@@ -1269,7 +1269,7 @@ private def ingestRemoteHarnessLine
 /-- Only protocol events are assistant output for native agy. Its raw log can contain an
     interactive login URL or a partial JSON line when bounded by the node's tail limit. -/
 private def missionLogTail (backend raw : String) : String :=
-  if backend == "antigravity" then (OrbBin.ClaudeControl.antigravitySignInError? raw).getD ""
+  if backend == "antigravity" then (OrbBin.ClaudeControl.antigravityAccountError? raw).getD ""
   else raw.trimAscii.toString
 
 private def splitCompleteLines (buf : String) : Array String × String := Id.run do
@@ -1613,7 +1613,7 @@ partial def spawnRemoteJobPoller
               if !proxyTok.isEmpty then
                 revokeSingleMissionProxyToken store proxyTok
               let nodeErr? := ((jv.fieldStr? "error").filter (!·.trimAscii.toString.isEmpty)).map fun msg =>
-                if backend == "antigravity" then (OrbBin.ClaudeControl.antigravitySignInError? msg).getD msg else msg
+                if backend == "antigravity" then (OrbBin.ClaudeControl.antigravityAccountError? msg).getD msg else msg
               let logTail := missionLogTail backend ((jv.fieldStr? "log_tail").getD "")
               let exitCode := (jv.fieldInt? "exit_code").getD (if jState == "succeeded" then 0 else 1)
               let finalText :=
