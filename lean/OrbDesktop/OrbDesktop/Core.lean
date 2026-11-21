@@ -58,6 +58,7 @@ private def liveStateFromProjection (lines : List String) (isDark : Bool) (scale
     { widgetId := m.widgetId, rowId := "mission:" ++ m.missionId, kind := "mission", title := m.title, status := m.status }
   let sidebar := [{ widgetId := 101, rowId := "nav:new", kind := "nav", title := "New Agent", shortcut := "⌘N", selected := true },
     { widgetId := 102, rowId := "nav:inbox", kind := "nav", title := "Inbox", shortcut := "⌘I" },
+    { widgetId := 111, rowId := "nav:cloud", kind := "nav", title := "Cloud agent", shortcut := "⌘2" },
     { widgetId := 112, rowId := "nav:machines", kind := "nav", title := "Machines", shortcut := "⌘3" },
     { widgetId := 113, rowId := "nav:inference", kind := "nav", title := "Inference", shortcut := "⌘4" },
     { widgetId := 114, rowId := "nav:resources", kind := "nav", title := "Resources", shortcut := "⌘6" },
@@ -80,6 +81,7 @@ private def liveStateFromProjection (lines : List String) (isDark : Bool) (scale
 
 private inductive ReadKind where
   | roster (previous : String) | catalog (revision : Nat) | providers
+  | cloud (mission : String)
   | resources (range : String)
   | nativeModels (machine : String)
   | accountRoutes (account provider action value : String)
@@ -100,6 +102,7 @@ private def startLiveRead (binding : String) (kind : ReadKind) (notify : IO Unit
     | .accountRoutes account provider action value => #["-I", "-c", transport ++ "\naccount_routes(*sys.argv[1:])", binding, account, provider, action, value]
     | .directories machine path => #["-I", "-c", transport ++ "\nlist_directories(*sys.argv[1:])", binding, machine, path]
     | .launchMachines admin harness => #["-I", "-c", transport ++ "\nlaunch_machines(*sys.argv[1:])", binding, if admin then "admin" else "member", harness]
+    | .cloud mission => #["-I", "-c", transport ++ "\ncloud_inventory(*sys.argv[1:])", binding, mission]
     | .resources range => #["-I", "-c", transport ++ "\nresource_inventory(*sys.argv[1:])", binding, range]
     | .providers => #["-I", "-c", transport ++ "\nprovider_inventory(sys.argv[1])", binding]
     | .catalog _ => #["-I", "-c", transport ++ "\ncatalog(sys.argv[1], json.loads(sys.argv[2]))", binding, modelCatalogRules]
@@ -133,6 +136,7 @@ def withLiveSources {α : Type} (isDark : Bool) (notify : IO Unit)
             (!st.draftSettings.machine.isEmpty || st.fleetMachines.any (·.machineId == "core")) then
           let machine := if st.draftSettings.machine.isEmpty then "core" else st.draftSettings.machine
           some (.directories machine ((st.missionMenu.map (·.browsePath)).getD ""))
+        else if st.screen == .cloud && st.cloudLines.isNone && !st.cloudFailed then some (.cloud st.cloudMission)
         else if st.screen == .resources && st.resourceRows.isNone && !st.resourceFailed then some (.resources st.resourceRange)
         else if st.screen == .inference && st.providers.isNone && !st.providerReadFailed then some .providers
         else if let some page := st.accountRoutePage then
@@ -168,6 +172,19 @@ def withLiveSources {α : Type} (isDark : Bool) (notify : IO Unit)
           | _ => .unavailable
         return if st.initialRosterPending || issue != st.connectionIssue then
           some { st with initialRosterPending := false, connectionIssue := issue } else none
+      if let .cloud _ := source.kind then
+        if lines.head? != some "cloud" then return some { st with cloudFailed := true }
+        let accounts := lines.filterMap fun line => match splitTab line with
+          | ["P", provider, account, name] => some (provider, account, name)
+          | _ => none
+        let selected := st.cloudAccounts[st.cloudAccountIndex]?.bind fun (p, a, _) =>
+          accounts.findIdx? fun (provider, account, _) => p == provider && a == account
+        let changed := st.cloudMission.isEmpty && !st.cloudAccounts.isEmpty && selected.isNone
+        return some { st with
+          cloudLines := some (lines.filterMap fun line => (line.dropPrefix? "L\t").map (·.toString)), cloudPage := 0,
+          cloudAccounts := accounts, cloudAccountIndex := selected.getD 0,
+          cloudDraft := if changed then {} else st.cloudDraft, cloudAttempt := if changed then "" else st.cloudAttempt,
+          cloudActions := lines.filterMap fun line => (line.dropPrefix? "A\t").map (·.toString) }
       if let .resources _ := source.kind then
         if lines.head? != some "resources" then return some { st with resourceFailed := true }
         let rows := lines.filterMap fun line => match splitTab line with
@@ -374,6 +391,10 @@ def readLiveFrame (slot : IO.Ref (Option LiveSubscription)) (scale : Nat) (viewp
       | .inboxRead item _ => ("inbox-read", item.mission, s!"{item.stamp} {item.version}")
       | .providerPreference account enabled => (if enabled then "use-provider" else "skip-provider", account, "")
       | .create => ("create", "", st.draftDirectory ++ String.singleton (Char.ofNat 0) ++ encode st.draftSettings ++ "\t" ++ st.draftProject ++ "\t" ++ st.composer.text)
+      | .cloudCreate provider account project prompt attempt =>
+        ("cloud-create", "", String.intercalate "\n" [attempt, provider, account, project, prompt])
+      | .cloudSend mid text attempt => ("cloud-send", mid, attempt ++ "\n" ++ text)
+      | .cloudCancel mid => ("cloud-cancel", mid, "")
       | .send mid text => ("send", mid, text)
       | .stop mid => ("stop", mid, "")
       | .archive mid => ("archive", mid, "")
@@ -397,6 +418,8 @@ def readLiveFrame (slot : IO.Ref (Option LiveSubscription)) (scale : Nat) (viewp
         return ({ st with writeError := "Start a new Goal mission or remove /goal." }, some viewport)
       if r.exitCode == 5 then
         return ({ st with writeError := "Choose an available remote machine for this mission." }, some viewport)
+      if (action == "cloud-send" || action == "cloud-create") && r.exitCode != 0 then
+        return ({ st with cloudAttempt := r.stdout.trimAscii.toString, writeError := "Core did not confirm the request. Submit again to retry." }, some viewport)
       if r.exitCode != 0 then throw (IO.userError "write failed")
       match request with
       | .providerPreference .. => pure ()
@@ -456,6 +479,11 @@ def readLiveFrame (slot : IO.Ref (Option LiveSubscription)) (scale : Nat) (viewp
         let cards := st.missionCards.map fun m =>
           if m.missionId == mid then { m with machine, backend, model, effort, permissionMode } else m
         return ({ st with missionCards := cards }, some viewport)
+      | .cloudCreate .. =>
+        let [_, mid] := r.stdout.trimAscii.toString.splitOn "\n" | throw (IO.userError "invalid cloud mission")
+        return (st.openCloud mid, some viewport)
+      | .cloudSend .. => return ({ st with cloudDraft := {}, cloudAttempt := "", cloudLines := none }, some viewport)
+      | .cloudCancel .. => return ({ st with cloudLines := none }, some viewport)
       | .send .. => return ({ st with composer := { isRunning := st.composer.isRunning } }, some viewport)
       | .stop _ => return (st, some viewport)
     catch _ =>

@@ -35,6 +35,7 @@ inductive ScreenId where
   | missionTranscript   -- `03_mission_transcript` (`/?screen=mission&id=m-active`)
   | missionSplitDiff    -- `04_mission_split_diff` (`/?screen=mission&id=m-diff&mode=split`)
   | machinesFleet       -- `05_machines_fleet` (`/?screen=machines`)
+  | cloud
   | resources
   | inbox               -- authenticated unread responses
   | inference           -- authenticated provider accounts
@@ -67,6 +68,7 @@ def fileStem : ScreenId → String
   | .missionSplitDiff   => "04_mission_split_diff"
   | .machinesFleet      => "05_machines_fleet"
   | .inbox              => "live-inbox"
+  | .cloud              => "cloud-agent"
   | .resources          => "resources"
   | .inference          => "inference"
   | .settingsGeneral    => "06_settings_general"
@@ -82,6 +84,7 @@ def w0Alias : ScreenId → String
   | .missionSplitDiff   => "diff"
   | .machinesFleet      => "streaming"
   | .inbox              => "live-inbox"
+  | .cloud              => "cloud-agent"
   | .resources          => "resources"
   | .inference          => "providers"
   | .settingsGeneral    => "settings"
@@ -97,6 +100,7 @@ def routeQuery : ScreenId → String
   | .missionSplitDiff   => "/?screen=mission&id=m-diff&mode=split"
   | .machinesFleet      => "/?screen=machines"
   | .inbox              => "/?screen=inbox"
+  | .cloud              => "/?screen=cloud-agent"
   | .resources          => "/?screen=resources"
   | .inference          => "/?screen=inference"
   | .settingsGeneral    => "/?screen=settings&tab=general"
@@ -112,6 +116,7 @@ def headerTitle : ScreenId → String
   | .missionSplitDiff   => "Long mission"
   | .machinesFleet      => "Machines"
   | .inbox              => "Inbox"
+  | .cloud              => "Cloud agent"
   | .resources          => "Resources"
   | .inference          => "Inference"
   | .settingsGeneral    => "Settings"
@@ -122,6 +127,7 @@ def headerTitle : ScreenId → String
 /-- Parse a screen identifier or route query into a `ScreenId`. -/
 def parse? (s : String) : Option ScreenId :=
   match s with
+  | "cloud-agent" | "/?screen=cloud-agent" => some .cloud
   | "resources" | "/?screen=resources" => some .resources
   | "01_control_empty"       | "control_empty"       | "inbox"         | "/?screen=control" => some .controlEmpty
   | "02_control_populated"   | "control_populated"   | "approvals"     | "/?screen=control&fixture=populated" => some .controlPopulated
@@ -352,6 +358,9 @@ structure InboxItem where
   deriving BEq, Repr, Inhabited
 
 inductive LiveWrite where
+  | cloudCreate (provider account project prompt attempt : String)
+  | cloudSend (mission text attempt : String)
+  | cloudCancel (mission : String)
   | inboxRead (item : InboxItem) (openItem : Bool)
   | providerPreference (account : String) (enabled : Bool)
   | create
@@ -464,6 +473,16 @@ structure DesktopState where
   syncCursor : SyncCursorState := {}
   badgePhase : Nat := 0
   sidebarRows : List ChromeSidebarRow := []
+  cloudMission : String := ""
+  cloudLines : Option (List String) := none
+  cloudAccounts : List (String × String × String) := []
+  cloudAccountIndex : Nat := 0
+  cloudProject : String := ""
+  cloudActions : List String := []
+  cloudDraft : ComposerBuffer := {}
+  cloudAttempt : String := ""
+  cloudFailed : Bool := false
+  cloudPage : Nat := 0
   resourceRows : Option (List ResourceRow) := none
   resourceFailed : Bool := false
   resourcePage : Nat := 0
@@ -516,12 +535,18 @@ def restoredExecutionStatus (status : String) : String :=
 def MissionSummaryCard.isRunning (card : MissionSummaryCard) : Bool :=
   card.status == "active" || card.status == "running"
 
+def DesktopState.openCloud (st : DesktopState) (mission : String) : DesktopState :=
+  { st with screen := .cloud, cloudMission := mission, cloudLines := none, cloudFailed := false,
+            cloudPage := 0, cloudActions := [], cloudDraft := {}, cloudAttempt := "", cloudProject := "", writeError := "" }
+
 def DesktopState.voiceDraft (st : DesktopState) : Bool :=
   st.hasLiveConnection && st.openMission.isNone && st.writeRequest.isNone &&
     (st.screen == .controlEmpty || st.screen == .controlPopulated)
 
 def resetSelection (st : DesktopState) (card : Option MissionSummaryCard) : DesktopState :=
-  let mid := card.map (·.missionId)
+  let cloud := card.filter fun c => st.screen == .missionTranscript && c.backend.startsWith "cloud_"
+  let st := cloud.elim st fun c => st.openCloud c.missionId
+  let mid := if cloud.isSome then none else card.map (·.missionId)
   { st with
     voicePhase := .idle, voiceGeneration := st.voiceGeneration + 1, openMission := mid, missionMenu := none, stream := { shown := [], pending := [], renders := 1 }, scroll := {}
     composer := { isRunning := card.any (·.isRunning) }
@@ -900,10 +925,32 @@ def DesktopState.sidebarHoverRow (st : DesktopState) (hit : Option WidgetId) : O
   let row ← st.sidebarRows.find? (·.widgetId == rowId)
   if ["nav", "project", "mission", "footer"].contains row.kind then some rowId else none
 
+def DesktopState.cloudProjects (st : DesktopState) : List ChromeSidebarRow :=
+  st.sidebarRows.filter (·.kind == "project")
+
+def DesktopState.cloudSelectedProject (st : DesktopState) : Option ChromeSidebarRow :=
+  if st.cloudProject.isEmpty then st.cloudProjects.head?
+  else st.cloudProjects.find? (·.rowId == st.cloudProject)
+
+def DesktopState.cloudCanCreate (st : DesktopState) : Bool :=
+  st.screen == .cloud && st.cloudMission.isEmpty && st.cloudLines.isSome &&
+    !st.cloudAccounts.isEmpty && st.cloudSelectedProject.isSome
+
+def DesktopState.cloudAllows (st : DesktopState) (action : String) : Bool :=
+  st.screen == .cloud && !st.cloudMission.isEmpty && st.cloudLines.isSome && st.cloudActions.contains action
+
+/-- Empty mission ID denotes a passive account, status or conversation line. -/
+def DesktopState.cloudItems (st : DesktopState) : List (String × String) := Id.run do
+  let inventory := (st.cloudLines.getD []).map fun t => ("", t)
+  if !st.cloudMission.isEmpty then return inventory
+  let conversations := st.missionCards.filter (·.backend.startsWith "cloud_")
+  return inventory ++ conversations.map fun c => (c.missionId, "Open · " ++ c.title)
+
 def DesktopState.hoverTarget (st : DesktopState) (hit : Option WidgetId) : Option WidgetId := do
   if hit == some voiceLanguageId || hit == some voiceButtonId || hit == some voiceCancelId then return ← hit
   let id ← hit
-  if st.screen == .resources && id >= 945 && id < 960 then some id
+  if st.screen == .cloud && id >= 960 && id < 972 then some id
+  else if st.screen == .resources && id >= 945 && id < 960 then some id
   else if st.screen == .inference && id >= providersBackId then some id else st.sidebarHoverRow hit
 
 def DesktopState.sidebarHoverDamage (st : DesktopState) (regions : List (WidgetId × Rect)) (scale : Nat)
@@ -1160,6 +1207,8 @@ def desktopFocusChange (before after : DesktopState) (ev : Event) : Option Nat :
     | none, some _ => some providersBackId
     | some page, none => ((after.providers.getD []).findIdx? (·.id == page.account.id)).map providerSettingsId
     | _, _ => none
+  else if after.screen == .cloud && before.screen != .cloud then some 111
+  else if after.screen == .cloud && before.cloudMission != after.cloudMission then some (if after.cloudMission.isEmpty then 111 else 963)
   else if after.screen == .resources && before.screen != .resources then some 114
   else if after.screen == .resources && after.resourceRows.isSome && before.resourcePage != after.resourcePage then
     some (if before.resourcePage < after.resourcePage then 947 else 946)
@@ -1262,6 +1311,17 @@ def stepDesktopEvent (scale120 : Nat) (viewport : Rect) (st : DesktopState) (ev 
     if let .windowFocus false := ev then
       return ({ st with missionMenu := none, heldSelectionKeys := [] }, if st.missionMenu.isSome then some viewport else none)
     if let some menu := st.missionMenu then return stepMissionMenu st menu ev viewport
+    if st.cloudCanCreate || st.cloudAllows "send" then
+      let draft := match ev with
+        | .text text => st.cloudDraft.insertText text
+        | .imeBatch db da text preedit _ _ => st.cloudDraft.applyImeBatch db da text preedit
+        | .preedit text _ _ => st.cloudDraft.setPreedit text
+        | .composerReturn true => st.cloudDraft.insertText "\n"
+        | _ => st.cloudDraft
+      if draft != st.cloudDraft then
+        return ({ st with
+                  cloudDraft := draft, cloudAttempt := if draft.text == st.cloudDraft.text then st.cloudAttempt else "",
+                  cloudProject := (st.cloudSelectedProject.map (·.rowId)).getD "" }, some viewport)
     match ev with
     | .text _ | .preedit .. | .imeBatch .. =>
       if st.selectedCard.isNone && st.screen != .controlEmpty && st.screen != .controlPopulated then return (st, none)
@@ -1272,19 +1332,21 @@ def stepDesktopEvent (scale120 : Nat) (viewport : Rect) (st : DesktopState) (ev 
         -- XKB reports modifiers even when the key was held before this window gained focus.
         if mods &&& 0x0a == 0 then 0
         else if key == 0x69 || key == 0x49 then 102
+        else if key == 0x32 then 111
         else if key == 0x36 then 114
         else if key == 0x34 then 113
         else if key == 0x33 then 112
         else if key == 0x6e || key == 0x4e then 101 else 0
       | _ => 0
     if navId == 102 && !st.inboxEnabled then return (st, none)
-    if [101, 102, 112, 113, 114].contains navId then
-      let screen := if navId == 114 then ScreenId.resources else if navId == 102 then .inbox else if navId == 113 then .inference else if navId == 112 then .machinesFleet else .controlEmpty
+    if [101, 102, 111, 112, 113, 114].contains navId then
+      let screen := if navId == 111 then ScreenId.cloud else if navId == 114 then .resources else if navId == 102 then .inbox else if navId == 113 then .inference else if navId == 112 then .machinesFleet else .controlEmpty
       let next := resetSelection { st with screen, fleetTopSub := 0, writeError := "", accountRoutePage := none } none
       -- These pages share the New Agent draft. A mission follow-up belongs only to its transcript.
       let next := if st.openMission.isNone then
           { next with composer := { st.composer with imePreeditText := "" } }
         else { next with draftProject := "" }
+      let next := if navId == 111 then next.openCloud "" else next
       let next := if navId == 114 then { next with resourceRows := none, resourceFailed := false, resourcePage := 0 } else next
       let next := if navId == 113 then { next with providers := none, providerReadFailed := false } else next
       return ({ next with sidebarRows := next.sidebarRows.map fun row => { row with selected := row.widgetId == navId } }, some viewport)
@@ -1303,6 +1365,40 @@ def stepDesktopEvent (scale120 : Nat) (viewport : Rect) (st : DesktopState) (ev 
       else if navId >= providerSettingsId 0 then
         if let some account := (st.providers.getD [])[navId - providerSettingsId 0]? then
           return ({ st with accountRoutePage := some { account, previousTop := st.fleetTopSub }, fleetTopSub := 0, writeError := "" }, some viewport)
+    if st.screen == .cloud then
+      if st.cloudCanCreate then
+        let projects := st.cloudProjects
+        if navId == 970 then
+          return ({ st with cloudAccountIndex := (st.cloudAccountIndex + 1) % st.cloudAccounts.length, cloudAttempt := "" }, some viewport)
+        if navId == 971 then
+          let index := projects.findIdx (·.rowId == (st.cloudSelectedProject.map (·.rowId)).getD "")
+          let some next := projects[(index + 1) % projects.length]? | return (st, none)
+          return ({ st with cloudProject := next.rowId, cloudAttempt := "" }, some viewport)
+        if navId == 968 || (ev matches .composerReturn false) then
+          let some (provider, account, _) := st.cloudAccounts[st.cloudAccountIndex]? | return (st, none)
+          let some project := st.cloudSelectedProject | return (st, none)
+          let prompt := st.cloudDraft.text.trimAscii.toString
+          if prompt.isEmpty || !st.cloudDraft.imePreeditText.isEmpty then return (st, none)
+          return ({ st with writeRequest := some (.cloudCreate provider account (project.rowId.drop 8).toString prompt st.cloudAttempt) }, none)
+      if st.cloudAllows "send" && (navId == 968 || (ev matches .composerReturn false)) &&
+          !st.cloudDraft.text.trimAscii.isEmpty && st.cloudDraft.imePreeditText.isEmpty then
+        return ({ st with writeRequest := some (.cloudSend st.cloudMission st.cloudDraft.text st.cloudAttempt) }, none)
+      if st.cloudAllows "cancel" && navId == 969 then
+        return ({ st with writeRequest := some (.cloudCancel st.cloudMission) }, none)
+      let items := st.cloudItems
+      if navId == 960 && (st.cloudLines.isSome || st.cloudFailed) then
+        return ({ st with cloudLines := none, cloudFailed := false, cloudPage := 0 }, some viewport)
+      if !st.cloudMission.isEmpty && (navId == 963 || (ev matches .key 0xff1b 0 .pressed)) then
+        return (st.openCloud "", some viewport)
+      if navId == 961 || (ev matches .key 0xff55 0 .pressed) then
+        return ({ st with cloudPage := st.cloudPage - 1 }, some viewport)
+      if navId == 962 || (ev matches .key 0xff56 0 .pressed) then
+        return ({ st with cloudPage := min ((items.length - 1) / 4) (st.cloudPage + 1) }, some viewport)
+      if navId >= 964 && navId < 968 then
+        if let some (mission, _) := items[4 * st.cloudPage + navId - 964]? then
+          if !mission.isEmpty then
+            return (st.openCloud mission, some viewport)
+      if ev matches .composerReturn .. then return (st, none)
     if st.screen == .resources then
       if navId == 945 then
         return ({ st with resourceRows := none, resourceFailed := false, resourcePage := 0 }, some viewport)
