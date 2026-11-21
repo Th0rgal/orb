@@ -290,6 +290,13 @@ def mutate(binding, action, mid):
     if c.binding != binding:
         raise ValueError('connection changed')
     key = str(uuid.uuid4())
+    if action == 'inbox-read':
+        if not re.fullmatch(r'[A-Za-z0-9_-]{1,128}', mid):
+            raise ValueError('invalid mission')
+        stamp, version = map(int, sys.stdin.read().split())
+        c.request(INBOX_PATH + '/seen/' + mid, method='PUT', body={
+            'stamp': stamp, 'expectedVersion': version, 'clientId': key, 'mutationSeq': 1})
+        return
     if action in ('use-provider', 'skip-provider'):
         enabled = action == 'use-provider'
         path = account_path(mid) + '/preference'
@@ -526,6 +533,50 @@ def provider_inventory(binding):
         print('\t'.join(map(label, row)))
 
 
+INBOX_PATH = '/api/control/inbox-state'
+NEEDS_ATTENTION = {'awaiting_user', 'waiting_user', 'failed', 'blocked', 'not_feasible'}
+READY = {'completed', 'succeeded', 'paused', 'interrupted'}
+
+
+def timestamp_ms(value):
+    if not value:
+        return 0
+    try:
+        return int(datetime.fromisoformat(value.replace('Z', '+00:00')).timestamp() * 1000)
+    except (TypeError, ValueError):
+        return 0
+
+
+def inbox_rows(missions, state):
+    prefs = state.get('preferences') or {}
+    if prefs.get('inboxEnabled') is False:
+        return [('I', 'disabled')]
+    rows = []
+    for m in missions:
+        mid, status = m['id'], m.get('status')
+        if status not in NEEDS_ATTENTION | READY or not re.fullmatch(r'[A-Za-z0-9_-]{1,128}', mid):
+            continue
+        if status == 'interrupted' and m.get('terminal_reason') == 'usage_limit_wait' and m.get('recovery'):
+            continue
+        tags = m.get('tags') or []
+        if m.get('superseded_by_mission_id') or any(t.startswith('btw-parent:') or t == 'btw-subagent' for t in tags):
+            continue
+        if not prefs.get('includeAutonomous') and (
+                m.get('parent_mission_id') or m.get('callback_parent_mission_id') or m.get('origin') == 'hermes'
+                or re.match(r'you are a sub-?agent\b', m.get('title') or '', re.I)
+                or any(t.startswith('worker-dispatch:') or t in ('origin:hermes', 'origin:hermes-assistant') for t in tags)):
+            continue
+        stamp = max(timestamp_ms(m.get(k)) for k in ('updated_at', 'created_at', 'last_output_at'))
+        key = 'seen:' + mid
+        seen = state.get(key)
+        forced = seen is not None and seen < 0 and stamp <= -seen + 1000
+        viewed = timestamp_ms(m.get('first_viewed_at'))
+        if not forced and ((viewed and viewed + 2000 >= stamp) or (seen is not None and seen >= stamp)):
+            continue
+        rows.append((status not in NEEDS_ATTENTION, -stamp, mid, max(1, stamp), state.get('_versions', {}).get(key, 0)))
+    return [('I', 'enabled')] + [('U', mid, stamp, str(version)) for _, _, mid, stamp, version in sorted(rows)]
+
+
 def project_history(c, slug, rules):
     """Project history plus older open work under the shared desktop policy."""
     page_size = rules['pageSize']
@@ -657,6 +708,14 @@ def roster_rows(c, include_archived=False, expanded=(), rules=None, publish_proj
             if error.code != 404:
                 raise
     rows = [('C', c.binding), *groups]
+    try:
+        rows += inbox_rows(missions, c.get(INBOX_PATH))
+    except urllib.error.HTTPError as error:
+        if error.code in (401, 403):
+            raise
+        error.close()
+    except (urllib.error.URLError, TimeoutError, ValueError):
+        pass  # An unavailable Inbox does not invalidate the mission roster.
     if groups:
         by_id = {m['id']: m for m in missions}
         by_id.update(by_project)
@@ -810,7 +869,7 @@ def poll(mid, binding, tracked=None, rules=None):
                 tracked.update(found)
                 # A full sampled row owns its metadata. Displaced authorized
                 # missions keep their last row until an explicit denial.
-                visible = ['\x1c'.join(map(label, row)) for row in rows if row[0] in ('P', 'M', 'N', 'G')]
+                visible = ['\x1c'.join(map(label, row)) for row in rows if row[0] in ('P', 'M', 'N', 'G', 'I', 'U')]
                 visible.extend('K\x1c' + ident for ident in sorted(tracked - found))
                 checked = time.monotonic()
         except (urllib.error.URLError, TimeoutError, ValueError, KeyError, TypeError) as error:
