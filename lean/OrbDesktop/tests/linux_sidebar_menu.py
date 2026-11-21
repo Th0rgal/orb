@@ -44,7 +44,8 @@ def exercise(root, tmp, api, graphical, click, process, wait, stack, client_kind
     config_path = tmp / 'connection.json'
     config = json.loads(config_path.read_text())
     config['api_url'], gate = stack.enter_context(archive_relay(config['api_url'], b))
-    config_path.write_text(json.dumps(config))
+    initial = dict(config, token="expired") if client_kind == "leanui" else config
+    config_path.write_text(json.dumps(initial))
     launch()
     sidebar = '10,100 200x560'
     header = '220,0 630x43'
@@ -112,6 +113,11 @@ def exercise(root, tmp, api, graphical, click, process, wait, stack, client_kind
             return next((hits for region in regions if (hits := actions_in(region))), None)
         hits = wait('ordered context actions ' + ', '.join(expected), rows)
         click(*hits[choose])
+    if client_kind == "leanui":
+        see("unavailable", header)
+        replacement = tmp / "reconnected.json"
+        replacement.write_text(json.dumps(config))
+        replacement.replace(config_path)
     open_project()
     click(*see(fixture['openMission']))
     see(fixture['openMission'], header)
