@@ -17,8 +17,8 @@ MISSION = "00000000-0000-0000-0000-000000000001"
 
 
 @contextlib.contextmanager
-def core(expiring=False):
-    state = {"renewals": 0, "sessions": 0, "external_sessions": 0}
+def core(expiring=False, fleet=False):
+    state = {"renewals": 0, "sessions": 0, "external_sessions": 0, "fleet_calls": 0}
 
     class Handler(http.server.BaseHTTPRequestHandler):
         def log_message(self, *args):
@@ -34,11 +34,19 @@ def core(expiring=False):
         def do_GET(self):
             mission_id = None if self.headers.get("Authorization") == "Bearer mcp1.external" else MISSION
             self.respond({"contract_version": "1", "identity": {"role": "executor", "mission_id": mission_id, "project": None},
-                          "tools": [], "limits": {"session_expires_at": int(time.time()) +
+                          "tools": ["get_compute_fleet"] if fleet else [], "limits": {"session_expires_at": int(time.time()) +
                           (60 if expiring and self.headers.get("Authorization") == "Bearer mcp1.initial" else 3600)}})
 
         def do_POST(self):
             body = self.rfile.read(int(self.headers.get("Content-Length", "0")))
+            if fleet and self.path == "/api/mcp/call":
+                if (self.headers.get("Authorization") != "Bearer mcp1.initial" or
+                        json.loads(body) != {"name": "get_compute_fleet", "arguments": {}}):
+                    self.send_error(403)
+                    return
+                state["fleet_calls"] += 1
+                self.respond({"ok": True, "result": {"nodes": []}})
+                return
             if self.path == "/api/mcp/session":
                 if (self.headers.get("Authorization") != "Bearer owner-login" or
                         json.loads(body) != {"role": "executor", "mission_id": MISSION, "project": None}):
@@ -182,11 +190,19 @@ print(str(credential))
             self.assertIsNone(json.loads(ext_ok.stdout)["identity"]["mission_id"])
 
     def test_antigravity_overlay_checks_mission_identity(self):
-        with core() as (url, _), tempfile.TemporaryDirectory() as directory:
+        with core(fleet=True) as (url, state), tempfile.TemporaryDirectory() as directory:
             probe = """import json, pathlib, subprocess
 config = json.loads(pathlib.Path('.agents/mcp_config.json').read_text())
 server = config['mcpServers']['sandboxed']
-result = subprocess.check_output([server['command'], *server['args'], '--check'])
+command = [server['command'], *server['args']]
+call = {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+        "params": {"name": "get_compute_fleet", "arguments": {}}}
+with subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True) as client:
+    print(json.dumps(call), file=client.stdin, flush=True)
+    reply = json.loads(client.stdout.readline())
+    assert not reply['result'].get('isError'), reply
+    client.stdin.close()
+result = subprocess.check_output([*command, '--check'])
 print(json.loads(result)['identity']['mission_id'])
 """
             env = {"PATH": os.environ["PATH"], "HOME": directory, "SANDBOXED_MCP_API_URL": url,
@@ -199,6 +215,7 @@ print(json.loads(result)['identity']['mission_id'])
             denied = subprocess.run(command, cwd=directory, env=env, capture_output=True, text=True, timeout=15)
             self.assertNotEqual(denied.returncode, 0)
             self.assertIn("identity", denied.stderr.lower())
+            self.assertEqual(state["fleet_calls"], 1)
             self.assertFalse((Path(directory) / ".agents/mcp_config.json").exists())
 
     def test_scoped_renewal_survives_client_restart(self):
