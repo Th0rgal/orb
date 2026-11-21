@@ -60,6 +60,17 @@ class Delivery(unittest.TestCase):
             live.roster()
         read.assert_called_once()
 
+    def test_catalog_recovers_without_reopening_the_window(self):
+        denied = live.urllib.error.HTTPError('http://localhost', 503, 'Unavailable', {}, None)
+        rows = [('H', 'antigravity', 'Antigravity', 'gemini-4-neon', 'Neon')]
+        with patch.object(live, 'Connection') as conn, patch.object(
+                live, 'catalog_rows', side_effect=[denied, TimeoutError(), rows]), patch.object(
+                live.time, 'sleep') as sleep, contextlib.redirect_stdout(io.StringIO()) as output:
+            conn.return_value.binding = 'binding'
+            live.catalog('binding', {})
+        self.assertEqual(output.getvalue().splitlines(), ['\t'.join(rows[0])])
+        self.assertEqual([call.args[0] for call in sleep.call_args_list], [1, 2])
+
     def test_saved_session_recovers_inside_the_window(self):
         self.run_wire('reconnect')
 
