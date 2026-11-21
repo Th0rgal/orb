@@ -89,14 +89,17 @@ def liveComposerControls (st : DesktopState) (width : SubPx) : WidgetNode :=
 def buildMissionMenu (st : DesktopState) (menu : MissionMenu) (width : SubPx) (visibleCount : Nat) : WidgetNode :=
   let pal := st.theme.palette
   let rows := (((missionMenuRows st menu).drop menu.first).take visibleCount).mapIdx fun i item =>
-    let label := WidgetNode.text { BoxStyle.row 0 with grow := 1 } (pxToSub 18)
+    let hasChevron := item.id == 711 || (menu.page == .settings && (settingTrigger item.id).isSome)
+    -- Keep every visible glyph inside the row that receives the click.
+    let labelWidth := width - pxToSub (12 + 16 + 14 + 9 + (if hasChevron then 21 else 0))
+    let label := WidgetNode.text { (BoxStyle.row 0 |>.withFixedSize labelWidth (pxToSub 18)) with clip := true } (pxToSub 18)
       [overlaySynthRun (Theme.bodyText st.theme) item.label]
     let row := WidgetNode.focusable item.id <| WidgetNode.box
       (BoxStyle.row (pxToSub 9) |>.withBg (if menu.first + i == menu.highlighted then pal.accentMuted else pal.elevatedSurface)
         |>.withAlign .center |>.withPadding (Edges.xy (pxToSub 8) 0)
         |>.withFixedSize (width - pxToSub 12) (pxToSub 30))
       ([chromeIcon item.icon pal.textMuted 14, label] ++
-        (if item.id == 711 || (menu.page == .settings && (settingTrigger item.id).isSome) then [chromeIcon "chevron-right" pal.textMuted 12] else []))
+        (if hasChevron then [chromeIcon "chevron-right" pal.textMuted 12] else []))
     if item.separatorBefore then
       [WidgetNode.box (BoxStyle.row 0 |>.withFixedSize (width - pxToSub 12) (pxToSub 1) |>.withBg pal.border) [], row]
     else [row]

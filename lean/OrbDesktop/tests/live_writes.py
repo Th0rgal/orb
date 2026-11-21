@@ -161,7 +161,13 @@ for i in range(300):
             click(315, 388)  # Machine, then the local Core
             click(326, 447)
             click(353, 388)  # Harness, then Codex below the default choice
-            click(394, 447)
+            choices = '305,396 450x210'
+            click(*wait('Codex harness', lambda: widget('codex', choices)))
+            # Click the name at the right end of a provider-qualified model row.
+            # Previously this visible suffix lay outside the popup hit region.
+            click(410, 388)
+            models = '320,396 590x213'
+            click(*wait('visible Astra model suffix', lambda: widget('astra', models)))
             click(540, 347)
             keys(typed)
             edit([("日本猫", 0, 0), ("語", len("猫".encode()), 0)])
@@ -179,6 +185,7 @@ for i in range(300):
         if mouse:
             mission = api(path)
             assert mission['project'] == 'source' and mission['backend'] == 'codex', mission['id']
+            assert mission['model_override'] == 'gpt-6.2-astra', mission['model_override']
             assert not mission.get('remote_job') and not any(t.startswith('remote-node:') for t in mission['tags'])
             assert api('/api/machines')[0]['id'] == 'core'
         def observed():
