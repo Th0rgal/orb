@@ -835,7 +835,9 @@ def DesktopState.visibleProjectRows (st : DesktopState) : List ChromeSidebarRow 
   let mut unassigned := #[]
   let mut slug := ""
   for row in missionBranchRows active cards st.expandedMissions do
-    if row.depth == 0 then slug := projectOf row.widgetId
+    if row.depth == 0 then
+      let project := projectOf row.widgetId
+      slug := if project.isEmpty then "default" else project
     if projectKeys.contains slug then
       grouped := grouped.insert slug ((grouped.getD slug #[]).push { row with depth := row.depth + 1 })
     else
@@ -849,6 +851,26 @@ def DesktopState.visibleProjectRows (st : DesktopState) : List ChromeSidebarRow 
       visible := visible ++ grouped.getD key #[]
   visible := visible ++ unassigned
   return (visible ++ archived).toList
+
+/-- Connector geometry follows visible preorder, independently of the selected row. -/
+def sidebarTreeBranches (rows : List ChromeSidebarRow) :
+    List (ChromeSidebarRow × Bool × Bool × List Nat) := Id.run do
+  let mut siblings : List Nat := []
+  let mut nextDepth := 0
+  let mut marked := []
+  for row in rows.reverse do
+    let depth := row.depth
+    siblings := siblings.filter (· ≤ depth)
+    marked := (row, !siblings.contains depth, nextDepth > depth) :: marked
+    if !siblings.contains depth then siblings := depth :: siblings
+    nextDepth := depth
+  let mut rails : List Nat := []
+  let mut result := #[]
+  for (row, last, children) in marked do
+    rails := rails.filter (· < row.depth)
+    result := result.push (row, last, children, rails.map (row.depth - ·))
+    if row.depth > 0 && !last then rails := row.depth :: rails
+  return result.toList
 
 def toggleSelection (st : DesktopState) (row : ChromeSidebarRow) (extend : Bool) : DesktopState := Id.run do
   let ids := (st.visibleProjectRows.filter (fun r => selectableRow r && (st.archivesOpen || r.status != "acknowledged"))).map (·.rowId)

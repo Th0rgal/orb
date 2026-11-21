@@ -448,3 +448,5 @@ Opening the New Agent machine picker reads the connected user's current remote-n
 Picker labels stay inside the clickable row. The model picker accommodates provider-qualified names and elides overflow at narrow viewport widths. Clicking the Astra suffix selects Astra, including when Sol was previously selected.
 
 At narrow composer widths the native client exposes placement, harness, model and effort through the Mission settings menu. A draft offers machine selection. An existing mission keeps its placement. The empty prompt truncates before the send button.
+
+The Misc project (Core slug `default`) contains unassigned mission roots whenever the project is present. Collapsing Misc hides those roots and their descendants. The sidebar connects each expanded folder or controller to its children at the icon center. A continued sibling keeps its vertical rail through nested rows. The last visible sibling ends in a rounded elbow at its own icon, irrespective of selection.
