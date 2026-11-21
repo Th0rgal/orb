@@ -1388,22 +1388,38 @@ private def popNextQueuedFollowup?
     | .error _ => return none
   | _ => return none
 
-/-- Close the projects ledger first. A retry after a database failure can
-    repeat that update while the mission database still owns the remote job. -/
-private def settleLostRemoteJob (store : CoreStore) (missionId jobId reason nowIso : String)
-    (generation : UInt64) : IO (Except String Bool) := do
-  let .ok _ ← execParamQuery store.projectsDb
-      ("UPDATE remote_jobs SET state='lost',heartbeat_at=?2,finished_at=COALESCE(finished_at,?2),updated_at=?2 " ++
-       "WHERE job_id=?1 AND mission_id=?3 AND state NOT IN ('succeeded','failed','cancelled','terminal','completed','aborted');")
-      #[jobId,nowIso,missionId] | return .error "remote_job_ledger_write_failed"
+/-- Serialize generation and terminal-evidence checks with settlement. The projects
+    ledger can be updated idempotently if the owning transaction has to retry. -/
+def settleLostRemoteJob (store : CoreStore) (missionId jobId reason nowIso : String)
+    (generation : UInt64) : IO (Except String Bool) :=
   withImmediateTx store.missionsDb do
+    let args := #[missionId,jobId,s!"{generation}"]
+    let .ok newerOrSettled ← execParamQueryUnlocked store.missionsDb
+        ("SELECT 1 FROM mission_runs WHERE mission_id=?1 AND remote_job_id=?2 AND (generation>CAST(?3 AS INTEGER) OR " ++
+         "(generation=CAST(?3 AS INTEGER) AND execution_state IN ('terminal','completed','failed','aborted'))) " ++
+         "UNION ALL SELECT 1 FROM remote_node_jobs WHERE job_id=?2 AND mission_id=?1 " ++
+         "AND state IN ('succeeded','failed','cancelled','terminal','completed','aborted') LIMIT 1;")
+        args | return .error "remote_job_read_failed"
+    if newerOrSettled.size > 1 then return .ok false
+    let .ok settled ← withImmediateTx store.projectsDb do
+      let .ok terminal ← execParamQueryUnlocked store.projectsDb
+          ("SELECT 1 FROM remote_jobs WHERE job_id=?1 AND mission_id=?2 AND " ++
+           "state IN ('succeeded','failed','cancelled','terminal','completed','aborted');")
+          #[jobId,missionId] | return .error "remote_job_ledger_read_failed"
+      if terminal.size > 1 then return .ok true
+      let .ok _ ← execParamQueryUnlocked store.projectsDb
+          ("UPDATE remote_jobs SET state='lost',heartbeat_at=?2,finished_at=COALESCE(finished_at,?2),updated_at=?2 " ++
+           "WHERE job_id=?1 AND mission_id=?3;")
+          #[jobId,nowIso,missionId] | return .error "remote_job_ledger_write_failed"
+      return .ok false
+      | return .error "remote_job_ledger_unavailable"
+    if settled then return .ok false
     let .ok _ ← execParamQueryUnlocked store.missionsDb
         ("UPDATE mission_runs SET execution_state='terminal',terminal_reason=?2,updated_at=?3 " ++
-         "WHERE mission_id=?1 AND remote_job_id=?4 AND execution_state NOT IN ('terminal','completed','failed','aborted');")
-        #[missionId,reason,nowIso,jobId] | return .error "remote_run_write_failed"
+         "WHERE mission_id=?1 AND remote_job_id=?4 AND generation=CAST(?5 AS INTEGER);")
+        #[missionId,reason,nowIso,jobId,s!"{generation}"] | return .error "remote_run_write_failed"
     let .ok _ ← execParamQueryUnlocked store.missionsDb
-        ("UPDATE remote_node_jobs SET state='lost',updated_at=?2 WHERE job_id=?1 AND mission_id=?3 " ++
-         "AND state NOT IN ('succeeded','failed','cancelled','terminal','completed','aborted');")
+        "UPDATE remote_node_jobs SET state='lost',updated_at=?2 WHERE job_id=?1 AND mission_id=?3;"
         #[jobId,nowIso,missionId] | return .error "remote_job_write_failed"
     let .ok updates ← execParamQueryUnlocked store.missionsDb
         ("UPDATE missions SET status='interrupted',terminal_reason=?2,state_revision=state_revision+1,updated_at=?3 " ++
@@ -1552,8 +1568,8 @@ partial def spawnRemoteJobPoller
           let .ok changed ← settleLostRemoteJob store missionId jobId reason nowIso capturedGen | do
             IO.sleep 2000
             continue
-          if !proxyTok.isEmpty then revokeSingleMissionProxyToken store proxyTok
           if changed then
+            if !proxyTok.isEmpty then revokeSingleMissionProxyToken store proxyTok
             emitMissionEventAndBroadcast store broadcastHub? missionId "mission_status_changed"
               (renderCompact (.obj #[("status", .str "interrupted"), ("reason", .str reason)])) nowIso
           break

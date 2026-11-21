@@ -116,15 +116,24 @@ def verifyManagedWorkerLoss (root : String) : IO Unit := do
       (← cellOf store.missionsDb "SELECT state FROM remote_node_jobs WHERE job_id=?1;" #[job]) == "lost" &&
       (← cellOf store.projectsDb "SELECT state FROM remote_jobs WHERE job_id=?1;" #[job]) == "lost")
       "confirmed managed worker loss settles its job, run and owner"
-    -- Re-adopt the old observer while another placement owns a newer turn.
-    insert store.missionsDb
-      "UPDATE missions SET status='active',run_generation=4,placement_job_id='replacement' WHERE id=?1;" #[mid]
-    let revision ← cellOf store.missionsDb "SELECT state_revision FROM missions WHERE id=?1;" #[mid]
-    spawnRemoteJobPoller store (some mc) none none sup root mid "codex" node job ""
-    IO.sleep 900
-    check ((← cellOf store.missionsDb "SELECT status FROM missions WHERE id=?1;" #[mid]) == "active" &&
-      (← cellOf store.missionsDb "SELECT state_revision FROM missions WHERE id=?1;" #[mid]) == revision)
-      "old loss cannot interrupt the replacement turn"
+    -- An older callback may still own the same handle after recovery of a newer generation.
+    insert store.missionsDb "UPDATE missions SET status='active',run_generation=4 WHERE id=?1;" #[mid]
+    insert store.missionsDb "UPDATE remote_node_jobs SET state='running' WHERE job_id=?1;" #[job]
+    insert store.projectsDb "UPDATE remote_jobs SET state='running',finished_at=NULL WHERE job_id=?1;" #[job]
+    let .ok _ ← store.missionsDb.mu.atomically do
+      insertMissionRunUnlocked store.missionsDb "next-run" mid "4" "running" "" job "t1" true job node
+      | throw (IO.userError "managed loss fixture replacement")
+    let resolveLoss := fun gen => settleLostRemoteJob store mid job "managed_worker_lost" "t2" gen
+    check ((← resolveLoss 3).toOption == some false &&
+      (← cellOf store.missionsDb "SELECT execution_state FROM mission_runs WHERE id='next-run';") == "running" &&
+      (← cellOf store.missionsDb "SELECT state FROM remote_node_jobs WHERE job_id=?1;" #[job]) == "running" &&
+      (← cellOf store.projectsDb "SELECT state FROM remote_jobs WHERE job_id=?1;" #[job]) == "running")
+      "stale callback cannot settle a handle reused for a later generation"
+    insert store.projectsDb "UPDATE remote_jobs SET state='succeeded' WHERE job_id=?1;" #[job]
+    check ((← resolveLoss 4).toOption == some false &&
+      (← cellOf store.projectsDb "SELECT state FROM remote_jobs WHERE job_id=?1;" #[job]) == "succeeded" &&
+      (← cellOf store.missionsDb "SELECT status FROM missions WHERE id=?1;" #[mid]) == "active")
+      "existing success evidence takes precedence over a later loss observation"
   finally
     closeCoreStore store
     closeManagedComputeStore mc
