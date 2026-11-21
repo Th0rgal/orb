@@ -134,6 +134,8 @@ jobs:
         working-directory: lean/OrbDesktop
         run: |
           set -euo pipefail
+          python3 -IB tests/test_voice_capture.py -v
+          lake env lean --run tests/VoiceComposer.lean
           python3 -IB ../../scripts/test_leanui_local_core_u5.py
           # Resolve absolute package and orb-spec import paths from this checkout's
           # manifest. Use the already built modules, not another native build.

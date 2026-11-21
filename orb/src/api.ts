@@ -985,8 +985,19 @@ async function sendRequestOnce<T>(
     if (path === "/api/auth/change-password" && /current password/i.test(detail)) {
       throw new ApiError(401, detail);
     }
-    if (connectionVersion() === version) clearConnection();
-    throw new Error("401 Unauthorized — reconnect in Settings → Backend");
+    const currentSession = jwt && connectionVersion() === version && getJwt() === jwt &&
+      normalizeEndpointKey(explicitBase) === normalizeEndpointKey() &&
+      headerValue(headers, "Authorization") === `Bearer ${jwt}`;
+    if (currentSession) {
+      if (path === "/api/auth/me") {
+        clearConnection();
+        throw new Error("401 Unauthorized — reconnect in Settings → Backend");
+      }
+      // Providers can reject their own credentials while Core still accepts the session.
+      // Concurrent requests share this identity check, which also guards account changes.
+      await api<AuthMeResponse>("/api/auth/me").catch(() => undefined);
+    }
+    throw new ApiError(401, detail || "Unauthorized");
   }
   const observedBuildHeader = res.headers?.get?.("x-orb-server-build") ?? res.headers?.get?.("x-orb-version");
   if (observedBuildHeader && connectionVersion() === version) {
