@@ -239,7 +239,8 @@ def readHttpRequest
   let (path, query) := parsePathAndQuery rawTarget
   let methodUp := method.toUpper
   let segs := (path.splitOn "/").filter (fun s => !s.isEmpty)
-  if ownerReserved && !(methodUp == "GET" && segs == ["heartbeat"]) then
+  if ownerReserved && !(methodUp == "GET" && segs == ["heartbeat"]) &&
+      !(methodUp == "POST" && segs == ["jobs"]) then
     return .error "owner_node_reserved"
   let isArchiveUnpack := methodUp == "POST" && segs == ["machine-transfer", "archive", "unpack"]
   let bodyStart := hdrEnd + 4
@@ -712,6 +713,10 @@ def handleNonExecRequestCore (rt0 : NodeRuntime) (req : HttpRequest) :
       if let some cid := claims.jobId? then
         if cid != jobId then
           return (rt, textResp 400 "lease is scoped to a different job", preLaunches, #[])
+      if let some owner := rt.cfg.dedicatedOwner? then
+        if owner.isEmpty || claims.ownerUserId != owner then
+          return (rt, textResp 403 "node_owner_required", preLaunches, #[])
+        return (rt, textResp 403 "native_owner_executor_unavailable", preLaunches, #[])
       let kind := (payloadVal.fieldStr? "kind").getD "raw_command"
       if kind == "lean_build" then
         if claims.unixUsername.isSome || claims.callerRole == "member" then

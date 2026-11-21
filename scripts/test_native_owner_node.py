@@ -39,8 +39,10 @@ def run(binary, dedicated):
             job, (status, body) = submit(port, token, mission, "true")
             if dedicated:
                 assert (status, body.strip()) == (403, "native_owner_executor_unavailable"), (status, body)
-                _, (other_status, _) = submit(port, token, mission, "true", owner=str(uuid4()))
-                assert other_status == 403, other_status
+                _, (other_status, reason) = submit(port, token, mission, "true", owner=str(uuid4()))
+                assert (other_status, reason.strip()) == (403, "node_owner_required")
+                _, (wrong_node, _) = submit(port, token, mission, "true", node_id="other-node")
+                assert wrong_node == 400, wrong_node
                 assert request(port, "invalid", "POST", "/jobs")[0] == 401
                 assert not (Path(root) / "work" / mission).exists()
                 print("reserved node: signed owner and other-user jobs 403; unauthenticated job 401; workspace absent")
