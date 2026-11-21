@@ -161,6 +161,27 @@ def redo (buf : ComposerBuffer) : ComposerBuffer :=
       imePreeditLen := 0
       imePreeditText := "" }
 
+/-- Edit an active text field using XKB navigation and editing keys. Leave IME
+    preedit to the input method until it commits or cancels. -/
+def editKey? (buf : ComposerBuffer) (key mods : UInt32) : Option ComposerBuffer := Id.run do
+  if !buf.imePreeditText.isEmpty then return none
+  if mods == 2 || mods == 8 then
+    if key == 0x7a then return some buf.undo
+    if key == 0x79 then return some buf.redo
+  if (mods == 3 || mods == 9) && (key == 0x5a || key == 0x7a) then return some buf.redo
+  if mods != 0 then return none
+  let cur := clampCursor buf.text buf.cursorOffset
+  let len := buf.text.length
+  if key == 0xff08 then return some (if cur == 0 then buf else buf.deleteAroundCursor 1 0)
+  if key == 0xffff then return some (if cur == len then buf else buf.deleteAroundCursor 0 1)
+  let pos := match key with
+    | 0xff51 => cur - 1
+    | 0xff53 => min len (cur + 1)
+    | 0xff50 => cur - ((buf.text.toList.take cur).reverse.takeWhile (· != '\n')).length
+    | 0xff57 => cur + ((buf.text.toList.drop cur).takeWhile (· != '\n')).length
+    | _ => return none
+  return some { buf with cursorOffset := pos, imePreeditOffset := pos }
+
 /-- Attach a file/payload chip to the composer buffer. -/
 def addAttachment (buf : ComposerBuffer) (att : ComposerAttachment) : ComposerBuffer :=
   { buf with attachments := buf.attachments ++ [att], dragHoverActive := false }

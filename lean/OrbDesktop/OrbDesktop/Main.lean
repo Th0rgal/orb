@@ -332,6 +332,15 @@ def desktopReducer (rt : Runtime.RuntimeState DesktopState) :
   let scale := rt.wayland.scale120
   let viewport := rt.viewportDeviceRect
   fun st ev => Id.run do
+    if let .key key mods state := ev then
+      if rt.focus.owner == some 1 && state != .released && st.hasLiveConnection && st.writeRequest.isNone then
+        if let some menu := st.missionMenu then
+          if menu.page == .rename || menu.page == .draftDirectory then
+            if let some draft := menu.draft.editKey? key mods then
+              return ({ st with missionMenu := some { menu with draft } }, if draft == menu.draft then none else some viewport)
+        else if st.openMission.isSome || st.screen == .controlEmpty || st.screen == .controlPopulated then
+          if let some composer := st.composer.editKey? key mods then
+            return ({ st with composer }, if composer == st.composer then none else some viewport)
     if let .pointerMove x y := ev then
       return (st, st.sidebarHoverDamage rt.hitRegions scale rt.hoveredEntity (hitTest rt.hitRegions x y))
     if let .pointerLeave := ev then
