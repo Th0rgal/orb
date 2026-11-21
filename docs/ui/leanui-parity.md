@@ -434,3 +434,7 @@ LeanUI edits.
 ### Opening the window with a slow Core
 
 The native window maps immediately with its title bar and a composer placeholder while the first roster request runs. A successful response populates the same window. A failed first read shows the connection hint and starts background recovery. A replaced session must discard the previous identity’s roster before showing the new one.
+
+### Changes from a second client
+
+An open sidebar must pick up missions and projects created in another client, including a child whose parent was already visible. A new roster page updates titles, placement and archive status. Rows retain their widget identity across a reorder. A mission displaced from a limited page stays visible while its individual presence check remains authorized. Session revocation clears the previous account’s data.

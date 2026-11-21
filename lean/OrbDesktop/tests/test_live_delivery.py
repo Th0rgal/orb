@@ -252,7 +252,7 @@ class Delivery(unittest.TestCase):
             with self.assertRaises(KeyboardInterrupt):
                 live.poll('', 'bound')
         self.assertTrue(roster.call_args.kwargs['include_archived'])
-        self.assertEqual(set(out.getvalue().strip().split('\t')[1].split('\x1f')), {'M:' + mid for mid in ids})
+        self.assertEqual(set(out.getvalue().strip().split('\t')[1].removeprefix('+').split('\x1f')), {'M\x1c' + mid for mid in ids})
 
     def test_coalesces_before_ipc(self):
         class Connection:
@@ -265,10 +265,10 @@ class Delivery(unittest.TestCase):
                 return dict(id='a', title='Title', status='active', text='Public')
 
         out = io.StringIO()
-        with patch.object(live, 'roster_rows', return_value=[('M','a','PRIVATE')]), patch.object(live, 'Connection', Connection), patch.object(live.time, 'sleep', side_effect=[None, KeyboardInterrupt]), contextlib.redirect_stdout(out):
+        with patch.object(live, 'roster_rows', return_value=[('M','a','Title')]), patch.object(live, 'Connection', Connection), patch.object(live.time, 'sleep', side_effect=[None, KeyboardInterrupt]), contextlib.redirect_stdout(out):
             with self.assertRaises(KeyboardInterrupt):
                 live.poll('a', 'bound', {'a'})
-        self.assertEqual(out.getvalue(), 'B\tM:a\tTitle\tactive\tPublic\n')
+        self.assertEqual(out.getvalue(), 'B\t+M\x1ca\x1cTitle\tTitle\tactive\tPublic\n')
 
     def test_unselected_status_changes_reach_sidebar(self):
         class Connection:
@@ -283,7 +283,8 @@ class Delivery(unittest.TestCase):
         with patch.object(live, 'Connection', Connection), patch.object(live, 'roster_rows', side_effect=[rows('active'), rows('paused')]), patch.object(live.time, 'monotonic', side_effect=[0, 6, 6]), patch.object(live.time, 'sleep', side_effect=[None, KeyboardInterrupt]), contextlib.redirect_stdout(out):
             with self.assertRaises(KeyboardInterrupt):
                 live.poll('', 'bound', {'b'})
-        self.assertEqual(out.getvalue().splitlines(), ['R\tM:b\x1fS:b:active', 'R\tM:b\x1fS:b:paused'])
+        self.assertEqual(out.getvalue().rstrip('\n').split('\n'),
+                         ['R\t+' + '\x1c'.join(rows(status)[0]) for status in ('active', 'paused')])
 
     def test_machine_status_updates_without_id_change(self):
         conn = type('Connection', (), {'binding': 'bound', 'check': lambda self: None})
@@ -296,7 +297,7 @@ class Delivery(unittest.TestCase):
                 live.time, 'sleep', side_effect=[None, KeyboardInterrupt]), contextlib.redirect_stdout(out):
             with self.assertRaises(KeyboardInterrupt):
                 live.poll('', 'bound', set())
-        records = [line.removeprefix('R\tN:').split('\x1c') for line in out.getvalue().strip().split('\n')]
+        records = [line.removeprefix('R\t+N\x1c').split('\x1c') for line in out.getvalue().strip().split('\n')]
         self.assertEqual([(r[0], r[1], r[7]) for r in records],
                          [('node', 'Name with separator', 'online'), ('node', 'Name with separator', 'offline')])
 

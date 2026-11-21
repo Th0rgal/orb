@@ -14,7 +14,6 @@ import uuid
 
 CURRENT_MISSION_LIMIT = 200
 ARCHIVED_MISSION_LIMIT = 100
-TRACKED_MISSION_LIMIT = CURRENT_MISSION_LIMIT + ARCHIVED_MISSION_LIMIT
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -348,11 +347,11 @@ def projection(c, mid, presence=False):
 def poll(mid, binding, tracked=None):
     c = Connection()
     if tracked is None:
-        line = sys.stdin.readline(TRACKED_MISSION_LIMIT * 129 + 1)
+        line = sys.stdin.readline()
         if not line.endswith('\n'):
             return
         tracked = set(filter(None, line.rstrip('\n').split(',')))
-    if len(tracked) > TRACKED_MISSION_LIMIT or not all(re.fullmatch(r'[A-Za-z0-9_-]{1,128}', i) for i in tracked):
+    if not all(re.fullmatch(r'[A-Za-z0-9_-]{1,128}', i) for i in tracked):
         return
     if c.binding != binding or (mid and not re.fullmatch(r'[A-Za-z0-9_-]{1,128}', mid)):
         return  # EOF invalidates the old roster; never request with a new identity
@@ -376,23 +375,20 @@ def poll(mid, binding, tracked=None):
                             tracked.discard(missing)
                     except (urllib.error.URLError, TimeoutError, ValueError, KeyError, TypeError):
                         pass  # unknown for this ID, continue checking the others
-                visible = ['P:' + label(ident) for kind, ident, *_ in rows if kind == 'P']
-                visible += ['N:' + '\x1c'.join(map(label, row[1:])) for row in rows if row[0] == 'N']
-                visible += ['M:' + i for i in sorted(tracked)]
-                # Project status for other visible rows too. The selected bubble
-                # carries a newer per-mission read and remains its own authority.
-                visible += ['S:' + r[1] + ':' + r[7] for r in rows if r[0] == 'M'
-                            and r[1] in tracked and r[1] != mid and len(r) > 7
-                            and isinstance(r[7], str) and re.fullmatch(r'[a-z_]+', r[7])]
+                tracked.update(found)
+                # A full sampled row owns its metadata. Displaced authorized
+                # missions keep their last row until an explicit denial.
+                visible = ['\x1c'.join(map(label, row)) for row in rows if row[0] in ('P', 'M', 'N')]
+                visible.extend('K\x1c' + ident for ident in sorted(tracked - found))
                 checked = time.monotonic()
             current = ['sample', visible.copy(), None]
-            if mid and 'M:' + mid in visible:
+            if mid and mid in tracked:
                 try:
                     current[2] = projection(c, mid)
                 except urllib.error.HTTPError as error:
                     if error.code not in (403, 404):
                         raise
-                    visible.remove('M:' + mid)
+                    visible = [row for row in visible if row.split('\x1c', 2)[:2] not in (['K', mid], ['M', mid])]
                     tracked.discard(mid)
                     current[1] = visible.copy()
                 except (ValueError, KeyError, TypeError):
@@ -412,7 +408,7 @@ def poll(mid, binding, tracked=None):
         if current != last:
             # Projection strips control characters except transcript newlines
             # and tabs. Reserve RS/US to encode those without a JSON runtime.
-            keys = '\x1f'.join(current[1])
+            keys = '=' if last is not None and current[1] == last[1] else '+' + '\x1f'.join(current[1])
             if isinstance(current[2], list):
                 title, status, text = current[2]
                 fields = ('B', keys, title, status, text.replace('\n', '\x1e').replace('\t', '\x1f'))

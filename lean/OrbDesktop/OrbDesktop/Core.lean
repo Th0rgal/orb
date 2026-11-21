@@ -120,7 +120,7 @@ def withLiveSources {α : Type} (isDark : Bool) (notify : IO Unit)
   finally close
 
 inductive LiveUpdate where
-  | sample (visible : List String) (bubble : Option (String × String × String))
+  | sample (roster : Option (List String)) (bubble : Option (String × String × String))
   | invalid
 
 structure LiveSubscription where
@@ -149,12 +149,18 @@ private def subscribe (mission binding : String) (tracked : List MissionSummaryC
         let line ← child.stdout.getLine
         if !line.endsWith "\n" then break
         let kind :: keys :: rest := splitTab (line.dropEnd 1).toString | break
-        let visible := if keys.isEmpty then [] else keys.splitOn "\x1f"
+        if keys != "=" && !keys.startsWith "+" then break
+        let encoded := (keys.drop 1).toString
+        let roster := if keys == "=" then none else some (if encoded.isEmpty then [] else encoded.splitOn "\x1f")
         let bubble ← match kind, rest with
           | "B", [title,status,text] => pure (some (title,status,(text.replace "\x1e" "\n").replace "\x1f" "\t"))
           | "R", [] => pure none
           | _, _ => break
-        latest.atomically (set (some (LiveUpdate.sample visible bubble)))
+        latest.atomically (modify fun pending =>
+          let previous := match pending with
+            | some (.sample rows _) => rows
+            | _ => none
+          some (.sample (roster.orElse fun _ => previous) bubble))
         notify
     finally
       latest.atomically (set (some LiveUpdate.invalid))
@@ -166,6 +172,39 @@ private def subscribe (mission binding : String) (tracked : List MissionSummaryC
 
 def closeLiveSubscription (slot : IO.Ref (Option LiveSubscription)) : IO Unit := do
   if let some sub ← slot.swap none then sub.stop
+
+/-- Reconcile the latest authorized page with the current rows. Widget IDs stay
+stable across reordering so an open menu continues to target the same mission. -/
+private def mergeRoster (st : DesktopState) (records : List String) : DesktopState := Id.run do
+  let oldRows := Std.HashMap.ofList (st.sidebarRows.map fun row => (row.rowId, row))
+  let oldCards := Std.HashMap.ofList (st.missionCards.map fun card => (card.missionId, card))
+  let mut idx := 1 + (st.sidebarRows.foldl (fun n row => max n row.widgetId) 1000 - 1000) / 3
+  let mut cards := #[]
+  let mut rows := (st.sidebarRows.filter (fun row => row.kind != "project" && row.kind != "mission")).toArray
+  let mut machines := #[]
+  for record in records do
+    let xs := record.splitOn "\x1c"
+    let id := col xs 1
+    match col xs 0 with
+    | "P" =>
+      let row := projectRow idx xs
+      if let some old := oldRows.get? row.rowId then
+        rows := rows.push { row with widgetId := old.widgetId, selected := old.selected }
+      else
+        rows := rows.push row
+        idx := idx + 1
+    | "M" | "K" =>
+      let old := oldCards.get? id
+      let some card := if col xs 0 == "K" then old else some (missionCard idx xs) | continue
+      let card := { card with widgetId := (old.map (·.widgetId)).getD card.widgetId }
+      if old.isNone then idx := idx + 1
+      let key := "mission:" ++ id
+      let row := (oldRows.get? key).getD { widgetId := card.widgetId, rowId := key, kind := "mission", title := card.title }
+      cards := cards.push card
+      rows := rows.push { row with title := card.title, status := card.status }
+    | "N" => machines := machines.push (machineCard machines.size xs)
+    | _ => continue
+  return { st with missionCards := cards.toList, sidebarRows := rows.toList, fleetMachines := machines.toList }
 
 /-- The window thread owns selection and damage. Each reader owns a fresh,
 single-value mailbox, so a retired subscription cannot update a new mission. -/
@@ -199,7 +238,7 @@ def readLiveFrame (slot : IO.Ref (Option LiveSubscription)) (scale : Nat) (viewp
       match request with
       | .create =>
         let [id,title,status,machine,backend,model,effort,permissionMode,project] := splitTab (r.stdout.dropEnd 1).toString | throw (IO.userError "invalid mission")
-        let wid := 1 + st.sidebarRows.foldl (fun n row => max n row.widgetId) 1000
+        let wid := 1001 + 3 * (1 + (st.sidebarRows.foldl (fun n row => max n row.widgetId) 1000 - 1000) / 3)
         let card := { (default : MissionSummaryCard) with widgetId := wid, missionId := id, title, status, machine, backend, model, effort, permissionMode, project }
         let row := { (default : ChromeSidebarRow) with widgetId := wid, rowId := "mission:" ++ id, kind := "mission", title, status }
         return (resetSelection { st with screen := .missionTranscript, missionCards := card :: st.missionCards, sidebarRows := row :: st.sidebarRows } (some card), some viewport)
@@ -254,30 +293,18 @@ def readLiveFrame (slot : IO.Ref (Option LiveSubscription)) (scale : Nat) (viewp
   let some update ← sub.latest.atomically (modifyGet (fun v => (v, none))) | return (st, none)
   match update with
   | .invalid => closeLiveSubscription slot; return invalidate
-  | .sample visible bubble =>
-    let cards := st.missionCards.filter fun m => visible.contains ("M:" ++ m.missionId)
-    let fleetRows := visible.filterMap fun key =>
-      if key.startsWith "N:" then some ("N" :: (key.drop 2).toString.splitOn "\x1c") else none
-    let machines := fleetRows.toArray.mapIdx (fun i xs => machineCard i xs) |>.toList
-    let rows := st.sidebarRows.filter fun r =>
-      if r.kind == "mission" then cards.any (·.widgetId == r.widgetId)
-      else if r.kind == "project" then visible.contains ("P:" ++ (r.rowId.drop 8).toString) else true
-    let statuses := visible.foldl (fun (acc : Std.HashMap String String) key =>
-      match key.splitOn ":" with
-      | ["S", id, status] => acc.insert id status
-      | _ => acc) {}
-    let changed := cards.any fun c => (statuses.get? c.missionId).any (· != c.status)
-    let cards := if changed then cards.map (fun c =>
-      { c with status := (statuses.get? c.missionId).getD c.status }) else cards
-    let rows := if changed then rows.map (fun r =>
-      if r.kind == "mission" then { r with status := (statuses.get? ((r.rowId.drop 8).toString)).getD r.status }
-      else r) else rows
-    let pruned := cards.length != st.missionCards.length || machines != st.fleetMachines || rows.length != st.sidebarRows.length
+  | .sample roster bubble =>
+    let updated := roster.elim st (mergeRoster st)
+    let changed := roster.isSome && (updated.missionCards != st.missionCards ||
+      updated.sidebarRows != st.sidebarRows || updated.fleetMachines != st.fleetMachines)
+    let st := updated
+    let cards := st.missionCards
+    let rows := st.sidebarRows
     let menu := st.missionMenu.bind fun m =>
       if (m.mission.isEmpty || cards.any (·.missionId == m.mission)) && m.targets.all (fun id => cards.any (·.missionId == id))
       then some m else none
     let st := { st with
-      missionCards := cards, sidebarRows := rows, fleetMachines := machines, missionMenu := menu,
+      missionMenu := menu,
       multiRows := st.multiRows.filter fun id => rows.any (·.rowId == id) }
     if st.openMission.isSome && st.selectedCard.isNone then
       closeLiveSubscription slot
@@ -286,10 +313,10 @@ def readLiveFrame (slot : IO.Ref (Option LiveSubscription)) (scale : Nat) (viewp
     let some (title,status,text) := bubble | do
       -- No bubble (roster-only or malformed response): never discard other missions.
       let (next, damage) := applyLiveText scale viewport st sub.mission ""
-      return (next, if pruned || changed then some viewport else damage)
+      return (next, if changed then some viewport else damage)
     let (next, damage) := applyLiveText scale viewport st sub.mission text
     let some card := next.selectedCard | return invalidate
-    if title == card.title && status == card.status then return (next, if pruned || changed then some viewport else damage)
+    if title == card.title && status == card.status then return (next, if changed then some viewport else damage)
     return ({ next with
       composer := { next.composer with isRunning := status == "active" || status == "running" }
       missionCards := next.missionCards.map fun m => if m.missionId == sub.mission then { m with title, status } else m

@@ -194,16 +194,16 @@ def main (args : List String) : IO Unit := do
     if args == ["page-two"] || args == ["null-retry"] then
       let st ← clickMission st b
       let st ← awaitState slot st (fun s => streamedText s == "second\n\tλ🙂\n")
-      unless st.openMission == some b.missionId && st.missionCards.length == 2 do throw (IO.userError "page displacement closed mission")
+      let expected := if args == ["page-two"] then 201 else 2
+      unless st.openMission == some b.missionId && st.missionCards.length == expected &&
+          st.selectedCard.any (·.widgetId == b.widgetId) do throw (IO.userError "page update displaced the selected mission")
       return
     if args == ["idle-page-two"] then
-      let mut current := st
-      for _ in [0:150] do
-        let (next, _) ← readLiveFrame slot 120 vp current
-        unless next.hasLiveConnection && next.missionCards.length == 2 && next.openMission.isNone do
-          throw (IO.userError "displaced authorized row dropped from idle roster")
-        current := next
-        IO.sleep 10
+      let current ← awaitState slot st (fun s => s.missionCards.length == 201)
+      unless current.hasLiveConnection && current.openMission.isNone &&
+          current.missionCards.any (fun m => m.missionId == b.missionId && m.widgetId == b.widgetId) &&
+          current.sidebarRows.any (·.rowId == "mission:new-198") do
+        throw (IO.userError "live page lost new or displaced authorized row")
       return
     if args == ["idle-session"] then
       let next ← awaitState slot st (!·.hasLiveConnection)
