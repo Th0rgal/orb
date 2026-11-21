@@ -3312,9 +3312,10 @@ def dispatchProviderAndAiRoute
         let targetProvId? := reqJv.fieldStr? "provider_id"
         if !effAdmin then
           if let some tid := targetProvId? then
-            if let some trow ← getAIProvider? store tid then
-              if !(trow.createdByUserId == callerUserId && !callerUserId.isEmpty) then
-                return some (jsonErr 403 "not_account_owner")
+            let some trow ← getAIProvider? store tid
+              | return some (jsonErr 403 "not_account_owner")
+            unless !callerUserId.isEmpty && trow.createdByUserId == callerUserId do
+              return some (jsonErr 403 "not_account_owner")
         let beforeFiles := (← scanCliProxyAuthFiles).map (fun af => (af.fileName, af.fingerprint))
         match ← sendJsonRequest "GET" s!"{mgmtBase}/v0/management/{slug}-auth-url" (some mgmtKey) none #[] 15000 262144 with
         | .ok (code, rawTxt, some uJv) =>
