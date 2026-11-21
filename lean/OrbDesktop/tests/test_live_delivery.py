@@ -358,6 +358,20 @@ class Delivery(unittest.TestCase):
             with self.subTest(action=action, reason=reason), patch.object(live, 'mutate', side_effect=error):
                 self.assertEqual(live.run_mutation('binding', action, 'm'), expected)
 
+    def test_folder_browser_uses_selected_machine_and_preserves_absolute_paths(self):
+        for machine, route in [('core', '/api'), ('uruk', '/api/remote-nodes/uruk')]:
+            with self.subTest(machine=machine), patch.object(live, 'Connection') as factory:
+                conn = factory.return_value
+                conn.binding = 'bound'
+                conn.request.return_value = [
+                    dict(kind='file', path='/work/a.txt', name='a.txt'),
+                    dict(kind='dir', path='/work/My Folder', name='My Folder')]
+                output = io.StringIO()
+                with contextlib.redirect_stdout(output):
+                    live.list_directories('bound', machine, '/work/a & b')
+                conn.request.assert_called_once_with(route + '/fs/list?path=%2Fwork%2Fa+%26+b', deadline=18)
+                self.assertEqual(output.getvalue().splitlines(), ['directories', 'D\t/work/My Folder\tMy Folder'])
+
     def test_new_agent_sends_the_first_prompt_in_the_create_request(self):
         prompt = 'First line\tcontains a tab.\nSecond line.'
         directory = '/home/ben/work/Project With Spaces'
