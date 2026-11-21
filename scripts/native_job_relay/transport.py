@@ -225,11 +225,33 @@ async def main(args):
         server = await asyncio.start_server(transport.handle, sock=listener, ssl=ctx, ssl_handshake_timeout=4, limit=8192)
     else:
         ctx = ssl.create_default_context(cafile=cfg.get("ca"))
+        stopped = asyncio.Event()
+        handlers = set()
         async def handle(r, w):
-            await node_connection(r, w, ctx, cfg["host"], cfg["port"], cfg["claim"])
+            if stopped.is_set():
+                w.transport.abort()
+                return
+            task = asyncio.current_task()
+            handlers.add(task)
+            try:
+                await node_connection(r, w, ctx, cfg["host"], cfg["port"], cfg["claim"])
+            finally:
+                handlers.discard(task)
         server = await asyncio.start_server(handle, sock=listener, limit=8192)
     async with server:
-        await server.serve_forever()
+        if args.lifetime_fd is None:
+            await server.serve_forever()
+        else:
+            loop = asyncio.get_running_loop()
+            loop.add_reader(args.lifetime_fd, stopped.set)
+            try:
+                await stopped.wait()
+                server.close()
+                for task in handlers:
+                    task.cancel()
+            finally:
+                loop.remove_reader(args.lifetime_fd)
+                os.close(args.lifetime_fd)
 
 
 if __name__ == "__main__":
@@ -237,4 +259,8 @@ if __name__ == "__main__":
     parser.add_argument("role", choices=("core", "node"))
     parser.add_argument("--listen-fd", type=int, required=True)
     parser.add_argument("--config-fd", type=int, required=True)
-    asyncio.run(main(parser.parse_args()))
+    parser.add_argument("--lifetime-fd", type=int, help="supervisor pipe, EOF stops the adapter")
+    options = parser.parse_args()
+    if options.role != "node" and options.lifetime_fd is not None:
+        parser.error("--lifetime-fd requires node mode")
+    asyncio.run(main(options))

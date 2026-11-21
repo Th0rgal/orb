@@ -20,6 +20,7 @@ from urllib.parse import unquote, urlsplit
 
 from antigravity_fixture_node import NODE_ID, request
 from test_native_owner_core import core
+from native_job_relay.supervisor import node_transport
 from native_job_relay.transport import Destination, admission, copy, first_completed
 
 HOST = Destination.DAILY_CLOUD_CODE.value
@@ -87,7 +88,11 @@ async def exercise(args, root, db, core_port, claim, mission, short_grant):
         direct_hits.append(1)
         w.close()
 
+    ledger_command = "pwd > ledger.receipt"
+    request_ledger = False
+
     async def origin(r, w):
+        nonlocal request_ledger
         try:
             head = await r.readuntil(b"\r\n\r\n")
             line = head.splitlines()[0]
@@ -102,6 +107,11 @@ async def exercise(args, root, db, core_port, claim, mission, short_grant):
             else:
                 payload = {"candidates":[{"index":0, "finishReason":"STOP",
                             "content":{"role":"model", "parts":[{"text":"ledger complete"}]}}]}
+                if request_ledger and b":streamGenerateContent" in line:
+                    request_ledger = False
+                    payload["candidates"][0]["content"]["parts"] = [{"functionCall": {"name": "run_command",
+                        "args": {"CommandLine": ledger_command, "WaitMsBeforeAsync": 5000,
+                                 "toolSummary": "Record fixture ledger directory"}}}]
                 data = ("data: " + json.dumps(payload) + "\n\n").encode()
                 w.write(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\nContent-Length: " +
                         str(len(data)).encode() + b"\r\n\r\n" + data)
@@ -195,19 +205,30 @@ async def exercise(args, root, db, core_port, claim, mission, short_grant):
                     writer.close()
                 assert not origin_sni and not origin_hits
                 print("unlisted SOCKS host, port 80 and mismatched inner TLS SNI denied", flush=True)
-                profile = Path(root) / "empty-profile"
-                profile.mkdir()
+                cfg = dict(host="127.0.0.1", port=front, ca=args.front_cert, claim=claim)
+                namespace, private_port = stack.enter_context(node_transport(cfg))
+                namespace_id = os.readlink(f"/proc/self/fd/{namespace}")
+                profile = Path(stack.enter_context(tempfile.TemporaryDirectory()))
+                os.chown(profile, 16001, 16001)
                 settings = profile / ".gemini/antigravity-cli/settings.json"
                 settings.parent.mkdir(parents=True)
                 settings.write_text('{"modelProvider":"gemini"}')
+                for path in settings.parents:
+                    if path == profile:
+                        break
+                    os.chown(path, 16001, 16001)
+                os.chown(settings, 16001, 16001)
                 env = dict(PATH=os.defpath, HOME=str(profile), TMPDIR=str(profile), SSL_CERT_FILE=args.cert,
                            GOOGLE_GEMINI_BASE_URL="https://" + HOST, GEMINI_API_KEY="fixture",
-                           HTTPS_PROXY=f"socks5://127.0.0.1:{local}", HTTP_PROXY=f"socks5://127.0.0.1:{local}",
+                           HTTPS_PROXY=f"socks5://127.0.0.1:{private_port}", HTTP_PROXY=f"socks5://127.0.0.1:{private_port}",
                            TERM="dumb", NO_PROXY="")
-                async def native_turn(timeout):
+                async def native_turn(model, timeout, sid=None):
                     proc = await asyncio.create_subprocess_exec(
-                        args.agy, "--model", "gemini-4-carbon-high", "--output-format", "stream-json",
-                        "--print-timeout", f"{timeout}s", "--print=Read the disposable ledger", cwd=profile, env=env,
+                        sys.executable, str(Path(__file__).with_name("test_antigravity_job_egress.py")), "job",
+                        str(namespace), args.agy, "--model", model, "--mode", "accept-edits",
+                        "--settings", json.dumps({"permissions": {"allow": [f"command({ledger_command})"]}}),
+                        *(["--conversation", sid] if sid else []), "--output-format", "stream-json",
+                        "--print-timeout", f"{timeout}s", "--print=Read the disposable ledger", cwd=profile, env=env, pass_fds=(namespace,),
                         stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
                     try:
                         events, _ = await asyncio.wait_for(proc.communicate(), timeout + 15)
@@ -215,13 +236,24 @@ async def exercise(args, root, db, core_port, claim, mission, short_grant):
                         if proc.returncode is None:
                             proc.kill()
                             await proc.wait()
-                    return [json.loads(line)["result"]["status"] for line in events.splitlines()
-                            if "result" in json.loads(line)]
+                    return next(json.loads(line)["result"] for line in events.splitlines() if "result" in json.loads(line))
 
-                assert await native_turn(30) == ["SUCCESS"]
+                conversations = {}
+                for model_name in ("gemini-4-carbon-high", "gemini-4-neon-high"):
+                    ledger = profile / "ledger.receipt"
+                    ledger.unlink(missing_ok=True)
+                    request_ledger = True
+                    initial = await native_turn(model_name, 45)
+                    assert initial["status"] == "SUCCESS" and ledger.read_text().strip() == str(profile)
+                    assert ledger.stat().st_uid == 16001
+                    sid = initial["conversation_id"]
+                    assert sid
+                    conversations[model_name] = sid
+                    followup = await native_turn(model_name, 30, sid)
+                    assert followup["status"] == "SUCCESS" and followup["conversation_id"] == sid
+                    print(f"{model_name}: native workspace file uid=16001; same conversation resumed", flush=True)
                 assert any(b":streamGenerateContent" in hit for hit in origin_hits)
                 assert relay_hits and not direct_hits
-                print("native agy 1.5.14 Carbon SUCCESS; verified provider TLS through assigned account relay; direct hits=0", flush=True)
 
                 async def open_live(port):
                     r,w = await asyncio.open_connection("127.0.0.1",port)
@@ -250,10 +282,11 @@ async def exercise(args, root, db, core_port, claim, mission, short_grant):
                 relay.close()
                 before = len(origin_hits)
                 await attempt({})
-                blocked = await native_turn(12)
-                assert blocked in (["ERROR"], ["CANCELLED"]), blocked
-                assert len(origin_hits) == before and not direct_hits
-                print(f"assigned VPN gateway unavailable with live grant; native agy {blocked[0]}; origin delta=0; direct hits=0", flush=True)
+                for model_name, sid in conversations.items():
+                    blocked = await native_turn(model_name, 12, sid)
+                    assert blocked["status"] in ("ERROR", "CANCELLED") and blocked["conversation_id"] == sid
+                    assert len(origin_hits) == before and not direct_hits
+                    print(f"{model_name}: gateway unavailable; resume {blocked['status']}; origin delta=0; direct hits=0", flush=True)
                 w.write(b"!")
                 await w.drain()
                 assert await asyncio.wait_for(r.readexactly(1), 3) == b"y"
@@ -271,6 +304,21 @@ async def exercise(args, root, db, core_port, claim, mission, short_grant):
                     raise AssertionError("cancelled grant still admitted by Core")
                 print("Core cancellation closed established TLS; reconnect denied", flush=True)
                 assert not direct_hits
+
+    assert not profile.exists()
+    assert not Path(f"/proc/self/fd/{namespace}").exists()
+    for proc in Path("/proc").glob("[0-9]*"):
+        try:
+            current = os.readlink(proc / "ns/net")
+            assert current != namespace_id, "job process survived teardown"
+            for fd in (proc / "fd").iterdir():
+                try:
+                    assert os.readlink(fd) != namespace_id, "namespace descriptor survived teardown"
+                except FileNotFoundError:
+                    continue
+        except (ProcessLookupError, FileNotFoundError, PermissionError):
+            continue
+    print("supervisor teardown: temporary profile removed; job namespace released", flush=True)
 
 
 def main():

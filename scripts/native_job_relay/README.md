@@ -10,7 +10,7 @@ Each admitted connection has a deadline from the Core grant. While connected the
 
 ## Trusted supervisor interface
 
-Both roles run `python3 -I transport.py ROLE --listen-fd N --config-fd M`. The supervisor supplies a pre-bound stream listener and a private JSON pipe or descriptor. See the executable fixture for a complete invocation using `pass_fds`. Keep the adapters and their configuration descriptors outside the mission process. Pass the job just its private listener address. Namespace creation, adapter lifecycle management and provisioning a personal profile are separate from this transport.
+Both roles run `python3 -I transport.py ROLE --listen-fd N --config-fd M`. The supervisor supplies a pre-bound stream listener and a private JSON pipe or descriptor. See the executable fixture for a complete invocation using `pass_fds`. Keep the adapters and their configuration descriptors outside the mission process. Pass the job just its private listener address. On Linux the trusted caller can use `supervisor.node_transport(config)` to create an anonymous loopback-only job namespace and start the node adapter. The returned descriptor is for the trusted privilege-dropping launcher. The workspace process receives the SOCKS address. The adapter stays in the outer namespace, using its inherited job-namespace socket for ingress. Its private configuration descriptor and supervisor lifetime pipe are excluded from the workload. Scope exit closes the lifetime pipe, waits for the adapter, and releases the namespace descriptor. Supervisor death also closes the pipe. The workload launcher remains responsible for terminating its process tree.
 
 | Role | JSON configuration |
 | --- | --- |
@@ -42,11 +42,13 @@ python3 scripts/test_native_job_relay.py --core /bin/orb-core --agy /bin/agy-new
   --driver /bin/orb-airvpn-sidecar-test --cert /transport.crt --key /transport.key \
   --front-cert /front.crt --front-key /front.key
 python3 scripts/test_native_owner_node.py /bin/sandboxed-node
+python3 scripts/test_native_owner_core.py /bin/orb-core
+python3 scripts/test_native_supervisor_loss.py
 ```
 
 The test creates a fresh Core store using the real enrollment and grant issuers, then seeds a synthetic running job and placement. It runs both adapters, the genuine agy CLI, the Core HTTP admission and cancellation endpoints, and Orb’s authenticated account relay backed by a disposable SOCKS gateway and Google TLS peer. The separate node control exercises ordinary signed job execution. The fixture does not enable owner-profile dispatch or use a subscription.
 
-## Disposable Linux run, 2026-11-21
+## Transport baseline at 11e45a19
 
 The guest had only the loopback interface. The guest runner recorded the following output and exit statuses.
 
@@ -64,3 +66,13 @@ restart with missing or changed owner binding: refused before listening
 ordinary node: valid signed job admitted and succeeded
 ordinary and reserved node controls exit=0
 ```
+
+## Owner dispatch and supervisor qualification
+
+The authenticated Core mission-creation and message endpoints exercise enrollment, owner binding and resume admission. The enrolled owner receives `native_owner_executor_unavailable` on dispatch. The reserved node rejects signed generic jobs before workspace creation. A synthetic running placement is seeded only in the independent transport test. Its real grant issuer and cancellation endpoint belong to Core. The supervisor consumes the resulting scoped claim.
+
+The native CLI uses its Gemini API-key interface with a disposable fixture value and independent synthetic TLS upstream. Both models use a clean, unprivileged CLI identity in the job network namespace. A synthetic provider requests a native command to write the current working directory to the ledger. The test checks its contents, file owner and native conversation ID on follow-up. Neither the fixture profile nor the workspace contains a subscription login.
+
+A network namespace controls sockets. The authenticated CLI still needs a way to delegate **all** workspace file access, commands, hooks and stdio MCP to a different OS identity, including after resume. The tested agy interface lacks a documented mandatory executor with fail-closed disconnect. Until that exists, a private native login on the CLI identity would be accessible to local workspace tools. The [capability investigation](../../docs/specs/antigravity-model-account-selection.md) records the ACP handshake and native UID evidence. The supervisor is independently callable. Core and the node continue to deny shared-profile execution.
+
+The crash regression waits for a SOCKS greeting, exits the supervisor immediately and holds an independent reference to the job namespace. It requires EOF on the established socket and ECONNREFUSED on a fresh connection while that namespace still exists. Closing only the asyncio server listener left the active socket open until the protocol timeout on Python 3.12. The adapter now cancels accepted handlers when the lifetime pipe closes.
