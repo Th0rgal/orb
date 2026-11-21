@@ -685,6 +685,12 @@ export function BackendTab(p: { standalone?: boolean } = {}) {
       .finally(() => setGithubBusy(false));
   });
 
+  const canManageGitHub = () => {
+    const status = authStatus();
+    const user = currentUser() ?? status?.user;
+    if (user) return user.role === "admin";
+    return status?.auth_mode === "single_tenant" || status?.auth_mode === "disabled";
+  };
   const isMultiUser = () => health()?.auth_mode === "multi_user";
   const authNotRequired = () => health()?.auth_required === false;
   const canConnect = () => {
@@ -903,6 +909,7 @@ export function BackendTab(p: { standalone?: boolean } = {}) {
           </Row>
         </Show>
       </Card>
+      <Show when={!p.standalone && isConnected() && canManageGitHub()}><GitHubIntegrationCard /></Show>
       <ErrorToast error={error()} title="Couldn’t connect to the backend" onDismiss={() => setError(null)} />
       <Show when={passwordDialog()}>
         <Dialog
@@ -1011,7 +1018,6 @@ export function Settings(p: { onOpenPage?: (id: string) => void } = {}) {
       <div class="s-inner">
         <h2>Account</h2>
         <BackendTab />
-        <GitHubIntegrationCard />
         <CloudAccountsCard onOpenPage={p.onOpenPage} />
         <Card title="Appearance">
           <Row title="Theme" desc="Auto follows your desktop appearance.">
