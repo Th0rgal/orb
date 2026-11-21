@@ -1455,6 +1455,8 @@ def isOpenCodeCompactionSummary (text : String) : Bool :=
 /-- Structured result extracted from a single stdout line of a one-shot CLI harness (`opencode`, `codex`, `grok`, etc.). -/
 structure OneShotLineParsed where
   sessionId?       : Option String := none
+  /-- A complete Codex assistant message, distinct from partial text frames. -/
+  wholeMessage     : Bool := false
   finalTextFallback : Bool := false
   textDelta        : String := ""
   errorMsg?        : Option String := none
@@ -1471,11 +1473,11 @@ structure OneShotLineParsed where
   deriving Repr, BEq, Inhabited
 
 /-- Append `parsed.textDelta` to `prevText`: returns `(piece, nextLastMessageId?)`.
-    OpenCode emits whole text parts (`run --format json`) or streamed chunks (ACP); separate
-    parts and separate messages get a blank line, chunks of one message are concatenated. -/
+    Separate complete Codex messages and OpenCode text parts with a paragraph break.
+    Chunks from the same OpenCode ACP message remain contiguous. -/
 def joinHarnessText (harness prevText : String) (lastMessageId? : Option String)
     (parsed : OneShotLineParsed) : String × Option String :=
-  let boundary := harness == "opencode" && !prevText.isEmpty && !prevText.endsWith "\n" &&
+  let boundary := (harness == "opencode" || parsed.wholeMessage) && !prevText.isEmpty && !prevText.endsWith "\n" &&
     !parsed.textDelta.startsWith "\n"
   if parsed.finalTextFallback && !prevText.isEmpty then ("", lastMessageId?)
   else if parsed.isChunk then
@@ -1674,7 +1676,7 @@ def parseOneShotHarnessEvent (harness : String) (rawLine : String) : OneShotLine
       let item := jv.fieldOrNull "item"
       let itemTy := (item.fieldStr? "type").getD ""
       if ty == "item.completed" && itemTy == "agent_message" then
-        return { sessionId? := sid?, textDelta := (item.fieldStr? "text").getD "" }
+        return { sessionId? := sid?, textDelta := (item.fieldStr? "text").getD "", wholeMessage := harness == "codex" }
       else if itemTy == "command_execution" then
         let aid := (item.fieldStr? "id").getD "cmd"
         let cmdStr := (item.fieldStr? "command").getD "command"
