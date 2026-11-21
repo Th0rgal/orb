@@ -1760,6 +1760,8 @@ def run : IO Unit := do
           !(← inChooser memberJwt) && (← inChooser jwt) do
         failures := failures.push "Personal preference persists on list reload and filters only the member's chooser"
       IO.ofExcept (← upsertAIProvider store { ownerRow with enabled := false })
+      if (← upsertAIProvider store ownerRow (memberEdit := true)).isOk then
+        failures := failures.push "A stale member edit cannot restore the previous global state"
       let disabledMember ← listRow memberJwt
       let disabledAdmin ← listRow jwt
       unless disabledMember.fieldStr? "id" == some ownerRow.id &&
