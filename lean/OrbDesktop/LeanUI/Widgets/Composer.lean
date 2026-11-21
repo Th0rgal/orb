@@ -268,15 +268,19 @@ def buildComposerWidget (theme : Theme) (availW composerH : SubPx)
       (buildComposerInlineRuns theme buf overrideRuns)
   let hasText := !buf.text.isEmpty || !buf.imePreeditText.isEmpty
   let sendBgCol := if hasText || isRunning then pal.sendBg else ((pal.sendBg &&& 0xFFFFFF00) ||| 0x47)
+  let glyph : WidgetNode := if isRunning then
+      WidgetNode.rrect (BoxStyle.row 0 |>.withFixedSize (pxToSub 6) (pxToSub 6)) pal.sendFg
+        (CornerRadii.uniform (pxToSub 1))
+    else
+      .mk none false false (BoxStyle.row 0 |>.withFixedSize (pxToSub 14) (pxToSub 14))
+        (.vectorIcon [[(80,130),(80,30)], [(35,75),(80,30),(125,75)]] pal.sendFg) []
   let sendBtn : WidgetNode :=
     withId buf.sendButtonId <|
       WidgetNode.box
         (buttonStyle
           |>.withBg sendBgCol
           |>.withRadius (if isRunning then theme.radiusMd else pxToSub 12))
-        [WidgetNode.rrect (BoxStyle.row 0 |>.withFixedSize (pxToSub 6) (pxToSub 6)) pal.sendFg
-          (CornerRadii.uniform (pxToSub 1))]
-        buf.sendButtonId
+        [glyph] buf.sendButtonId
   -- The native three-box blur at 16 px matches the falloff of the browser's
   -- `.dock .composer` 18 px CSS shadow; retain its 4 px offset and 8% opacity.
   let pill : WidgetNode :=
