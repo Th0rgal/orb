@@ -824,6 +824,9 @@ def renderHydratedProviderJv (hp : HydratedProvider) (userEnabled? : Option Bool
 def providerAddedBy (hp : HydratedProvider) (callerUserId : String) : Bool :=
   !hp.createdByUserId.isEmpty && hp.createdByUserId == callerUserId
 
+def providerVisibleTo (hp : HydratedProvider) (effAdmin : Bool) (callerUserId : String) : Bool :=
+  effAdmin || providerAddedBy hp callerUserId || (hp.enabled && (hp.hasApiKey || hp.hasOAuth))
+
 /-- Render one provider for the caller: admins and the member who added the account get the
     full (credential-free) view plus who added it; other members get the reduced view. -/
 def renderHydratedProviderForCaller (hps : Array HydratedProvider) (hp : HydratedProvider)
@@ -3296,7 +3299,7 @@ def dispatchProviderAndAiRoute
       let sidecarFiles ← fetchSidecarAuthFiles
       let mut arr : Array JVal := #[]
       for hp in hps do
-        if effAdmin || providerAddedBy hp callerUserId || (hp.enabled && (hp.hasApiKey || hp.hasOAuth)) then
+        if providerVisibleTo hp effAdmin callerUserId then
           let uEn? := if isLegacyUnscoped then none else some (isUserProviderEnabled uPrefs hp.id)
           let rejected ← loginRejectedFor hub store hp
           let rejected := rejected ||
@@ -3358,7 +3361,7 @@ def dispatchProviderAndAiRoute
         (formatEpochIso8601Utc (← nowEpoch))
       let hps ← loadHydratedProviders store workingDir
       let usernames ← listUsernamesById store
-      let visible := hps.filter (fun hp => effAdmin || providerAddedBy hp callerUserId || (hp.enabled && (hp.hasApiKey || hp.hasOAuth)))
+      let visible := hps.filter (fun hp => providerVisibleTo hp effAdmin callerUserId)
       return some (jsonResp 200 (.arr (visible.map (fun hp => renderHydratedProviderForCaller hps hp effAdmin callerUserId usernames))))
 
     -- 5e. `GET /api/ai/providers/for-backend/:backend_id`
@@ -3599,7 +3602,7 @@ def dispatchProviderAndAiRoute
       if method == "GET" && segs.length == 4 then
         let some hp := matchedProv?
           | return some (jsonErr 404 "Provider not found")
-        if !effAdmin && !providerAddedBy hp callerUserId && !(hp.enabled && (hp.hasApiKey || hp.hasOAuth)) then
+        if !providerVisibleTo hp effAdmin callerUserId then
           return some (jsonErr 404 "Provider not found")
         let rejected ← loginRejectedFor hub store hp
         let sidecarFiles ← fetchSidecarAuthFiles
@@ -3620,7 +3623,7 @@ def dispatchProviderAndAiRoute
       if method == "GET" && segs.length == 5 && segs[4]? == some "usage" then
         let some hp := matchedProv?
           | return some (jsonErr 404 "Provider not found")
-        if !effAdmin && !providerAddedBy hp callerUserId && !(hp.enabled && (hp.hasApiKey || hp.hasOAuth)) then
+        if !providerVisibleTo hp effAdmin callerUserId then
           return some (jsonErr 404 "Provider not found")
         let force := ((qParam? qMap "force").getD "false") == "true"
         let cachedOnly := ((qParam? qMap "cached_only").getD "false") == "true"
