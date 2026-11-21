@@ -465,6 +465,8 @@ Opening a project shows the cached activity rows immediately, then loads the sam
 
 Replay this sequence with two projects. Fill the global page with recent activity from the first project. Expand the second, whose controller and child are older than the global page. Both appear when the project read completes. An older completed sibling outside the project history stays hidden. Collapse and reopen while a read is pending, refresh the global roster, then replay a transient failure. The expanded tree keeps the last successful project membership until a newer project read or an explicit move, archive or access revocation changes it. Switching account discards the previous account's membership.
 
+On expansion the first complete project membership and its mission cards may arrive before the global mission, archive and machine lists. This sample owns only the named memberships and supplied cards. The following full sample reuses those same project reads. A short all-status project page exhausts the open list as well. A full page still requires the bounded open scan and ancestor resolution.
+
 The Misc project (Core slug `default`) contains unassigned mission roots whenever the project is present. Collapsing Misc hides those roots and their descendants. The sidebar connects each expanded folder or controller to its children at the icon center. A continued sibling keeps its vertical rail through nested rows. The last visible sibling ends in a rounded elbow at its own icon, irrespective of selection.
 
 A committed Wayland IME batch can replace text on both sides of the caret.
