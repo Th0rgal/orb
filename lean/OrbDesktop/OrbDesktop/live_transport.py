@@ -1,4 +1,5 @@
 """Embedded native client. stdout is private projection IPC, never diagnostics."""
+from datetime import datetime
 import hashlib
 import json
 import os
@@ -514,7 +515,81 @@ def provider_inventory(binding):
         print('\t'.join(map(label, row)))
 
 
-def roster_rows(c, include_archived=False):
+def project_history(c, slug, rules):
+    """Project history plus older open work under the shared desktop policy."""
+    page_size = rules['pageSize']
+    query = '/api/control/missions?project=' + urllib.parse.quote(slug, safe='') + f'&limit={page_size}'
+    history = c.get(query + '&all=true')
+    if not isinstance(history, list):
+        raise ValueError('invalid project history')
+    known = {row['id']: row for row in history}
+    members = dict(known)
+    candidates = {}
+    cutoff = time.time() - rules['recentDays'] * 86400
+    for offset in range(0, rules['openLimit'], page_size):
+        page = c.get(query + (f'&offset={offset}' if offset else ''))
+        if not isinstance(page, list):
+            raise ValueError('invalid project page')
+        for row in page:
+            mid = row['id']
+            known.setdefault(mid, row)
+            if mid in members:
+                continue
+            status = row.get('status')
+            if status in rules['recent']:
+                try:
+                    when = datetime.fromisoformat(row.get('updated_at') or row.get('created_at') or '').timestamp()
+                except ValueError:
+                    continue
+                if when < cutoff:
+                    continue
+            elif status not in rules['live']:
+                continue
+            candidates[mid] = row
+        if len(page) < page_size:
+            break
+    for mid, row in candidates.items():
+        parent = row.get('parent_mission_id') or row.get('callback_parent_mission_id')
+        if not parent or parent in members or parent in candidates or row.get('status') in rules['live']:
+            members[mid] = row
+    unavailable = set()
+    for row in list(members.values()):
+        current = row
+        visited = {row['id']}
+        while True:
+            _, launch, callback, fork, _ = mission_hierarchy(current)
+            parent = (launch if launch != fork else None) or callback
+            if not parent or parent in visited or parent in unavailable:
+                break
+            visited.add(parent)
+            if parent not in known:
+                try:
+                    ancestor = c.get('/api/control/missions/' + urllib.parse.quote(parent, safe='') + '?include_history=false')
+                except urllib.error.HTTPError as error:
+                    if error.code not in (403, 404):
+                        raise
+                    unavailable.add(parent)
+                    break
+                if not isinstance(ancestor, dict) or ancestor.get('id') != parent:
+                    raise ValueError('invalid project ancestor')
+                known[parent] = ancestor
+            current = known[parent]
+            if (current.get('project') or '__unassigned__') == slug:
+                members.setdefault(parent, current)
+    def visible(row):
+        visited = set()
+        while row and row['id'] not in visited:
+            visited.add(row['id'])
+            tags = row.get('tags') or []
+            if any(t == 'btw-subagent' or t.startswith('btw-parent:') for t in tags):
+                return False
+            _, launch, callback, fork, _ = mission_hierarchy(row)
+            row = known.get((launch if launch != fork else None) or callback)
+        return True
+    return [row for row in members.values() if visible(row) and row.get('viewer_role') != 'participant']
+
+
+def roster_rows(c, include_archived=False, expanded=(), rules=None):
     projects = c.get('/api/projects')['projects']
     missions = c.get(f'/api/control/missions?limit={CURRENT_MISSION_LIMIT}&include_ancestors=true')
     machines = c.get('/api/machines')
@@ -529,6 +604,22 @@ def roster_rows(c, include_archived=False):
             if error.code != 404:
                 raise
     rows = [('C', c.binding)]
+    if expanded:
+        by_id = {m['id']: m for m in missions}
+        for slug in expanded:
+            if not any(p.get('slug') == slug for p in projects):
+                continue
+            members = project_history(c, slug, rules)
+            if slug == 'default':
+                members += project_history(c, '__unassigned__', rules)
+            listed = []
+            for member in members:
+                if (member.get('project') or 'default') != slug:
+                    continue
+                by_id[member['id']] = member
+                listed.append(member['id'])
+            rows.append(('G', slug, *sorted(set(listed))))
+        missions = by_id.values()
     rows += [('P', p['slug'], p.get('title') or p['slug'], p.get('objective'), p.get('color')) for p in projects]
     rows += [('M', *(m.get(k) for k in ('id','title','project','track','model','model_override',
                                         'status','updated_at','created_at','short_description')), *mission_settings(m), *mission_hierarchy(m))
@@ -594,13 +685,15 @@ def projection(c, mid, presence=False):
     return [label(obj['title']), label(obj['status']), ''.join(ch for ch in obj['text'] if ch in '\n\t' or ch.isprintable())]
 
 
-def poll(mid, binding, tracked=None):
+def poll(mid, binding, tracked=None, rules=None):
     c = Connection()
     if tracked is None:
         line = sys.stdin.readline()
         if not line.endswith('\n'):
             return
         tracked = set(filter(None, line.rstrip('\n').split(',')))
+    expanded = sys.stdin.readline().rstrip('\n').split('\t') if rules else []
+    expanded = [slug for slug in expanded if slug and slug.isprintable()]
     if not all(re.fullmatch(r'[A-Za-z0-9_-]{1,128}', i) for i in tracked):
         return
     if c.binding != binding or (mid and not re.fullmatch(r'[A-Za-z0-9_-]{1,128}', mid)):
@@ -611,7 +704,7 @@ def poll(mid, binding, tracked=None):
         c.check()
         try:
             if checked is None or time.monotonic() - checked >= 5:
-                rows = roster_rows(c, include_archived=True)
+                rows = roster_rows(c, include_archived=True, expanded=expanded, rules=rules)
                 found = {r[1] for r in rows if r[0] == 'M'}
                 # A sorted, limited list is positive evidence only. For every
                 # absent tracked ID require an explicit per-mission denial.
@@ -628,7 +721,7 @@ def poll(mid, binding, tracked=None):
                 tracked.update(found)
                 # A full sampled row owns its metadata. Displaced authorized
                 # missions keep their last row until an explicit denial.
-                visible = ['\x1c'.join(map(label, row)) for row in rows if row[0] in ('P', 'M', 'N')]
+                visible = ['\x1c'.join(map(label, row)) for row in rows if row[0] in ('P', 'M', 'N', 'G')]
                 visible.extend('K\x1c' + ident for ident in sorted(tracked - found))
                 checked = time.monotonic()
             current = ['sample', visible.copy(), None]

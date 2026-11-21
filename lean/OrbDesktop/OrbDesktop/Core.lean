@@ -12,6 +12,7 @@ golden paths never call this module and remain deterministic fixtures. -/
 /-- Embedded connection-bound HTTP reader and writer. -/
 private def transport : String := include_str "live_transport.py"
 
+private def projectHistoryRules : String := include_str "../../../orb/src/projectHistoryRules.json"
 private def modelCatalogRules : String := include_str "../../../orb/src/modelSuccessors.json"
 
 private def splitTab (line : String) : List String :=
@@ -203,19 +204,21 @@ inductive LiveUpdate where
   | invalid
 
 structure LiveSubscription where
+  projects : List String
   mission : String
   binding : String
   latest : Std.Mutex (Option LiveUpdate)
   stop : IO Unit
 
-private def subscribe (mission binding : String) (tracked : List MissionSummaryCard) (notify : IO Unit) : IO LiveSubscription := do
+private def subscribe (mission binding : String) (tracked : List MissionSummaryCard) (projects : List String) (notify : IO Unit) : IO LiveSubscription := do
   let child ← IO.Process.spawn {
-    cmd := "python3", args := #["-I", "-c", transport ++ "\npoll(*sys.argv[1:])", mission, binding]
+    cmd := "python3", args := #["-I", "-c", transport ++ "\npoll(sys.argv[1], sys.argv[2], rules=json.loads(sys.argv[3]))", mission, binding, projectHistoryRules]
     stdin := .piped, stdout := .piped, stderr := .null }
   -- Bootstrap tracks validated IDs from both current and archived pages. Do not expose
   -- the roster in the process list; a new reader gets the current tracked set.
   try
     child.stdin.putStrLn (String.intercalate "," (tracked.map (·.missionId)))
+    child.stdin.putStrLn (String.intercalate "\t" projects)
     child.stdin.flush
   catch err =>
     try child.kill catch _ => pure ()
@@ -244,7 +247,7 @@ private def subscribe (mission binding : String) (tracked : List MissionSummaryC
     finally
       latest.atomically (set (some LiveUpdate.invalid))
       notify
-  return { mission, binding, latest, stop := do
+  return { mission, binding, projects, latest, stop := do
     try child.kill catch _ => pure ()
     discard child.wait
     discard (IO.wait reader) }
@@ -261,6 +264,7 @@ private def mergeRoster (st : DesktopState) (records : List String) : DesktopSta
   let mut cards := #[]
   let mut rows := (st.sidebarRows.filter (fun row => row.kind != "project" && row.kind != "mission")).toArray
   let mut machines := #[]
+  let mut memberships := st.projectMemberships
   for record in records do
     let xs := record.splitOn "\x1c"
     let id := col xs 1
@@ -281,9 +285,10 @@ private def mergeRoster (st : DesktopState) (records : List String) : DesktopSta
       let row := (oldRows.get? key).getD { widgetId := card.widgetId, rowId := key, kind := "mission", title := card.title }
       cards := cards.push card
       rows := rows.push { row with title := card.title, status := card.status }
+    | "G" => memberships := (id, xs.drop 2) :: memberships.filter (·.1 != id)
     | "N" => machines := machines.push (machineCard machines.size xs)
     | _ => continue
-  let updated := { st with missionCards := cards.toList, sidebarRows := rows.toList, fleetMachines := machines.toList }
+  let updated := { st with projectMemberships := memberships, missionCards := cards.toList, sidebarRows := rows.toList, fleetMachines := machines.toList }
   let some selected := updated.selectedCard | return updated
   return { updated with composer := { updated.composer with isRunning := selected.isRunning } }
 
@@ -379,10 +384,10 @@ def readLiveFrame (slot : IO.Ref (Option LiveSubscription)) (scale : Nat) (viewp
     catch _ => return ({ st with writeError := "Core did not confirm " ++ action }, some viewport)
   let invalidate := ({ DesktopState.liveUnavailable with theme := st.theme, scale120 := scale }, some viewport)
   let target := if st.hasLiveConnection then some (st.openMission.getD "") else none
-  if active.map (·.mission) != target || active.any (·.binding != st.connectionBinding) then
+  if active.map (·.mission) != target || active.any (fun sub => sub.binding != st.connectionBinding || sub.projects != st.expandedProjects) then
     closeLiveSubscription slot
     if let some mission := target then
-      try slot.set (some (← subscribe mission st.connectionBinding st.missionCards notify)) catch _ => return invalidate
+      try slot.set (some (← subscribe mission st.connectionBinding st.missionCards st.expandedProjects notify)) catch _ => return invalidate
   let some sub ← slot.get | return (st, none)
   let some update ← sub.latest.atomically (modifyGet (fun v => (v, none))) | return (st, none)
   match update with
@@ -390,7 +395,7 @@ def readLiveFrame (slot : IO.Ref (Option LiveSubscription)) (scale : Nat) (viewp
   | .sample roster bubble =>
     let updated := roster.elim st (mergeRoster st)
     let changed := roster.isSome && (updated.missionCards != st.missionCards ||
-      updated.sidebarRows != st.sidebarRows || updated.fleetMachines != st.fleetMachines)
+      updated.sidebarRows != st.sidebarRows || updated.fleetMachines != st.fleetMachines || updated.projectMemberships != st.projectMemberships)
     let st := updated
     let cards := st.missionCards
     let rows := st.sidebarRows

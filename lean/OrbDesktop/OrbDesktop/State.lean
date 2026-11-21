@@ -386,6 +386,7 @@ structure DesktopState where
   providers : Option (List ProviderAccount) := none
   providerReadFailed : Bool := false
   accountRoutePage : Option AccountRoutePage := none
+  projectMemberships : List (String × List String) := []
   expandedProjects : List String := []
   expandedMissions : List String := []
   archivesOpen : Bool := false
@@ -890,10 +891,15 @@ def DesktopState.visibleProjectRows (st : DesktopState) : List ChromeSidebarRow 
   let projectOf := fun id => ((cards.get? id).map (·.project)).getD ""
   let mut active := #[]
   let mut archived := #[]
+  let memberships := Std.HashMap.ofList (st.projectMemberships.map fun (slug, ids) => (slug, Std.HashSet.ofList ids))
   for row in st.sidebarRows do
     if row.kind == "mission" then
       if row.status == "acknowledged" then archived := archived.push row
-      else active := active.push row
+      else
+        let project := projectOf row.widgetId
+        let membership := memberships.get? (if project.isEmpty then "default" else project)
+        let mid := (row.rowId.drop 8).toString
+        if st.openMission == some mid || membership.all (·.contains mid) then active := active.push row
   let mut grouped : Std.HashMap String (Array ChromeSidebarRow) := {}
   let projectKeys := Std.HashSet.ofList (projects.map (fun row => (row.rowId.drop 8).toString))
   let mut unassigned := #[]

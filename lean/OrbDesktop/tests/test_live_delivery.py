@@ -268,7 +268,7 @@ class Delivery(unittest.TestCase):
                     if mode == 'null-retry' and paths.count(path) == 3:
                         self.send_error(503)
                         return
-                elif path == '/api/machines':
+                elif path.startswith('/api/control/missions?project=p&') or path == '/api/machines':
                     result = []
                 elif path.split('?')[0] in (a + events, b + events):
                     mid = path.split('/')[-2]
@@ -427,6 +427,30 @@ class Delivery(unittest.TestCase):
             self.assertEqual(request.kwargs['body']['project'], 'now')
             self.assertEqual(request.kwargs['body']['working_directory'], directory)
             self.assertNotIn('remote_node_id', request.kwargs['body'])
+
+    def test_expanded_project_restores_older_active_worker_and_its_controller(self):
+        query = '/api/control/missions?project=p&limit=2'
+        def row(mid, status, **fields):
+            return dict(id=mid, project='p', status=status, **fields)
+        old = row('old', 'completed')
+        child = row('child', 'active', parent_mission_id='controller')
+        history = [row('new', 'completed'), row('archived', 'acknowledged')]
+        pages = {query + '&all=true': history, query: [history[0], old],
+                 query + '&offset=2': [child, row('side', 'active', tags=['btw-parent:child'])],
+                 query + '&offset=4': [], '/api/control/missions/controller?include_history=false': row('controller', 'completed'),
+                 '/api/projects': {'projects': [{'slug': 'p'}]}, '/api/machines': [],
+                 '/api/control/missions?limit=200&include_ancestors=true': [old]}
+        connection = type('Fixture', (), {'binding': 'bound', 'check': lambda _: None, 'get': lambda _, path: pages[path]})()
+        rules = json.loads((PKG.parents[1] / 'orb/src/projectHistoryRules.json').read_text())
+        rules['pageSize'] = 2
+        initial = live.roster_rows(connection)
+        self.assertEqual([r[1] for r in initial if r[0] == 'M'], ['old'])
+        loaded = live.roster_rows(connection, expanded=['p'], rules=rules)
+        self.assertIn(('G', 'p', 'archived', 'child', 'controller', 'new'), loaded)
+        self.assertIn('old', [r[1] for r in loaded if r[0] == 'M'])
+        pages[query + '&offset=2'] = None
+        with self.assertRaises(ValueError):
+            live.roster_rows(connection, expanded=['p'], rules=rules)
 
     def test_child_precedes_parent_in_live_roster(self):
         child = dict(id='child', folder='notes/today', parent_mission_id='launch',

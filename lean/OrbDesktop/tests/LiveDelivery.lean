@@ -25,6 +25,13 @@ private def hierarchyFixture : DesktopState := {
 #guard (({ hierarchyFixture with expandedProjects := ["now"] } : DesktopState).visibleProjectRows.map
   (fun r => (r.rowId, r.depth))) == [("project:now", 0), ("mission:m", 1)]
 
+private def hydratedHistory : DesktopState := { hierarchyFixture with
+  expandedProjects := ["now"], projectMemberships := [("now", [])] }
+#guard (hydratedHistory.visibleProjectRows.map (·.rowId)) == ["project:now"]
+#guard hydratedHistory.missionCards.length == 1
+#guard (({ hydratedHistory with openMission := some "m" } : DesktopState).visibleProjectRows.map (·.rowId)) ==
+  ["project:now", "mission:m"]
+
 private def treeRow (depth : Nat) (selected := false) : ChromeSidebarRow :=
   { widgetId := 1001, rowId := "row", kind := "mission", title := "Row", depth, selected }
 private def treeGeometry (rows : List ChromeSidebarRow) :=
