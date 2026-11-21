@@ -166,7 +166,7 @@ def chromeLabel (lineH : SubPx) (runs : List InlineRun) (grow : Nat := 0) : Widg
 tall with `6 px` corners, a `16 px` icon slot (`18 px` for a mission, holding its status dot),
  the label, and an optional count pill and shortcut hint. -/
 def buildSidebarRowWidget (theme : Theme) (innerW : SubPx) (row : ChromeSidebarRow)
-    (margin : Edges := {}) (livePhase : Option Nat := none) (expanded : Bool := false) (hovered : Bool := false) : WidgetNode :=
+    (margin : Edges := {}) (livePhase : Option Nat := none) (expanded : Bool := false) (hovered : Bool := false) (last children : Bool := false) (rails : List Nat := []) : WidgetNode :=
   let pal := theme.palette
   let small := Theme.mutedText theme
   if row.kind == "section" then
@@ -196,7 +196,7 @@ def buildSidebarRowWidget (theme : Theme) (innerW : SubPx) (row : ChromeSidebarR
     let lead : WidgetNode :=
       .mk none false false
         (BoxStyle.row 0 |>.withAlign .center |>.withFixedSize leadSize leadSize)
-        (.treeDecoration isMission row.selected pal.borderSubtle
+        (.treeDecoration (isMission && row.depth > 0) last children rails pal.borderSubtle
           (if isMission && livePhase.isNone then statusBadgeColor pal row.status else if projectRunning && livePhase.isNone then pal.accent else 0)
           (if row.selected then pal.rowActive else pal.sidebar))
         [if isMission && livePhase.isSome then liveMissionLead theme row.status (livePhase.getD 0) else chromeIcon (if isMission then "mission" else if row.kind == "project" then (if expanded then "project-folder-open" else "project-folder") else row.rowId) (row.iconColor.getD pal.textMuted)]
@@ -329,7 +329,7 @@ def buildSidebarChrome (st : DesktopState) (availH : SubPx) (useReferenceTree : 
     [{ widgetId := 730, rowId := "section:archives", kind := "section", title := "Archived" }] ++
     (if st.archivesOpen then archiveRows else [])
   let treeRows : List WidgetNode :=
-    ((rowsSource.filter fun r => !isNav r && !isFoot r && !archived r) ++ archiveGroup).map fun r =>
+    (sidebarTreeBranches ((rowsSource.filter fun r => !isNav r && !isFoot r && !archived r) ++ archiveGroup)).map fun (r, last, children, rails) =>
       if r.kind == "empty" then
         let small := Theme.mutedText theme
         WidgetNode.box
@@ -343,7 +343,7 @@ def buildSidebarChrome (st : DesktopState) (availH : SubPx) (useReferenceTree : 
           (if r.kind == "section" then Edges.trbl (pxToSub 14) 0 (pxToSub 4) 0
            else Edges.trbl 0 0 (pxToSub 1) 0) (if st.liveData then some st.badgePhase else none) (if r.rowId == "section:archives" then st.archivesOpen
             else if r.kind == "project" then st.expandedProjects.contains (r.rowId.drop 8).toString
-            else st.expandedMissions.contains r.rowId) (hovered := hoverRow == some r.widgetId)
+            else st.expandedMissions.contains r.rowId) (hovered := hoverRow == some r.widgetId) (last := last) (children := children) (rails := rails)
   let footRows : List WidgetNode :=
     (rowsSource.filter isFoot).map fun r => buildSidebarRowWidget theme rowW r (hovered := hoverRow == some r.widgetId)
   let rosterH := availH - chromeHeaderHeightSub - footH
