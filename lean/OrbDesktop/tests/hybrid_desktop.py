@@ -201,6 +201,7 @@ def run():
                     pointer.click(*check('sidebar ' + word, lambda: words().get(word)))
 
                 see('native')
+                check('Machines in the shared sidebar projection', lambda: row('machines'))
                 click('machines')
                 see('local')
                 see('personal')
