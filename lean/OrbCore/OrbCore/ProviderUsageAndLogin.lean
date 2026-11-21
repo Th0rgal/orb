@@ -3392,11 +3392,12 @@ def dispatchProviderAndAiRoute
               ("flow", .str flow),
               ("instructions", .str instr)
             ]))
-          else
-            if routedRequest?.isSome then
-              return some (jsonErr 502 "Sidecar could not start a VPN-bound OAuth exchange. A sidecar with per-login OAuth proxy support is required.")
+          else if routedRequest?.isNone then
             return some (jsonErr 502 s!"CLIProxy auth-url failed: {rawTxt}")
-        | _ => return some (jsonErr 502 "Failed reaching CLIProxy management endpoint")
+        | _ => pure ()
+        if routedRequest?.isSome then
+          return some (jsonErr 502 "The router could not reconnect this account with its saved settings. Check that the sidecar supports targeted OAuth reconnects.")
+        return some (jsonErr 502 "Failed reaching CLIProxy management endpoint")
 
       if segs.length == 5 then
         let sid := segs[4]!
