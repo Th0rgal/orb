@@ -1645,6 +1645,119 @@ private def stopMissionTurnForUnavailableChain
     let statusPayload := renderCompact (.obj #[("status", .str "interrupted"), ("reason", .str termReason), ("mission_id", .str mid)])
     publishControlEvent st.broadcastHub? "mission_status_changed" statusPayload (some mid)
 
+private def proxySpendDenial? (st : CoreAppState) (ownerRec : UserRecord) (utcDay : String) :
+    IO (Option String) := do
+  let (infSpent, cmpSpent) ← getUserSpentTodayCents st.store ownerRec.id utcDay
+  let userSpent := infSpent + cmpSpent
+  let mf ← st.managedRef.get
+  let globalActive : UInt8 := if mf.enabled then 1 else 0
+  let userActive : UInt8 := if ownerRec.dailySpendCapCents?.isSome then 1 else 0
+  let userCapU32 : UInt32 := clampControlSpendU32 (ownerRec.dailySpendCapCents?.getD 0)
+  if globalActive == 1 || userActive == 1 then
+    let capWord := Orb.Kernel.userSpendCapStep
+      globalActive (clampControlSpendU32 mf.spentTodayCents) (clampControlSpendU32 mf.dailyCapCents)
+      userActive (clampControlSpendU32 userSpent) userCapU32
+      1
+    if (capWord &&& 1) != 1 then
+      let denyReason := ((capWord >>> 1) &&& 0x7).toNat
+      let scopeStr := if denyReason == 2 then "user" else "global"
+      return some s!"\{\"error\":\{\"type\":\"spend_cap_exceeded\",\"code\":\"daily_spend_cap_exceeded\",\"scope\":{jsonEscape scopeStr},\"message\":\"Daily spend cap reached\"}}"
+  return none
+
+/-- Only native Cloud Code requests carrying this job's opaque bearer can use
+    the subscription. Google owns model execution and policy responses. -/
+private def handleNativeAntigravity (st : CoreAppState) (req : HttpRequest) (rawTarget : String)
+    (now : UInt64) : IO CoreHttpResponse := do
+  let deny := fun (status : Nat) (code : String) =>
+    jsonResponse status (renderCompact (.obj #[("error", .str code)]))
+  let token := (extractBearerToken? req.headers now).getD ""
+  let some grant ← resolveNativeAntigravityToken? st.store token now | return deny 401 "invalid_native_grant"
+  let some mission ← getMission? st.store grant.mission | return deny 403 "native_mission_unavailable"
+  let some owner ← getUserById? st.store grant.owner | return deny 403 "native_owner_unavailable"
+  if owner.disabled || mission.ownerUserId != grant.owner || mission.backend != "antigravity" then
+    return deny 403 "native_mission_unavailable"
+  let rpcTarget := (rawTarget.drop "/api/native/antigravity/v1internal:".length).toString
+  let (rpc, query) := match rpcTarget.splitOn "?" with
+    | [name] => (name, "")
+    | [name, "alt=sse"] => (name, "?alt=sse")
+    | _ => ("", "")
+  let generate := rpc == "streamGenerateContent"
+  let discovery := ["fetchAdminControls", "fetchAvailableModels", "listExperiments",
+    "loadCodeAssist", "retrieveUserQuotaSummary", "fetchUserInfo"].contains rpc
+  if req.method != "POST" || !(generate || discovery) || (!generate && !query.isEmpty) then
+    return deny 403 "unsupported_native_operation"
+  let some hub := st.providerHub? | return deny 503 "native_transport_unavailable"
+  let rows ← loadHydratedProviders st.store st.cfg.workingDir
+  let prefs ← getUserProviderPrefs st.store grant.owner
+  let some hp := rows.find? (·.id == grant.account) | return deny 403 "native_account_unavailable"
+  if hp.providerType != "antigravity" || !hp.enabled || hp.oauthToken.isEmpty ||
+      (accountRoutingFile rows hp).isEmpty || !isUserProviderEnabled prefs hp.id then
+    return deny 403 "native_account_unavailable"
+  let shared := owner.role != "admin" && !providerAddedBy hp grant.owner
+  let wire := req.bodySlice.toByteArray
+  let encoding := ((lookupHeaderCI req.headers "content-encoding").getD "").toLower
+  let decoded := if encoding == "gzip" then (OrbNetLeaf.Gzip.gunzipBounded wire 16777216).toOption
+    else if encoding.isEmpty || encoding == "identity" then some wire else none
+  let some body := decoded | return deny 400 "invalid_native_encoding"
+  let .ok payload := OrbBin.Json.parseBytes body | return deny 400 "invalid_native_request"
+  if generate then
+    let some model := payload.fieldStr? "model" | return deny 400 "missing_native_model"
+    let grouped := OrbBin.ClaudeControl.groupAntigravityModels #[(model, model)]
+    if grouped[0]?.map Prod.fst != some grant.model then return deny 403 "native_model_mismatch"
+    if let some denied ← proxySpendDenial? st owner (currentUtcDay now) then return jsonResponse 429 denied
+  let some resolve := hub.resolveTransport? | return deny 503 "native_transport_unavailable"
+  let .ok port? ← resolve hp.providerType hp.id | return deny 503 "native_transport_unavailable"
+  let mut headers := #[("Authorization", "Bearer " ++ hp.oauthToken), ("Content-Type", "application/json")]
+  for key in #["accept", "user-agent", "x-goog-api-client", "x-client-version"] do
+    if let some value := lookupHeaderCI req.headers key then headers := headers.push (key, value)
+  let upstream ← streamingUpstreamRequest true "POST" "daily-cloudcode-pa.googleapis.com" 443
+    ("/v1internal:" ++ rpc ++ query) headers body (socksPort? := port?)
+  let .ok (response, pump?) := upstream | return deny 502 "native_upstream_unavailable"
+  let (ctype, _) := sanitizeUpstreamHeaders response.headers
+  if shared && (rpc == "fetchUserInfo" || rpc == "fetchAdminControls") then
+    -- The CLI requires its eligibility check on every start. Forward its actual
+    -- result while exposing only typed eligibility/privacy settings to a member.
+    if response.status / 100 != 2 then return deny response.status "native_eligibility_denied"
+    let (bytes, complete) ← match pump? with
+      | some pump => do
+        let size ← IO.mkRef 0
+        pump fun part => do
+          size.modify (· + part.size)
+          return (← size.get) ≤ 65536
+      | none => pure (response.body, true)
+    unless complete do return deny 502 "invalid_native_eligibility"
+    let .ok (.obj fields) := OrbBin.Json.parseBytes bytes | return deny 502 "invalid_native_eligibility"
+    let upstreamInfo := JVal.obj fields
+    if rpc == "fetchAdminControls" then
+      -- Policy may embed an enterprise MCP configuration, including server
+      -- credentials. Do not send it into a different user's workspace.
+      let mcp := upstreamInfo.fieldOrNull "mcpSetting"
+      if #["overrideMcpConfigJson", "mcpConfigJson"].any (fun key => !((mcp.fieldStr? key).getD "").isEmpty) ||
+          ((upstreamInfo.fieldOrNull "mcpControls").field? "mcpAllowlist").isSome then
+        return deny 403 "native_shared_account_policy_private"
+      return jsonResponse response.status (renderCompact upstreamInfo)
+    let settings := upstreamInfo.fieldOrNull "userSettings"
+    let mut allowedSettings := #[]
+    for field in #["consumerTermsAccepted", "gcpTermsAccepted", "telemetryEnabled", "userDataCollectionForceDisabled"] do
+      if let some flag := settings.fieldBool? field then allowedSettings := allowedSettings.push (field, .bool flag)
+    let mut visible := #[("userSettings", JVal.obj allowedSettings)]
+    if let some region := upstreamInfo.fieldStr? "regionCode" then
+      if region.length == 2 && region.toList.all Char.isUpper then visible := visible.push ("regionCode", .str region)
+    return jsonResponse response.status (renderCompact (.obj visible))
+  let record := fun (bytes : ByteArray) => do
+    if generate && response.status / 100 == 2 then
+      recordProxyUsage st.store now grant.model hp.providerType hp.id "" mission.id
+        (if mission.parentMissionId.isEmpty then "mission" else "subagent") (extractProxyUsage bytes)
+        (requestedModel := mission.modelOverride)
+  if let some pump := pump? then
+    return { status := response.status, contentType := ctype, body := ByteArray.empty
+             bodyStream? := some fun emit => do
+               let (copy, ok) ← pump emit
+               record copy
+               return ok }
+  record response.body
+  return { status := response.status, contentType := ctype, body := response.body }
+
 /-- Gate `/v1/*` proxy requests against execution-bound mission Cyber selections (`#1497`)
     and per-account cooldowns (`#1612`). -/
 private def handleProxyRequest (st : CoreAppState) (req : HttpRequest) (cleanPath : String)
@@ -1713,21 +1826,7 @@ private def handleProxyRequest (st : CoreAppState) (req : HttpRequest) (cleanPat
     if ownerRec.disabled then
       return mkJson 401 "{\"error\":\"account_disabled\"}"
     userPrefs ← getUserProviderPrefs st.store ownerUid
-    let (infSpent, cmpSpent) ← getUserSpentTodayCents st.store ownerUid utcDay
-    let userSpent := infSpent + cmpSpent
-    let mf ← st.managedRef.get
-    let globalActive : UInt8 := if mf.enabled then 1 else 0
-    let userActive : UInt8 := if ownerRec.dailySpendCapCents?.isSome then 1 else 0
-    let userCapU32 : UInt32 := clampControlSpendU32 (ownerRec.dailySpendCapCents?.getD 0)
-    if globalActive == 1 || userActive == 1 then
-      let capWord := Orb.Kernel.userSpendCapStep
-        globalActive (clampControlSpendU32 mf.spentTodayCents) (clampControlSpendU32 mf.dailyCapCents)
-        userActive (clampControlSpendU32 userSpent) userCapU32
-        1
-      if (capWord &&& 1) != 1 then
-        let denyReason := ((capWord >>> 1) &&& 0x7).toNat
-        let scopeStr := if denyReason == 2 then "user" else "global"
-        return mkJson 429 s!"\{\"error\":\{\"type\":\"spend_cap_exceeded\",\"code\":\"daily_spend_cap_exceeded\",\"scope\":{jsonEscape scopeStr},\"message\":\"Daily spend cap reached\"}}"
+    if let some denied ← proxySpendDenial? st ownerRec utcDay then return mkJson 429 denied
   let rawRequestedModel := (bodyJv.fieldStr? "model").getD defaultCodexModel
   let chains ← st.chainsRef.get
   -- A named model is served by its saved chain or by the provider owning that
@@ -2936,6 +3035,9 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
 
   if req.method == "OPTIONS" then
     return .ok { status := 204, corsOrigin? := reqOrigin?, body := ByteArray.empty }
+
+  if cleanPath.startsWith "/api/native/antigravity/v1internal:" then
+    return .ok (← handleNativeAntigravity st req rawTarget nowEpochSec)
 
   -- 1. Public Health Endpoint (`GET /api/health`)
   if req.method == "GET" && cleanPath == "/api/health" then
@@ -5777,12 +5879,10 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
     ]
     let configured ← configuredOpenCodeOptions st.store caller.userId isAdm
     opencodeModels := opencodeModels ++ configured.map renderCompact
-    let mut agyModels : Array String := #[]
-    if isAdm then
-      let pHub ← match st.providerHub? with | some h => pure h | none => newProviderRuntimeHub
-      let pairs ← getCachedAntigravityModels pHub false
-      for (mId, mLbl) in pairs do
-        agyModels := agyModels.push (mkOpt mId mLbl "")
+    let pHub ← match st.providerHub? with | some h => pure h | none => newProviderRuntimeHub
+    let pairs ← if isAdm then getCachedAntigravityModels pHub false else
+      memberAntigravityModels pHub st.store st.cfg.workingDir caller.userId false
+    let agyModels := pairs.map fun (mId, mLbl) => mkOpt mId mLbl ""
     let vibeModels : Array String := #[
       mkOpt "mistral/mistral-vibe-cli-latest" "Mistral Vibe" "Native Mistral Vibe CLI"
     ]
@@ -8118,6 +8218,7 @@ def runCoreServer (cfg : CoreConfig) (maxRequests? : Option Nat := none) : IO UI
     let providerHub := { baseProviderHub with
       resolveTransport? := some (fun provider account => AccountVpnRoutes.resolve store.missionsDb account fun pref =>
         AccountVpnPool.allocate vpnPool store.rootDir vpnCoordinatorDir store.missionsDb account provider pref) }
+    let remoteSup := { remoteSup with providerHub? := some providerHub }
     let appState : CoreAppState := {
       cfg := cfg
       store := store

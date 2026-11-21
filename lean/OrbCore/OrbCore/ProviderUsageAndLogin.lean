@@ -97,8 +97,16 @@ structure CliLoginSession where
   userId        : String := ""
   deriving Repr, Inhabited
 
+private structure NativeCatalogRead where
+  account : String
+  credentialHash : String
+  routeRevision : Nat
+  started : UInt64
+  result : Task (Except IO.Error (Array (String × String)))
+
 structure ProviderHubState where
   agyModelsCache? : Option (UInt64 × Array (String × String)) := none
+  memberAgyCatalogs : Array NativeCatalogRead := #[]
   usageEntries    : Array CachedUsageEntry := #[]
   usageGeneration : Nat := 0
   refreshingProviderIds : Array String := #[]
@@ -605,6 +613,87 @@ def loadHydratedProviders (store : CoreStore) (workingDir : String) : IO (Array 
 def accountRoutingFile (accounts : Array HydratedProvider) (hp : HydratedProvider) : String :=
   if !hp.boundOauthFile.isEmpty && (accounts.filter (fun p => p.oauthFile == hp.boundOauthFile)).size == 1
     then hp.boundOauthFile else ""
+
+/-- Discover from this subscription with the native CLI. The fresh private HOME
+    contains only an access token. Reconnection and refresh stay with its owner. -/
+private def probeNativeAccount (hp : HydratedProvider) (resolve : ResolveTransport) :
+    IO (Array (String × String)) := do
+  let unavailable := IO.userError "Native Antigravity model discovery unavailable"
+  let .ok port? ← resolve | throw unavailable
+  let some agy ← OrbBin.ClaudeControl.resolveHarnessBinary? "agy" | throw unavailable
+  let some timeout ← OrbBin.ClaudeControl.resolveHarnessBinary? "timeout" | throw unavailable
+  IO.FS.withTempDir fun home => do
+    let profile := JVal.obj #[("auth_method", .str "consumer"), ("token", .obj #[
+      ("access_token", .str hp.oauthToken), ("token_type", .str "Bearer")])]
+    let file := home / ".gemini" / "antigravity-cli" / "antigravity-oauth-token"
+    let .ok _ ← writeAtomicPrivate0600 file (renderCompact profile).toUTF8 | throw unavailable
+    let path := (← IO.getEnv "PATH").getD "/usr/local/bin:/usr/bin:/bin"
+    let mut env := #[("HOME", some home.toString), ("NO_COLOR", some "1"), ("PATH", some path)]
+    for key in #["SSL_CERT_FILE", "SSL_CERT_DIR"] do
+      if let some value ← IO.getEnv key then env := env.push (key, some value)
+    if let some port := port? then
+      let proxy := some s!"socks5://127.0.0.1:{port}"
+      env := env ++ #[("HTTPS_PROXY", proxy), ("HTTP_PROXY", proxy), ("ALL_PROXY", proxy)]
+    let .ok out ← (IO.Process.output {
+      cmd := timeout, args := #["-k", "1", "8", agy, "models"], cwd := some home
+      inheritEnv := false, env }).toBaseIO | throw unavailable
+    if out.exitCode != 0 then throw unavailable
+    IO.ofExcept (OrbBin.ClaudeControl.parseAntigravityModelList out.stdout)
+
+/-- The admin CLI profile has its own catalog. Members see positively discovered
+    models of enabled, unambiguously bound accounts they have opted into. -/
+def nativeAntigravityAccounts (hub : ProviderRuntimeHub) (store : CoreStore) (workingDir userId : String)
+    (probe : Bool) : IO (Array (String × Array (String × String))) := do
+  if userId.isEmpty then return #[]
+  let accounts ← loadHydratedProviders store workingDir
+  let prefs ← getUserProviderPrefs store userId
+  let now ← nowEpoch
+  let mut reads : Array NativeCatalogRead := #[]
+  let mut failed := false
+  for hp in accounts do
+    let file := accountRoutingFile accounts hp
+    if hp.providerType != "antigravity" || !hp.enabled || !hp.hasOAuth || hp.oauthToken.isEmpty ||
+      file.isEmpty || !isUserProviderEnabled prefs hp.id then continue
+    let .ok route ← AccountVpnRoutes.snapshot store.missionsDb hp.id |
+      failed := true
+      continue
+    let credentialHash := bytesToHexLower (sha256Bytes (renderCompact (.arr #[.str file, .str hp.oauthToken])).toUTF8)
+    let read? ← hub.mu.atomically do
+      let state ← get
+      let fresh := state.memberAgyCatalogs.filter (fun r => now ≤ r.started + 300)
+      if let some row := fresh.find? (fun r => r.account == hp.id && r.credentialHash == credentialHash &&
+          r.routeRevision == route.generation) then return some row
+      if !probe then return none
+      let resolve := match hub.resolveTransport? with
+        | some coordinator => coordinator hp.providerType hp.id
+        | none => AccountVpnRoutes.resolve store.missionsDb hp.id fun _ => pure (.error "vpn_coordinator_unavailable")
+      let task ← IO.asTask (prio := .dedicated) (probeNativeAccount hp resolve)
+      let entry : NativeCatalogRead := ⟨hp.id, credentialHash, route.generation, now, task⟩
+      set { state with memberAgyCatalogs := (fresh.filter (fun (row : NativeCatalogRead) => row.account != hp.id)).push entry }
+      return some entry
+    if let some entry := read? then reads := reads.push entry
+  let mut catalogs := #[]
+  for entry in reads do
+    if !probe && !(← IO.hasFinished entry.result) then continue
+    let .ok rows ← IO.wait entry.result |
+      failed := true
+      hub.mu.atomically do
+        modify fun st => { st with memberAgyCatalogs := st.memberAgyCatalogs.filter fun r =>
+          !(r.account == entry.account && r.started == entry.started &&
+            r.routeRevision == entry.routeRevision && r.credentialHash == entry.credentialHash) }
+      continue
+    catalogs := catalogs.push (entry.account, rows)
+  if probe && catalogs.isEmpty && failed then
+    throw (IO.userError "Native Antigravity model discovery temporarily unavailable")
+  return catalogs
+
+def memberAntigravityModels (hub : ProviderRuntimeHub) (store : CoreStore) (workingDir userId : String)
+    (probe : Bool) : IO (Array (String × String)) := do
+  let mut models : Array (String × String) := #[]
+  for (_, rows) in ← nativeAntigravityAccounts hub store workingDir userId probe do
+    for row in rows do
+      unless models.any (fun m => m.1 == row.1) do models := models.push row
+  return models
 
 def memberProviderDisplayName (hps : Array HydratedProvider) (hp : HydratedProvider) : String := Id.run do
   let metaInfo := lookupProviderMeta hp.providerType
@@ -2751,9 +2840,11 @@ def dispatchProviderAndAiRoute
 
   -- 1. `GET /api/providers/antigravity-models` & `GET /api/antigravity-models` (300s cached!)
   if method == "GET" && (segs == ["api", "providers", "antigravity-models"] || segs == ["api", "antigravity-models"]) then
-    if !effAdmin then return some (jsonResp 200 (.arr #[]))
     let force := ((qParam? qMap "force").getD "") == "true"
-    let pairs ← getCachedAntigravityModels hub force
+    let lookup := if effAdmin then getCachedAntigravityModels hub force else
+      memberAntigravityModels hub store workingDir callerUserId true
+    let .ok pairs ← lookup.toBaseIO |
+      return some (jsonResp 503 (.obj #[("error", .str "antigravity_catalog_unavailable")]))
     let arr := pairs.map (fun (mId, mLbl) => JVal.arr #[.str mId, .str mLbl])
     return some (jsonResp 200 (.arr arr))
 

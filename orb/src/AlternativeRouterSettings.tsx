@@ -33,7 +33,7 @@ export function AlternativeRouterSettings(p: { account: string }) {
       setSaving(false);
     }
   }
-  return <SettingsRow title="Alternative routers" desc="Allow OpenCode and other routed clients to use this account. The native Antigravity harness uses its own login.">
+  return <SettingsRow title="Alternative routers" desc="Allow OpenCode and other routed clients to use this account.">
     <Show when={!setting.error} fallback={<button class="s-btn" onClick={() => void refetch()}>Retry router settings</button>}>
       <Show when={setting()}>{s =>
         <Toggle label="Allow alternative routers" on={s().allowed} disabled={saving() || setting.loading}

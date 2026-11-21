@@ -7,6 +7,7 @@ for (const theme of ["light", "dark"]) test(`account VPN retry and Direct select
     added_by_me: id === "b", uses_oauth: true, has_oauth: true, credential_owner: "cli_proxy", status: { type: "connected" },
   }));
   let routersAllowed = true;
+  let refuseFirstChange = true;
   const routerWrites: string[] = [];
   const direct = { mode: "direct", status: "direct", countries: ["NL", "US"], can_configure: true };
   await page.addInitScript(theme => {
@@ -22,6 +23,10 @@ for (const theme of ["light", "dark"]) test(`account VPN retry and Direct select
     if (path.endsWith("/alternative-routers")) {
       if (route.request().method() === "PUT") {
         routerWrites.push(path);
+        if (refuseFirstChange) {
+          refuseFirstChange = false;
+          return route.fulfill({ status: 503, json: { error: "sidecar_unavailable" } });
+        }
         routersAllowed = route.request().postDataJSON().allowed;
       }
       return route.fulfill({ json: { allowed: routersAllowed } });
@@ -53,12 +58,15 @@ for (const theme of ["light", "dark"]) test(`account VPN retry and Direct select
   await page.locator(".p-acc-btn").filter({ hasText: "b@example.invalid" }).click();
   await expect(routerToggle).toBeChecked();
   await routerToggle.click();
+  await expect(page.getByRole("alert").filter({ hasText: "Could not confirm" })).toBeVisible();
+  await expect(routerToggle).toBeChecked();
+  await routerToggle.click();
   await expect(routerToggle).not.toBeChecked();
   const own = page.locator(".p-acc-btn").filter({ hasText: "b@example.invalid" });
   await own.click();
   await own.click();
   await expect(routerToggle).not.toBeChecked();
-  expect(routerWrites).toEqual(["/api/ai/providers/b/alternative-routers"]);
+  expect(routerWrites).toEqual(Array(2).fill("/api/ai/providers/b/alternative-routers"));
   await own.click();
   await shared.click();
   const select = page.getByLabel("Account connection", { exact: true });
