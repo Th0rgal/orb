@@ -212,6 +212,7 @@ def missionsSchemaSql : String :=
   "CREATE INDEX IF NOT EXISTS idx_mission_proxy_tokens_mission ON mission_proxy_tokens(mission_id);" ++
   "CREATE TABLE IF NOT EXISTS native_owner_enrollments (node_id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, account_id TEXT NOT NULL, revision INTEGER NOT NULL CHECK(revision>0));" ++
   "CREATE TABLE IF NOT EXISTS native_antigravity_grants (token_sha256 TEXT PRIMARY KEY REFERENCES mission_proxy_tokens(token_sha256) ON DELETE CASCADE, job_id TEXT NOT NULL, account_id TEXT NOT NULL, model TEXT NOT NULL);" ++
+  "CREATE TABLE IF NOT EXISTS native_shared_workspace_bindings (token_sha256 TEXT PRIMARY KEY REFERENCES native_antigravity_grants(token_sha256) ON DELETE CASCADE, node_id TEXT NOT NULL, route_generation INTEGER NOT NULL);" ++
   "CREATE TABLE IF NOT EXISTS native_job_relay_bindings (token_sha256 TEXT PRIMARY KEY REFERENCES native_antigravity_grants(token_sha256) ON DELETE CASCADE, node_id TEXT NOT NULL, enrollment_revision INTEGER NOT NULL, route_generation INTEGER NOT NULL);" ++
   "CREATE TABLE IF NOT EXISTS workspaces (id TEXT PRIMARY KEY, name TEXT NOT NULL DEFAULT '', path TEXT NOT NULL DEFAULT '', kind TEXT NOT NULL DEFAULT 'host', owner_user_id TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL DEFAULT '');" ++
   "CREATE TABLE IF NOT EXISTS mission_terminal_evidence (mission_id TEXT PRIMARY KEY, terminal_reason TEXT NOT NULL DEFAULT '', summary TEXT NOT NULL DEFAULT '', artifact_ref TEXT NOT NULL DEFAULT '', verified INTEGER NOT NULL DEFAULT 1, evidence TEXT NOT NULL DEFAULT '{}', recorded_at TEXT NOT NULL DEFAULT '');" ++
@@ -4404,6 +4405,13 @@ private def issueProxyToken (st : CoreStore) (tokenPrefix mission owner : String
         #[digest, job, account, model]
       if let .error err := bindingResult then return .error err
       if let some node := relayNode? then
+        -- A Core-held profile may use a shared subscription. Keep the route
+        -- revision and intended workspace node immutable for this specific job.
+        let shared ← execParamQueryUnlocked st.missionsDb
+          ("INSERT INTO native_shared_workspace_bindings SELECT ?1,?2,v.generation " ++
+           "FROM account_vpn_routes v WHERE v.account_id=?3 AND v.country GLOB '[A-Z][A-Z]' AND v.generation>0;")
+          #[digest,node,account]
+        if let .error err := shared then return .error err
         let bound ← execParamQueryUnlocked st.missionsDb
           ("INSERT INTO native_job_relay_bindings SELECT ?1,e.node_id,e.revision,v.generation " ++
            "FROM native_owner_enrollments e JOIN account_vpn_routes v ON v.account_id=e.account_id " ++

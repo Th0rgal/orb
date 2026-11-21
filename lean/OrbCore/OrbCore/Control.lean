@@ -37,6 +37,7 @@ import OrbCore.ManagedProviderSealing
 import OrbCore.AirVpnSettings
 import OrbCore.AccountVpnApi
 import OrbCore.AccountVpnRelay
+import OrbCore.NativeSharedWorkspace
 import OrbCore.AutoPlacement
 import OrbCore.RemoteDispatch
 import OrbCore.ProjectFilesAndController
@@ -3035,6 +3036,26 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
 
   if req.method == "OPTIONS" then
     return .ok { status := 204, corsOrigin? := reqOrigin?, body := ByteArray.empty }
+
+  -- A node may verify a shared account placement without acquiring any
+  -- authority to run a profile or extracting the Google login from Core.
+  if cleanPath == "/api/native/antigravity/workspace-admission" then
+    let denied := mkJson 403 "{\"error\":\"native_shared_workspace_denied\"}"
+    unless st.cfg.instanceName == "dev" && !st.cfg.devMode && req.method == "POST" do return .ok denied
+    let some hub := st.providerHub? | return .ok denied
+    let some bearer := extractBearerToken? req.headers nowEpochSec | return .ok denied
+    let some node ← authenticateStaticNodeToken? bearer | return .ok denied
+    let body := req.bodySlice.toByteArray
+    if body.size > 4096 then return .ok denied
+    let some j := (OrbBin.Json.parseBytes body).toOption | return .ok denied
+    let some job := j.fieldStr? "job" | return .ok denied
+    let some owner := j.fieldStr? "owner" | return .ok denied
+    let some grant := lookupHeaderCI req.headers "x-orb-job-grant" | return .ok denied
+    let .ok placement ← OrbCore.NativeSharedWorkspace.authorize st.store hub st.cfg.workingDir grant job node owner
+      | return .ok denied
+    return .ok (mkJson 200 (renderCompact (.obj #[("mission", .str placement.mission),
+      ("job", .str placement.job), ("readonly", .bool placement.readonly),
+      ("route_generation", .nat placement.routeGeneration), ("expires", .nat placement.expires)])))
 
   -- The trusted account relay asks Core on admission and during each stream.
   -- No gateway address, provider credential or reusable relay secret leaves Core here.

@@ -504,3 +504,22 @@ python3 scripts/test_native_owner_core.py lean/OrbCore/.lake/build/bin/orb-core
 python3 scripts/test_native_owner_node.py lean/OrbNode/.lake/build/bin/sandboxed-node
 (cd orb && pnpm exec vitest run tests/native-owner-enrollment.test.tsx)
 ```
+
+### Core-held profiles for shared subscriptions
+
+A shared subscription and an owner-enrolled node have different credential
+boundaries. A Core-held profile keeps the Google login on Core. Workspace
+tools receive mission authority only. The provider's creator can differ from
+the member who owns the mission, including for legacy subscriptions.
+
+On authenticated dev Core, a registered worker can submit its native job
+grant to `POST /api/native/antigravity/workspace-admission` in the
+`X-Orb-Job-Grant` header. Its bearer identifies the worker. The JSON body
+contains `job` and `owner`. Core checks the running placement, Unix member
+identity, mission, immutable account binding and current personal preference.
+The VPN generation must match grant issuance. Core checks that the subscription
+has a unique enabled OAuth binding and resolves the configured VPN before
+checking the placement again. The receipt contains the job and mission IDs,
+read-only mode, route generation and expiry. It carries no provider credential
+or transport handle. Access to an owner-enrolled profile uses the separate
+enrollment path above.
