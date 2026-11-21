@@ -10,6 +10,8 @@ renders transcripts, Markdown, diffs, KaTeX, Mermaid, PDFs, and the composer.
 
 ## Opt-in LeanUI sidebar on Linux
 
+Hovering a clickable sidebar control shows the GTK hand cursor. Leaving the control restores the cursor for the next surface. Returning to a sidebar row shows the hand again.
+
 Build the desktop package with `nix build .#orb-desktop` and run
 `./result/bin/orb-desktop-hybrid`. On m2air the flake selects `aarch64-linux`.
 The regular `orb-desktop` launcher uses Classic GTK. Close Classic before starting

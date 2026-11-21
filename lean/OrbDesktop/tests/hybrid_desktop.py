@@ -201,7 +201,26 @@ def run():
                     pointer.click(*check('sidebar ' + word, lambda: words().get(word)))
 
                 see('native')
-                click('machines')
+                click('new')
+                see('newAgent')
+                mx, my = check('Machines label', lambda: words().get('machines'))
+                region = f'{mx-22},{my-22} 58x58'
+
+                def row_cursor_visible():
+                    def frame(*flags):
+                        return subprocess.check_output(['grim', *flags, '-t', 'ppm', '-g', region, '-'], env=env)
+                    # Count high-contrast changes within the static sidebar label.
+                    bare = frame().split(b'\n', 3)[3]
+                    visible = frame('-c').split(b'\n', 3)[3]
+                    return sum(abs(a - b) > 18 for a, b in zip(bare, visible)) > 60
+
+                for _ in range(2):
+                    pointer.move(850, 570)
+                    time.sleep(.45)
+                    pointer.move(mx, my)
+                    time.sleep(.45)
+                    check('visible pointer over Machines', row_cursor_visible)
+                pointer.click(mx, my)
                 see('local')
                 see('personal')
                 check('selected Machines row', lambda: (row('machines') or {}).get('selected'))
