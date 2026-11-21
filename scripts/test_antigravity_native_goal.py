@@ -1,5 +1,6 @@
 """Replay native agy stream events and resume with an isolated loopback Gemini fixture."""
 
+import argparse
 import json
 import os
 from pathlib import Path
@@ -11,7 +12,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from uuid import UUID
 
 
-def run():
+def run(model):
     interfaces = {line.split(":")[0].strip() for line in Path("/proc/net/dev").read_text().splitlines()[2:]}
     if interfaces != {"lo"}:
         raise SystemExit("Run in a Linux network namespace with only loopback enabled")
@@ -65,7 +66,8 @@ def run():
                    "GEMINI_API_KEY": "local-fixture", "GOOGLE_GEMINI_BASE_URL": f"http://127.0.0.1:{server.server_port}"}
 
             def turn(*options):
-                proc = subprocess.run([binary, "--mode", "accept-edits", "--output-format", "stream-json",
+                model_flags = ["--model", model] if model else []
+                proc = subprocess.run([binary, *model_flags, "--mode", "accept-edits", "--output-format", "stream-json",
                                        *options, "--print=Perform the next fixture step"], cwd=root, env=env,
                                       capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=40)
                 assert proc.returncode == 0, f"agy exited with status {proc.returncode}"
@@ -85,6 +87,10 @@ def run():
                 resumed, final, _ = turn("--conversation", sid)
                 assert resumed == sid and final == "<!-- GOAL_COMPLETE -->"
                 assert len(requests) == 3
+                if model:
+                    upstream = "gemini-4-carbon" if model == "gemini-4-carbon-high" else model
+                    expected_path = f"/v1beta/models/{upstream}:streamGenerateContent"
+                    assert requests == [expected_path] * 3, requests
             finally:
                 server.shutdown()
                 thread.join()
@@ -92,4 +98,6 @@ def run():
 
 
 if __name__ == "__main__":
-    run()
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--model", choices=["gemini-4-carbon-high", "gemini-4-neon"])
+    run(parser.parse_args().model)
