@@ -887,7 +887,7 @@ def sidebarTreeBranches (rows : List ChromeSidebarRow) :
   for row in rows.reverse do
     let depth := row.depth
     siblings := siblings.filter (· ≤ depth)
-    marked := (row, !siblings.contains depth, nextDepth > depth) :: marked
+    marked := (row, !siblings.contains depth, decide (nextDepth > depth)) :: marked
     if !siblings.contains depth then siblings := depth :: siblings
     nextDepth := depth
   let mut rails : List Nat := []
