@@ -4,6 +4,8 @@ How close the LeanUI desktop (`lean/OrbDesktop`, opt-in) is to the SolidJS
 desktop (`orb/`), measured per screen. The SolidJS screenshots are the
 reference; the LeanUI frames are the candidate.
 
+On startup and during recovery, the native window distinguishes an absent or invalid saved connection, a rejected session (401), denied access (403), and temporary Core unavailability. Connection details and response bodies never appear in these messages. A change of failure reason updates the open window and a successful roster read restores navigation.
+
 ## Reproduce
 
 ```sh
@@ -459,6 +461,10 @@ initial page. An inaccessible parent ends that branch, including when an older
 ancestor is independently visible. Ordinary paginated callers retain their
 existing page size. Multiple workers referencing a controller produce one row.
 
+Opening a project shows the cached activity rows immediately, then loads the same project history and older open conversations as the WebKit sidebar. A completed project read determines which rows belong in that project's tree. A mission kept in the global activity cache can still receive updates after it leaves the tree. An older controller outside the history page remains visible when an eligible child needs it for context.
+
+Replay this sequence with two projects. Fill the global page with recent activity from the first project. Expand the second, whose controller and child are older than the global page. Both appear when the project read completes. An older completed sibling outside the project history stays hidden. Collapse and reopen while a read is pending, refresh the global roster, then replay a transient failure. The expanded tree keeps the last successful project membership until a newer project read or an explicit move, archive or access revocation changes it. Switching account discards the previous account's membership.
+
 The Misc project (Core slug `default`) contains unassigned mission roots whenever the project is present. Collapsing Misc hides those roots and their descendants. The sidebar connects each expanded folder or controller to its children at the icon center. A continued sibling keeps its vertical rail through nested rows. The last visible sibling ends in a rounded elbow at its own icon, irrespective of selection.
 
 A committed Wayland IME batch can replace text on both sides of the caret.
@@ -466,3 +472,5 @@ One Undo restores the original text and caret. Redo reapplies the complete
 replacement. Preedit-only updates preserve the edit history.
 
 Opening the harness picker requests the native Antigravity catalog for the selected destination and current login. Other harnesses remain selectable while discovery runs. An empty successful catalog removes that destination's native choices. A failed refresh offers a retry on reopening, and a different destination never inherits those model rows.
+
+The installed GTK sidebar treats the Core `archived` tag independently of execution status. LeanUI excludes tagged and acknowledged workers from project badges and places them under Archived. An archived ancestor needed to reach a visible worker appears once in its project. Restoring a tag-only archive clears the tag and preserves execution status.

@@ -33,6 +33,13 @@ private def hierarchyFixture : DesktopState := {
 #guard (({ hierarchyFixture with expandedProjects := ["now"] } : DesktopState).visibleProjectRows.map
   (fun r => (r.rowId, r.depth))) == [("project:now", 0), ("mission:m", 1)]
 
+private def hydratedHistory : DesktopState := { hierarchyFixture with
+  expandedProjects := ["now"], projectMemberships := [("now", [])] }
+#guard (hydratedHistory.visibleProjectRows.map (·.rowId)) == ["project:now"]
+#guard hydratedHistory.missionCards.length == 1
+#guard (({ hydratedHistory with openMission := some "m" } : DesktopState).visibleProjectRows.map (·.rowId)) ==
+  ["project:now", "mission:m"]
+
 private def treeRow (depth : Nat) (selected := false) : ChromeSidebarRow :=
   { widgetId := 1001, rowId := "row", kind := "mission", title := "Row", depth, selected }
 private def treeGeometry (rows : List ChromeSidebarRow) :=
@@ -105,6 +112,18 @@ private def nestedControllerFixture : DesktopState :=
   [("project:now", 0), ("mission:m", 2)]
 #guard (({ nestedControllerFixture with expandedMissions := ["mission:m"] } : DesktopState).visibleProjectRows.map
   (fun r => (r.rowId, r.badge))) == [("project:now", 0), ("mission:m", 2), ("mission:child", 1)]
+
+-- Tagged workers retain their execution status. A tagged parent supplies context only
+-- while a visible worker needs it, regardless of whether the controller is expanded.
+private def archiveFixture (ids : List String) :=
+  let cards := nestedControllerFixture.missionCards.map fun c => { c with archiveTag := ids.contains c.missionId }
+  { nestedControllerFixture with expandedMissions := ["mission:m", "mission:child"], missionCards := cards }
+
+#guard ((archiveFixture ["child"]).visibleProjectRows.map fun r => (r.rowId, r.badge, r.archiveOnly)) ==
+  [("project:now", 0, false), ("mission:m", 2, false), ("mission:child", 1, false), ("mission:grandchild", 0, false)]
+#guard (((archiveFixture ["child", "grandchild"]).visibleProjectRows.filter (!·.archiveOnly)).map fun r => (r.rowId, r.badge)) ==
+  [("project:now", 0), ("mission:m", 0)]
+#guard ((archiveFixture ["child", "grandchild"]).visibleProjectRows.filter (·.archiveOnly)).length == 2
 
 private def unsentDraft : DesktopState :=
   { hierarchyFixture with composer := { text := "Keep this draft" }, draftProject := "other" }
@@ -224,6 +243,12 @@ def main (args : List String) : IO Unit := do
     for _ in [:1000] do
       if let some next ← readSources pending then
         if next.initialRosterPending then throw (IO.userError "initial read failed to settle")
+        if args == ["reconnect"] && next.headerTitle != "Sign in to Core" then
+          throw (IO.userError "rejected session reported as an outage")
+        if args == ["denied"] && next.headerTitle != "Access denied" then
+          throw (IO.userError "account denial reported as an outage")
+        if args == ["unavailable"] && next.headerTitle != "Core unavailable" then
+          throw (IO.userError "invalid Core response reported as an authentication failure")
         return if next.hasLiveConnection then some next else none
       IO.sleep 20
     throw (IO.userError "initial roster did not finish")
@@ -242,7 +267,7 @@ def main (args : List String) : IO Unit := do
         IO.sleep 20
       throw (IO.userError "window failed to recover the new session and reload its catalog")
     return
-  if args == ["unavailable"] then
+  if args == ["unavailable"] || args == ["denied"] then
     unless boot.isNone do throw (IO.userError "failed bootstrap appeared successful")
     return
   let some st := boot | throw (IO.userError "bootstrap failed")
@@ -276,15 +301,20 @@ def main (args : List String) : IO Unit := do
     if args == ["start-running"] then
       let st ← clickMission st b
       if st.composer.isRunning then throw (IO.userError "pending mission offered Stop")
-      let st ← awaitState slot st (fun s => s.selectedCard.any (·.status == "active"))
+      let st ← awaitState slot st (fun s => s.selectedCard.any (·.status == "active") && streamedText s == "second\n\tλ🙂\n")
       let (next, _) := stepDesktopEvent 120 vp st (.activate 2)
       unless next.writeRequest == some (.stop b.missionId) do
         throw (IO.userError "active roster and bubble left Send in place of Stop")
       return
+    if args == ["project-lag"] then
+      let st ← clickMission st b
+      let next ← awaitState slot st (fun s => streamedText s == "second\n\tλ🙂\n")
+      unless next.projectMemberships.isEmpty do throw (IO.userError "bubble waited for project history")
+      return
     if args == ["page-two"] || args == ["null-retry"] then
       let st ← clickMission st b
-      let st ← awaitState slot st (fun s => streamedText s == "second\n\tλ🙂\n")
       let expected := if args == ["page-two"] then 201 else 2
+      let st ← awaitState slot st (fun s => streamedText s == "second\n\tλ🙂\n" && s.missionCards.length == expected)
       unless st.openMission == some b.missionId && st.missionCards.length == expected &&
           st.selectedCard.any (·.widgetId == b.widgetId) do throw (IO.userError "page update displaced the selected mission")
       return

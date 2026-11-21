@@ -1,3 +1,4 @@
+import projectHistoryRules from "./projectHistoryRules.json";
 import modelCatalogRules from "./modelSuccessors.json";
 import { nativeInvoke } from "./native";
 import { missionNode } from "./machines/nodes";
@@ -1968,14 +1969,15 @@ async function includeAncestors(rows: Mission[], project?: string): Promise<Miss
  * older than that page that still matter (`openBeyondPage`): a page of recent
  * history alone drops live missions that newer (often archived) ones pushed off. */
 async function projectRows(slug: string, priority?: RequestPriority): Promise<Mission[]> {
+  const { pageSize, openLimit } = projectHistoryRules;
   const project = encodeURIComponent(slug);
   const [history, firstLive] = await Promise.all([
-    api<Mission[]>(`/api/control/missions?project=${project}&limit=200&all=true`, undefined, undefined, priority),
-    api<Mission[]>(`/api/control/missions?project=${project}&limit=200`, undefined, undefined, priority),
+    api<Mission[]>(`/api/control/missions?project=${project}&limit=${pageSize}&all=true`, undefined, undefined, priority),
+    api<Mission[]>(`/api/control/missions?project=${project}&limit=${pageSize}`, undefined, undefined, priority),
   ]);
   const live: Mission[][] = [firstLive];
-  for (let offset = 200; live[live.length - 1].length === 200 && offset < 1000; offset += 200)
-    live.push(await api<Mission[]>(`/api/control/missions?project=${project}&limit=200&offset=${offset}`, undefined, undefined, priority));
+  for (let offset = pageSize; live[live.length - 1].length === pageSize && offset < openLimit; offset += pageSize)
+    live.push(await api<Mission[]>(`/api/control/missions?project=${project}&limit=${pageSize}&offset=${offset}`, undefined, undefined, priority));
   const byId = new Map<string, Mission>();
   for (const row of [...history, ...openBeyondPage(history, live.flat())]) if (!byId.has(row.id)) byId.set(row.id, row);
   const at = (m: Mission) => Date.parse(m.updated_at || m.created_at || "") || 0;
