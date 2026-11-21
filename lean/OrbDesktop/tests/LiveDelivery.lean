@@ -285,3 +285,15 @@ def main (args : List String) : IO Unit := do
     unless st.openMission.isNone && st.missionCards.isEmpty && st.sidebarRows.isEmpty &&
         (streamedText st).isEmpty && (← slot.get).isNone do throw (IO.userError "invalidation leaked state")
   finally closeLiveSubscription slot
+
+-- Compact chrome opens the same picker flow for a new draft and an existing mission.
+private def compactSettings (mid : String) : MissionMenu :=
+  { mission := mid, trigger := 714, page := .settings, x := 0, y := 0 }
+
+#guard ((missionMenuRows hierarchyFixture (compactSettings "")).map (·.id)) == [720, 721, 722]
+#guard !(missionMenuRows hierarchyFixture (compactSettings "m")).any (·.id == 720)
+
+-- Replace focus on the loading placeholder when a member's remote nodes arrive.
+private def waitingForNodes : DesktopState :=
+  { hierarchyFixture with missionMenu := some { compactSettings "" with page := .picker .machine } }
+#guard menuFocusChange waitingForNodes { waitingForNodes with launchMachines := some [("babylon", "Babylon")] } == some 2000000
