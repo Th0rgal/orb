@@ -324,7 +324,7 @@ def buildSidebarChrome (st : DesktopState) (availH : SubPx) (useReferenceTree : 
         else if st.screen == .settingsGeneral && i == 1 then pxToSub 10
         else pxToSub 1
       buildSidebarRowWidget theme rowW r (Edges.trbl topM 0 0 0) (hovered := hoverRow == some r.widgetId)
-  let archived := fun (r : ChromeSidebarRow) => st.liveData && r.kind == "mission" && r.status == "acknowledged"
+  let archived := fun (r : ChromeSidebarRow) => st.liveData && r.archiveOnly
   let archiveRows := rowsSource.filter archived
   let archiveGroup : List ChromeSidebarRow := if !st.hasLiveConnection then [] else
     [{ widgetId := 730, rowId := "section:archives", kind := "section", title := "Archived" }] ++
