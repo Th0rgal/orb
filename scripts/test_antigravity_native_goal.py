@@ -24,6 +24,7 @@ def serve_mcp(receipt):
             result = {"protocolVersion": request["params"]["protocolVersion"], "capabilities": {"tools": {}},
                       "serverInfo": {"name": "fixture", "version": "1"}}
         elif method == "tools/list":
+            receipt.with_suffix(".listed").touch()
             result = {"tools": [{"name": "get_compute_fleet", "description": "List fixture nodes",
                                  "inputSchema": {"type": "object", "properties": {}}}]}
         elif method == "tools/call" and request["params"]["name"] == "get_compute_fleet":
@@ -45,7 +46,8 @@ def run(model, consumer=False):
         raise SystemExit("agy is required")
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)
-        output = root / "proof.txt"
+        output = root / "ledger.tsv"
+        ledger = "entry\tamount\nfixture\t7"
         settings = root / ".gemini/antigravity-cli/settings.json"
         settings.parent.mkdir(parents=True)
         provider_settings = {} if consumer else {"modelProvider": "gemini"}
@@ -111,17 +113,17 @@ def run(model, consumer=False):
                          for function in tool.get("functionDeclarations", tool.get("function_declarations", []))}
                 can_write = "write_file" in tools
                 if can_write:
-                    advertised.append("call_mcp_tool" in tools)
+                    advertised.append(sorted(tools))
                     requests.append(self.path.split("?")[0])
                 if not can_write:
                     # Some agy versions run a lightweight auxiliary model first.
                     part = {"text": "fixture"}
-                elif len(requests) == 1 and advertised[0]:
+                elif len(requests) == 1 and "call_mcp_tool" in advertised[0]:
                     part = {"functionCall": {"name": "call_mcp_tool", "args": {
                         "ServerName": "sandboxed", "ToolName": "get_compute_fleet", "Arguments": {}}}}
                 elif not output.exists():
                     part = {"functionCall": {"name": "write_file", "args": {
-                        "Path": str(output), "Content": "fixture proof"}}}
+                        "Path": str(output), "Content": ledger}}}
                 else:
                     part = {"text": "<!-- GOAL_COMPLETE -->" if resuming else "fixture reply"}
                 candidate = {"index": 0, "finishReason": "STOP", "content": {"role": "model", "parts": [part]}}
@@ -163,15 +165,16 @@ def run(model, consumer=False):
 
             try:
                 sid, first, steps = turn()
-                assert first == "fixture reply" and output.read_text().strip() == "fixture proof"
+                assert first == "fixture reply" and output.read_text().strip() == ledger
                 writes = [(s["step_index"], s["state"]) for s in steps if s.get("tool_name") == "write_file"]
                 assert writes and writes[0][1] == "ACTIVE" and writes[-1] == (writes[0][0], "DONE")
                 resumed, final, _ = turn("--conversation", sid)
                 assert resumed == sid and final == "<!-- GOAL_COMPLETE -->"
                 mode = "subscription" if consumer else "API key"
+                listed = receipt.with_suffix(".listed").exists()
                 assert receipt.is_file(), (
                     f"{mode} harness finished the turn without executing get_compute_fleet "
-                    f"(call_mcp_tool advertised on first request: {advertised[0]})")
+                    f"(tools/list received: {listed}; native declarations: {advertised[0]})")
                 assert receipt.read_text() == "fleet listed"
                 assert len(requests) == 4
                 if model:
