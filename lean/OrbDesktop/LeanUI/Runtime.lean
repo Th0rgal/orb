@@ -71,6 +71,8 @@ structure ScrollRegion where
   id : EntityId
   bounds : Rect
   limitY : SubPx
+  offsetY : SubPx := 0
+  textLines : List WrappedLine := []
   deriving Inhabited
 
 abbrev FrameView := Text.GlyphAtlasCache × Color × Scene × List (EntityId × Rect) × List EntityId

@@ -83,6 +83,22 @@ private def longDraft (separator : String) (count : Nat) : Widgets.ComposerBuffe
   return moved.text == draft.text && text.contentRectSub.y < editor.rectSub.y &&
     editor.rectSub.y ≤ top && top + line.heightSub ≤ editor.rectSub.y + editor.rectSub.h
 
+-- A short row and an empty row clamp the local caret, while a subsequent long
+-- row recovers its original horizontal position. Offsets count Unicode scalars.
+#guard Id.run do
+  let draft := ({} : Widgets.ComposerBuffer).insertText "abcdef\n\n猫\n123456"
+  let (root, _) := editorFrame draft
+  let [_, card] := root.children | return false
+  let [editor, _] := card.children | return false
+  let [text] := editor.children | return false
+  let rows := editorRows text.lines draft.text.length
+  let mut b := draft
+  for (key, pos) in [(0xff52, 9), (0xff52, 7), (0xff52, 6), (0xff54, 7), (0xff54, 9), (0xff54, 16)] do
+    let some moved := b.editKey? key 0 rows | return false
+    if moved.cursorOffset != pos || moved.text != draft.text then return false
+    b := moved
+  return true
+
 private def newAgent : DesktopState :=
   { DesktopState.liveUnavailable with
     connectionBinding := "fixture", voiceAvailable := true

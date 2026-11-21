@@ -15,6 +15,9 @@ Pure multi-line composer state machine and widget builder supporting:
 -/
 namespace LeanUI.Widgets
 
+/-- Scroll routing ID. Pointer and keyboard focus belong to the enclosing composer. -/
+def composerViewportId : WidgetId := 973
+
 /-- Snapshot of the editable text and cursor offset stored on the undo/redo stacks. -/
 structure ComposerSnapshot where
   text : String
@@ -35,6 +38,8 @@ attachment chips, and drag-and-drop hover indicator. -/
 structure ComposerBuffer where
   text : String := ""
   cursorOffset : Nat := 0
+  wheelTop : Option SubPx := none
+  preferredX : Option SubPx := none
   undoStack : List ComposerSnapshot := []
   redoStack : List ComposerSnapshot := []
   maxUndoDepth : Nat := 64
@@ -75,6 +80,8 @@ private def replaceAroundCursor (buf : ComposerBuffer) (delBefore delAfter : Nat
     let nextCursor := start + inserted.length
     { buf.pushUndoSnapshot with
       text := String.ofList (chars.take start ++ inserted.toList ++ chars.drop stop)
+      wheelTop := none
+      preferredX := none
       cursorOffset := nextCursor
       imePreeditOffset := nextCursor
       imePreeditLen := 0
@@ -91,7 +98,10 @@ def deleteAroundCursor (buf : ComposerBuffer) (delBefore delAfter : Nat) : Compo
 /-- Set or clear the active IME preedit composition string at `cursorOffset`. -/
 def setPreedit (buf : ComposerBuffer) (preedit : String) : ComposerBuffer :=
   let cur := clampCursor buf.text buf.cursorOffset
+  if buf.imePreeditText == preedit && buf.imePreeditOffset == cur then buf else
   { buf with
+    wheelTop := none
+    preferredX := none
     imePreeditOffset := cur
     imePreeditLen := preedit.length
     imePreeditText := preedit }
@@ -128,6 +138,8 @@ def undo (buf : ComposerBuffer) : ComposerBuffer :=
     let curSnap : ComposerSnapshot := { text := buf.text, cursorOffset := buf.cursorOffset }
     let nextRedo := (curSnap :: buf.redoStack).take (max 1 buf.maxUndoDepth)
     { buf with
+      wheelTop := none
+      preferredX := none
       text := prev.text
       cursorOffset := clampCursor prev.text prev.cursorOffset
       undoStack := restUndo
@@ -143,6 +155,8 @@ def redo (buf : ComposerBuffer) : ComposerBuffer :=
     let curSnap : ComposerSnapshot := { text := buf.text, cursorOffset := buf.cursorOffset }
     let nextUndo := (curSnap :: buf.undoStack).take (max 1 buf.maxUndoDepth)
     { buf with
+      wheelTop := none
+      preferredX := none
       text := next.text
       cursorOffset := clampCursor next.text next.cursorOffset
       undoStack := nextUndo
@@ -152,7 +166,8 @@ def redo (buf : ComposerBuffer) : ComposerBuffer :=
 
 /-- Edit an active text field using XKB navigation and editing keys. Leave IME
     preedit to the input method until it commits or cancels. -/
-def editKey? (buf : ComposerBuffer) (key mods : UInt32) : Option ComposerBuffer := Id.run do
+def editKey? (buf : ComposerBuffer) (key mods : UInt32)
+    (rows : List EditorRow := []) : Option ComposerBuffer := Id.run do
   if !buf.imePreeditText.isEmpty then return none
   if mods == 2 || mods == 8 then
     if key == 0x7a then return some buf.undo
@@ -163,13 +178,27 @@ def editKey? (buf : ComposerBuffer) (key mods : UInt32) : Option ComposerBuffer 
   let len := buf.text.length
   if key == 0xff08 then return some (if cur == 0 then buf else buf.deleteAroundCursor 1 0)
   if key == 0xffff then return some (if cur == len then buf else buf.deleteAroundCursor 0 1)
+  if (key == 0xff52 || key == 0xff54) && !rows.isEmpty then
+    if len == 0 then return some buf
+    let i := editorRowIndex rows cur
+    let row := rows[i]!
+    let closest (points : List (Nat × Nat)) (goal : Nat) :=
+      let distance (x : Nat) := max x goal - min x goal
+      points.foldl (fun best p => if distance p.1 < distance best.1 then p else best)
+        (points.headD (0, 0))
+    let goal := buf.preferredX.getD (closest row.stops cur).2
+    let j := if key == 0xff52 then i - 1 else min (i + 1) (rows.length - 1)
+    let pos := if i == j then (if key == 0xff52 then 0 else len) else
+      (closest (rows[j]!.stops.map Prod.swap) goal).2
+    let pos := min len pos
+    return some { buf with cursorOffset := pos, imePreeditOffset := pos, preferredX := some goal, wheelTop := none }
   let pos ← match key with
     | 0xff51 => pure (cur - 1)
     | 0xff53 => pure (min len (cur + 1))
     | 0xff50 => pure (cur - ((buf.text.toList.take cur).reverse.takeWhile (· != '\n')).length)
     | 0xff57 => pure (cur + ((buf.text.toList.drop cur).takeWhile (· != '\n')).length)
     | _ => return none
-  return some { buf with cursorOffset := pos, imePreeditOffset := pos }
+  return some { buf with cursorOffset := pos, imePreeditOffset := pos, preferredX := none, wheelTop := none }
 
 /-- Attach a file/payload chip to the composer buffer. -/
 def addAttachment (buf : ComposerBuffer) (att : ComposerAttachment) : ComposerBuffer :=
@@ -216,15 +245,18 @@ private def composerTextRuns (style : TextStyle) (text : String) : List InlineRu
 
 /-- Build styled `InlineRun`s for a `ComposerBuffer`, highlighting the active IME preedit span
 with an underline and accent color when `imePreeditLen > 0`. -/
-private def composerRunsAtCaret (theme : Theme) (buf : ComposerBuffer)
-    (overrideRuns : List InlineRun) : List InlineRun × Nat :=
-  if !overrideRuns.isEmpty then (overrideRuns, overrideRuns.length)
+def buildComposerInlineRuns (theme : Theme) (buf : ComposerBuffer)
+    (overrideRuns : List InlineRun := []) : List InlineRun :=
+  if !overrideRuns.isEmpty then overrideRuns
   else
     let pal := theme.palette
     if buf.text.isEmpty && buf.imePreeditText.isEmpty then
       let phStyle : TextStyle := { (Theme.bodyText theme) with
         color := if theme.isDark then 0x676767FF else 0xA3A29CFF }
-      ([composerSynthRun phStyle buf.placeholder], 0)
+      [composerSynthRun phStyle buf.placeholder]
+    else if buf.imePreeditText.isEmpty then
+      -- Preserve word boundaries when the caret moves inside a soft-wrapped word.
+      composerTextRuns (Theme.bodyText theme) buf.text
     else
       let chars := buf.text.toList
       let cur := ComposerBuffer.clampCursor buf.text buf.cursorOffset
@@ -237,15 +269,9 @@ private def composerRunsAtCaret (theme : Theme) (buf : ComposerBuffer)
         underline := true
       }
       let beforeRun := composerTextRuns bodyStyle beforeStr
-      let preeditRun :=
-        if buf.imePreeditText.isEmpty then []
-        else composerTextRuns preeditStyle buf.imePreeditText
+      let preeditRun := composerTextRuns preeditStyle buf.imePreeditText
       let afterRun := composerTextRuns bodyStyle afterStr
-      (beforeRun ++ preeditRun ++ afterRun, beforeRun.length + preeditRun.length)
-
-def buildComposerInlineRuns (theme : Theme) (buf : ComposerBuffer)
-    (overrideRuns : List InlineRun := []) : List InlineRun :=
-  (composerRunsAtCaret theme buf overrideRuns).1
+      beforeRun ++ preeditRun ++ afterRun
 
 /-- Build an attachment chip widget for a single `ComposerAttachment`. -/
 def buildAttachmentChipWidget (theme : Theme) (att : ComposerAttachment) : WidgetNode :=
@@ -306,7 +332,7 @@ def buildComposerWidget (theme : Theme) (availW composerH : SubPx)
   let hasText := !buf.text.isEmpty || !buf.imePreeditText.isEmpty
   -- Two 24px buttons, two 8px gaps, pill padding, text inset and border.
   let placeholderWidth := colW - pxToSub (48 + 16 + 22 + 2) - 2 * theme.borderWidth
-  let (runs, caret) := composerRunsAtCaret theme buf overrideRuns
+  let runs := buildComposerInlineRuns theme buf overrideRuns
   let lineH := pxToSub 18
   let editW := colW - pxToSub 26
   let inset := Edges.trbl 0 0 0 (pxToSub 2)
@@ -314,12 +340,23 @@ def buildComposerWidget (theme : Theme) (availW composerH : SubPx)
     let style := { BoxStyle.col 0 with
       minWidth := editW, maxWidth := editW
       minHeight := pxToSub 48, maxHeight := pxToSub 180 }
-    -- A final newline opens an empty editing line, including before the cap is reached.
+    let runs := Id.run do
+      let mut start := 0
+      let mut indexed := #[]
+      for r in runs do
+        let glyphs := r.glyphs.map fun g => { g with cluster := start + g.cluster }
+        indexed := indexed.push { r with editorStart := some start, glyphs }
+        start := start + glyphs.length + (if r.hardBreakAfter then 1 else 0)
+      return indexed.toList
+    -- A final newline opens an empty editing line.
     let editorRuns := match runs.getLast? with
       | some r => if r.hardBreakAfter then runs ++ [{ r with glyphs := [] }] else runs
       | none => []
-    WidgetNode.scrollClip style { revealAfterRuns := some caret }
-      (WidgetNode.text { BoxStyle.row 0 with minWidth := editW, maxWidth := editW, padding := inset } lineH editorRuns)
+    let caret := if buf.wheelTop.isSome then none else
+      some (buf.cursorOffset + buf.imePreeditText.length, buf.text.length + buf.imePreeditText.length)
+    let childStyle := { BoxStyle.row 0 with minWidth := editW, maxWidth := editW, padding := inset }
+    WidgetNode.scrollClip style { revealCaret := caret, offsetY := buf.wheelTop.getD 0 }
+      (WidgetNode.text childStyle lineH editorRuns) (some composerViewportId) (hitTestable := false)
   else
     WidgetNode.text
       { BoxStyle.row 0 with

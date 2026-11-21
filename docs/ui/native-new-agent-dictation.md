@@ -36,5 +36,9 @@ Further rows scroll inside that rectangle. The attachment, configuration, voice,
 and send controls stay below it and retain their pointer targets and tab order.
 The editor follows the insertion line on edits and keyboard navigation, using
 the same shaped word wraps as the displayed text. Moving back through the draft
-reveals earlier rows. IME preedit participates in the viewport calculation.
+reveals earlier rows. Up and Down move one displayed row per keypress and retain
+the preferred horizontal position across short or empty rows. A wheel gesture
+inside the editor scrolls the text independently of the insertion point. It
+preserves focus and toolbar position. The next edit or cursor move reveals
+the caret again. IME preedit participates in the viewport calculation.
 Enter submits the entire committed draft, including text outside the viewport.
