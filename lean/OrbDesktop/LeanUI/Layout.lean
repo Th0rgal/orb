@@ -110,6 +110,8 @@ structure ScrollSpec where
   offsetY : SubPx := 0
   contentWidth : SubPx := 0
   contentHeight : SubPx := 0
+  /-- Reveal the insertion point following this many shaped runs in a text child. -/
+  revealAfterRuns : Option Nat := none
   deriving DecidableEq, Repr, Inhabited
 
 namespace ScrollSpec
@@ -262,7 +264,8 @@ def measureNode (availWidthSub : SubPx) : LayoutNode → SubPx × SubPx
     let padH := s.padding.vertical
     let marW := s.margin.horizontal
     let marH := s.margin.vertical
-    let (cw, ch) := measureNode (availWidthSub - (padW + marW)) child
+    let viewportW := clampNat s.minWidth s.maxWidth (availWidthSub - marW)
+    let (cw, ch) := measureNode (viewportW - padW) child
     let rawW := max s.basis (cw + padW)
     let rawH := max (if s.axis == Axis.column then s.basis else 0) (ch + padH)
     let clampedW := clampNat s.minWidth s.maxWidth rawW
@@ -406,11 +409,19 @@ def layoutNode (scale120 : Nat) (focusOwner : Option EntityId) (focusColor : Col
     let vpH := contentRectSub.h.toNat
     let (measW, measH) := measureNode vpW child
     let contentW := max sc.contentWidth (max vpW measW)
-    let contentH := max sc.contentHeight (max vpH measH)
+    let caretBottom := match sc.revealAfterRuns, child with
+      | some n, .text _ textStyle lineH runs =>
+        -- Flush the insertion line even at offset zero or after a final newline.
+        let style := (runs[n]?.orElse fun _ => runs.getLast?).map (·.style)
+        let lineEnd : InlineRun := { style := style.getD { lineHeightSub := lineH }, hardBreakAfter := true }
+        (wrapInlineRuns (contentW - textStyle.padding.horizontal) lineH
+          (runs.take n ++ [lineEnd])).2.2
+      | _, _ => 0
+    let contentH := max caretBottom (max sc.contentHeight (max vpH measH))
     let limX := scrollLimit contentW vpW
     let limY := scrollLimit contentH vpH
     let clampedOffX := scrollStep contentW vpW (min sc.offsetX limX) 0
-    let clampedOffY := scrollStep contentH vpH (min sc.offsetY limY) 0
+    let clampedOffY := scrollStep contentH vpH (min (max sc.offsetY (caretBottom - vpH)) limY) 0
     let childX : Int := vpX - Int.ofNat clampedOffX
     let childY : Int := vpY - Int.ofNat clampedOffY
     let laidChild := layoutNode scale120 focusOwner focusColor childX childY contentW contentH child
@@ -488,7 +499,7 @@ def hashLayoutNode : LayoutNode → UInt64
     let h1 := mixU64 h0 sc.offsetX.toUInt64
     let h2 := mixU64 h1 sc.offsetY.toUInt64
     let h3 := mixU64 h2 s.basis.toUInt64
-    mixU64 h3 (hashLayoutNode child)
+    mixU64 (mixU64 h3 (hash sc.revealAfterRuns)) (hashLayoutNode child)
 where
   hashLayoutNodeList (acc : UInt64) : List LayoutNode → UInt64
     | [] => acc

@@ -216,15 +216,15 @@ private def composerTextRuns (style : TextStyle) (text : String) : List InlineRu
 
 /-- Build styled `InlineRun`s for a `ComposerBuffer`, highlighting the active IME preedit span
 with an underline and accent color when `imePreeditLen > 0`. -/
-def buildComposerInlineRuns (theme : Theme) (buf : ComposerBuffer)
-    (overrideRuns : List InlineRun := []) : List InlineRun :=
-  if !overrideRuns.isEmpty then overrideRuns
+private def composerRunsAtCaret (theme : Theme) (buf : ComposerBuffer)
+    (overrideRuns : List InlineRun) : List InlineRun × Nat :=
+  if !overrideRuns.isEmpty then (overrideRuns, overrideRuns.length)
   else
     let pal := theme.palette
     if buf.text.isEmpty && buf.imePreeditText.isEmpty then
       let phStyle : TextStyle := { (Theme.bodyText theme) with
         color := if theme.isDark then 0x676767FF else 0xA3A29CFF }
-      [composerSynthRun phStyle buf.placeholder]
+      ([composerSynthRun phStyle buf.placeholder], 0)
     else
       let chars := buf.text.toList
       let cur := ComposerBuffer.clampCursor buf.text buf.cursorOffset
@@ -239,9 +239,13 @@ def buildComposerInlineRuns (theme : Theme) (buf : ComposerBuffer)
       let beforeRun := composerTextRuns bodyStyle beforeStr
       let preeditRun :=
         if buf.imePreeditText.isEmpty then []
-        else [composerSynthRun preeditStyle buf.imePreeditText]
+        else composerTextRuns preeditStyle buf.imePreeditText
       let afterRun := composerTextRuns bodyStyle afterStr
-      beforeRun ++ preeditRun ++ afterRun
+      (beforeRun ++ preeditRun ++ afterRun, beforeRun.length + preeditRun.length)
+
+def buildComposerInlineRuns (theme : Theme) (buf : ComposerBuffer)
+    (overrideRuns : List InlineRun := []) : List InlineRun :=
+  (composerRunsAtCaret theme buf overrideRuns).1
 
 /-- Build an attachment chip widget for a single `ComposerAttachment`. -/
 def buildAttachmentChipWidget (theme : Theme) (att : ComposerAttachment) : WidgetNode :=
@@ -302,19 +306,27 @@ def buildComposerWidget (theme : Theme) (availW composerH : SubPx)
   let hasText := !buf.text.isEmpty || !buf.imePreeditText.isEmpty
   -- Two 24px buttons, two 8px gaps, pill padding, text inset and border.
   let placeholderWidth := colW - pxToSub (48 + 16 + 22 + 2) - 2 * theme.borderWidth
-  let runs := buildComposerInlineRuns theme buf overrideRuns
-  let editH := if tall then max (pxToSub 48) (min (pxToSub 180) (wrapInlineRuns (colW - pxToSub 26) (pxToSub 18) runs).2.2) else pxToSub 18
-  let textNode : WidgetNode :=
+  let (runs, caret) := composerRunsAtCaret theme buf overrideRuns
+  let lineH := pxToSub 18
+  let editW := colW - pxToSub 26
+  let inset := Edges.trbl 0 0 0 (pxToSub 2)
+  let textNode : WidgetNode := if tall then
+    let style := { BoxStyle.col 0 with
+      minWidth := editW, maxWidth := editW
+      minHeight := pxToSub 48, maxHeight := pxToSub 180 }
+    -- A final newline opens an empty editing line, including before the cap is reached.
+    let editorRuns := match runs.getLast? with
+      | some r => if r.hardBreakAfter then runs ++ [{ r with glyphs := [] }] else runs
+      | none => []
+    WidgetNode.scrollClip style { revealAfterRuns := some caret }
+      (WidgetNode.text { BoxStyle.row 0 with minWidth := editW, maxWidth := editW, padding := inset } lineH editorRuns)
+  else
     WidgetNode.text
       { BoxStyle.row 0 with
-        grow := 1
-        clip := !hasText
-        maxWidth := if tall then colW - pxToSub 26 else if hasText then (BoxStyle.row 0).maxWidth else placeholderWidth
-        minHeight := editH
-        maxHeight := editH
-        padding := Edges.trbl 0 0 0 (pxToSub 2) }
-      (pxToSub 18)
-      runs
+        grow := 1, clip := !hasText
+        maxWidth := if hasText then (BoxStyle.row 0).maxWidth else placeholderWidth
+        minHeight := lineH, maxHeight := lineH, padding := inset }
+      lineH runs
   let sendBgCol := if hasText || isRunning then pal.sendBg else ((pal.sendBg &&& 0xFFFFFF00) ||| 0x47)
   let glyph : WidgetNode := if isRunning then
       WidgetNode.rrect (BoxStyle.row 0 |>.withFixedSize (pxToSub 6) (pxToSub 6)) pal.sendFg
@@ -373,11 +385,11 @@ def buildComposerWidget (theme : Theme) (availW composerH : SubPx)
   if let some header := newAgentHeader then
     let toolbar := WidgetNode.box (BoxStyle.row (pxToSub 8) |>.withAlign .center |>.withFixedSize (colW - pxToSub 26) (pxToSub 24))
       ([attachBtn] ++ controls.toList ++ voice.toList ++ [sendBtn])
-    let card := WidgetNode.focusable buf.composerWidgetId <| WidgetNode.box
-      (BoxStyle.col (pxToSub 6) |>.withPadding (Edges.trbl (pxToSub 10) (pxToSub 12) (pxToSub 8) (pxToSub 12))
-        |>.withFixedSize colW (pxToSub 50 + editH + (if hasChips then chipRowH else 0))
+    let cardStyle : BoxStyle :=
+      (BoxStyle.col (pxToSub 6) |>.withPadding (Edges.trbl (pxToSub 10) (pxToSub 12) (pxToSub 10) (pxToSub 12))
         |>.withBg pillBg |>.withRadius (pxToSub 12) |>.withBorder theme.borderWidth borderCol)
-      (chipBar ++ [textNode, toolbar])
+    let card := WidgetNode.focusable buf.composerWidgetId <| WidgetNode.box
+      { cardStyle with minWidth := colW, maxWidth := colW } (chipBar ++ [textNode, toolbar])
     WidgetNode.box (BoxStyle.col (pxToSub 10) |>.withAlign .center) [header, card]
   else
     WidgetNode.box

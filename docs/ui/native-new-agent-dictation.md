@@ -28,3 +28,13 @@ the active draft at its current Unicode caret as one undoable edit. Sending
 requires a separate action.
 
 The macOS desktop uses the existing web composer and locald voice RPC.
+
+### Native New Agent draft viewport
+
+At 1000 × 700, entering 20 short lines grows the editor to 180 logical pixels.
+Further rows scroll inside that rectangle. The attachment, configuration, voice,
+and send controls stay below it and retain their pointer targets and tab order.
+The editor follows the insertion line on edits and keyboard navigation, using
+the same shaped word wraps as the displayed text. Moving back through the draft
+reveals earlier rows. IME preedit participates in the viewport calculation.
+Enter submits the entire committed draft, including text outside the viewport.
