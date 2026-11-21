@@ -297,3 +297,16 @@ private def compactSettings (mid : String) : MissionMenu :=
 private def waitingForNodes : DesktopState :=
   { hierarchyFixture with missionMenu := some { compactSettings "" with page := .picker .machine } }
 #guard menuFocusChange waitingForNodes { waitingForNodes with launchMachines := some [("babylon", "Babylon")] } == some 2000000
+
+private def remoteCatalogFixture : DesktopState := {
+  hierarchyFixture with
+  nativeHarnessAvailable := true
+  draftSettings := { machine := "uruk" }
+  missionMenu := some { compactSettings "" with page := .picker .backend }
+  catalog := [⟨"codex", "Codex", "astra", "Astra"⟩]
+  nativeCatalog := some ("uruk", [⟨"antigravity", "Antigravity CLI", "neon", "Neon"⟩]) }
+
+#guard nativeCatalogRequest remoteCatalogFixture == some "uruk"
+#guard (settingChoices remoteCatalogFixture "" .backend).length == 2
+#guard settingChoices { remoteCatalogFixture with draftSettings := { machine := "babylon" } } "" .backend == [("codex", "Codex")]
+#guard nativeCatalogRequest { remoteCatalogFixture with nativeHarnessAvailable := false } == none

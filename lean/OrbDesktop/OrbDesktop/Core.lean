@@ -70,6 +70,7 @@ private def liveStateFromProjection (lines : List String) (isDark : Bool) (scale
 
 private inductive ReadKind where
   | roster | recover | catalog (revision : Nat) | providers
+  | nativeModels (machine : String)
   | launchMachines (admin : Bool) (harness : String)
   deriving BEq
 
@@ -83,6 +84,7 @@ private def startLiveRead (binding : String) (kind : ReadKind) (notify : IO Unit
   let args := match kind with
     | .roster => #["-I", "-c", transport ++ "\ntry: roster()\nexcept Exception: sys.exit(1)"]
     | .recover => #["-I", "-c", transport ++ "\nrecover_roster()"]
+    | .nativeModels machine => #["-I", "-c", transport ++ "\nnative_models(*sys.argv[1:])", binding, machine]
     | .launchMachines admin harness => #["-I", "-c", transport ++ "\nlaunch_machines(*sys.argv[1:])", binding, if admin then "admin" else "member", harness]
     | .providers => #["-I", "-c", transport ++ "\nprovider_inventory(sys.argv[1])", binding]
     | .catalog _ => #["-I", "-c", transport ++ "\ncatalog(sys.argv[1], json.loads(sys.argv[2]))", binding, modelCatalogRules]
@@ -114,7 +116,7 @@ def withLiveSources {α : Type} (isDark : Bool) (notify : IO Unit)
           some (.launchMachines (st.fleetMachines.any (·.machineId == "core")) st.draftSettings.backend)
         else if st.screen == .inference && st.providers.isNone && !st.providerReadFailed then some .providers
         else if st.catalogLoading then some (.catalog st.catalogRevision)
-        else none
+        else (nativeCatalogRequest st).map ReadKind.nativeModels
       if current.any (fun r => r.binding != st.connectionBinding || some r.kind != kind) then close
       let some kind := kind | return none
       let source ← match ← slot.get with
@@ -128,6 +130,14 @@ def withLiveSources {α : Type} (isDark : Bool) (notify : IO Unit)
       if source.binding.isEmpty then
         if let some ready := liveStateFromProjection lines isDark st.scale120 then return some ready
         return if st.initialRosterPending then some { st with initialRosterPending := false } else none
+      if let .nativeModels machine := source.kind then
+        let ok := lines.head? == some "native-models"
+        let menu := st.missionMenu.map fun m => { m with nativeCatalogResult := some ok }
+        if !ok then return some { st with missionMenu := menu }
+        let rows := lines.filterMap fun line => match splitTab line with
+          | ["N", id, name] => some ({ backend := "antigravity", harnessName := "Antigravity CLI", model := id, modelName := name } : CatalogModel)
+          | _ => none
+        return some { st with missionMenu := menu, nativeCatalog := some (machine, rows) }
       if let .launchMachines .. := source.kind then
         if lines.head? != some "machines" then return some { st with launchMachinesFailed := true }
         let nodes := lines.filterMap fun line => match splitTab line with
@@ -147,7 +157,7 @@ def withLiveSources {α : Type} (isDark : Bool) (notify : IO Unit)
         | ["H", backend, harnessName, model, modelName] =>
           some ({ backend, harnessName, model, modelName } : CatalogModel)
         | _ => none
-      return some { st with catalog := models, catalogLoading := false }
+      return some { st with catalog := models, catalogLoading := false, nativeHarnessAvailable := lines.contains "native-antigravity" }
   finally close
 
 inductive LiveUpdate where
@@ -281,7 +291,7 @@ def readLiveFrame (slot : IO.Ref (Option LiveSubscription)) (scale : Nat) (viewp
       | .providerPreference account enabled =>
         let providers := st.providers.map fun rows =>
           rows.map fun p => if p.id == account then { p with userEnabled := enabled } else p
-        return ({ st with providers, catalogLoading := true, catalogRevision := st.catalogRevision + 1 }, some viewport)
+        return ({ st with providers, nativeCatalog := none, catalogLoading := true, catalogRevision := st.catalogRevision + 1 }, some viewport)
       | .create =>
         let [id,title,status,machine,backend,model,effort,permissionMode,project] := splitTab (r.stdout.dropEnd 1).toString | throw (IO.userError "invalid mission")
         let wid := 1001 + 3 * (1 + (st.sidebarRows.foldl (fun n row => max n row.widgetId) 1000 - 1000) / 3)

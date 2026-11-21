@@ -108,6 +108,30 @@ class Delivery(unittest.TestCase):
             request.assert_called_with('/api/ai/providers/gemini-work/preference',
                                        body={'enabled': False}, method='PUT')
 
+    def test_native_catalog_probes_the_selected_destination_and_rechecks_identity(self):
+        with patch.object(live, 'Connection') as conn:
+            c = conn.return_value
+            c.binding = 'ben'
+            c.request.return_value = [['gemini-4-neon', 'Neon']]
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                live.native_models('ben', 'node a')
+            c.request.assert_called_once_with('/api/providers/antigravity-models?node_id=node+a', deadline=20)
+            self.assertEqual(out.getvalue().splitlines(), ['native-models', 'N\tgemini-4-neon\tNeon'])
+            c.request.return_value = []
+            c.check.side_effect = ValueError('connection changed')
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out), self.assertRaises(ValueError):
+                live.native_models('ben', 'core')
+            self.assertEqual(out.getvalue(), '')
+            c.request.assert_called_with('/api/providers/antigravity-models', deadline=20)
+            c.check.side_effect = None
+            for bad in ({}, ['xx'], [['x\ty', 'name']]):
+                c.request.return_value = bad
+                with contextlib.redirect_stdout(out), self.assertRaises(ValueError):
+                    live.native_models('ben', 'core')
+            self.assertEqual(out.getvalue(), '')
+
     def test_catalog_recovers_without_reopening_the_window(self):
         denied = live.urllib.error.HTTPError('http://localhost', 503, 'Unavailable', {}, None)
         rows = [('H', 'antigravity', 'Antigravity', 'gemini-4-neon', 'Neon')]

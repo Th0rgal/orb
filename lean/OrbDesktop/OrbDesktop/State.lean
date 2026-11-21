@@ -328,6 +328,7 @@ structure MissionMenu where
   trigger : Nat := 0
   targets : List String := []
   mixed : Bool := false
+  nativeCatalogResult : Option Bool := none
   page : MissionMenuPage := .actions
   first : Nat := 0
   highlighted : Nat := 0
@@ -352,6 +353,8 @@ structure DesktopState where
   missionMenu : Option MissionMenu := none
   draftSettings : LaunchSettings := {}
   draftProject : String := ""
+  nativeHarnessAvailable : Bool := false
+  nativeCatalog : Option (String × List CatalogModel) := none
   catalog : List CatalogModel := []
   catalogLoading : Bool := false
   catalogRevision : Nat := 0
@@ -704,14 +707,32 @@ def currentSettings (st : DesktopState) (mid : String) : LaunchSettings :=
                 permission := if c.permissionMode.isEmpty then "supervised" else c.permissionMode }
   | none => st.draftSettings
 
+def catalogDestination (st : DesktopState) (mid : String) : String :=
+  let machine := (currentSettings st mid).machine
+  if machine.isEmpty && st.fleetMachines.any (·.machineId == "core") then "core" else machine
+
+def destinationCatalog (st : DesktopState) (mid : String) : List CatalogModel :=
+  let native := match st.nativeCatalog with
+    | some (machine, rows) => if machine == catalogDestination st mid then rows else []
+    | none => []
+  st.catalog ++ native
+
+def nativeCatalogRequest (st : DesktopState) : Option String := do
+  let menu ← st.missionMenu
+  guard (st.nativeHarnessAvailable && menu.nativeCatalogResult.isNone && (menu.page == .picker .backend ||
+    (menu.page == .picker .model && (currentSettings st menu.mission).backend == "antigravity")))
+  let machine := catalogDestination st menu.mission
+  guard (!machine.isEmpty)
+  return machine
+
 def settingChoices (st : DesktopState) (mid : String) (field : SettingField) : List (String × String) :=
   let values := currentSettings st mid
   match field with
   | .machine =>
     let localMachines := st.fleetMachines.filter (·.machineId == "core")
     (if localMachines.isEmpty then [] else [("", "Default machine")]) ++ (localMachines.map fun m => (m.machineId, m.name)) ++ st.launchMachines.getD []
-  | .backend => (st.catalog.map fun c => (c.backend, c.harnessName)).eraseDups
-  | .model => (st.catalog.filter (·.backend == values.backend)).map fun c => (c.model, c.modelName)
+  | .backend => ((destinationCatalog st mid).map fun c => (c.backend, c.harnessName)).eraseDups
+  | .model => ((destinationCatalog st mid).filter (·.backend == values.backend)).map fun c => (c.model, c.modelName)
   | .effort =>
     let levels := if values.backend == "antigravity" then ["low", "medium", "high"]
       else if ["claudecode", "codex"].contains values.backend then ["low", "medium", "high", "xhigh", "max"] else []
@@ -726,9 +747,9 @@ def settingTrigger (id : Nat) : Option SettingField :=
 private def chooseSetting (st : DesktopState) (mid : String) (field : SettingField) (value : String) : DesktopState :=
   let prev := currentSettings st mid
   let next := match field with
-    | .machine => { prev with machine := value }
+    | .machine => { prev with machine := value, model := if prev.backend == "antigravity" && prev.machine != value then "" else prev.model }
     | .backend =>
-      let model := ((st.catalog.find? (·.backend == value)).map (·.model)).getD ""
+      let model := (((destinationCatalog st mid).find? (·.backend == value)).map (·.model)).getD ""
       { prev with backend := value, effort := "", permission := "supervised", model }
     | .model => { prev with model := value }
     | .effort => { prev with effort := value }
@@ -875,6 +896,10 @@ def missionMenuRows (st : DesktopState) (menu : MissionMenu) : List MissionMenuR
     let rows : List MissionMenuRow := choices.mapIdx fun i (value, label) => { id := 2000000 + i, label, icon := "list", value }
     if field == .machine && st.launchMachines.isNone then
       return rows ++ [{ id := 729, label := if st.launchMachinesFailed then "Could not load remote machines. Reopen to retry." else "Loading remote machines…", icon := "list" }]
+    if (nativeCatalogRequest st).isSome then
+      return rows ++ [{ id := 729, label := "Checking Antigravity models…", icon := "list" }]
+    if menu.nativeCatalogResult == some false then
+      return rows ++ [{ id := 729, label := "Antigravity unavailable. Reopen to retry.", icon := "list" }]
     if rows.isEmpty then return [{ id := 719, label := "No available choices", icon := "list" }]
     return rows
   let clear : MissionMenuRow := { id := 727, label := "Clear selection", icon := "close", separatorBefore := true }
@@ -936,7 +961,7 @@ def menuFocusChange (before after : DesktopState) : Option Nat :=
   | some old, none => some old.trigger
   | old, some menu =>
     let fleetLoaded := menu.page == .picker .machine && before.launchMachines.isNone && after.launchMachines.isSome
-    if !fleetLoaded && before.catalogLoading == after.catalogLoading && old.any (fun m => m.page == menu.page && m.highlighted == menu.highlighted && m.trigger == menu.trigger) then none
+    if !fleetLoaded && old.all (·.nativeCatalogResult == menu.nativeCatalogResult) && before.catalogLoading == after.catalogLoading && old.any (fun m => m.page == menu.page && m.highlighted == menu.highlighted && m.trigger == menu.trigger) then none
     else ((missionMenuRows after menu)[menu.highlighted]?).map (·.id)
   | _, _ => none
 
@@ -1078,6 +1103,8 @@ def stepDesktopEvent (scale120 : Nat) (viewport : Rect) (st : DesktopState) (ev 
       if id == 2 && st.selectedCard.isNone then
         if (st.screen == .controlEmpty || st.screen == .controlPopulated) &&
             !st.composer.text.trimAscii.isEmpty && st.composer.imePreeditText.isEmpty then
+          if st.draftSettings.backend == "antigravity" && st.draftSettings.model.isEmpty then
+            return ({ st with writeError := "Choose an Antigravity model for this machine." }, some viewport)
           return ({ st with writeRequest := some .create }, none)
         return (st, none)
       if id == 2 || id == 106 then

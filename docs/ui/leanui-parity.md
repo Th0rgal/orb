@@ -448,3 +448,5 @@ Opening the New Agent machine picker reads the connected user's current remote-n
 Picker labels stay inside the clickable row. The model picker accommodates provider-qualified names and elides overflow at narrow viewport widths. Clicking the Astra suffix selects Astra, including when Sol was previously selected.
 
 At narrow composer widths the native client exposes placement, harness, model and effort through the Mission settings menu. A draft offers machine selection. An existing mission keeps its placement. The empty prompt truncates before the send button.
+
+Opening the harness picker requests the native Antigravity catalog for the selected destination and current login. Other harnesses remain selectable while discovery runs. An empty successful catalog removes that destination's native choices. A failed refresh offers a retry on reopening, and a different destination never inherits those model rows.
