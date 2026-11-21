@@ -28,3 +28,10 @@ it("uses the revision shown to the owner for enrollment and removal", async () =
     { account_id: "", expected_revision: 4 }
   ]));
 });
+
+it("hides enrollment when the dev endpoint is unavailable", async () => {
+  const read = vi.spyOn(client, "api").mockRejectedValue(new Error("not found"));
+  const ui = render(() => <NativeOwnerEnrollment account="ledger-account" />);
+  await waitFor(() => expect(read).toHaveBeenCalledTimes(1));
+  expect(ui.queryByRole("button")).toBeNull();
+});
