@@ -685,6 +685,34 @@ def projection(c, mid, presence=False):
     return [label(obj['title']), label(obj['status']), ''.join(ch for ch in obj['text'] if ch in '\n\t' or ch.isprintable())]
 
 
+def poll_bubble(mid, binding):
+    c = Connection()
+    if c.binding != binding or not re.fullmatch(r'[A-Za-z0-9_-]{1,128}', mid):
+        return
+    previous = None
+    while True:
+        c.check()
+        try:
+            title, status, text = projection(c, mid)
+            fields = ('B', title, status, text.replace('\n', '\x1e').replace('\t', '\x1f'))
+        except urllib.error.HTTPError as error:
+            if error.code in (403, 404):
+                print('D', flush=True)
+                return
+            if error.code == 401:
+                raise
+            fields = None
+        except (ValueError, KeyError, TypeError):
+            fields = ('X',)
+        except (urllib.error.URLError, TimeoutError):
+            fields = None
+        c.check()
+        if fields is not None and fields != previous:
+            print('\t'.join(fields), flush=True)
+            previous = fields
+        time.sleep(1)
+
+
 def poll(mid, binding, tracked=None, rules=None):
     c = Connection()
     if tracked is None:
@@ -724,19 +752,6 @@ def poll(mid, binding, tracked=None, rules=None):
                 visible = ['\x1c'.join(map(label, row)) for row in rows if row[0] in ('P', 'M', 'N', 'G')]
                 visible.extend('K\x1c' + ident for ident in sorted(tracked - found))
                 checked = time.monotonic()
-            current = ['sample', visible.copy(), None]
-            if mid and mid in tracked:
-                try:
-                    current[2] = projection(c, mid)
-                except urllib.error.HTTPError as error:
-                    if error.code not in (403, 404):
-                        raise
-                    visible = [row for row in visible if row.split('\x1c', 2)[:2] not in (['K', mid], ['M', mid])]
-                    tracked.discard(mid)
-                    current[1] = visible.copy()
-                except (ValueError, KeyError, TypeError):
-                    # A malformed/oversized bubble is not a roster revocation.
-                    current[2] = 'unavailable'
         except (urllib.error.URLError, TimeoutError, ValueError, KeyError, TypeError) as error:
             c.check()
             if isinstance(error, urllib.error.HTTPError) and error.code in (401, 403):
@@ -748,15 +763,7 @@ def poll(mid, binding, tracked=None, rules=None):
             continue
         c.check()
         failures = 0
-        if current != last:
-            # Projection strips control characters except transcript newlines
-            # and tabs. Reserve RS/US to encode those without a JSON runtime.
-            keys = '=' if last is not None and current[1] == last[1] else '+' + '\x1f'.join(current[1])
-            if isinstance(current[2], list):
-                title, status, text = current[2]
-                fields = ('B', keys, title, status, text.replace('\n', '\x1e').replace('\t', '\x1f'))
-            else:
-                fields = ('R', keys)
-            print('\t'.join(fields), flush=True)
-            last = current
+        if visible != last:
+            print('R\t+' + '\x1f'.join(visible), flush=True)
+            last = visible
         time.sleep(1)

@@ -254,15 +254,20 @@ def main (args : List String) : IO Unit := do
     if args == ["start-running"] then
       let st ← clickMission st b
       if st.composer.isRunning then throw (IO.userError "pending mission offered Stop")
-      let st ← awaitState slot st (fun s => s.selectedCard.any (·.status == "active"))
+      let st ← awaitState slot st (fun s => s.selectedCard.any (·.status == "active") && streamedText s == "second\n\tλ🙂\n")
       let (next, _) := stepDesktopEvent 120 vp st (.activate 2)
       unless next.writeRequest == some (.stop b.missionId) do
         throw (IO.userError "active roster and bubble left Send in place of Stop")
       return
+    if args == ["project-lag"] then
+      let st ← clickMission st b
+      let next ← awaitState slot st (fun s => streamedText s == "second\n\tλ🙂\n")
+      unless next.projectMemberships.isEmpty do throw (IO.userError "bubble waited for project history")
+      return
     if args == ["page-two"] || args == ["null-retry"] then
       let st ← clickMission st b
-      let st ← awaitState slot st (fun s => streamedText s == "second\n\tλ🙂\n")
       let expected := if args == ["page-two"] then 201 else 2
+      let st ← awaitState slot st (fun s => streamedText s == "second\n\tλ🙂\n" && s.missionCards.length == expected)
       unless st.openMission == some b.missionId && st.missionCards.length == expected &&
           st.selectedCard.any (·.widgetId == b.widgetId) do throw (IO.userError "page update displaced the selected mission")
       return

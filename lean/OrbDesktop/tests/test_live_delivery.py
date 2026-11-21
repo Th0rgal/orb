@@ -235,6 +235,8 @@ class Delivery(unittest.TestCase):
     def run_wire(self, mode):
         paths, tokens = [], []
         db = fixture()
+        project_started = threading.Event()
+        release_project = threading.Event()
         events = '/current-bubble'
         a, b = ('/api/control/missions/' + m for m in ('a', 'b'))
 
@@ -268,11 +270,17 @@ class Delivery(unittest.TestCase):
                     if mode == 'null-retry' and paths.count(path) == 3:
                         self.send_error(503)
                         return
+                elif mode == 'project-lag' and path.startswith('/api/control/missions?project=p&'):
+                    project_started.set()
+                    release_project.wait(8)
+                    result = []
                 elif path.startswith('/api/control/missions?project=p&') or path == '/api/machines':
                     result = []
                 elif path.split('?')[0] in (a + events, b + events):
                     mid = path.split('/')[-2]
                     presence = path.endswith('?presence=1')
+                    if mode == 'project-lag' and mid == 'b':
+                        project_started.wait(3)
                     if mode == 'selected-session' and mid == 'b' and paths.count(path) > 1:
                         self.send_error(401)
                         return
@@ -321,7 +329,7 @@ class Delivery(unittest.TestCase):
                 if mode in ('idle-share', 'idle-page-two'):
                     self.assertIn(b + events + '?presence=1', paths)
                     self.assertNotIn(b + events, paths)
-                elif mode in ('page-two', 'null-retry', 'start-running'):
+                elif mode in ('page-two', 'null-retry', 'start-running', 'project-lag'):
                     self.assertIn(b + events, paths)
                 elif mode in ('idle-identity', 'before-open', 'unavailable', 'idle-session'):
                     self.assertFalse(any(p.startswith(a) or p.startswith(b) for p in paths))
@@ -334,8 +342,12 @@ class Delivery(unittest.TestCase):
                     if mode == 'leave':
                         self.assertEqual(paths.count(b + events), 1)
             finally:
+                release_project.set()
                 server.shutdown()
                 db.close()
+
+    def test_conversation_updates_while_expanded_project_read_is_pending(self):
+        self.run_wire('project-lag')
 
     def test_revocation(self):
         self.run_wire('revoke')
@@ -489,8 +501,8 @@ class Delivery(unittest.TestCase):
         out = io.StringIO()
         with patch.object(live, 'roster_rows', return_value=[('M','a','Title')]), patch.object(live, 'Connection', Connection), patch.object(live.time, 'sleep', side_effect=[None, KeyboardInterrupt]), contextlib.redirect_stdout(out):
             with self.assertRaises(KeyboardInterrupt):
-                live.poll('a', 'bound', {'a'})
-        self.assertEqual(out.getvalue(), 'B\t+M\x1ca\x1cTitle\tTitle\tactive\tPublic\n')
+                live.poll_bubble('a', 'bound')
+        self.assertEqual(out.getvalue(), 'B\tTitle\tactive\tPublic\n')
 
     def test_unselected_status_changes_reach_sidebar(self):
         class Connection:

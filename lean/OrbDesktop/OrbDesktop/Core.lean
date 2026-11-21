@@ -199,8 +199,13 @@ def withLiveSources {α : Type} (isDark : Bool) (notify : IO Unit)
       return some { st with catalog := models, catalogLoading := false, nativeHarnessAvailable := lines.contains "native-antigravity" }
   finally close
 
+inductive BubbleUpdate where
+  | text (title status value : String)
+  | unavailable
+  | revoked
+
 inductive LiveUpdate where
-  | sample (roster : Option (List String)) (bubble : Option (String × String × String))
+  | sample (roster : Option (List String)) (bubble : Option BubbleUpdate)
   | invalid
 
 structure LiveSubscription where
@@ -208,49 +213,70 @@ structure LiveSubscription where
   mission : String
   binding : String
   latest : Std.Mutex (Option LiveUpdate)
+  lastBubble : IO.Ref (Option BubbleUpdate)
   stop : IO Unit
 
-private def subscribe (mission binding : String) (tracked : List MissionSummaryCard) (projects : List String) (notify : IO Unit) : IO LiveSubscription := do
-  let child ← IO.Process.spawn {
-    cmd := "python3", args := #["-I", "-c", transport ++ "\npoll(sys.argv[1], sys.argv[2], rules=json.loads(sys.argv[3]))", mission, binding, projectHistoryRules]
-    stdin := .piped, stdout := .piped, stderr := .null }
-  -- Bootstrap tracks validated IDs from both current and archived pages. Do not expose
-  -- the roster in the process list; a new reader gets the current tracked set.
+private def readSample (line : String) : Option LiveUpdate := do
+  match splitTab line with
+  | ["R", keys] =>
+    guard (keys.startsWith "+")
+    let encoded := (keys.drop 1).toString
+    return .sample (some (if encoded.isEmpty then [] else encoded.splitOn "\x1f")) none
+  | ["B", title, status, text] =>
+    return .sample none (some (.text title status ((text.replace "\x1e" "\n").replace "\x1f" "\t")))
+  | ["X"] => return .sample none (some .unavailable)
+  | ["D"] => return .sample none (some .revoked)
+  | _ => none
+
+/-- Each process owns its HTTP deadlines. A pending roster and a pending bubble
+    coalesce independently, and neither can supersede session invalidation. -/
+private def liveReader (args : Array String) (input : String)
+    (latest : Std.Mutex (Option LiveUpdate)) (notify : IO Unit) : IO (IO Unit) := do
+  let child ← IO.Process.spawn { cmd := "python3", args, stdin := .piped, stdout := .piped, stderr := .null }
   try
-    child.stdin.putStrLn (String.intercalate "," (tracked.map (·.missionId)))
-    child.stdin.putStrLn (String.intercalate "\t" projects)
-    child.stdin.flush
+    if !input.isEmpty then child.stdin.putStr input; child.stdin.flush
   catch err =>
     try child.kill catch _ => pure ()
     discard child.wait
     throw err
-  let latest ← Std.Mutex.new (none : Option LiveUpdate)
   let reader ← IO.asTask (prio := .dedicated) do
     try
       repeat
         let line ← child.stdout.getLine
+        let some (.sample rows bubble) := readSample (line.dropEnd 1).toString | break
         if !line.endsWith "\n" then break
-        let kind :: keys :: rest := splitTab (line.dropEnd 1).toString | break
-        if keys != "=" && !keys.startsWith "+" then break
-        let encoded := (keys.drop 1).toString
-        let roster := if keys == "=" then none else some (if encoded.isEmpty then [] else encoded.splitOn "\x1f")
-        let bubble ← match kind, rest with
-          | "B", [title,status,text] => pure (some (title,status,(text.replace "\x1e" "\n").replace "\x1f" "\t"))
-          | "R", [] => pure none
-          | _, _ => break
-        latest.atomically (modify fun pending =>
-          let previous := match pending with
-            | some (.sample rows _) => rows
-            | _ => none
-          some (.sample (roster.orElse fun _ => previous) bubble))
+        latest.atomically (modify fun previous => match previous with
+          | some .invalid => previous
+          | some (.sample _ (some .revoked)) => previous
+          | some (.sample oldRows oldBubble) =>
+            some (.sample (rows.orElse fun _ => oldRows) (bubble.orElse fun _ => oldBubble))
+          | none => some (.sample rows bubble))
         notify
-    finally
-      latest.atomically (set (some LiveUpdate.invalid))
-      notify
-  return { mission, binding, projects, latest, stop := do
+        if let some .revoked := bubble then return
+    catch _ => pure ()
+    latest.atomically (set (some LiveUpdate.invalid))
+    notify
+  return do
     try child.kill catch _ => pure ()
     discard child.wait
-    discard (IO.wait reader) }
+    discard (IO.wait reader)
+
+private def subscribe (mission binding : String) (tracked : List MissionSummaryCard) (projects : List String)
+    (notify : IO Unit) : IO LiveSubscription := do
+  let latest ← Std.Mutex.new (none : Option LiveUpdate)
+  let rosterArgs := #["-I", "-c", transport ++ "\npoll(sys.argv[1], sys.argv[2], rules=json.loads(sys.argv[3]))",
+    mission, binding, projectHistoryRules]
+  let input := String.intercalate "," (tracked.map (·.missionId)) ++ "\n" ++ String.intercalate "\t" projects ++ "\n"
+  let stopRoster ← liveReader rosterArgs input latest notify
+  let stop ← try
+    if mission.isEmpty then pure stopRoster else do
+      let stopBubble ← liveReader #["-I", "-c", transport ++ "\npoll_bubble(*sys.argv[1:])", mission, binding] "" latest notify
+      pure (do stopBubble; stopRoster)
+  catch err =>
+    stopRoster
+    throw err
+  let lastBubble ← IO.mkRef none
+  return { mission, binding, projects, latest, lastBubble, stop }
 
 def closeLiveSubscription (slot : IO.Ref (Option LiveSubscription)) : IO Unit := do
   if let some sub ← slot.swap none then sub.stop
@@ -393,6 +419,10 @@ def readLiveFrame (slot : IO.Ref (Option LiveSubscription)) (scale : Nat) (viewp
   match update with
   | .invalid => closeLiveSubscription slot; return invalidate
   | .sample roster bubble =>
+    -- The roster can finish after a newer transcript read. Keep the selected
+    -- conversation's title, status and text together across that arrival.
+    if bubble.isSome then sub.lastBubble.set bubble
+    let bubble ← sub.lastBubble.get
     let updated := roster.elim st (mergeRoster st)
     let changed := roster.isSome && (updated.missionCards != st.missionCards ||
       updated.sidebarRows != st.sidebarRows || updated.fleetMachines != st.fleetMachines || updated.projectMemberships != st.projectMemberships)
@@ -409,10 +439,16 @@ def readLiveFrame (slot : IO.Ref (Option LiveSubscription)) (scale : Nat) (viewp
       closeLiveSubscription slot
       let (st, _) := stepDesktopEvent scale viewport st (.activate 101)
       return (st, some viewport)
-    let some (title,status,text) := bubble | do
-      -- No bubble (roster-only or malformed response): never discard other missions.
+    if let some .revoked := bubble then
+      closeLiveSubscription slot
+      let next := { st with
+        missionCards := cards.filter (·.missionId != sub.mission)
+        sidebarRows := rows.filter (·.rowId != "mission:" ++ sub.mission) }
+      return ((stepDesktopEvent scale viewport next (.activate 101)).1, some viewport)
+    if let some .unavailable := bubble then
       let (next, damage) := applyLiveText scale viewport st sub.mission ""
       return (next, if changed then some viewport else damage)
+    let some (.text title status text) := bubble | return (st, if changed then some viewport else none)
     let (next, damage) := applyLiveText scale viewport st sub.mission text
     let some card := next.selectedCard | return invalidate
     if title == card.title && status == card.status then return (next, if changed then some viewport else damage)
