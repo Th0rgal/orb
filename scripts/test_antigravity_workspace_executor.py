@@ -11,6 +11,8 @@ import struct
 import subprocess
 import tempfile
 import threading
+
+from native_job_relay.workspace import start_file_executor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 
@@ -30,8 +32,20 @@ def run(agy, workspace_mcp, model):
         home.mkdir(mode=0o700)
         os.chown(work, WORKSPACE, WORKSPACE)
         os.chown(home, PROFILE, PROFILE)
-        mcp = root / "workspace-mcp"
-        shutil.copy2(workspace_mcp, mcp)
+        image = root / "image"
+        (image / "bin").mkdir(parents=True)
+        (image / "workspace").mkdir()
+        (image / "dev").mkdir()
+        shutil.copy2(workspace_mcp, image / "bin/workspace-mcp")
+        # Build the disposable image from this trusted binary's exact runtime.
+        for line in subprocess.check_output(["ldd", workspace_mcp], text=True).splitlines():
+            paths = [word for word in line.split() if word.startswith("/")]
+            if paths:
+                lib = Path(paths[0])
+                dest = image / lib.relative_to("/")
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(lib, dest)
+        check_readonly_executor(image, work, root)
         # The account profile and the checkout are not readable across principals.
         for uid, directory in ((PROFILE, work), (WORKSPACE, home)):
             assert subprocess.run(["test", "-r", str(directory)], user=uid, group=uid, extra_groups=[]).returncode == 1
@@ -73,9 +87,14 @@ def run(agy, workspace_mcp, model):
                         with conn:
                             _, uid, _ = struct.unpack("3i", conn.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12))
                             assert uid == PROFILE
-                            proc = subprocess.Popen([str(mcp)], stdin=conn, stdout=conn, stderr=subprocess.DEVNULL,
-                                user=WORKSPACE, group=WORKSPACE, extra_groups=[], cwd=work,
-                                env={"PATH": os.environ["PATH"], "HOME": str(work)})
+                            rootfd = os.open(image, os.O_DIRECTORY | os.O_NOFOLLOW)
+                            workfd = os.open(work, os.O_DIRECTORY | os.O_NOFOLLOW)
+                            try:
+                                proc = start_file_executor(shutil.which("bwrap"), rootfd, workfd, WORKSPACE, WORKSPACE,
+                                                           conn, readonly=False)
+                            finally:
+                                os.close(workfd)
+                                os.close(rootfd)
                             children.append(proc)
                 finally:
                     for proc in children:
@@ -90,6 +109,35 @@ def run(agy, workspace_mcp, model):
             finally:
                 stop.set()
                 worker.join()
+
+
+def check_readonly_executor(image, work, root):
+    sentinel = root / "outside.txt"
+    sentinel.write_text("ordinary public test fixture")
+    sentinel.chmod(0o644)
+    rd = os.open(image, os.O_DIRECTORY)
+    wd = os.open(work, os.O_DIRECTORY)
+    try:
+        client, child = socket.socketpair()
+        with client, child:
+            proc = start_file_executor(shutil.which("bwrap"), rd, wd, WORKSPACE, WORKSPACE, child, readonly=True)
+            child.close()
+            try:
+                with client.makefile("rwb", buffering=0) as pipe:
+                    for name, args in (("read_file", {"path": str(sentinel)}),
+                                       ("write_file", {"path": "readonly-receipt", "content": "fixture"})):
+                        request = {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                                   "params": {"name": name, "arguments": args}}
+                        pipe.write(json.dumps(request).encode() + b"\n")
+                        assert json.loads(pipe.readline())["result"]["isError"]
+            finally:
+                proc.terminate()
+                proc.wait(timeout=5)
+        assert not (work / "readonly-receipt").exists()
+        print("confined executor: outside fixture invisible; read-only checkout rejected write", flush=True)
+    finally:
+        os.close(wd)
+        os.close(rd)
 
 
 def turns(agy, model, home, cwd, work, endpoint):

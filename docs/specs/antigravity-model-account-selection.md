@@ -265,7 +265,9 @@ sets `tools: []`, `mainAgent: true` and `subagent: false`. We selected this
 agent using `--agent orb-workspace`, gave it a private empty session directory
 and configured a single trusted MCP transport. The account process never
 loads workspace customizations. The real checkout belongs to another UID.
-Orb's existing `workspace-mcp` runs as that workspace UID and accepts stdio
+The supervisor starts Orb's existing `workspace-mcp` as that workspace UID
+in a separate filesystem and network namespace. It pins the trusted runtime
+and checkout using open directory descriptors. The executor accepts stdio
 from the supervisor's private Unix socket. The profile-side stdio adapter only
 relays bytes. [Custom agent tool selection](https://antigravity.google/docs/subagents/)
 
@@ -273,7 +275,9 @@ The Linux arm64 agy 1.5.14 fixture contacted only a loopback synthetic Gemini
 model endpoint. The CLI exposed MCP call and resource tools plus
 `manage_task`. A write followed by a resume changed the ledger under the
 workspace UID for each of the Carbon and Neon model identifiers. The two
-principals could not read each other's directory. When the socket disappeared,
+principals could not read each other's directory. The executor could not
+read a world-readable host fixture outside the runtime and checkout, and its
+read-only mount rejected a write. When the socket disappeared,
 the ledger and local session directory remained unchanged. The CLI could
 still report a successful conversational turn. A deployment must detect
 executor loss independently of the final CLI status, enforce the grant
@@ -281,7 +285,7 @@ lifetime, and bind resume to the same account, workspace and conversation.
 The fixture does not use a Google subscription or verify Internet egress.
 
 To replay on a Linux host with subordinate user and group IDs, Python 3,
-`socat`, `ip`, `agy` and a native Orb `workspace-mcp` binary:
+`bwrap`, `socat`, `ip`, `agy` and a native Orb `workspace-mcp` binary:
 
 ```sh
 unshare --user --map-root-user --map-auto --net sh -ec '
@@ -295,9 +299,9 @@ unshare --user --map-root-user --map-auto --net sh -ec '
 
 This qualifies file operations in a synthetic restricted-agent configuration.
 The workspace MCP currently exposes eight tools including file read and write,
-with no command execution. Its working directory is a path-resolution
-default. Production needs an OS-confined workspace process with only the
-job's filesystem available. Each concurrent account job also needs private
+with no command execution. The supervisor
+must derive the checkout, mode and UID from the authorized job. The MCP's
+working directory alone would only be a path-resolution default. Each concurrent account job also needs private
 session state, trusted settings and its own authenticated workspace channel.
 
 #### Whole-process account egress fixture
