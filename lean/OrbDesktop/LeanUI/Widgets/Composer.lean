@@ -174,11 +174,11 @@ def editKey? (buf : ComposerBuffer) (key mods : UInt32) : Option ComposerBuffer 
   let len := buf.text.length
   if key == 0xff08 then return some (if cur == 0 then buf else buf.deleteAroundCursor 1 0)
   if key == 0xffff then return some (if cur == len then buf else buf.deleteAroundCursor 0 1)
-  let pos := match key with
-    | 0xff51 => cur - 1
-    | 0xff53 => min len (cur + 1)
-    | 0xff50 => cur - ((buf.text.toList.take cur).reverse.takeWhile (· != '\n')).length
-    | 0xff57 => cur + ((buf.text.toList.drop cur).takeWhile (· != '\n')).length
+  let pos ← match key with
+    | 0xff51 => pure (cur - 1)
+    | 0xff53 => pure (min len (cur + 1))
+    | 0xff50 => pure (cur - ((buf.text.toList.take cur).reverse.takeWhile (· != '\n')).length)
+    | 0xff57 => pure (cur + ((buf.text.toList.drop cur).takeWhile (· != '\n')).length)
     | _ => return none
   return some { buf with cursorOffset := pos, imePreeditOffset := pos }
 
