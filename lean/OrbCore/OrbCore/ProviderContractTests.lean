@@ -16,8 +16,7 @@ open OrbCore.ProviderUsageAndLogin
 def checkDiscovery (root url : String) (port : UInt16) : IO Unit := do
   let st ← IO.ofExcept (← openCoreStore root)
   try
-    let hp : AIProviderRecord := { id := "fixture", providerType := "custom", name := "Fixture", baseUrl := url, apiKey := "fixture-only"
-        customModels := #[{ id := "fixture-model" }] }
+    let hp : AIProviderRecord := { id := "fixture", providerType := "custom", name := "Fixture", baseUrl := url, apiKey := "fixture-only" }
     IO.ofExcept (← upsertAIProvider st hp)
     let hub ← newProviderRuntimeHub
     let verify := fun (hub : ProviderRuntimeHub) (expected : String) => do
