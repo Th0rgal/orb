@@ -67,10 +67,27 @@ jobs:
       - name: Build the packaged launchers on aarch64
         run: nix build .#orb-desktop --max-jobs 1 --cores 2 -L
       - name: Exercise Classic and hybrid in a private Wayland session
+        env:
+          ORB_TEST_SCREENSHOT: ${{ runner.temp }}/hybrid-desktop.png
         run: |
-          nix shell --inputs-from . nixpkgs#sway nixpkgs#grim nixpkgs#wtype nixpkgs#imagemagick nixpkgs#tesseract --command bash -euc '
+          fonts=$(nix build --inputs-from . nixpkgs#inter --no-link --print-out-paths)
+          export FONTCONFIG_FILE="$RUNNER_TEMP/fonts.conf"
+          cat > "$FONTCONFIG_FILE" <<EOF
+          <fontconfig>
+            <include>/etc/fonts/fonts.conf</include>
+            <dir>$fonts/share/fonts</dir>
+          </fontconfig>
+          EOF
+          nix shell --inputs-from . nixpkgs#fontconfig nixpkgs#sway nixpkgs#grim nixpkgs#wtype nixpkgs#imagemagick nixpkgs#tesseract --command bash -euc '
+            fc-match Inter
             export ORB_WEBKIT_TEST_BINARY="$PWD/result/bin/orb-desktop"
             export ORB_HYBRID_TEST_BINARY="$PWD/result/bin/orb-desktop-hybrid"
             export ORB_DIST_DIR="$(nix build .#orb-desktop.webUi --no-link --print-out-paths)"
             python3 -B lean/OrbDesktop/tests/hybrid_desktop.py
           '
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: hybrid-desktop-screenshot
+          path: ${{ runner.temp }}/hybrid-desktop.png
+          if-no-files-found: ignore
