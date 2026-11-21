@@ -24,8 +24,8 @@ from wayland_pointer import Pointer
 
 
 MISSIONS = [dict(id=f'aaaaaaaa-0000-4000-8000-00000000000{i}', title=title, project='orchard',
-                 backend='codex', status='completed', history=[], created_at='2026-10-01T10:00:00Z',
-                 updated_at='2026-10-01T11:00:00Z') for i, title in enumerate(['Copper', 'Plum'])]
+                 backend='codex', status=status, history=[], created_at='2026-10-01T10:00:00Z',
+                 updated_at='2026-10-01T11:00:00Z') for i, (title, status) in enumerate([('Copper', 'awaiting_user'), ('Plum', 'completed')])]
 PROVIDER = dict(provider='boat', display_name='Indigo Fleet', configured=True, enabled=True,
                 user_enabled=True, sizes=[], effective_enabled=True)
 TOKEN = 'fixture-member'
@@ -117,6 +117,7 @@ setInterval(() => {
     local: visible('.local-machine button') && document.querySelector('.local-machine').innerText.includes('This computer'),
     personal: visible('[role=switch][aria-label="Use Indigo Fleet for my missions"]:enabled'),
     global: visible('[role=switch][aria-label="Enable Indigo Fleet globally"]'),
+    rawAwaiting: document.querySelector('main')?.innerText.includes('awaiting_user'),
     earlier: conversation.includes('Amber blossom'), latest: conversation.includes('Violet harvest'),
     plum: conversation.includes('Plum harvest'), search: visible('[data-testid=conversation-search-dialog]'),
     width: innerWidth, editor: rect?.width ? [rect.x+rect.width/2,rect.y+rect.height/2] : null,
@@ -234,6 +235,11 @@ def run():
                 see('plum')
                 check('selected second mission', lambda: (row('plum') or {}).get('selected'))
                 assert not http.observed['earlier']
+                click('copper')
+                see('earlier')
+                see('latest')
+                check('reopened waiting mission', lambda: (row('copper') or {}).get('selected'))
+                assert http.observed['rawAwaiting'] is False
                 click('new')
                 see('newAgent')
                 check('selected New Agent row', lambda: (row('new agent') or {}).get('selected'))
