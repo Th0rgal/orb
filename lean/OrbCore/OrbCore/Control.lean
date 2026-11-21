@@ -5564,7 +5564,7 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
           rpmLimit? := rpm?, maxConcurrency? := conc?, customModels := cModels,
           updatedAt := s!"{nowEpochSec}"
         }
-        match ← upsertAIProvider st.store updated (memberEdit := !isAdm) with
+        match ← upsertAIProvider st.store updated (memberEdit := !isAdm) (credentialOwner := own) with
         | .error "provider_changed" => return .ok (mkJson 409 "{\"error\":\"provider_changed\"}")
         | .error e => return .ok (mkJson 400 s!"\{\"error\":\"invalid_provider_limits\",\"detail\":{jsonEscape e}}")
         | .ok () =>

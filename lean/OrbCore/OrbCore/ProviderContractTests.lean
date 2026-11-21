@@ -1668,6 +1668,9 @@ def run : IO Unit := do
           (← listRow jwt).fieldBool? "user_enabled" == some true &&
           !(← inChooser memberJwt) && (← inChooser jwt) do
         failures := failures.push "Personal preference persists on list reload and filters only the member's chooser"
+      IO.ofExcept (← upsertAIProvider store { ownerRow with apiKey := "synthetic-rotated" })
+      if (← upsertAIProvider store ownerRow (memberEdit := true)).isOk then
+        failures := failures.push "A concurrent shared settings edit cannot restore an owner credential"
       IO.ofExcept (← upsertAIProvider store { ownerRow with enabled := false })
       if (← upsertAIProvider store ownerRow (memberEdit := true)).isOk then
         failures := failures.push "A stale member edit cannot restore the previous global state"
