@@ -33,6 +33,15 @@ and latest turns. The raw lifecycle value must stay out of the visible transcrip
 The Nix workflow's `hybrid_desktop` dispatch runs it against
 the packaged clients on a native aarch64 runner.
 
+## New Agent destination during fleet loading
+
+The shared desktop composer may select a default machine while the draft is empty.
+Once a draft contains text, a command, or attachments, fleet discovery and load
+updates preserve its destination. The user can still choose another machine.
+Clearing the draft restores automatic selection unless the user chose a machine
+explicitly. Role restrictions still apply, and Send checks the selected remote
+machine's current launch capability before creating the mission.
+
 ## Single Owner & Cold-Start Hydration (`AGENTS.md` Principle 3)
 
 `OrbLocald.NativeChrome` (`lean/OrbLocald/OrbLocald/NativeChrome.lean`, `0 import Lean`,

@@ -90,7 +90,7 @@ export function Composer(p: {
   harnessIds?: string[];
   /** Follow-up: the mission's harness. New agent uses the picker. */
   backend?: string;
-  onDraft?: (text: string) => void;
+  onDraft?: (text: string, hasAttachments: boolean) => void;
   onPending?: (draft: {text:string; images:DraftImage[]; retry?:()=>void} | null) => void;
   onSendError?: (error:string)=>void;
   retainFailedMessage?:boolean;
@@ -669,7 +669,8 @@ export function Composer(p: {
   createEffect(() => { const revision = p.revision; if (revision) { setMode(null); setText(current => { const next = revision.append && current ? `${current}\n\n${revision.text}` : revision.text; ta.value = next; return next; }); queueMicrotask(() => { resize(); ta?.focus(); }); } });
   const draftOf = (visible: string, m = mode()) => modePrompt(m, visible);
   // Report every change, including restored drafts and revisions, not only typing.
-  createEffect(on([text, mode], ([visible, m]) => p.onDraft?.(draftOf(visible, m))));
+  createEffect(on([text, mode, images, fileChips], ([visible, m, attachedImages, files]) =>
+    p.onDraft?.(draftOf(visible, m), attachedImages.length > 0 || files.length > 0)));
   const write = (visible: string) => {
     ta.value = visible;
     setText(visible);
