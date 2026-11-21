@@ -4,7 +4,6 @@ Run live_writes.py --sidebar-menu leanui or --sidebar-menu webkit. OCR reads the
 private compositor's pixels so the check also exercises the actual menu layout.
 """
 import contextlib
-import csv
 import json
 import os
 from pathlib import Path
@@ -16,6 +15,7 @@ import time
 import uuid
 
 from archive_race import archive_relay
+from wayland_ocr import read_words
 
 
 def exercise(root, tmp, api, graphical, click, process, wait, stack, client_kind):
@@ -53,17 +53,6 @@ def exercise(root, tmp, api, graphical, click, process, wait, stack, client_kind
         image = subprocess.check_output(['grim', '-t', 'ppm', '-g', geometry, '-'], env=graphical)
         return read_words(image, geometry)
 
-    def read_words(image, geometry, full_frame=False):
-        origin, size = geometry.split()
-        crop = ['-crop', size + '+' + origin.replace(',', '+'), '+repage'] if full_frame else []
-        png = subprocess.check_output(['magick', '-', *crop, '-colorspace', 'gray', '-auto-level',
-                                       '-resize', '300%', 'png:-'], input=image)
-        result = subprocess.check_output(['tesseract', 'stdin', 'stdout', '--psm', '11', 'tsv'],
-                                         input=png, stderr=subprocess.DEVNULL, text=False)
-        ox, oy = map(int, geometry.split(' ')[0].split(','))
-        return [(r['text'].strip('.,:|…').lower(), ox+(int(r['left'])+int(r['width'])//2)//3,
-                 oy+(int(r['top'])+int(r['height'])//2)//3) for r in
-                csv.DictReader(result.decode().splitlines(), delimiter='\t') if r['text'].strip()]
     def locate(label, geometry):
         return next(((x, y) for word, x, y in words(geometry) if word == label.lower()), None)
     def see(label, geometry=sidebar):

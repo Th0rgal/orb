@@ -18,6 +18,7 @@ import urllib.request
 
 import wayland_ime
 from wayland_pointer import Pointer
+from wayland_ocr import read_words
 
 ROOT = Path(__file__).resolve().parents[3]
 
@@ -87,7 +88,7 @@ for i in range(300):
         token = wait('disposable Core login', login)
         (tmp / 'connection.json').write_text(json.dumps({'api_url': base, 'token': token}))
         assert api('/api/control/missions') == []
-        if mouse and menu_client is None:
+        if menu_client is None:
             api('/api/projects', {'slug': 'menu-test', 'title': 'Menu test'})
             api('/api/projects', {'slug': 'source', 'title': 'Source project'})
         config = tmp / 'sway.conf'
@@ -121,21 +122,25 @@ for i in range(300):
         def crop(geometry):
             return subprocess.check_output(['grim', '-t', 'ppm', '-g', geometry, '-'], env=graphical)
 
-        def composer_frame():
-            return crop('700,615 24x24')
-
+        edit = stack.enter_context(wayland_ime.session(graphical))
+        typed, committed = 'Indigo ' + secrets.token_hex(5) + ' ', '日本語'
         if mouse:
-            empty_frame = composer_frame()
-            click(74, 214)   # open Source project
-            click(264, 53)   # choose the Core machine explicitly
-            click(302, 114)
-            empty_choice_row = crop('366,106 56x16')
-            click(348, 53)   # select Codex from the live catalog
-            wait('live harness choices', lambda: crop('366,106 56x16') != empty_choice_row)
-            click(360, 114)
-            click(80, 50)  # Create mission in the sidebar
+            click(74, 178)   # Source project disclosure
+            click(195, 178)  # Start a draft in that project
+            click(315, 388)  # Machine, then the local Core
+            click(326, 447)
+            click(353, 388)  # Harness, then Codex below the default choice
+            click(394, 447)
+            click(540, 347)
+            keys(typed)
+            edit([("日本猫", 0, 0), ("語", len("猫".encode()), 0)])
+            click(944, 347)
         else:
-            keys('-k', 'Tab', '-s', '200', '-k', 'Return')
+            roster = '10,110 195x180'
+            wait('live project roster', lambda: any(word == 'source' for word, _, _ in read_words(crop(roster), roster)))
+            keys('-M', 'ctrl', '-k', 'n', '-m', 'ctrl', '-s', '200', typed)
+            edit([(committed, 0, 0)])
+            keys('-k', 'Return')
         created = wait('created mission', lambda: api('/api/control/missions'))
         assert len(created) == 1
         mid = created[0]['id']
@@ -145,21 +150,6 @@ for i in range(300):
             assert mission['project'] == 'source' and mission['backend'] == 'codex', mission['id']
             assert not mission.get('remote_job') and not any(t.startswith('remote-node:') for t in mission['tags'])
             assert api('/api/machines')[0]['id'] == 'core'
-        typed, committed = 'u6a ' + secrets.token_hex(5) + ' ', '日本語'
-        time.sleep(.5)
-        if mouse:
-            wait('visible composer', lambda: composer_frame() != empty_frame)
-            click(540, 626)
-            keys(typed)
-        else:
-            keys(*(['-k', 'Tab'] * 4), '-s', '300', typed)
-        wayland_ime.commit(committed, graphical)
-        time.sleep(.25)
-        if mouse:
-            click(946, 626)
-        else:
-            keys('-k', 'Tab', '-k', 'Tab', '-k', 'Return')
-
         def observed():
             row = api(path)
             messages = [m for m in api(path + '/events') if m['event_type'] == 'user_message' and m['mission_id'] == mid]
@@ -189,49 +179,51 @@ for i in range(300):
         if mouse:
             click(946, 626)
         else:
-            keys('-k', 'Return')
+            keys('-k', 'Tab', '-k', 'Tab', '-k', 'Return')
         stopped = wait('hosted stop', lambda: (r if (r := api(path))['status'] == 'interrupted' else None))
         time.sleep(1.5)
         if mouse:
-            # The newly created row precedes the original roster. The anchored
-            # menu opens at the secondary click, independent of transcript focus.
-            action_row = '89,152 72x23'
-            rendered = None
-
+            sidebar_region = '10,110 195x305'
+            def locate(label, region):
+                rows = read_words(crop(region), region)
+                return next(((x, y) for text, x, y in rows if text == label), None)
+            def select(label, region):
+                click(*wait('visible ' + label, lambda: locate(label, region)))
             def open_actions():
-                nonlocal rendered
-                if rendered is not None:
-                    wait('previous menu dismissed', lambda: crop(action_row) != rendered)
-                before = crop(action_row)
-                click(75, 143, 'button3')
-                rendered = wait('visible mission actions', lambda: frame if (frame := crop(action_row)) != before else None)
-            # Keep the same virtual keyboard while the popup owns focus.
-            # Connecting another keyboard inside the popup sends a focus leave.
-            with process(['wtype', '-k', 'Shift_L', '-', '-k', 'End', ' renamed', '-s', '120000'],
-                         graphical, tmp, stdin=subprocess.PIPE) as keyboard:
-                with keyboard.stdin:
-                    open_actions()
-                    click(128, 164)
-                    original_title = crop('100,151 176x26')
-                # EOF releases wtype's stdin barrier with its existing keymap.
-                wait('edited rename field', lambda: crop('100,151 176x26') != original_title)
-                click(128, 194)
-            wait('renamed mission', lambda: api(path)['title'].endswith(' renamed'))
-            open_actions()
-            click(128, 194)
-            click(128, 194)
+                x, y = wait('visible mission in project', lambda: locate('indigo', sidebar_region))
+                click(x, y, 'button3')
+                return f'{x+10},{y} 175x180'
+            region = open_actions()
+            select('rename', region)
+            save_x, save_y = wait('rename field open', lambda: locate('save', region))
+            click(save_x, save_y - 30)
+            edit([('Indigo edited', len(api(path)['title'].encode()), 0)])
+            select('save', region)
+            wait('renamed mission', lambda: api(path)['title'] == 'Indigo edited')
+            region = open_actions()
+            select('move', region)
+            select('menu', region)
             wait('moved mission', lambda: api(path).get('project') == 'menu-test')
-            open_actions()
-            click(128, 284)  # Mission settings
-            click(128, 254)  # Effort
-            click(128, 194)  # Low
+            if not locate('indigo', sidebar_region):
+                select('menu', sidebar_region)
+            region = open_actions()
+            select('settings', region)
+            select('effort', region)
+            select('low', region)
             wait('mission effort saved through context menu', lambda: api(path).get('model_effort') == 'low')
-            open_actions()
-            click(128, 224)  # Archive follows Move to
+            select('archive', open_actions())
         else:
-            backend = stopped.get('backend')
-            selector_count = 2 + int(backend in ('codex', 'antigravity', 'claudecode')) + int(backend == 'claudecode')
-            keys(*(['-k', 'Tab'] * (2 + selector_count)), '-k', 'Return')
+            # Traverse back to the only live mission. Open its context menu
+            # with the keyboard and verify the visible action before invoking it.
+            region = '0,75 420x480'
+            for _ in range(32):
+                keys('-M', 'shift', '-k', 'Tab', '-m', 'shift', '-k', 'Menu')
+                words = {word for word, _, _ in read_words(crop(region), region)}
+                if {'rename', 'archive'} <= words:
+                    break
+            else:
+                raise AssertionError('keyboard traversal did not reach the mission actions')
+            keys('-k', 'Down', '-k', 'Down', '-k', 'Return')
         wait('archive', lambda: api(path)['status'] == 'acknowledged')
         server.terminate()
         server.wait(8)
@@ -246,12 +238,11 @@ for i in range(300):
             stack.enter_context(process(client, graphical, ROOT))
             wait('reopened native window', lambda: b'"orb-desktop"' in sway('-t', 'get_tree'))
             time.sleep(1.5)
-            click(75, 245)  # Archived group in the otherwise empty roster
-            click(75, 277, 'button3')
-            click(128, 358)  # Restore follows Rename and Move to
+            select('archived', sidebar_region)
+            select('restore', open_actions())
             wait('restored archived mission after desktop restart', lambda: api(path)['status'] == 'paused')
             restored = api(path)['status']
-        print(json.dumps(dict(id=mid, submitted=message['content'], message_id=message['event_id'], running=active['status'], stopped=stopped['status'],
+        print(json.dumps(dict(id=mid, exact_submitted_text=message['content'] == typed + committed, event_sequence=message['sequence'], running=active['status'], stopped=stopped['status'],
                               after_restart=archived['status'], restored=restored), ensure_ascii=False))
 
 
