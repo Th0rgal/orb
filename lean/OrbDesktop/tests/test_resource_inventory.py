@@ -6,6 +6,7 @@ from pathlib import Path
 import subprocess
 import tempfile
 import threading
+import time
 import unittest
 
 
@@ -24,6 +25,9 @@ class ResourceInventory(unittest.TestCase):
             def do_GET(self):
                 if self.path.startswith('/api/resources/overview?'):
                     reads.append((self.path, self.headers['Authorization']))
+                    if len(reads) == 1:
+                        # A cold aggregation can outlast the normal roster socket timeout.
+                        time.sleep(5)
                     body = overview
                 elif self.path.startswith('/api/control/missions?limit='):
                     body = missions

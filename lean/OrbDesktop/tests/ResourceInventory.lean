@@ -8,7 +8,7 @@ private def step (st : DesktopState) (ev : Event) : DesktopState :=
 
 private def settled (readState : DesktopState → IO (Option DesktopState))
     (st : DesktopState) : IO DesktopState := do
-  for _ in [:500] do
+  for _ in [:1000] do
     if let some ready ← readState st then return ready
     IO.sleep 10
   throw (IO.userError "fixture read timed out")
