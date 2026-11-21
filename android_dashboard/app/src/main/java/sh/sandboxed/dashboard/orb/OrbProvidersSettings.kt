@@ -2222,7 +2222,7 @@ private fun AlternativeRouterSettings(core: OrbCore, account: String) {
             val path = "/api/ai/providers/${core.encodeComponent(account)}/alternative-routers"
             val result = if (value == null) core.request(path)
                 else core.request(path, method = "PUT", body = mapOf("allowed" to value))
-            allowed = OrbJSON.dict(result)["allowed"] as? Boolean ?: error("Missing router access")
+            allowed = OrbJSON.dict(result)?.get("allowed") as? Boolean ?: error("Missing router access")
             failed = false
         } catch (e: Exception) {
             if (e is kotlinx.coroutines.CancellationException) throw e
