@@ -85,7 +85,9 @@ for i in range(300):
     with contextlib.ExitStack() as stack:
         server = stack.enter_context(process(core, env, tmp))
         token = wait('disposable Core login', login)
-        (tmp / 'connection.json').write_text(json.dumps({'api_url': base, 'token': token}))
+        connection = tmp / 'connection.json'
+        reconnect = mouse and menu_client is None
+        connection.write_text(json.dumps({'api_url': base, 'token': 'expired' if reconnect else token}))
         assert api('/api/control/missions') == []
         if mouse and menu_client is None:
             api('/api/projects', {'slug': 'menu-test', 'title': 'Menu test'})
@@ -124,6 +126,14 @@ for i in range(300):
         def composer_frame():
             return crop('700,615 24x24')
 
+        if reconnect:
+            project_rows = '24,170 220x60'
+            disconnected = crop(project_rows)
+            replacement = tmp / 'new-session.json'
+            replacement.write_text(json.dumps({'api_url': base, 'token': token}))
+            replacement.replace(connection)
+            wait('projects visible after reconnecting the open window',
+                 lambda: crop(project_rows) != disconnected)
         if mouse:
             empty_frame = composer_frame()
             click(74, 214)   # open Source project
