@@ -30,7 +30,7 @@ def private_listener():
 
 
 @contextlib.contextmanager
-def node_transport(config):
+def _private_transport(role, config):
     """Project one inherited SOCKS listener into a fresh loopback-only namespace.
 
     The trusted caller owns the running placement and stops its workload before
@@ -45,7 +45,7 @@ def node_transport(config):
             json.dump(config, handle)
             handle.seek(0)
             pid = subprocess.Popen(
-                [sys.executable, "-I", str(TRANSPORT), "node", "--listen-fd", str(listener.fileno()),
+                [sys.executable, "-I", str(TRANSPORT), role, "--listen-fd", str(listener.fileno()),
                  "--config-fd", str(descriptor), "--lifetime-fd", str(read_fd)],
                 pass_fds=(listener.fileno(), descriptor, read_fd), env={"PATH": os.defpath})
         watcher.close()
@@ -60,3 +60,14 @@ def node_transport(config):
             except subprocess.TimeoutExpired:
                 pid.kill()
                 pid.wait()
+
+
+def node_transport(config):
+    return _private_transport("node", config)
+
+
+def profile_transport(verified_port):
+    """The caller holds an admitted placement and closes this context on revocation."""
+    if type(verified_port) is not int or not 0 < verified_port <= 65535:
+        raise ValueError("verified account VPN required")
+    return _private_transport("profile", {"verified_port": verified_port})

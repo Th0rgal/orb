@@ -177,22 +177,27 @@ class AccountTransport:
             writer.transport.abort()
 
 
+async def socks_destination(reader, writer):
+    version, count = await reader.readexactly(2)
+    if version != 5 or 0 not in await reader.readexactly(count):
+        raise ValueError("unsupported SOCKS negotiation")
+    writer.write(b"\x05\x00")
+    if await reader.readexactly(4) != bytes([5, 1, 0, 3]):
+        raise ValueError("expected a DNS destination")
+    size = (await reader.readexactly(1))[0]
+    dest = Destination((await reader.readexactly(size)).decode("ascii"))
+    if await reader.readexactly(2) != b"\x01\xbb":
+        raise ValueError("HTTPS port required")
+    return dest
+
+
 async def node_connection(reader, writer, context, host, port, claim):
     """The supervisor supplies a listener accessible only inside this job boundary."""
     outer = None
     try:
         async def setup():
             nonlocal outer
-            version, count = await reader.readexactly(2)
-            if version != 5 or 0 not in await reader.readexactly(count):
-                raise ValueError("unsupported SOCKS negotiation")
-            writer.write(b"\x05\x00")
-            if await reader.readexactly(4) != bytes([5, 1, 0, 3]):
-                raise ValueError("expected a DNS destination")
-            size = (await reader.readexactly(1))[0]
-            dest = Destination((await reader.readexactly(size)).decode("ascii"))
-            if await reader.readexactly(2) != b"\x01\xbb":
-                raise ValueError("HTTPS port required")
+            dest = await socks_destination(reader, writer)
             channel, outer = await asyncio.open_connection(host, port, ssl=context, server_hostname=host)
             outer.write(json.dumps(dict(claim, destination=dest.value)).encode() + b"\n")
             await outer.drain()
@@ -212,6 +217,41 @@ async def node_connection(reader, writer, context, host, port, claim):
         writer.transport.abort()
 
 
+async def local_profile_connection(reader, writer, verified_port):
+    """The listener is inside the Core profile namespace. Upstream is a Core-selected tunnel."""
+    upstream = None
+    try:
+        async with asyncio.timeout(5):
+            destination = await socks_destination(reader, writer)
+            remote, upstream = await asyncio.open_connection("127.0.0.1", verified_port)
+            upstream.write(b"\x05\x01\x00")
+            if await remote.readexactly(2) != b"\x05\x00":
+                raise PermissionError("account tunnel unavailable")
+            host = destination.value.encode("ascii")
+            upstream.write(bytes([5, 1, 0, 3, len(host)]) + host + b"\x01\xbb")
+            header = await remote.readexactly(4)
+            if header[:3] != bytes([5, 0, 0]):
+                raise ConnectionError("account tunnel unavailable")
+            length = {1: 4, 4: 16}.get(header[3])
+            if header[3] == 3:
+                length = (await remote.readexactly(1))[0]
+            if not length:
+                raise ValueError("invalid bound address")
+            await remote.readexactly(length + 2)
+            writer.write(bytes([5, 0, 0, 1]) + bytes(6))
+            await writer.drain()
+            hello = await client_hello(reader, destination)
+            upstream.write(hello)
+            await upstream.drain()
+        await first_completed(copy(reader, upstream), copy(remote, writer))
+    except (OSError, ValueError, EOFError, asyncio.TimeoutError):
+        pass
+    finally:
+        if upstream is not None:
+            upstream.transport.abort()
+        writer.transport.abort()
+
+
 async def main(args):
     # Pass only an already bound listener and a supervisor-owned config pipe.
     # Neither reusable node nor account relay credentials enter the mission.
@@ -224,7 +264,7 @@ async def main(args):
         transport = AccountTransport(cfg["core_port"], cfg["account"], cfg["relay_port"], cfg["relay_password"])
         server = await asyncio.start_server(transport.handle, sock=listener, ssl=ctx, ssl_handshake_timeout=4, limit=8192)
     else:
-        ctx = ssl.create_default_context(cafile=cfg.get("ca"))
+        ctx = ssl.create_default_context(cafile=cfg.get("ca")) if args.role == "node" else None
         stopped = asyncio.Event()
         handlers = set()
         async def handle(r, w):
@@ -234,7 +274,10 @@ async def main(args):
             task = asyncio.current_task()
             handlers.add(task)
             try:
-                await node_connection(r, w, ctx, cfg["host"], cfg["port"], cfg["claim"])
+                if args.role == "profile":
+                    await local_profile_connection(r, w, cfg["verified_port"])
+                else:
+                    await node_connection(r, w, ctx, cfg["host"], cfg["port"], cfg["claim"])
             finally:
                 handlers.discard(task)
         server = await asyncio.start_server(handle, sock=listener, limit=8192)
@@ -256,11 +299,11 @@ async def main(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("role", choices=("core", "node"))
+    parser.add_argument("role", choices=("core", "node", "profile"))
     parser.add_argument("--listen-fd", type=int, required=True)
     parser.add_argument("--config-fd", type=int, required=True)
     parser.add_argument("--lifetime-fd", type=int, help="supervisor pipe, EOF stops the adapter")
     options = parser.parse_args()
-    if options.role != "node" and options.lifetime_fd is not None:
-        parser.error("--lifetime-fd requires node mode")
+    if options.role == "core" and options.lifetime_fd is not None:
+        parser.error("--lifetime-fd requires a supervised mode")
     asyncio.run(main(options))

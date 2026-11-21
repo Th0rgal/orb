@@ -104,3 +104,11 @@ mission admission exit=0
 supervisor process loss: active SOCKS connection closed; listener refused reconnect
 supervisor loss exit=0
 ```
+
+For a profile that runs on Core, `profile_transport(verified_port)` projects the
+account coordinator's SOCKS listener into a private loopback-only namespace.
+The profile can connect to the four Google HTTPS destinations above. The adapter
+checks the original TLS ClientHello before passing it to the tunnel. The
+placement owner must close the context on expiry, revocation or worker loss.
+`python3 scripts/test_native_profile_transport.py` checks each permitted host and
+denial of other hosts, cleartext ports and mismatched TLS names.
