@@ -13,6 +13,14 @@ private def typed : Widgets.ComposerBuffer := { text := "one\n二X", cursorOffse
 #guard ((typed.editKey? 0xff08 0).bind (·.editKey? 0x7a 2)).map (·.text) == some typed.text
 #guard ((typed.setPreedit "あ").editKey? 0xff08 0).isNone
 
+-- A Wayland IME can replace both sides of the caret in one committed edit.
+private def sourceDraft : Widgets.ComposerBuffer := { text := "a二Xb", cursorOffset := 2 }
+private def replacement := sourceDraft.applyImeBatch 3 1 "東京" ""
+#guard replacement.text == "a東京b" && replacement.cursorOffset == 3
+#guard replacement.undo.text == sourceDraft.text && replacement.undo.cursorOffset == 2
+#guard replacement.undo.redo.text == replacement.text
+#guard (sourceDraft.applyImeBatch 1 0 "" "候").undoStack.isEmpty
+
 private def hierarchyFixture : DesktopState := {
   DesktopState.liveUnavailable with
   connectionBinding := "fixture"
