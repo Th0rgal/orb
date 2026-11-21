@@ -152,7 +152,7 @@ jobs:
           Xvfb :99 -screen 0 1470x923x24 > .ci/leanui/xvfb.log 2>&1 &
           xvfb_pid=$!
           sleep 2
-          weston --backend=x11-backend.so --socket=leanui-u2 \
+          weston --backend=x11-backend.so --renderer=pixman --socket=leanui-u2 \
             --width=1470 --height=923 \
             --shell=kiosk-shell.so > .ci/leanui/weston.log 2>&1 &
           weston_pid=$!

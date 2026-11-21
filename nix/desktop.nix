@@ -1,14 +1,30 @@
-{lib, stdenv, callPackage, clang, pkg-config, gtk3, webkitgtk_4_1, turbo-lean ? null}:
+{lib, stdenv, callPackage, clang, pkg-config, nodejs, pnpm, fetchPnpmDeps, pnpmConfigHook, gtk3, webkitgtk_4_1, makeBinaryWrapper, python3, wl-clipboard, zenity, revision ? "local checkout", turbo-lean ? null}:
 
 let
   core = callPackage ./package.nix {inherit turbo-lean; buildDesktop = true;};
+  webUi = stdenv.mkDerivation {
+    pname = "orb-ui";
+    inherit (core) version;
+    src = ../orb;
+    pnpmDeps = fetchPnpmDeps {
+      pname = "orb-desktop";
+      inherit (core) version;
+      src = ../orb;
+      fetcherVersion = 5;
+      hash = "sha256-Dd/+Hxbe0bef8hp/37aIfpVgqYuf0XXPspotz8rW5fw=";
+    };
+    nativeBuildInputs = [nodejs pnpm pnpmConfigHook];
+    ORB_BUILD_ID = revision;
+    buildPhase = "pnpm build";
+    installPhase = "cp -r dist $out";
+  };
 in
 stdenv.mkDerivation {
   pname = "orb-desktop";
   version = core.version;
   src = ../.;
   dontConfigure = true;
-  nativeBuildInputs = [clang pkg-config];
+  nativeBuildInputs = [clang pkg-config makeBinaryWrapper];
   buildInputs = [gtk3 webkitgtk_4_1];
   buildPhase = ''
     runHook preBuild
@@ -20,13 +36,16 @@ stdenv.mkDerivation {
   '';
   installPhase = ''
     mkdir -p "$out/bin" "$out/share/applications" "$out/share/orb-desktop"
-    install -m 0755 "${core}/bin/orb-desktop-native" "$out/bin/orb-desktop-native"
-    install -m 0755 orb-webkit "$out/bin/orb-webkit"
+    makeBinaryWrapper "${core}/bin/orb-desktop-native" "$out/bin/orb-desktop-native" \
+      --prefix PATH : "${lib.makeBinPath [python3 wl-clipboard]}"
+    install -m 0755 orb-webkit "$out/bin/.orb-webkit"
+    makeBinaryWrapper "$out/bin/.orb-webkit" "$out/bin/orb-webkit" \
+      --set ORB_LOCALD_BIN "${core}/bin/orb-locald" --set ORB_UI_ROOT "${webUi}"
     install -m 0644 "$src/nix/orb-desktop.hyprland.conf" "$out/share/orb-desktop/hyprland.conf"
     cat > "$out/bin/orb-desktop" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
-# GTK/WebKit is the default; LeanUI is experimental (renders the parity screens only).
+# GTK/WebKit is the default; LeanUI is available as a separate trial launcher.
 if [[ "''${1:-}" == "--leanui" ]]; then
   shift
   exec "$(dirname "$0")/orb-desktop-native" "$@"
@@ -44,6 +63,21 @@ Terminal=false
 Type=Application
 Categories=Development;Utility;
 StartupWMClass=orb-desktop
+EOF
+    cat > "$out/share/applications/orb-leanui.desktop" <<EOF
+[Desktop Entry]
+Name=Orb LeanUI
+Comment=Native Orb desktop trial
+Exec=$out/bin/orb-desktop --leanui
+Terminal=false
+Type=Application
+Categories=Development;Utility;
+StartupWMClass=orb-desktop
+Actions=About;
+
+[Desktop Action About]
+Name=About Orb LeanUI
+Exec=${zenity}/bin/zenity --info --title="About Orb LeanUI" --text="Orb LeanUI · ${revision}"
 EOF
   '';
   meta = {

@@ -6,6 +6,16 @@ open LeanUI
 
 /-- Differential fixtures for invalidations that the stream benchmark does not force. -/
 def verifyRepaintEdges : IO Unit := do
+  -- A half-transparent colored pixel reaches wl_shm premultiplied exactly once.
+  let clear : ByteArray := ⟨#[0,0,0,0]⟩
+  let rgba := FFI.blendRect clear 0 1 1 1 0xF0783C80
+  let ptr ← FFI.memAlloc 4
+  if ptr == 0 then throw <| IO.userError "cannot allocate Wayland test pixel"
+  try
+    FFI.presentArgb ptr rgba
+    unless (← FFI.memRead ptr 4).data == #[30,60,120,128] do
+      throw <| IO.userError "Wayland presentation changed premultiplied color or alpha"
+  finally FFI.memFree ptr
   let dest : ByteArray := ⟨#[1,2,3,4, 0,50,100,200, 5,6,7,8]⟩
   let src : ByteArray := ⟨#[80,120,160,128]⟩
   for (colored, rgb) in [(true, #[20,68,115]), (false, #[50,63,75])] do
@@ -68,7 +78,7 @@ private def verifyFocusTransfer : IO Unit := do
   let some (_, target) := first.hitRegionsSub.find? (·.1 == 2)
     | throw <| IO.userError "focus: missing target"
   let clicked := rt.stepEvent (fun s _ => (s, none))
-    (.pointerButton (target.x + target.w/2) (target.y + target.h/2) 1 true)
+    (.pointerButton (target.x + target.w/2) (target.y + target.h/2) 0x110 true)
   unless clicked.focus.owner == some 2 do throw <| IO.userError "focus: transfer failed"
   let base ← Vulkan.renderFrame { width := 80, height := 24 } theme.palette.canvas {} first.prims
   let got ← checkPartial "focus transfer" base clicked.damage {} theme.palette.canvas (view clicked.focus).prims

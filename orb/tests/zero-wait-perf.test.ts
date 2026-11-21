@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   bootstrapDesktopRuntime,
+  transportFetch,
   clearConnection,
   getApiUrl,
   getJwt,
@@ -200,6 +201,22 @@ describe("Zero-Wait Conversation Loading & Two-Tier Answer Cache", () => {
       { id: "q-1", content: "Queued next", source: "remote-queue" },
     ]);
     expect(fetchCalls).toHaveLength(1);
+  });
+
+  it("sends local Core requests directly when the desktop bridge belongs to another server", async () => {
+    const origin = "http://127.0.0.1:39045";
+    (window as Window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ = {
+      invoke: vi.fn(async (cmd: string) => cmd === "desktop_bootstrap" ? {
+        connection: { api_url: origin, token: "fixture" }, prefs: { exists: true, prefs: {} },
+        transport: { configured_target: "https://other.example", proxy_base_url: "http://127.0.0.1:49111/__orb_tx/t" },
+      } : null),
+    };
+    const fetch = vi.fn(async (_url: RequestInfo | URL) => new Response("{}"));
+    vi.stubGlobal("fetch", fetch);
+    setTransportBridgeEnabled(true);
+    await bootstrapDesktopRuntime();
+    await transportFetch("/api/health");
+    expect(fetch.mock.calls.at(-1)?.[0]).toBe(origin + "/api/health");
   });
 
   it("hydrates pre-digested settled turns synchronously (syncBump) and consolidates desktop_bootstrap into 1 IPC", async () => {

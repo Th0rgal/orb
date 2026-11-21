@@ -50,4 +50,9 @@ private def widget (scale120 : Nat) (id : Nat) : Option Rect :=
 #guard widget 120 105 == some { x := 6, y := 163, w := 207, h := 30 }
 #guard widget 120 103 == some { x := 6, y := 885, w := 207, h := 32 }
 
+-- Core emits active for running turns, while the preview uses running.
+#guard liveBadgeKind "active" == "loader" && liveBadgeKind "running" == "loader"
+#guard liveBadgeKind "paused" == "pause" && liveBadgeKind "failed" == "alert"
+#guard liveBadgeKind "completed" == "check" && liveBadgeKind "awaiting_user" == ""
+
 end OrbDesktop.Spec
