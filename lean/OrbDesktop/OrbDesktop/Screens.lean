@@ -331,21 +331,52 @@ private def splitMermaidFences (src : String) : List (Bool × String) := Id.run 
     segs := segs ++ [(false, String.intercalate "\n" proseBuf.toList)]
   return segs
 
-/-- One wrapped prose row of the live transcript, synthesized from plain text; the runtime
-`shapeWidgetTree` pass re-shapes synth runs with HarfBuzz on real displays. -/
-private def liveProseRow (theme : Theme) (colW width : SubPx) (text : String) : WidgetNode :=
-  let runs := [synthInlineRun { (Theme.bodyText theme) with color := theme.palette.textPrimary } text]
-  let (_, _, height) := wrapInlineRuns width theme.typo.lineBase runs
-  WidgetNode.box
-    (BoxStyle.row 0
-      |>.withPadding (Edges.xy (pxToSub 20) (pxToSub 6))
-      |>.withFixedSize colW (height + pxToSub 12))
-    [WidgetNode.text
-      (BoxStyle.row 0 |>.withFixedSize width height)
-      theme.typo.lineBase runs]
+/-- One markdown-lite line of the live transcript, synthesized from plain text; the runtime
+`shapeWidgetTree` pass re-shapes synth runs with HarfBuzz on real displays. `#{1,6} ` headings
+reuse the rich-text heading recipe; every other line renders as wrapped body prose. -/
+private def liveProseLine (theme : Theme) (colW width : SubPx) (line0 : String) : Option WidgetNode :=
+  let line := mermaidTrim line0
+  let hashes := (line.toList.takeWhile (· == '#')).length
+  let rest := line.toList.drop hashes
+  if hashes >= 1 && hashes <= 6 && rest.length > 1 && rest.head? == some ' ' then
+    let heading := mermaidTrim (String.ofList (rest.drop 1))
+    let hSize := if hashes <= 1 then theme.typo.xl else if hashes == 2 then theme.typo.lg else theme.typo.md
+    let lh := if hashes <= 2 then theme.typo.lineHeading else theme.typo.lineRelaxed
+    let hStyle : TextStyle := { Theme.headingText theme with sizeSub := hSize, lineHeightSub := lh, weight := 700 }
+    let runs := [synthInlineRun { hStyle with color := theme.palette.textPrimary } heading]
+    let (_, _, height) := wrapInlineRuns width lh runs
+    some (WidgetNode.box
+      (BoxStyle.row 0
+        |>.withPadding (Edges.xy (pxToSub 20) (pxToSub 4))
+        |>.withFixedSize colW (height + pxToSub 8))
+      [WidgetNode.text
+        (BoxStyle.row 0 |>.withFixedSize width height)
+        lh runs])
+  else
+    let runs := [synthInlineRun { (Theme.bodyText theme) with color := theme.palette.textPrimary } line]
+    let (_, _, height) := wrapInlineRuns width theme.typo.lineBase runs
+    some (WidgetNode.box
+      (BoxStyle.row 0
+        |>.withPadding (Edges.xy (pxToSub 20) (pxToSub 6))
+        |>.withFixedSize colW (height + pxToSub 12))
+      [WidgetNode.text
+        (BoxStyle.row 0 |>.withFixedSize width height)
+        theme.typo.lineBase runs])
+
+/-- Render prose text line by line: blank lines produce nothing (a literal newline
+character never reaches the glyph atlas, where it would rasterize as a missing glyph)
+and markdown headings render with the heading style. -/
+private def liveProseLines (theme : Theme) (colW width : SubPx) (text : String) : List WidgetNode :=
+  Id.run do
+    let mut rows : List WidgetNode := []
+    for line in text.splitOn "\n" do
+      match liveProseLine theme colW width line with
+      | some row => rows := rows ++ [row]
+      | none => pure ()
+    return rows
 
 /-- Render one turn's text: mermaid fences become diagram widgets (node widget ids from
-`base`, one stride per diagram); everything else becomes prose rows. Returns the nodes and
+`base`, one stride per diagram); everything else becomes markdown-lite prose rows. Returns the nodes and
 the next free widget-id base for the following turn. -/
 private def buildOneLiveTurn (theme : Theme) (colW width : SubPx) (base : Nat) (text : String) :
     List WidgetNode × Nat := Id.run do
@@ -359,9 +390,9 @@ private def buildOneLiveTurn (theme : Theme) (colW width : SubPx) (base : Nat) (
           { n with widgetId := some (next + i) } }
         rows := rows ++ [buildMermaidDiagramWidget theme colW spec]
         next := next + liveDiagramStride
-      | none => rows := rows ++ [liveProseRow theme colW width seg]
+      | none => rows := rows ++ liveProseLines theme colW width seg
     else
-      rows := rows ++ [liveProseRow theme colW width seg]
+      rows := rows ++ liveProseLines theme colW width seg
   return (rows, next)
 
 /-- Render the completed live turns oldest first, returning the nodes and the next free
@@ -400,6 +431,10 @@ def buildMissionTranscriptBody (st : DesktopState) (mainW bodyH : SubPx)
     if (splitMermaidFences currentText).any (·.1) then
       (buildOneLiveTurn theme colW width nextBand currentText).1
     else if _runs.streamRuns.isEmpty then []
+    else if currentText.contains "\n" then
+      -- Multi-line stream text shares the completed-turn rendering so newline
+      -- characters and markdown headings never rasterize as literal missing glyphs.
+      liveProseLines theme colW width currentText
     else Id.run do
       let (_, _, height) := wrapInlineRuns width theme.typo.lineBase _runs.streamRuns
       return [WidgetNode.box

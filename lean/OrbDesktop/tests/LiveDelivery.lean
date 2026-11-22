@@ -261,12 +261,44 @@ private def awaitState (slot : IO.Ref (Option LiveSubscription)) (st : DesktopSt
     IO.sleep 10
   throw (IO.userError "poll timed out")
 
+/-- Lower `.vectorIcon` payloads the way Main.lean's shaping pass does, so driver scenes
+carry the icon-mask prims (the diamond outline) without the glyph atlas. The mask source
+rect mirrors the rasterized icon; driver assertions only inspect the destination. -/
+private partial def lowerVectorIcons : WidgetNode → WidgetNode
+  | .mk id focusable hit style payload children =>
+    let payload := match payload with
+      | .vectorIcon _paths color badgeBg =>
+        let size := if badgeBg.isSome then pxToSub 10 else max (pxToSub 16) style.minWidth
+        .iconMask 0 { x := 0, y := 0, w := size, h := size } color badgeBg
+      | p => p
+    .mk id focusable hit style payload (children.map lowerVectorIcons)
+
 /-- Render the live transcript the way Main.lean's window does, with the current
 stream text synthesized for the no-font driver. -/
 private def renderScreen (st : DesktopState) (streamText : String) : ComputedBox × SceneOutput :=
   let stream := Widgets.synthInlineRun (Theme.bodyText st.theme) streamText
   renderWidgetTree 120 (pxToSub 800) (pxToSub 600) st.initialFocusState st.theme
-    (buildDesktopScreen st (pxToSub 800) (pxToSub 600) { streamRuns := [stream] } true)
+    (lowerVectorIcons (buildDesktopScreen st (pxToSub 800) (pxToSub 600) { streamRuns := [stream] } true))
+
+/-- Pure shape check for a decision node: its label center (device rect) is covered by an
+icon-mask prim (the rhombus stroke rendered through the vector-icon pipeline) that covers
+no other observed node's center. -/
+private def diamondObserved (scene : SceneOutput)
+    (observed : List (String × Rect × Rect)) (self : String) (others : List String) : Bool :=
+  match observed.filter (fun p => p.1 == self) with
+  | [(_, _, fix)] =>
+    let centers := (others.filterMap fun t =>
+      (observed.filter (fun p => p.1 == t)).head?.map (fun p =>
+        (p.2.2.x + p.2.2.w / 2, p.2.2.y + p.2.2.h / 2)))
+    let fx := fix.x + fix.w / 2
+    let fy := fix.y + fix.h / 2
+    scene.prims.toList.any fun p => match p with
+      | .mask _ _ dst _ =>
+        dst.x ≤ fx && fx ≤ dst.x + dst.w && dst.y ≤ fy && fy ≤ dst.y + dst.h &&
+        !(centers.any fun (cx, cy) =>
+          dst.x ≤ cx && cx ≤ dst.x + dst.w && dst.y ≤ cy && cy ≤ dst.y + dst.h)
+      | _ => false
+  | _ => false
 
 /-- Semantic diagram assertions shared by the live-turn and cold-open cases: node and
 edge labels are observed exactly once, edges are directed (each label sits strictly
@@ -307,9 +339,10 @@ private def assertDiagram (scene : SceneOutput) (observed : List (String × Rect
     | none => throw (IO.userError ("no scene rect observed around " ++ t))
   let specR ← observedRadius "Spec"
   let buildR ← observedRadius "Build"
-  let fixR ← observedRadius "Fix"
-  unless buildR > specR && specR > fixR do
-    throw (IO.userError "rendered node shapes did not observe pill > rounded > diamond")
+  unless buildR > specR do
+    throw (IO.userError "rendered node shapes did not observe pill > rounded")
+  unless diamondObserved scene observed "Fix" ["Spec", "Build"] do
+    throw (IO.userError "decision node is not rendered as a diamond outline")
   let covering (sub : Rect) : List Rect :=
     (scene.hitRegionsSub.filter fun r =>
       let cx := sub.x + sub.w / 2
@@ -359,6 +392,25 @@ private def cycleObserved := (renderedTurns [cycleTurn]).1
 #guard match (observedOnce cycleObserved "P", observedOnce cycleObserved "Q") with
   | (some p, some q) => p.x < q.x && q.x + q.w <= pxToSub 800 && q.y + q.h <= pxToSub 600
   | _ => false
+
+-- Physical parity for the m2air evidence flow: a four-node graph with two labeled
+-- edges and a decision node keeps every node and both edge labels visible in source
+-- order, and the decision node renders as a rhombus (icon mask), not a rect fill.
+private def flowTurn : String :=
+  "```mermaid\ngraph LR\n  A[Spec] -->|Approve| B(Build)\n  B -->|Revise| C{Review}\n  C --> D[Done]\n```"
+private def flowObserved := (renderedTurns [flowTurn]).1
+#guard [observedOnce flowObserved "Spec", observedOnce flowObserved "Build",
+  observedOnce flowObserved "Review", observedOnce flowObserved "Done",
+  observedOnce flowObserved "Approve", observedOnce flowObserved "Revise"].all (·.isSome)
+#guard match (observedOnce flowObserved "Spec", observedOnce flowObserved "Build",
+    observedOnce flowObserved "Review", observedOnce flowObserved "Done",
+    observedOnce flowObserved "Approve", observedOnce flowObserved "Revise") with
+  | (some a, some b, some c, some d, some ap, some rv) =>
+    a.x < b.x && b.x < c.x && c.x < d.x &&
+    a.x < ap.x && ap.x < b.x && b.x < rv.x && rv.x < c.x
+  | _ => false
+#guard diamondObserved (renderedTurns [flowTurn]).2.1 flowObserved "Review" ["Spec", "Build", "Done"]
+#guard !((renderedTurns [flowTurn]).2.2.contains "```")
 
 def main (args : List String) : IO Unit := do
   for dark in [true, false] do

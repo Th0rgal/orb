@@ -291,6 +291,12 @@ def collectDiagramSvgPaths (spec : DiagramSpec) : List SvgPathCmd :=
       | _, _ => acc) []
   spec.svgPaths ++ edgePaths
 
+/-- Mermaid decision-node outline: a rhombus in the 160-unit icon view box, stroked
+like the desktop chrome icons so a diamond is visibly distinct from rounded and pill
+nodes even though the scene only ships rect-family fills. -/
+private def diamondOutline : List (List (Int × Int)) :=
+  [[(80, 4), (156, 80), (80, 156), (4, 80), (80, 4)]]
+
 /-- Build a declarative `WidgetNode` for a single `DiagramNode`. -/
 def buildDiagramNodeBox (theme : Theme) (nodeW nodeH : SubPx) (n : DiagramNode) : WidgetNode :=
   let pal := theme.palette
@@ -302,21 +308,35 @@ def buildDiagramNodeBox (theme : Theme) (nodeW nodeH : SubPx) (n : DiagramNode) 
     | .pill    => nodeH / 2
     | .diamond => theme.radiusSm
   let labelStyle : TextStyle := { (Theme.codeText theme) with weight := 600, color := pal.textPrimary }
+  let label : WidgetNode :=
+    WidgetNode.text
+      (BoxStyle.row 0 |>.withFixedSize (nodeW - pxToSub 20) (pxToSub 18))
+      theme.typo.lineTight
+      [diagramSynthRun labelStyle n.label]
   let rawBox : WidgetNode :=
-    WidgetNode.rrect
-      (BoxStyle.row 0
-        |>.withAlign .center
-        |>.withJustify .center
-        |>.withPadding (Edges.xy (pxToSub 10) (pxToSub 6))
-        |>.withFixedSize nodeW nodeH)
-      pal.surface
-      (CornerRadii.uniform radius)
-      (BorderStyle.uniform (pxToSub 2) borderCol)
-      [WidgetNode.text
-        (BoxStyle.row 0 |>.withFixedSize (nodeW - pxToSub 20) (pxToSub 18))
-        theme.typo.lineTight
-        [diagramSynthRun labelStyle n.label]]
-      n.widgetId
+    match n.shape with
+    | .diamond =>
+      -- Decision parity: a stroked rhombus with the label centered inside, the way
+      -- mermaid.js draws `{decision}` nodes, instead of a small-radius rectangle.
+      WidgetNode.mk none false true
+        (BoxStyle.row 0
+          |>.withAlign .center
+          |>.withJustify .center
+          |>.withPadding (Edges.xy (pxToSub 10) (pxToSub 6))
+          |>.withFixedSize nodeW nodeH)
+        (.vectorIcon diamondOutline borderCol) [label]
+    | _ =>
+      WidgetNode.rrect
+        (BoxStyle.row 0
+          |>.withAlign .center
+          |>.withJustify .center
+          |>.withPadding (Edges.xy (pxToSub 10) (pxToSub 6))
+          |>.withFixedSize nodeW nodeH)
+        pal.surface
+        (CornerRadii.uniform radius)
+        (BorderStyle.uniform (pxToSub 2) borderCol)
+        [label]
+        n.widgetId
   match n.widgetId with
   | some wid => WidgetNode.focusable wid rawBox
   | none => rawBox
