@@ -3139,11 +3139,12 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
         | return JVal.null
       return reply
     let goal := config.remote && (← NativeGoalApproval.currentGoal st.store p)
-    let live := do
-      let now ← coreEpochSec
-      return (← OrbCore.NativeSharedWorkspace.placement? st.store grant job node owner now) == some p &&
-        (← NativeGoalApproval.currentGoal st.store p)
-    let delegateCall := fun (placed : OrbCore.NativeSharedWorkspace.Placement) (op : JVal) => do
+    let delegateCall := fun (placed : OrbCore.NativeSharedWorkspace.Placement) (op : JVal) (holderLive : IO Bool) => do
+      let live := do
+        unless ← holderLive do return false
+        let now ← coreEpochSec
+        return (← OrbCore.NativeSharedWorkspace.placement? st.store grant job node owner now) == some p &&
+          (← NativeGoalApproval.currentGoal st.store p)
       unless goal && placed == p && (← live) do return JVal.null
       let args := op.fieldOrNull "arguments"
       let now ← coreEpochSec

@@ -854,7 +854,8 @@ private def prepareRemoteHarnessCommand
           | return .error "native_grant_unavailable"
         if spec.goalDispatch?.isSome && !holder.remote then return .error "native_workspace_goal_unavailable"
         let worker := include_str "antigravity_workspace_turn.py"
-        let options := #[jobId, spec.ownerUserId, effNodeId, resumeSid?.getD ""]
+        let readTimeout := NativeSharedWorkspace.turnReadTimeoutSecs spec.goalDispatch?.isSome
+        let options := #[jobId, spec.ownerUserId, effNodeId, resumeSid?.getD "", toString readTimeout]
         let args := String.intercalate " " (options.toList.map shellSingleQuote)
         let cmd := wsPrefix ++ skillPrelude ++ fd3Prelude ++ "exec python3 -I -c " ++ shellSingleQuote worker ++ " " ++ args
         return .ok { command := cmd, envPairs := skillEnvs ++ promptEnvs ++ #[
