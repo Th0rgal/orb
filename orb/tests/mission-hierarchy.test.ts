@@ -23,7 +23,7 @@ test("a partial patch changes only the fields it names", () => {
   expect(next).toMatchObject({ status: "running", status_message: "x", callback_parent_mission_id: "p" });
 });
 
-test("a stale full detail response cannot restore an older renamed title", () => {
+test.each(["2026-11-18T07:00:00Z", undefined])("a stale full detail response (%s) cannot restore an older renamed title", metadata_updated_at => {
   const renamed = mergeMission(undefined, row("c", {
     title: "Final title",
     metadata_updated_at: "2026-11-18T08:00:00Z",
@@ -31,7 +31,7 @@ test("a stale full detail response cannot restore an older renamed title", () =>
   const stale = mergeMission(renamed, {
     id: "c",
     title: "Draft title",
-    metadata_updated_at: "2026-11-18T07:00:00Z",
+    metadata_updated_at,
   });
   expect(stale.title).toBe("Final title");
   expect(stale.metadata_updated_at).toBe("2026-11-18T08:00:00Z");

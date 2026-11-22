@@ -3,6 +3,10 @@
 Status: normative. Applies to the desktop Orb (`orb/`), and in reduced form to
 iOS (`ios_dashboard/`) and Android (`android_dashboard/`).
 
+Once a full row reports a rename with `metadata_updated_at`, a full response
+with an older or missing metadata timestamp cannot roll back the title. Other
+fields in that response still follow their usual merge rules.
+
 ## Problem
 
 The sidebar nests missions a mission launched (subagents) inside their parent,

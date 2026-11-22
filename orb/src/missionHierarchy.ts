@@ -443,7 +443,7 @@ export function mergeMission<M extends HierarchyFields>(prev: M | undefined, nex
     if (mode !== "full" || !prev) return next;
     const previousMetadata = prev.metadata_updated_at ? Date.parse(prev.metadata_updated_at) : NaN;
     const incomingMetadata = next.metadata_updated_at ? Date.parse(next.metadata_updated_at) : NaN;
-    if (!Number.isNaN(previousMetadata) && !Number.isNaN(incomingMetadata) && incomingMetadata < previousMetadata) {
+    if (Number.isFinite(previousMetadata) && (!Number.isFinite(incomingMetadata) || incomingMetadata < previousMetadata)) {
       return { ...next, title: prev.title, metadata_updated_at: prev.metadata_updated_at };
     }
     return next;
