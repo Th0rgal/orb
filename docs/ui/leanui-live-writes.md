@@ -1,5 +1,9 @@
 # Live native mission writes
 
+The native conversation displays “Ready for a follow-up” for a mission waiting
+for the user. Core's status value remains available to the sidebar and to
+mission actions. Rendering the conversation must preserve its transcript.
+
 * Leaving the composer or losing text-input focus cancels preedit. Committed text stays in the draft. Activating Send after blur must not require another text edit.
 * An unconfirmed Send retains its submission ID for a retry of the same draft on the same mission. Even if the mission is now running, that activation retries Send rather than stopping the turn. Core authorizes the caller before replaying a receipt; it must not append or dispatch the same submission again.
 * Stop on a Core-local turn must tear down its harness process. An `interrupted` database row alone is insufficient evidence. Archive must persist across a Core restart.
@@ -17,7 +21,3 @@ Core-local activation allocates a generation before PID registration. Archive ca
 Retiring warm children remain visible to Archive until exit. Transcript writes from a harness are conditional on its active generation. An occupied local one-shot returns a replayable `409 local_run_busy` before recording a second user message. LeanUI keeps the draft for an explicit new submission once idle (`live_writes.py busy`); an uncertain response retains its original key.
 
 For a running remote mission, both follow-up endpoints confirm queueing only after the queue transaction commits. If the transaction fails, the draft can be retried with the same message ID. Repeated delivery of that ID leaves one queued item.
-
-The native conversation displays “Ready for a follow-up” for a mission waiting
-for the user. Core's status value remains available to the sidebar and to
-mission actions. Rendering the conversation must preserve its transcript.
