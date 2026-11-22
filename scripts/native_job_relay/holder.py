@@ -112,7 +112,7 @@ def run(runtime, profile_uid, profile_gid, packet, lifetime, emit):
                                 checkout, uid, gid, readonly=packet["readonly"]))
         namespace, port = stack.enter_context(profile_transport(packet["port"], direct=packet.get("direct", False)))
         child = start_profile(nsenter, bwrap, image, home, ipc, namespace, port, profile_uid, profile_gid,
-                              packet["access_token"], packet["model"], packet.get("conversation"))
+                              packet["access_token"], packet["model"], packet.get("conversation"), readonly=packet["readonly"])
         stop = threading.Event()
         invalid = threading.Event()
 

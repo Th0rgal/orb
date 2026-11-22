@@ -25,6 +25,6 @@ def start_file_executor(bwrap, rootfs, workspace, uid, gid, stream, *, readonly)
         "--ro-bind-fd", str(rootfs), "/", "--ro-bind-fd" if readonly else "--bind-fd", str(workspace), "/workspace",
         "--dev", "/dev", "--clearenv", "--setenv", "HOME", "/nonexistent", "--setenv", "SANDBOXED_SH_WORKSPACE", "/workspace", "--chdir", "/",
         "--", "/bin/setpriv", "--clear-groups", "--reuid", str(uid), "--regid", str(gid), "--no-new-privs",
-        "--", "/bin/workspace-mcp",
+        "--", "/bin/workspace-mcp", "--bound-files", "readonly" if readonly else "writer",
     ], stdin=stream, stdout=stream, stderr=subprocess.DEVNULL, env={}, cwd="/", pass_fds=(rootfs, workspace),
        extra_groups=[])

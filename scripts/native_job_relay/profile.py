@@ -8,7 +8,7 @@ import uuid
 
 
 def start_profile(nsenter, bwrap, rootfs, home, ipc, namespace, port, uid, gid,
-                  access_token, model, conversation=None, *, workspace=True, catalog=False, diagnostic=False):
+                  access_token, model, conversation=None, *, workspace=True, catalog=False, diagnostic=False, readonly=False):
     """The private image supplies an empty /session and the CLI, setpriv and socat.
 
     home is a dedicated per-owner/mission/account directory for conversation state.
@@ -40,8 +40,10 @@ def start_profile(nsenter, bwrap, rootfs, home, ipc, namespace, port, uid, gid,
     proxy = f"socks5://127.0.0.1:{port}"
     agent = ("---\nname: orb-workspace\ndescription: Isolated Orb workspace\nmainAgent: true\n"
              "subagent: false\ntools: []\ncommandExecutionPolicy: off\n---\nUse the workspace MCP.")
-    settings = {"permissions": {"allow": ["mcp(workspace/write_file)"]}}
-    config = {"mcpServers": {"workspace": {"command": "/bin/socat", "args": ["STDIO", "UNIX-CONNECT:/ipc/workspace.sock"]}}}
+    enabled = ["read_file"] if readonly else ["read_file", "write_file"]
+    settings = {"permissions": {"allow": [f"mcp(workspace/{name})" for name in enabled]}}
+    config = {"mcpServers": {"workspace": {"command": "/bin/socat", "args": ["STDIO", "UNIX-CONNECT:/ipc/workspace.sock"],
+                                          "enabledTools": enabled}}}
     if not workspace:
         config = {"mcpServers": {}}
         settings = {}
