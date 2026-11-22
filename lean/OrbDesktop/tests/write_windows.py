@@ -71,7 +71,47 @@ def check(tmp, mode):
                 return body
             raise AssertionError('expected refusal: ' + error)
 
-        if mode == 'remote-append':
+        if mode == 'group-stop':
+            import signal
+            import sys
+            import time
+            childfile = tmp / 'grandchild'
+            term = tmp / 'leader-stopped'
+            (tmp / 'codex').write_text(f'''#!{sys.executable}
+import os, signal
+from pathlib import Path
+def retire(*_):
+    Path({str(term)!r}).touch()
+    os._exit(0)
+signal.signal(signal.SIGTERM, retire)
+if os.fork() == 0:
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    os.close(1)
+    Path({str(childfile)!r}).write_text(str(os.getpid()))
+signal.alarm(8)
+while True:
+    signal.pause()
+''')
+            send()
+            child = int(wait('descendant ready', lambda: childfile.exists() and childfile.read_text()))
+            fd = os.pidfd_open(child)
+            exited = select.poll()
+            exited.register(fd, select.POLLIN)
+            try:
+                with concurrent.futures.ThreadPoolExecutor(2) as pool:
+                    first = pool.submit(api, path + '/cancel', {})
+                    deadline = time.monotonic() + 5
+                    while not term.exists() and time.monotonic() < deadline:
+                        time.sleep(0.001)
+                    assert term.exists() and not first.done(), 'missed the Stop grace period'
+                    second = pool.submit(api, path + '/cancel', {})
+                    assert first.result(timeout=5)['ok'] and second.result(timeout=5)['ok']
+                assert exited.poll(400), 'successful Stop left a TERM-resistant descendant running'
+            finally:
+                with contextlib.suppress(ProcessLookupError):
+                    signal.pidfd_send_signal(fd, signal.SIGKILL)
+                os.close(fd)
+        elif mode == 'remote-append':
             check_remote_append(tmp, api, mid, submissions)
         elif mode == 'remote-queue-replay':
             def restart(while_stopped):
@@ -281,6 +321,6 @@ def check(tmp, mode):
 
 if __name__ == '__main__':
     import sys
-    for mode in sys.argv[1:] or ('stop', 'receipt', 'activation', 'pipe', 'archive-activation', 'archive-registration', 'supersede', 'completion', 'fd', 'busy', 'retire', 'stop-archive', 'remote-append', 'remote-queue-replay'):
+    for mode in sys.argv[1:] or ('stop', 'receipt', 'activation', 'pipe', 'archive-activation', 'archive-registration', 'supersede', 'completion', 'fd', 'busy', 'retire', 'stop-archive', 'remote-append', 'remote-queue-replay', 'group-stop'):
         with tempfile.TemporaryDirectory(prefix='orb-write-window-') as d:
             check(Path(d), mode)

@@ -1986,12 +1986,12 @@ def tickLocalHarnessSupervisor (st : CoreAppState) (nowIso : String) : IO Nat :=
   let some mgr := st.warmMgr?
     | return 0
   let runs ← mgr.runsRef.get
-  let pids ← mgr.activePidsRef.get
+  let pids ← mgr.activeGroupsRef.get
   let mut observed : Nat := 0
   for (mid, runRef) in runs do
     let run ← runRef.get
     if run.done || run.stopping then continue
-    let pid? := (pids.find? (fun p => p.1 == mid)).map Prod.snd
+    let pid? := (pids.find? (fun p => p.1 == mid)).map fun p => p.2.pid
     let some pid := pid?
       | continue
     let alive ← (System.FilePath.mk s!"/proc/{pid}").pathExists
@@ -2178,7 +2178,7 @@ private def launchLocalCoreMissionTurn
     if let .ok _ := changed then
       let claimed ← mgr.registration.atomically do
         if (← mgr.stopEpochs.get).getD missionId 0 != launchEpoch then return false
-        if (← mgr.activePidsRef.get).any (·.1 == missionId) then return false
+        if (← mgr.activeGroupsRef.get).any (·.1 == missionId) then return false
         mgr.launchGenerations.modify fun gs => gs.insert missionId nextGen
         return true
       if !claimed then return .error "local_run_busy_or_fenced"
@@ -4072,8 +4072,8 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
       let fenceArchive : IO Bool := do
         let some mgr := st.warmMgr? | return true
         mgr.registration.atomically do
-          if (← mgr.stoppingPidsRef.get).any (·.1 == mid) then return false
-          if (← mgr.activePidsRef.get).any (·.1 == mid) then return false
+          if (← mgr.stoppingGroupsRef.get).any (·.1 == mid) then return false
+          if (← mgr.activeGroupsRef.get).any (·.1 == mid) then return false
           if let some (_, entry) := (← mgr.warmProcsRef.get).find? (·.1 == mid) then
             if !(← entry.aliveRef.get) then return false
             if (← OrbBin.ClaudeControl.getRunState? mgr mid).any (!·.done) then return false
@@ -6594,7 +6594,7 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
           if localSend then
             let refusal? ← match st.warmMgr? with
               | none => pure (some (503, "local_launcher_unavailable"))
-              | some mgr => pure (if (← mgr.activePidsRef.get).any (·.1 == mid) then some (409, "local_run_busy") else none)
+              | some mgr => pure (if (← mgr.activeGroupsRef.get).any (·.1 == mid) then some (409, "local_run_busy") else none)
             if let some (status, reason) := refusal? then
               let refusal := s!"\{\"id\":{jsonEscape msgId},\"error\":{jsonEscape reason},\"message_accepted\":false,\"queued\":false}"
               if keyed then
