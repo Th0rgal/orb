@@ -13,3 +13,4 @@ Core-local activation allocates a generation before PID registration. Archive ca
 Retiring warm children remain visible to Archive until exit. Transcript writes from a harness are conditional on its active generation. An occupied local one-shot returns a replayable `409 local_run_busy` before recording a second user message. LeanUI keeps the draft for an explicit new submission once idle (`live_writes.py busy`); an uncertain response retains its original key.
 
 A remote follow-up refused before managed provisioning starts may reuse its submission ID. Once provisioning has started, a failure can have external effects, so a retry keeps the original claim.
+Both remote follow-up endpoints persist the user’s event before submitting the turn. If the event write fails, Core returns a storage error and sends no job to the node.

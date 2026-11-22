@@ -5334,7 +5334,8 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
             let effTagsJson ← if !rentedVmId.isEmpty then
               updateMissionBoundManagedNode st.store mid resolvedNode nowIso
             else pure mRec.tagsJson
-            discard <| appendMissionEvent st.store mid "user_message" pl nowIso
+            if let .error _ ← appendMissionEvent st.store mid "user_message" pl nowIso then
+              return .ok (mkJson 500 "{\"error\":\"message_append_failed\"}")
             if let some tSink := st.telemetrySink? then
               let actorUid? := if caller.isLegacyUnscoped || caller.userId.isEmpty then none else some caller.userId
               let actorUname? := if caller.isLegacyUnscoped || caller.username.isEmpty then none else some caller.username
@@ -6533,7 +6534,11 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
           let effTagsJson ← if !rentedVmId.isEmpty then
             updateMissionBoundManagedNode st.store mid resolvedNode nowIso
           else pure m.tagsJson
-          let _ ← appendMissionEvent st.store mid "user_message" evPayload nowIso
+          if let .error _ ← appendMissionEvent st.store mid "user_message" evPayload nowIso then
+            if keyed && rentedVmId.isEmpty then
+              if let .error _ ← abortIdempotencySlot st.store receiptScope msgId then
+                return .ok (mkJson 500 "{\"error\":\"message_receipt_unconfirmed\"}")
+            return .ok (mkJson 500 "{\"error\":\"message_append_failed\"}")
           let mut resumeSid? : Option String := none
           if let .ok sRows ← execParamQuery st.store.missionsDb "SELECT COALESCE(session_id,'') FROM missions WHERE id=?1;" #[mid] then
             if sRows.size > 1 then

@@ -821,6 +821,18 @@ def run (root : String) : IO Unit := do
     check ((placementRows[1]?.bind (·[0]?)) == some "1") "placement recovery queues once"
     sql store.missionsDb "DELETE FROM remote_message_queue WHERE mission_id=?1;" #[placementMid]
     sql store.missionsDb "DELETE FROM queue_item_receipts WHERE mission_id=?1;" #[placementMid]
+    sql store.missionsDb "UPDATE missions SET tags='[\"remote-node:fixture\"]',status='awaiting_user' WHERE id=?1;" #[placementMid]
+    sql store.missionsDb "CREATE TRIGGER refuse_remote_message BEFORE INSERT ON mission_events WHEN NEW.event_type='user_message' BEGIN SELECT RAISE(ABORT,'test event failure'); END;"
+    for (route, key) in #[("/api/control/message", "append-native"), (s!"/api/control/missions/{placementMid}/message", "append-scoped")] do
+      let body := JVal.obj #[("mission_id", .str placementMid), ("content", .str "resume"), ("client_message_id", .str key)]
+      for _ in [0:2] do
+        let (code, refusal) ← send "POST" route member body placementApp
+        check (code == 500 && refusal.fieldStr? "error" == some "message_append_failed")
+          "a refused event prevents remote dispatch and is retryable before provisioning"
+    sql store.missionsDb "DROP TRIGGER refuse_remote_message;"
+    let .ok eventRows ← execParamQuery store.missionsDb "SELECT COUNT(*) FROM mission_events WHERE mission_id=?1 AND event_type='user_message';" #[placementMid]
+      | throw (IO.userError "query refused user event")
+    check ((eventRows[1]?.bind (·[0]?)) == some "0") "a refused remote send leaves no user event"
     sql store.missionsDb "DELETE FROM missions WHERE id=?1;" #[placementMid]
     for method in #["GET", "POST"] do
       let route := "/api/workspaces/member-workspace/resources"
