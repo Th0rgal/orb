@@ -338,12 +338,12 @@ def runStreamingPumpContracts : IO Unit := do
     if let .ok cfd2 ← tcpConnect "127.0.0.1" cPort then
       discard <| writeAll cfd2 req.toUTF8 false
       discard <| closeFd cfd2
-    let _ := srvTask.get
+    discard <| IO.wait srvTask
     if let .ok (errResp, none) ← streamingUpstreamRequest false "POST" "127.0.0.1" errPort "/v1/chat/completions" #[] body.toUTF8 then
       truncErrStatus := errResp.status
       truncErrBody := errResp.body
-    let _ := upTask.get
-    let _ := errTask.get
+    discard <| IO.wait upTask
+    discard <| IO.wait errTask
     if let .ok rows ← execParamQuery headFailStore.missionsDb
         "SELECT input_tokens, output_tokens FROM proxy_usage ORDER BY id DESC LIMIT 1;" #[] then
       usageRows := rows
