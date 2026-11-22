@@ -173,28 +173,16 @@ gboolean orb_gtk_row_context_menu(GtkWidget *wv, GtkWidget *list, GtkWidget *row
     gboolean bulk = wv && sel && g_hash_table_size(sel) > 1;
     const char *kind = g_object_get_data(G_OBJECT(row), "orb-kind"), *target = g_object_get_data(G_OBJECT(row), "orb-target");
     const char *slug = orb_menu_project_slug(target);
-    if (!bulk && wv && slug && g_strcmp0(kind, "project") == 0) {
-        gint origin_x, origin_y;
-        gdk_window_get_origin(gtk_widget_get_window(wv), &origin_x, &origin_y);
-        gdouble root_x, root_y;
-        gdk_event_get_root_coords(ev, &root_x, &root_y);
-        char *quoted = orb_json_escape_string(slug);
-        if (!quoted) return FALSE;
-        char *js = g_strdup_printf("window.dispatchEvent(new CustomEvent('orb:native-project-menu',{detail:{slug:%s,y:%d}}))", quoted, (int)(root_y - origin_y));
-        webkit_web_view_evaluate_javascript(WEBKIT_WEB_VIEW(wv), js, -1, NULL, NULL, NULL, NULL, NULL);
-        free(quoted);
-        g_free(js);
-        return TRUE;
-    }
-    if (!bulk && (!wv || !kind || strcmp(kind, "mission") != 0 || !target || strncmp(target, "m:", 2) != 0 || !target[2])) {
-        return FALSE;
-    }
+    gboolean is_project = !bulk && wv && slug && g_strcmp0(kind, "project") == 0;
+    gboolean is_mission = !bulk && wv && !g_strcmp0(kind, "mission") && target && !strncmp(target, "m:", 2) && target[2];
+    if (!bulk && !is_project && !is_mission) return FALSE;
     GtkWidget *pop = gtk_popover_menu_new(), *menu = orb_menu_page();
     orb_menu_anchor(GTK_POPOVER(pop), row, ev);
     gtk_container_add(GTK_CONTAINER(pop), menu);
     gtk_container_child_set(GTK_CONTAINER(pop), menu, "submenu", "main", NULL);
     gtk_style_context_add_class(gtk_widget_get_style_context(pop), "orb-ctx");
     if (bulk) { bulk_menu(wv, list, menu); }
+    else if (is_project) { orb_project_menu_populate(wv, menu, slug); }
     else {
         const char *id = target + 2, *title = g_object_get_data(G_OBJECT(row), "orb-title");
         const char *status = g_object_get_data(G_OBJECT(row), "orb-status"), *project = g_object_get_data(G_OBJECT(row), "orb-project");
