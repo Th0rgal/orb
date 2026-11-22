@@ -84,7 +84,16 @@ for (const theme of ["light", "dark"]) test(`account VPN retry and Direct select
   await shared.click();
   const select = page.getByLabel("Account connection", { exact: true });
   await expect(select).toHaveValue("");
-  await select.selectOption("NL");
+  await select.click();
+  const routes = page.getByRole("listbox", { name: "Account connection" });
+  await expect(routes.getByRole("option", { name: "Direct" })).toHaveAttribute("aria-selected", "true");
+  await page.keyboard.press("Escape");
+  await expect(routes).toHaveCount(0);
+  expect(changes).toHaveLength(0);
+  await select.click();
+  const netherlands = routes.getByRole("option", { name: "AirVPN · NL" });
+  expect(await netherlands.evaluate(el => el.scrollWidth <= el.clientWidth)).toBe(true);
+  await netherlands.click();
   await expect(page.getByText("All five AirVPN sessions are in use.")).toBeVisible();
   await page.getByRole("button", { name: "Retry verification" }).click();
   const verified = page.getByText("Verified exit · west · 192.0.2.35");
