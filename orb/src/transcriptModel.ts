@@ -551,6 +551,7 @@ export class TranscriptReducer {
       case "tool_call":
       case "tool_result": {
         const callId=str(d.tool_call_id), index=this.tools.get(callId);
+        const name = str(d.name ?? d.tool_name);
         // A finished call whose id comes back is a new call: OpenCode history
         // from before Core made its ids unique reused `call_0` per response.
         // A re-emitted call (Antigravity repeats some) carries the same arguments;
@@ -560,11 +561,11 @@ export class TranscriptReducer {
         if(index!=null&&!reused){
           const old=this.items[index];
           if(old.kind==="tool"&&ev.type==="tool_result")this.put(index,{...old,result:d.result,done:true,unresolved:false,...(d.truncated===true?{truncated:true}:{})});
-          else if(old.kind==="tool"&&ev.type==="tool_call")this.put(index,{...old,name:str(d.name)||old.name,args:d.args??old.args,...(d.truncated===true?{truncated:true}:{})});
+          else if(old.kind==="tool"&&ev.type==="tool_call")this.put(index,{...old,name:name||old.name,args:d.args??old.args,...(d.truncated===true?{truncated:true}:{})});
           return;
         }
         this.tools.set(callId,this.items.length);
-        this.items.push({kind:"tool",key:reused?`tool:${callId}:${this.items.length}`:`tool:${callId}`,callId,name:str(d.name)||"tool",args:d.args??null,...(ev.type==="tool_result"?{result:d.result}:{}),...(d.truncated===true?{truncated:true}:{}),...(ev.sequence!=null?{sequence:ev.sequence}:{}),done:ev.type==="tool_result"});return;
+        this.items.push({kind:"tool",key:reused?`tool:${callId}:${this.items.length}`:`tool:${callId}`,callId,name:name||"tool",args:d.args??null,...(ev.type==="tool_result"?{result:d.result}:{}),...(d.truncated===true?{truncated:true}:{}),...(ev.sequence!=null?{sequence:ev.sequence}:{}),done:ev.type==="tool_result"});return;
       }
       case "error": this.close(); this.items.push({kind:"error",key:this.key("error"),text:str(d.message)});return;
       case "mission_status_changed": {
