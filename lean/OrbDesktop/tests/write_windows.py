@@ -74,10 +74,11 @@ def check(tmp, mode):
         if mode == 'remote-append':
             check_remote_append(tmp, api, mid, submissions)
         elif mode == 'remote-queue-replay':
-            def restart():
+            def restart(while_stopped):
                 nonlocal token
                 server.terminate()
                 server.wait(8)
+                while_stopped()
                 start()
                 token = wait('restart', login)
             check_scoped_queue_replay(tmp, api, mid, submissions, restart)
