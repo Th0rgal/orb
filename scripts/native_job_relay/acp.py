@@ -55,12 +55,12 @@ def turn(child, packet, ask, emit):
                 if msg["method"] != "session/request_permission":
                     send({"id": msg["id"], "error": {"code": -32601, "message": "Unavailable"}})
                     continue
-                candidate = delegated_call(request, session) if session else None
+                candidate = delegated_call(request, session) if method == "session/prompt" and session else None
                 outcome = {"outcome": "cancelled"}
                 if candidate and ask(candidate[1]):
                     outcome = {"outcome": "selected", "optionId": candidate[0]}
                 send({"id": msg["id"], "result": {"outcome": outcome}})
-            elif msg["method"] == "session/update" and request.get("sessionId") == session:
+            elif method == "session/prompt" and msg["method"] == "session/update" and request.get("sessionId") == session:
                 update = request.get("update", {})
                 content = update.get("content", {})
                 if update.get("sessionUpdate") == "agent_message_chunk" and content.get("type") == "text":

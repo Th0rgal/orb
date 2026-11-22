@@ -65,7 +65,7 @@ struct OrbQuestion: View {
                         }
                         .buttonStyle(.plain)
 
-                        if isToolPermission {
+                        if isToolPermission && params["input"]["once_only"] != .bool(true) {
                             Button {
                                 OrbHaptics.selection()
                                 Task { await reply(.object(["action": .string("accept_session")])) }

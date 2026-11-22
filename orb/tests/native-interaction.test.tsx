@@ -59,6 +59,18 @@ describe('native plan interactions',()=>{
    expect((input as HTMLInputElement).value).toBe('');
   }finally{cleanup();host.__TAURI_INTERNALS__=previous;}
  });
+ it('shows only one-time decisions for a native child mission',async()=>{
+  const request={id:'child-1',method:'permission',params:{tool:'start_mission',input:{description:'Start child mission',once_only:true}}};
+  const invoke=vi.fn(async(cmd:string)=>cmd==='local_interaction'?request:null);
+  const host=window as any;const previous=host.__TAURI_INTERNALS__;host.__TAURI_INTERNALS__={invoke:transport(invoke)};
+  try{
+   render(()=><NativeInteraction mission="mission" active/>);
+   await screen.findByText('Start child mission');
+   expect(screen.queryByRole('button',{name:'Allow for session'})).toBeNull();
+   expect(screen.getByRole('button',{name:'Decline'})).toBeTruthy();
+   expect(screen.getByRole('button',{name:'Allow once'})).toBeTruthy();
+  }finally{cleanup();host.__TAURI_INTERNALS__=previous;}
+ });
  it('does not accept a plan until explicitly clicked',async()=>{
   const invoke=vi.fn(async(cmd:string)=>cmd==='local_interaction'?{id:'plan-1',method:'plan',params:{plan:'Create hello.txt'}}:null);
   const host=window as any;const previous=host.__TAURI_INTERNALS__;host.__TAURI_INTERNALS__={invoke:transport(invoke)};
