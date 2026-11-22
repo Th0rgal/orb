@@ -62,3 +62,35 @@ test("expired native handoff signs in by keyboard and disconnects the displayed 
   expect(calls.map(c => c.command)).not.toContain("ui_cache_clear");
   expect(JSON.stringify(calls)).not.toContain("fixture-password");
 });
+
+for (const usernameValue of ["Ben", ""]) {
+  test(`unavailable health permits ${usernameValue ? "named-account" : "password-only"} login`, async ({ page }) => {
+    await page.addInitScript(() => {
+      localStorage.setItem("orb.apiUrl", location.origin);
+      Object.assign(window, { __TAURI__: { core: { invoke: async () => null } } });
+    });
+    let login: unknown;
+    await page.route("**/api/**", async route => {
+      const path = new URL(route.request().url()).pathname;
+      if (path === "/api/health") return route.fulfill({ status: 503, body: "{}" });
+      if (path === "/api/auth/login") {
+        login = route.request().postDataJSON();
+        return route.fulfill({ json: { token: "fixture-session" } });
+      }
+      if (path === "/api/auth/me" && login) {
+        return route.fulfill({ json: { auth_mode: "multi_user", user: { id: "ben", username: "Ben", role: "member" } } });
+      }
+      return route.fulfill({ status: 401, body: "{}" });
+    });
+    const healthFailure = page.waitForResponse(r => new URL(r.url()).pathname === "/api/health" && r.status() === 503);
+    await page.goto("/#account-settings");
+    await healthFailure;
+    const username = page.getByRole("textbox", { name: "Username" });
+    await expect(username).toBeVisible();
+    if (usernameValue) await username.fill(usernameValue);
+    await page.getByLabel("Password", { exact: true }).fill("fixture-password");
+    await page.getByRole("button", { name: "Connect", exact: true }).click();
+    const credentials = usernameValue ? { username: usernameValue, password: "fixture-password" } : { password: "fixture-password" };
+    await expect.poll(() => login).toEqual(credentials);
+  });
+}
