@@ -38,11 +38,15 @@ def respond(frame, tools, exchange):
     return {**envelope, "result": result}
 
 
-@contextlib.contextmanager
 def remote_socket(directory, uid, gid, readonly, exchange):
     tools = {name: definition(name) for name in (["read_file"] if readonly else ["read_file", "write_file"])}
+    return rpc_socket(directory, "workspace.sock", uid, gid, lambda frame: respond(frame, tools, exchange))
+
+
+@contextlib.contextmanager
+def rpc_socket(directory, socket_name, uid, gid, handle):
     connected, failed, stop = threading.Event(), threading.Event(), threading.Event()
-    path = os.path.join(directory, "workspace.sock")
+    path = os.path.join(directory, socket_name)
     with socket.socket(socket.AF_UNIX) as server:
         server.bind(path)
         os.chown(path, uid, gid)
@@ -65,7 +69,7 @@ def remote_socket(directory, uid, gid, readonly, exchange):
                                 break
                             if len(line) > 2 * 1024 * 1024 or not line.endswith(b"\n"):
                                 raise ValueError("Workspace frame too large")
-                            reply = respond(json.loads(line), tools, exchange)
+                            reply = handle(json.loads(line))
                             if reply is not None:
                                 stream.write(json.dumps(reply).encode() + b"\n")
                                 stream.flush()

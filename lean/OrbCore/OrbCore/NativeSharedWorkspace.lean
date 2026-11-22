@@ -86,7 +86,7 @@ private def claim (store : CoreStore) (grant job : String) : IO Bool := do
 /-- Pump one process only. The stdin pipe ties the isolated route and profile to Core. -/
 def pumpTurn (store : CoreStore) (hub : ProviderRuntimeHub) (working grant job node owner prompt : String)
     (conversation : Option String) (expectedUid : Nat) (config : HolderConfig)
-    (fileCall : Placement → JVal → IO JVal) (emit : ByteArray → IO Bool) : IO Bool := do
+    (goal : Bool) (fileCall delegateCall : Placement → JVal → IO JVal) (emit : ByteArray → IO Bool) : IO Bool := do
   unless ← emit ByteArray.empty do return false
   let result ← withVerifiedProfile store hub working grant job node owner fun p token port => do
     unless ← claim store grant p.job do return .error "native_turn_already_claimed"
@@ -94,7 +94,7 @@ def pumpTurn (store : CoreStore) (hub : ProviderRuntimeHub) (working grant job n
       ("mission", .str p.mission), ("account", .str p.account), ("model", .str p.model), ("exec_uid", .nat expectedUid),
       ("access_token", .str token), ("direct", .bool p.country.isEmpty), ("remote", .bool config.remote),
       ("port", (port.map (fun n => JVal.nat n.toNat)).getD .null), ("readonly", .bool p.readonly),
-      ("prompt", .str prompt), ("conversation", (conversation.map JVal.str).getD .null)]
+      ("goal", .bool goal), ("prompt", .str prompt), ("conversation", (conversation.map JVal.str).getD .null)]
     let .ok child ← (IO.Process.spawn {
       cmd := "/usr/bin/python3", args := #["-I", config.runtime ++ "/native_job_relay/main.py",
         config.runtime, config.profileUser], inheritEnv := false,
@@ -132,14 +132,15 @@ def pumpTurn (store : CoreStore) (hub : ProviderRuntimeHub) (working grant job n
         let some envelope := (OrbBin.Json.parse line).toOption | return .error "native_holder_protocol"
         if let some event := envelope.field? "agent" then
           if !(← emit (renderCompact event ++ "\n").toUTF8) then return .error "native_stream_closed"
-        else if let some file := envelope.field? "file" then
+        else if let some operation := (envelope.field? "file").orElse (fun _ => envelope.field? "delegate") then
           unless config.remote do return .error "native_holder_protocol"
-          let action := file.fieldStr? "action"
-          unless action == some "read_file" || (action == some "write_file" && !p.readonly) do
+          let delegated := (envelope.field? "delegate").isSome
+          let action := operation.fieldStr? "action"
+          unless (delegated && goal) || (!delegated && (action == some "read_file" || (action == some "write_file" && !p.readonly))) do
             return .error "native_holder_protocol"
           let checked ← withVerifiedProfile store hub working grant job node owner fun current currentToken _ => do
             unless current == p && currentToken == token do return .error "native_shared_workspace_denied"
-            return .ok (← fileCall p file)
+            return .ok (← (if delegated then delegateCall else fileCall) p operation)
           let .ok reply := checked | return .error "native_shared_workspace_denied"
           unless (← placement? store grant job node owner (← coreEpochSec)) == some p do
             return .error "native_shared_workspace_denied"

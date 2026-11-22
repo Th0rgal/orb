@@ -32,12 +32,18 @@ def main():
                 sys.stdout.write(line + "\n")
                 sys.stdout.flush()
 
-        def exchange(file):
-            send({"file": file})
+        exchange_lock = threading.Lock()
+
+        def request(frame):
+            send(frame)
             line = sys.stdin.buffer.readline(2 * 1024 * 1024 + 1)
             if len(line) > 2 * 1024 * 1024 or not line.endswith(b"\n"):
                 raise ValueError("invalid Core response")
             return json.loads(line)
+
+        def exchange(frame):
+            with exchange_lock:
+                return request(frame)
 
         run(runtime, account.pw_uid, account.pw_gid, packet, sys.stdin.fileno(),
             lambda event: send({"agent": event}), exchange)

@@ -616,7 +616,7 @@ private def resolveRemoteCallbackUrls (sup : RemoteJobSupervisor) (targetNodeId 
   let proxyBase := if !pubProxyRaw.isEmpty then pubProxyRaw else apiBase
   return (apiBase, proxyBase)
 
-private def mintMissionScopedMcpEnv
+def mintMissionScopedMcpEnv
     (store : CoreStore)
     (sup : RemoteJobSupervisor)
     (missionId ownerUid project apiBaseUrl : String)
@@ -846,8 +846,8 @@ private def prepareRemoteHarnessCommand
         if !url.isHttps && !(sup.devMode && url.host == "127.0.0.1") then return .error "native_core_tls_required"
         let .ok bearer ← mintNativeAntigravityToken store spec.missionId spec.ownerUserId jobId account model (nowSec + 86400) (some effNodeId)
           | return .error "native_grant_unavailable"
-        if (← NativeSharedWorkspace.holderFor? effNodeId).isSome && !sup.devMode then
-          if spec.goalDispatch?.isSome then return .error "native_workspace_goal_unavailable"
+        if let some holder := (← NativeSharedWorkspace.holderFor? effNodeId).filter (fun _ => !sup.devMode) then
+          if spec.goalDispatch?.isSome && !holder.remote then return .error "native_workspace_goal_unavailable"
           let worker := include_str "antigravity_workspace_turn.py"
           let options := #[jobId, spec.ownerUserId, effNodeId, resumeSid?.getD ""]
           let args := String.intercalate " " (options.toList.map shellSingleQuote)

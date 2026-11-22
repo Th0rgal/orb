@@ -14,7 +14,9 @@ import threading
 import uuid
 
 from .profile import start_profile
-from .remote import remote_socket
+from .remote import remote_socket, rpc_socket
+from .delegation import Delegation
+from .acp import turn as acp_turn
 from .session import workspace_socket
 from .supervisor import profile_transport
 
@@ -113,16 +115,22 @@ def run(runtime, profile_uid, profile_gid, packet, lifetime, emit, exchange=None
         nsenter = shutil.which("nsenter")
         if not bwrap or not nsenter:
             raise RuntimeError("native isolation unavailable")
+        goal = packet.get("goal") is True
+        if goal and not remote:
+            raise PermissionError("Goal requires an enrolled remote workspace")
         if remote:
-            listener = remote_socket(tmp, profile_uid, profile_gid, packet["readonly"], exchange)
+            listener = remote_socket(tmp, profile_uid, profile_gid, packet["readonly"], lambda file: exchange({"file": file}))
         else:
             files = directory(stack, base / "workspace-image")
             listener = workspace_socket(tmp, profile_uid, profile_gid, bwrap, files, checkout, uid, gid,
-                                        readonly=packet["readonly"])
+                                        readonly=packet["readonly"], goal=goal)
         connected, failed = stack.enter_context(listener)
+        if goal:
+            delegate = Delegation(lambda request: exchange({"delegate": request}))
+            stack.enter_context(rpc_socket(tmp, "delegate.sock", profile_uid, profile_gid, delegate.respond))
         namespace, port = stack.enter_context(profile_transport(packet["port"], direct=packet.get("direct", False)))
         child = start_profile(nsenter, bwrap, image, home, ipc, namespace, port, profile_uid, profile_gid,
-                              packet["access_token"], packet["model"], packet.get("conversation"), readonly=packet["readonly"])
+                              packet["access_token"], packet["model"], packet.get("conversation"), readonly=packet["readonly"], goal=goal)
         stop = threading.Event()
         invalid = threading.Event()
 
@@ -138,6 +146,9 @@ def run(runtime, profile_uid, profile_gid, packet, lifetime, emit, exchange=None
         monitor = threading.Thread(target=revoke)
         monitor.start()
         try:
+            if goal:
+                acp_turn(child, packet, delegate.ask, emit)
+                return
             message = {"event": "user", "message": {"role": "user", "content": packet["prompt"]}}
             child.stdin.write(json.dumps(message).encode() + b"\n")
             child.stdin.close()

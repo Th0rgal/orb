@@ -37,7 +37,7 @@ import OrbCore.ManagedProviderSealing
 import OrbCore.AirVpnSettings
 import OrbCore.AccountVpnApi
 import OrbCore.AccountVpnRelay
-import OrbCore.NativeSharedWorkspace
+import OrbCore.NativeGoalApproval
 import OrbCore.AutoPlacement
 import OrbCore.RemoteDispatch
 import OrbCore.ProjectFilesAndController
@@ -2950,6 +2950,16 @@ private def dispatchMissionControlAndGitRoutes?
       | return some (.ok (mkJson 400 "{\"error\":\"invalid_json\"}"))
     let callId := (jv.fieldStr? "tool_call_id").getD ""
     let toolName := (jv.fieldStr? "name").getD "ui_native_request"
+    if callId.startsWith NativeGoalApproval.ticketPrefix then
+      let action := (jv.fieldOrNull "result").fieldStr? "action"
+      let mid? ← NativeGoalApproval.answer st.store callId caller.userId ((jv.fieldStr? "mission_id").getD "")
+        (action.getD "") nowEpochSec
+      if let some mid := mid? then
+        let pl := renderCompact (.obj #[("tool_call_id",.str callId),("tool_name",.str "ui_native_request"),
+          ("result",.obj #[("action",.str (action.getD ""))])])
+        discard <| appendMissionEvent st.store mid "tool_result" pl (formatEpochIso8601Utc nowEpochSec)
+        publishControlEvent st.broadcastHub? "tool_result" pl (some mid)
+      return some (.ok (mkJson 200 (renderCompact (.obj #[("delivered",.bool mid?.isSome)]))))
     let resultVal := (jv.field? "result").getD (.obj #[("action", .str "accept")])
     if callId.trimAscii.toString.isEmpty then
       return some (.ok (mkJson 400 "{\"error\":\"missing_tool_call_id\"}"))
@@ -3075,8 +3085,39 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
           (sn.baseUrl ++ "/jobs/" ++ job ++ "/native-file") (some auth) (some request) #[] 5000 (2*1024*1024)
         | return JVal.null
       return reply
+    let goal := config.remote && (← NativeGoalApproval.currentGoal st.store p)
+    let live := do
+      let now ← coreEpochSec
+      return (← OrbCore.NativeSharedWorkspace.placement? st.store grant job node owner now) == some p &&
+        (← NativeGoalApproval.currentGoal st.store p)
+    let delegateCall := fun (placed : OrbCore.NativeSharedWorkspace.Placement) (op : JVal) => do
+      unless goal && placed == p && (← live) do return JVal.null
+      let args := op.fieldOrNull "arguments"
+      let now ← coreEpochSec
+      match op.fieldStr? "action" with
+      | some "catalog" => return NativeGoalApproval.catalogue
+      | some "ask" =>
+        return ← NativeGoalApproval.ask st.store p args now (fun id notice => do
+          let payload := renderCompact (.obj #[("tool_call_id",.str id),("tool_name",.str "ui_native_request"),("args",notice)])
+          discard <| appendMissionEvent st.store p.mission "tool_call" payload (formatEpochIso8601Utc now)
+          publishControlEvent st.broadcastHub? "tool_call" payload (some p.mission)) live
+      | some "dispatch" =>
+        let ticket := (op.fieldStr? "ticket").getD ""
+        unless ← NativeGoalApproval.consume st.store p args ticket now do return JVal.null
+        let some sup := st.remoteSup? | return JVal.null
+        let some mission ← getMission? st.store p.mission | return JVal.null
+        let localUrl := s!"http://127.0.0.1:{st.cfg.port}"
+        let env ← mintMissionScopedMcpEnv st.store sup p.mission p.owner mission.project localUrl false now
+        let some (_,token) := env.find? (fun (k,_) => k == "SANDBOXED_MCP_TOKEN") | return JVal.null
+        let key := ((args.fieldStr? "idempotency_key").filter (!·.isEmpty)).getD ticket
+        let bound := (args.setField "parent_mission_id" (.str p.mission)).setField "idempotency_key" (.str key)
+        unless ← live do return JVal.null
+        let .ok (200,_,some reply) ← OrbBin.HttpClient.sendJsonRequest "POST" (localUrl ++ "/api/mcp/call")
+          (some token) (some (.obj #[("name",.str "start_mission"),("arguments",bound)])) #[] 20000 262144 | return JVal.null
+        return reply
+      | _ => return JVal.null
     let stream := OrbCore.NativeSharedWorkspace.pumpTurn st.store hub st.cfg.workingDir grant job node
-      owner prompt (j.fieldStr? "conversation") uid config fileCall
+      owner prompt (j.fieldStr? "conversation") uid config goal fileCall delegateCall
     return .ok {
       status := 200
       contentType := "application/x-ndjson"

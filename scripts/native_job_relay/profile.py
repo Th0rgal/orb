@@ -8,7 +8,7 @@ import uuid
 
 
 def start_profile(nsenter, bwrap, rootfs, home, ipc, namespace, port, uid, gid,
-                  access_token, model, conversation=None, *, workspace=True, catalog=False, diagnostic=False, readonly=False):
+                  access_token, model, conversation=None, *, workspace=True, catalog=False, diagnostic=False, readonly=False, goal=False):
     """The private image supplies an empty /session and the CLI, setpriv and socat.
 
     home is a dedicated per-owner/mission/account directory for conversation state.
@@ -34,6 +34,10 @@ def start_profile(nsenter, bwrap, rootfs, home, ipc, namespace, port, uid, gid,
     args.extend(("--input-format", "stream-json"))
     if diagnostic and not catalog:
         args.extend(("--log-file", "/home/orb/probe.log"))
+    if goal:
+        if not workspace or catalog:
+            raise ValueError("Goal requires a workspace")
+        args = ["/bin/agy", "acp", "--agent", "orb-workspace"]
     if catalog:
         args = ["/bin/agy", "models"]
     token = {"auth_method": "consumer", "token": {"access_token": access_token, "token_type": "Bearer"}}
@@ -44,6 +48,10 @@ def start_profile(nsenter, bwrap, rootfs, home, ipc, namespace, port, uid, gid,
     settings = {"permissions": {"allow": [f"mcp(workspace/{name})" for name in enabled]}}
     config = {"mcpServers": {"workspace": {"command": "/bin/socat", "args": ["STDIO", "UNIX-CONNECT:/ipc/workspace.sock"],
                                           "enabledTools": enabled}}}
+    if goal:
+        settings["permissions"]["ask"] = ["mcp(sandboxed/start_mission)"]
+        config["mcpServers"]["sandboxed"] = {"command": "/bin/socat", "args": ["STDIO", "UNIX-CONNECT:/ipc/delegate.sock"],
+                                              "enabledTools": ["start_mission"]}
     if not workspace:
         config = {"mcpServers": {}}
         settings = {}
