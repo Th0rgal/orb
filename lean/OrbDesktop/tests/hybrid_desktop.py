@@ -262,6 +262,12 @@ def run():
                     subprocess.run(['wtype', '-k', 'Escape'], env=env, check=True)
                     check('dismiss mission menu', lambda: 'rename' not in words('rename'))
                 assert anchors[1] - anchors[0] > 45, (mode, anchors)
+                # Visit both ends, wrap to the last action, and activate it.
+                pointer.click(55, parent_y, 'button3')
+                check('menu keyboard target', lambda: words('rename').get('rename'))
+                subprocess.run(['wtype', '-k', 'End', '-k', 'Home', '-k', 'Up', '-k', 'Return'],
+                               env=env, check=True)
+                check('last mission action', lambda: http.observed.get('heading') == 'Copper · Settings')
                 was_open = row('copper')['expanded']
                 pointer.click(195, parent_y)
                 check('pointer toggles disclosure', lambda: row('copper')['expanded'] != was_open)
