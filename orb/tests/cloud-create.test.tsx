@@ -14,7 +14,10 @@ vi.mock('../src/composer/Composer', () => ({floatingDock: () => {}, Composer: (p
   <button aria-label={p.sendLabel} disabled={p.disabled} onClick={() => { const text = value; value = ''; void Promise.resolve(p.onSend(text, [])).then(ok => { if (ok === false) value = text; }); }} />
  </div>;
 }}));
-vi.mock('../src/api', () => ({api:vi.fn(async () => ({models:{items:[]},repositories:{items:[]}}))}));
+vi.mock('../src/api', () => ({
+ api:vi.fn(async () => ({models:{items:[]},repositories:{items:[]}})),
+ connectionVersion: () => 1, listProjects: vi.fn(async () => [{slug:'demo',title:'Demo'}]),
+}));
 afterEach(() => {cleanup();vi.clearAllMocks();});
 const capabilities = {models:false,repository:false,follow_up:false,cancel:false,artifacts:false,attachments:false,detailed_events:false};
 describe('cloud creation', () => {
