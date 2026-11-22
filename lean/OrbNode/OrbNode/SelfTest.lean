@@ -928,8 +928,8 @@ private def runRound2RegressionTests
   let packSha := sourceArchiveSha256 packCommit rawPackBytes
   let packB64 := base64Encode rawPackBytes false true
 
-  -- Set capacity=2, start two 1s timeout regular jobs, shrink capacity to 1 (`shrinkDebt = 1`), let both time out,
-  -- and submit a queued archive-backed `lean_build` while saturated so it launches on a LATER tick!
+  -- Keep both regular lanes occupied through admission. A one-second process or
+  -- systemd deadline can expire during an unrelated request tick on a busy host.
   let cap2Lease := signLeaseToken "sec-primary-123" {
     missionId := "00000000-0000-0000-0000-000000000000", nodeId := "test-node", scope := .nodeCapacity, expiresAt := nowEp + 600
   }
@@ -938,11 +938,11 @@ private def runRound2RegressionTests
     body := (renderCompact (.obj #[("lease_token", .str cap2Lease), ("capacity", JVal.nat 2)])).toUTF8
   }
   rt := rtC2
-  for k in [1, 2] do
-    let tid := s!"99999999-9999-4999-8999-99999999999{k}"
+  let blockers := #["99999999-9999-4999-8999-999999999991", "99999999-9999-4999-8999-999999999992"]
+  for tid in blockers do
     let tb := renderCompact (.obj #[
       ("job_id", .str tid), ("mission_id", .str missionId), ("lease_token", .str submitLease),
-      ("payload", .obj #[("kind", .str "raw_command"), ("command", .str "sleep 10"), ("timeout_secs", JVal.uint64 1)])
+      ("payload", .obj #[("kind", .str "raw_command"), ("command", .str "exec sleep 600"), ("long_running", .bool true)])
     ])
     let (rtT, _) ← handleRequest rt { method := "POST", rawPath := "/jobs", path := "/jobs", query := #[], headers := authHdrs, body := tb.toUTF8 }
     rt := rtT
@@ -986,18 +986,23 @@ private def runRound2RegressionTests
      (rt.ledger.jobs.get? archJobId).map (·.state) == some .queued &&
      !persistedHasB64)
 
-  -- Wait for the two 1s jobs to time out (`nowEp > startedEp + 1`), repay `shrinkDebt`, and admit `archJobId` from `queuedPayloads`!
+  -- Arm already-expired runner deadlines only after observing the queued archive.
+  -- The next real tick must terminate both live children and release their lanes.
+  for tid in blockers do
+    let some proc := rt.liveProcs.get? tid
+      | throw (IO.userError s!"saturation blocker {tid} left its lane before expiry")
+    rt := { rt with liveProcs := rt.liveProcs.insert tid { proc with startedEp := 0, timeoutSecs? := some 1 } }
   for _ in [0:450] do
     IO.sleep 100
     rt ← tickRuntime rt
     if (rt.ledger.jobs.get? archJobId).any (fun r => r.state.isTerminal) then
       break
-  let t1ErrOk := match (rt.ledger.jobs.get? "99999999-9999-4999-8999-999999999991").bind (·.error?) with
-    | some e => e == "timed out after 1s" || e.startsWith "command exited with Some("
-    | none => false
+  let bothTimedOut := blockers.all fun tid =>
+    (rt.ledger.jobs.get? tid).any fun job =>
+      job.state == .failed && job.exitCode? == some 124 && job.error? == some "timed out after 1s"
   check "timed-out regular jobs repay shrinkDebt=0 and queued archive-backed lean_build succeeds on cold seed"
     (rt.shrinkDebt == 0 &&
-     t1ErrOk &&
+     bothTimedOut &&
      (rt.ledger.jobs.get? archJobId).map (·.state) == some .succeeded)
   return rt
 
