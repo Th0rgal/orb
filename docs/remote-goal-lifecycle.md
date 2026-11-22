@@ -222,3 +222,11 @@ These tests do not establish exactly-once execution. Final integration requires
 temporary SQLite and a fake remote endpoint covering lost submit responses,
 restart around commit/acceptance, queued steering, cancellation uncertainty and
 cross-client projection fixtures. Production hook registration remains blocked.
+
+
+The desktop transcript omits the standalone terminal marker on a final answer
+after Core confirms `remote_goal_complete`. A completed mission record also
+supplies that confirmation when the completion event lies outside a fetched
+page. The same rule applies to a cached Done summary that reproduces the
+answer with whitespace flattened. The raw events retain their original text.
+A quoted marker, fenced example or ordinary assistant response remains visible.

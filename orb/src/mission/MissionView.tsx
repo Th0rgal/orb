@@ -67,7 +67,7 @@ import {
   transcriptVersion,
 } from "../missionCache";
 import { ConversationSkeleton, DelayedTranscriptSkeleton, ActivitySkeleton } from "../Skeleton";
-import { visibleTranscript, removeUsers, mapUsers, reuseUnchanged } from "../transcriptModel";
+import { projectCompletedGoal, visibleTranscript, removeUsers, mapUsers, reuseUnchanged } from "../transcriptModel";
 import { pollWhileVisible } from "../poll";
 import { contextPct, contextWindow, estimateTokens, formatTokens } from "../missionContext";
 import {
@@ -1003,7 +1003,6 @@ export function NativeMissionView(p: { id: string; active?: boolean; launch?:Lau
           }
           if (ev.type === "goal_status" || ev.type === "goal_iteration") {
             setLiveGoal(old => applyRemoteGoalEvent(old ?? { phase: "active", objective: "", iteration: 0 }, { type: ev.type, data: ev.data }));
-            return;
           }
           if (replaying) held.push(ev);
           else applyLive(ev);
@@ -1252,7 +1251,10 @@ export function NativeMissionView(p: { id: string; active?: boolean; launch?:Lau
   const viewItems = createMemo(() => {
     const ready = p.id ? peekReadyTranscript(p.id) : undefined;
     const spinePending = Boolean(ready?.hasOlder && ready.spineComplete === false);
-    const canonical = withInitialPrompt(items(), mission(), receipt, awaiting() || spinePending);
+    const record = mission();
+    const history = record?.status === "completed" && record.terminal_reason === "remote_goal_complete"
+      ? projectCompletedGoal(items()) : items();
+    const canonical = withInitialPrompt(history, record, receipt, awaiting() || spinePending);
     const outbox = [...acceptedLocalMessages(p.id), ...queuedLocalMessages(p.id).filter(row=>!row.error&&(!row.waiting||row.state==='accepted'||row.state==='dispatching'))];
     const drafts=optimisticList();
     let list = canonical;

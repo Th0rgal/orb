@@ -1,3 +1,4 @@
+import { confirmedGoalAnswer } from "./remoteGoal";
 import { shallowEqual } from "./poll";
 import { isFailedStatus } from "./missionStatus";
 import type { DraftImage } from "./imageAttachments";
@@ -12,7 +13,7 @@ import { isCancellationRequestedNotice, isGeneratedRemoteJobStatus, type StreamE
 export type StreamItem =
   | { kind: "user"; key: string; text: string; images?: DraftImage[]; messageId?: string; eventId?: string; sequence?: number; source?: string; senderUsername?: string; queued?: boolean; attached?: boolean; receipt?: boolean; /** Server time the message was stored (ISO), when known. */ at?: string }
   | { kind: "think"; key: string; text: string; done: boolean }
-  | { kind: "text"; key: string; text: string; live: boolean; eventId?: string; sequence?: number; /** When the turn this text closes completed (ISO), when known. */ at?: string; /** The producer's one bubble for a whole response (text_delta_latest), across tool boundaries: it holds the answer, never only narration. */ cumulative?: boolean }
+  | { kind: "text"; key: string; text: string; live: boolean; goalMarkedText?: string; eventId?: string; sequence?: number; /** When the turn this text closes completed (ISO), when known. */ at?: string; /** The producer's one bubble for a whole response (text_delta_latest), across tool boundaries: it holds the answer, never only narration. */ cumulative?: boolean }
   | { kind: "error"; key: string; text: string; terminal?: boolean; cancelled?: boolean; title?: string }
   | {
       kind: "tool";
@@ -434,7 +435,7 @@ export class TranscriptReducer {
         if (index == null && bubble === "text_delta_latest" && this.lastFinal != null) {
           const finalized = this.items[this.lastFinal];
           const candidate = snapshot ?? (hadSuppressedPrefix ? text : undefined);
-          if (finalized?.kind === "text" && !finalized.live && candidate != null && finalized.text.startsWith(candidate)) {
+          if (finalized?.kind === "text" && !finalized.live && candidate != null && (finalized.goalMarkedText ?? finalized.text).startsWith(candidate)) {
             // Recovery may replay an unsequenced live prefix (or incremental
             // suffix inserts) after its durable final. A delivered user turn
             // resets lastFinal, so new replies with identical text remain independent.
@@ -447,6 +448,12 @@ export class TranscriptReducer {
           if (!text) return;
           index=this.placeText(bubble,{kind:"text",key:this.key("text"),text,live,...(bubble==="text_delta_latest"?{cumulative:true}:{}),...(typeof d.at==="string"?{at:d.at}:{})});
         } else if (previous?.kind === "text" && (previous.text !== text || previous.live !== live)) this.put(index,{...previous,text,live,...(typeof d.at==="string"?{at:d.at}:{})});
+        return;
+      }
+      case "goal_status": {
+        if (d.status !== "complete" || d.reason !== "remote_goal_complete") return;
+        const index = completedGoalAnswerIndex(this.items);
+        if (index !== undefined) this.put(index, projectGoalAnswer(this.items[index]));
         return;
       }
       case "assistant_message": {
@@ -668,6 +675,32 @@ export function withoutFiller(items: StreamItem[]): StreamItem[] {
   return items.filter((_, i) => dropped![i] === 0);
 }
 
+/** A completion receipt owns only the last finalized answer in its delivered turn. */
+function completedGoalAnswerIndex(items: StreamItem[]): number | undefined {
+  for (let i = items.length - 1; i >= 0; i--) {
+    const item = items[i];
+    if (item.kind === "user" && !item.queued) return undefined;
+    if (item.kind === "text") return item.live ? undefined : i;
+  }
+}
+
+function projectGoalAnswer(item: StreamItem): StreamItem {
+  if (item.kind !== "text" || item.goalMarkedText !== undefined) return item;
+  const answer = confirmedGoalAnswer(item.text);
+  return answer === undefined ? item : { ...item, text: answer, goalMarkedText: item.text };
+}
+
+/** A paged history can lack the structured event but still have the completed mission record. */
+export function projectCompletedGoal(items: StreamItem[]): StreamItem[] {
+  const i = completedGoalAnswerIndex(items);
+  if (i === undefined) return items;
+  const item = projectGoalAnswer(items[i]);
+  if (item === items[i]) return items;
+  const copy = items.slice();
+  copy[i] = item;
+  return copy;
+}
+
 /** A delivered follow-up supersedes the previous attempt's terminal notice.
  * Keep the raw history intact, and do not dismiss failures for queued input. */
 export function visibleTranscript(items: StreamItem[]): StreamItem[] {
@@ -680,7 +713,8 @@ export function visibleTranscript(items: StreamItem[]): StreamItem[] {
     }
   }
   return withoutFiller(items.filter((item, index) =>
-    !(item.kind === "error" && item.terminal && index < lastDelivered),
+    !(item.kind === "error" && item.terminal && index < lastDelivered) &&
+    !(item.kind === "text" && item.goalMarkedText !== undefined && !item.text.trim()),
   ));
 }
 

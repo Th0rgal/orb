@@ -5,6 +5,7 @@ import { getCachedInboxDigest, requestInboxDigest, inboxDigestVersion } from "./
 import { DONE_STATUSES, isFailedStatus } from "./missionStatus";
 import { missionResponseTimestampMs } from "./missionUnread";
 import { inboxConfig } from "./inboxSettings";
+import { confirmedGoalRecap } from "./remoteGoal";
 import { shouldRequestInboxDigest } from "./inboxPolicy";
 
 const tone: Record<string, string> = { succeeded: "Done", failed: "Failed", interrupted: "Interrupted", waiting: "Waiting", needs_input: "Needs you" };
@@ -30,6 +31,15 @@ export function TurnRecap(p: { mission?: Mission; items: StreamItem[]; busy: boo
   const digest = createMemo(() => { inboxDigestVersion(); return enabled() && p.mission && updatedMs() ? getCachedInboxDigest(p.mission.id, updatedMs()) : undefined; });
   // Only the summary of this response, never an older one.
   const current = createMemo(() => { const d = digest(); return d && d.updatedMs === updatedMs() ? d : undefined; });
+  const outcome = createMemo(() => {
+    const summary = current()?.outcome ?? "";
+    const turn = latestTurn();
+    for (let i = turn.length - 1; i >= 0; i--) {
+      const item = turn[i];
+      if (item.kind === "text") return confirmedGoalRecap(summary, item.goalMarkedText);
+    }
+    return summary;
+  });
   const verdict = createMemo(() => {
     const status = (p.mission?.status ?? "").toLowerCase();
     const turn = latestTurn();
@@ -49,7 +59,7 @@ export function TurnRecap(p: { mission?: Mission; items: StreamItem[]; busy: boo
     <Show when={enabled() && !p.busy && answered() && current()}>{(d) => (
       <aside class={`turn-recap verdict-${verdict()}`} aria-label="Turn summary">
         <div class="turn-recap-head"><span class="turn-recap-dot" aria-hidden="true" />{tone[verdict()] ?? verdict()}</div>
-        <p>{d().outcome}</p>
+        <p>{outcome()}</p>
         <Show when={d().unresolved || d().decision}><p class="dim">{d().decision || d().unresolved}</p></Show>
         <Show when={verdict() !== "failed" && verdict() !== "interrupted" && d().suggestions?.length}>
           <div class="turn-recap-actions"><For each={d().suggestions!.slice(0, 2)}>{(s) => <button type="button" class="s-btn sm" title="Put in the message box" onClick={() => p.onDraft(s)}>{s}</button>}</For></div>
