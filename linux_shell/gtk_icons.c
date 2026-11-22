@@ -101,7 +101,7 @@ static gboolean on_draw_icon(GtkWidget *w, cairo_t *cr, gpointer ud) {
     if (bk > 0) { draw_status_badge(cr, bk, sp ? sp->step : 0); }
     return FALSE;
 }
-static gboolean activate_menu_row(GtkWidget *row, GdkEventKey *event, gpointer data) {
+gboolean orb_button_enter(GtkWidget *row, GdkEventKey *event, gpointer data) {
     (void)data;
     if ((event->keyval != GDK_KEY_Return && event->keyval != GDK_KEY_KP_Enter) ||
         (event->state & gtk_accelerator_get_default_mod_mask())) return FALSE;
@@ -113,7 +113,7 @@ static gboolean activate_menu_row(GtkWidget *row, GdkEventKey *event, gpointer d
  * native submenu indicator and add the leading glyph beside its label. */
 GtkWidget *orb_menu_row(GtkWidget *page, const char *label, const char *icon) {
     GtkWidget *button = gtk_model_button_new();
-    g_signal_connect(button, "key-press-event", G_CALLBACK(activate_menu_row), NULL);
+    g_signal_connect(button, "key-press-event", G_CALLBACK(orb_button_enter), NULL);
     g_object_set(button, "text", label, NULL);
     if (icon) { orb_add_menu_icon(button, icon); }
     gtk_box_pack_start(GTK_BOX(page), button, FALSE, FALSE, 0);

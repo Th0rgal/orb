@@ -47,14 +47,6 @@ static void activate(GtkButton *button, OrbSidebar *s) {
         s->action(s->chrome,"expand",rid);
     else s->action(s->chrome,kind,target);
 }
-static gboolean key_press(GtkWidget *widget, GdkEventKey *event, gpointer unused) {
-    (void)unused;
-    if (event->state & gtk_accelerator_get_default_mod_mask()) return FALSE;
-    if (event->keyval != GDK_KEY_Return && event->keyval != GDK_KEY_KP_Enter) return FALSE;
-    gtk_button_clicked(GTK_BUTTON(widget));
-    return TRUE;
-}
-
 static GtkWidget *button(OrbSidebar *s, const char *action, const char *rid, const char *label) {
     char *key = g_strdup_printf("%s/%s", action, rid);
     GtkWidget *b = g_hash_table_lookup(s->buttons, key);
@@ -65,7 +57,7 @@ static GtkWidget *button(OrbSidebar *s, const char *action, const char *rid, con
         g_object_set_data_full(G_OBJECT(b), "orb-action", g_strdup(action), g_free);
         g_signal_connect(b, "clicked", G_CALLBACK(activate), s);
         g_signal_connect(b, "button-press-event", G_CALLBACK(press), s);
-        g_signal_connect(b, "key-press-event", G_CALLBACK(key_press), NULL);
+        g_signal_connect(b, "key-press-event", G_CALLBACK(orb_button_enter), NULL);
         gtk_overlay_add_overlay(GTK_OVERLAY(s->overlay), b);
         g_hash_table_insert(s->buttons, key, b);
     } else g_free(key);
