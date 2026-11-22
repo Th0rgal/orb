@@ -63,8 +63,15 @@ def exercise(root, tmp, api, graphical, click, process, wait, stack, client_kind
 
     def locate(label, geometry):
         return next(((x, y) for word, x, y in words(geometry) if word == label.lower()), None)
+    def capture_failure():
+        with tempfile.NamedTemporaryFile(prefix=f'orb-{client_kind}-sidebar-', suffix='.png', delete=False) as frame:
+            subprocess.run(['grim', '-t', 'png', '-'], stdout=frame, env=graphical, check=True)
+            return frame.name
     def see(label, geometry=sidebar):
-        return wait('visible ' + label, lambda: locate(label, geometry))
+        try:
+            return wait('visible ' + label, lambda: locate(label, geometry))
+        except TimeoutError as error:
+            raise AssertionError(f'{label} in {geometry}: {capture_failure()}') from error
     def open_project():
         def reveal():
             if locate(fixture['openMission'], sidebar):
@@ -111,9 +118,7 @@ def exercise(root, tmp, api, graphical, click, process, wait, stack, client_kind
         try:
             hits = wait('ordered context actions ' + ', '.join(expected), rows)
         except TimeoutError as error:
-            with tempfile.NamedTemporaryFile(prefix=f'orb-{client_kind}-menu-', suffix='.png', delete=False) as frame:
-                subprocess.run(['grim', '-t', 'png', '-'], stdout=frame, env=graphical, check=True)
-            raise AssertionError(f'{choose} for {target or fixture["contextMission"]} at {(x, y)}: {frame.name}') from error
+            raise AssertionError(f'{choose} for {target or fixture["contextMission"]} at {(x, y)}: {capture_failure()}') from error
         if choose == 'dismiss':
             subprocess.run(['wtype', '-k', 'Escape'], env=graphical, check=True)
             wait('context menu dismissed', lambda: rows() is None)
@@ -249,8 +254,9 @@ def exercise(root, tmp, api, graphical, click, process, wait, stack, client_kind
     see(fixture['openMission'], header)
     archived = see('Archived')
     assert status(b) == 'acknowledged'
-    click(*archived)
     below_archive = f'10,{archived[1]+10} 200x{660-archived[1]-10}'
+    if not locate(fixture['contextMission'], below_archive):
+        click(*archived)
     action_menu(fixture['archivedActions'], 'restore', below_archive)
     wait('context mission restored', lambda: status(b) == 'paused')
     see(fixture['openMission'], header)
