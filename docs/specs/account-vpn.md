@@ -7,6 +7,8 @@ Core's country, route status and most recently verified public exit.
 
 A signed-in member can read and change the connection of any provider account visible to them. The route belongs to the account. Other users of that account see the same country and use the same exit. An administrator can configure any account and manages the shared AirVPN credentials and profiles. A personal choice to skip a shared provider affects only the member’s missions.
 
+When configuration is unavailable, Core supplies a separate explanation alongside the saved route. The account panel can refresh this setting after provider sign-in. A refresh reads the account route and preserves the selected country.
+
 ## Admission contract
 
 The pure kernel is in `lean/Orb/AccountVpn.lean` (Orb base `9c6b94da2`).
@@ -230,3 +232,16 @@ Reconnecting an existing Antigravity account targets its exact credential in bot
 The isolated sidecar test sends buffered and streaming requests before restricting the account. It then requests the model by its account prefix and its unqualified ID, checks that neither request reaches the simulated Google generation endpoint, and checks another provider during the restriction. Refresh and targeted reconnect must preserve the exclusion before the operator can restore access.
 
 Before confirming a native-only Antigravity setting, Core checks both the saved wildcard and the sidecar’s live model registry for the selected credential. If any model is still registered or the registry cannot be queried, the client must surface an unconfirmed setting. A sibling credential may continue serving the same model.
+
+When Core reports `vpn_awaiting_verification`, an open desktop account row periodically reads the route while visible and checks again when the window regains visibility. Verification may finish independently after a Core restart. Observing this transition requires only a read. Closing the row or changing its account or route discards any older pending observation.
+
+An open account row rereads its settled VPN route and its alternative router access setting when the desktop window regains focus or visibility. A change made in another session appears without a write from the observing client. If the router setting cannot be confirmed, the switch is unavailable until a successful read.
+
+### Desktop client connected to an older Core
+
+When Core returns its missing-endpoint response (HTTP 404, `not_found`,
+and the requested path), the account row explains which setting requires
+a Core update. The user can retry the read after an update without
+closing the account. A missing account or a transient service failure
+keeps the ordinary retry action. A failed read never implies Direct or
+permission to use an alternative router.

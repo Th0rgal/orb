@@ -27,6 +27,8 @@ import uuid
 VENDOR = "daily-cloudcode-pa.googleapis.com"
 NATIVE_PATH = "/api/native/antigravity"
 ACCOUNT = "fixture-account"
+DIRECT_ACCOUNT = "fixture-direct"
+TOKENS = {ACCOUNT: "fixture-vendor-token", DIRECT_ACCOUNT: "fixture-direct-token"}
 MODELS = {"gemini-4-neon": "MODEL_PLACEHOLDER_M1", "gemini-4-carbon-high": "MODEL_PLACEHOLDER_M2"}
 LAUNCHER = Path(__file__).resolve().parents[1] / "lean/OrbCore/OrbCore/antigravity_native_launch.py"
 
@@ -36,10 +38,12 @@ class Subscription(BaseHTTPRequestHandler):
         pass
 
     def do_POST(self):
-        if self.headers.get("Authorization") != "Bearer fixture-vendor-token":
+        authorization = self.headers.get("Authorization")
+        account = next((name for name, token in TOKENS.items() if authorization == f"Bearer {token}"), None)
+        self.server.calls.append(account)
+        if account is None:
             self.send_error(401)
             return
-        self.server.calls += 1
         body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
         method = self.path.split("?", 1)[0].split(":")[-1]
         content_type = "application/json"
@@ -100,7 +104,7 @@ def start_subscription(stack, root, workspace):
     server.workspace = workspace
     server.requests = dict.fromkeys(MODELS, 0)
     server.admin_controls = {}
-    server.calls = 0
+    server.calls = []
     threading.Thread(target=server.serve_forever, daemon=True).start()
     stack.callback(server.shutdown)
     return server, cert
@@ -122,9 +126,10 @@ def http(base, path, token=None):
 def start_core(stack, root, binary, cert):
     auth = root / "auth"
     auth.mkdir()
-    (auth / "antigravity-fixture.json").write_text(json.dumps({
-        "type": "antigravity", "prefix": ACCOUNT, "access_token": "fixture-vendor-token",
-    }))
+    for account, token in TOKENS.items():
+        (auth / f"antigravity-{account}.json").write_text(json.dumps({
+            "type": "antigravity", "prefix": account, "access_token": token,
+        }))
     home = root / "core-home"
     home.mkdir()
     with socket.socket() as sock:
@@ -144,7 +149,7 @@ def start_core(stack, root, binary, cert):
     raise RuntimeError("The disposable Core failed to start")
 
 
-def seed_job(db, model, owner):
+def seed_job(db, model, owner, account):
     mission, job = str(uuid.uuid4()), str(uuid.uuid4())
     grant = "orb-agy-v1_" + uuid.uuid4().hex
     with db:
@@ -155,7 +160,7 @@ def seed_job(db, model, owner):
         digest = hashlib.sha256(grant.encode()).hexdigest()
         db.execute("INSERT INTO mission_proxy_tokens VALUES(?,?,?,?,0)", (digest, mission, owner, int(time.time()) + 600))
         db.execute("INSERT INTO native_antigravity_grants(token_sha256,job_id,account_id,model) VALUES(?,?,?,?)",
-                   (digest, job, ACCOUNT, model))
+                   (digest, job, account, model))
     return mission, job, grant
 
 
@@ -188,10 +193,12 @@ def run(core, agy):
         owner = str(uuid.uuid4())
         with db:
             db.execute("INSERT INTO users(id,username,password_hash,role,created_at,updated_at) VALUES(?,'fixture','unused','member','','')", (owner,))
-            db.execute("INSERT INTO ai_providers(id,provider_type,name) VALUES(?,'antigravity','Shared fixture account')", (ACCOUNT,))
+            db.executemany("INSERT INTO ai_providers(id,provider_type,name) VALUES(?,'antigravity',?)",
+                           [(account, account) for account in TOKENS])
         for selected in MODELS:
             group = selected.removesuffix("-high")
-            mission, job, grant = seed_job(db, group, owner)
+            mission, job, grant = seed_job(db, group, owner, ACCOUNT)
+            _, _, direct_grant = seed_job(db, group, owner, DIRECT_ACCOUNT)
             def rpc(name):
                 return http(base, NATIVE_PATH + "/v1internal:" + name, grant)
             assert rpc("fetchUserInfo") == (200, {"regionCode": "PT", "userSettings": {
@@ -201,12 +208,15 @@ def run(core, agy):
             vendor.admin_controls = {}
             # A reachable Direct upstream must receive nothing when this account
             # requires a VPN and no verified tunnel can be established.
-            before = vendor.calls
+            before = len(vendor.calls)
             with db:
                 db.execute("INSERT INTO account_vpn_routes(account_id,country) VALUES(?,'NL') "
                            "ON CONFLICT(account_id) DO UPDATE SET country='NL',generation=generation+1", (ACCOUNT,))
             assert rpc("fetchAvailableModels")[0] == 503
-            assert vendor.calls == before
+            assert vendor.calls[before:] == []
+            assert http(base, NATIVE_PATH + "/v1internal:fetchAvailableModels", direct_grant)[0] == 200
+            assert rpc("fetchAvailableModels")[0] == 503
+            assert vendor.calls[before:] == [DIRECT_ACCOUNT]
             with db:
                 db.execute("UPDATE account_vpn_routes SET country='',generation=generation+1 WHERE account_id=?", (ACCOUNT,))
             conversation = native_turn(agy, workspace, base, grant, selected)
@@ -220,7 +230,7 @@ def run(core, agy):
                 db.execute("UPDATE remote_node_jobs SET state='succeeded' WHERE job_id=?", (job,))
             assert rpc("fetchAvailableModels")[0] == 401
             print(json.dumps({"model": selected, "conversation": conversation, "workspace_write": True,
-                              "resume": True, "usage": usage, "unavailable_vpn_http": 503, "direct_fallback_calls": 0, "terminal_http": 401}), flush=True)
+                              "resume": True, "usage": usage, "unavailable_vpn_http": 503, "direct_control_http": 200, "direct_fallback_calls": 0, "terminal_http": 401}), flush=True)
 
 
 if __name__ == "__main__":

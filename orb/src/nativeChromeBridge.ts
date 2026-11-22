@@ -174,6 +174,7 @@ export function buildNativeChromeSyncArgs(
 export type NativeChromeBridgeHandlers = {
   open: (id: string | null) => boolean;
   leaveSettings: () => void;
+  openSearch?: () => void;
   navHistory?: (delta: -1 | 1) => void;
   getSidebarOpen: () => boolean;
   setSidebarOpen: (open: boolean) => void;
@@ -234,6 +235,10 @@ export function installNativeChromeWindowHandlers(
   const nativeNav = (target: string): boolean => {
     const clean = (target ?? "").trim();
     if (!clean || clean === "new-agent") return handlers.open(null);
+    if (clean === "search") {
+      handlers.openSearch?.();
+      return Boolean(handlers.openSearch);
+    }
     if (clean === "settings-back") {
       handlers.leaveSettings();
       return true;

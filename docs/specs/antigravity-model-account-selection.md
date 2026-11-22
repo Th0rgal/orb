@@ -131,6 +131,11 @@ probe fails, the dedicated endpoint returns a retryable failure. Restoring the
 route allows a fresh discovery. With no eligible subscription it returns an
 empty list. Loading the other harnesses never waits on native catalog discovery.
 
+A tunnel outage affects the account assigned to that tunnel. While its native
+catalog returns 503, a mission bound to a second account on Direct can read
+the catalog with that account’s credential. A subsequent request from the
+first mission still returns 503 without contacting the upstream.
+
 ### Consumer headless eligibility on remote workers
 
 The native launcher gives agy a local relay nonce. Core alone authenticates

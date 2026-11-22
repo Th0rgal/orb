@@ -1,5 +1,7 @@
-import { Show, createResource, createSignal } from "solid-js";
+import { Show, createEffect, createResource, createSignal, onCleanup } from "solid-js";
 import { api, connectionVersion } from "./api";
+import { pollWhileVisible } from "./poll";
+import { AccountSettingReadError } from "./AccountSettingReadError";
 import { SettingsRow } from "./SettingsCard";
 
 interface Route {
@@ -7,7 +9,9 @@ interface Route {
   country?: string;
   countries: string[];
   can_configure: boolean;
+  configuration_message?: string;
   status: "direct" | "verified" | "blocked";
+  reason?: string;
   server?: string;
   exits?: string[];
   message?: string;
@@ -25,6 +29,20 @@ export function AccountVpnSettings(p: { account: string }) {
   const [route, { mutate, refetch }] = createResource(source, ([, id]) => readRoute(id));
   const [busy, setBusy] = createSignal(false);
   const [error, setError] = createSignal("");
+  createEffect(() => {
+    if (busy() || route.state !== "ready") return;
+    const interval = route().reason === "vpn_awaiting_verification" ? 5000 : null;
+    const [, id] = source();
+    let active = true;
+    const stop = pollWhileVisible(async () => {
+      const next = await readRoute(id);
+      if (active) mutate(next);
+    }, interval, "account-vpn");
+    onCleanup(() => {
+      active = false;
+      stop();
+    });
+  });
   const save = async (value: string) => {
     const [version, id] = source();
     const current = () => version === connectionVersion() && id === p.account;
@@ -42,8 +60,9 @@ export function AccountVpnSettings(p: { account: string }) {
     }
   };
   return <SettingsRow title="Account connection" stack>
-    <Show when={!route.error} fallback={<button class="s-btn" onClick={() => void refetch()}>Retry connection settings</button>}>
-      <Show when={route()}>{r => <>
+    <Show when={!route.error} fallback={<AccountSettingReadError error={route.error} path={uri(p.account)}
+      updateMessage="Update Core to configure account VPNs." retryLabel="Retry connection settings" retry={() => void refetch()} />}>
+      <Show when={route()}>{r => <div class="p-native-controls">
         <select class="s-input" aria-label="Account connection" disabled={busy() || !r().can_configure}
           value={r().country ?? ""} onChange={e => {
             const selected = e.currentTarget.value;
@@ -54,14 +73,17 @@ export function AccountVpnSettings(p: { account: string }) {
           {Array.from(new Set([...(r().country ? [r().country!] : []), ...r().countries])).map(c =>
             <option value={c}>AirVPN · {c}</option>)}
         </select>
-        <Show when={!r().can_configure}><span>This credential’s connection is managed by the sidecar.</span></Show>
+        <Show when={!r().can_configure}><span>{r().configuration_message ?? "VPN routing is unavailable for this credential."}</span>
+          <button class="s-btn" disabled={route.loading} onClick={() => void refetch()}>Refresh connection settings</button></Show>
         <Show when={r().can_configure && !r().countries.length}><span>Import a named server profile in AirVPN Settings to enable VPN routing.</span></Show>
-        <Show when={r().status === "verified"}><span>Verified exit · {r().server} · {r().exits?.join(", ")}</span></Show>
+        <Show when={r().status === "verified"}><span class="s-row-desc" role="status">Verified exit · {r().server} · {r().exits?.join(", ")}</span></Show>
         <Show when={r().status === "blocked"}>
           <span role="status">{r().message ?? "The VPN route is unavailable."}</span>
-          <button class="s-btn" disabled={busy() || !r().can_configure} onClick={() => void save(r().country!)}>Retry verification</button>
+          <Show when={r().reason !== "vpn_awaiting_verification"}>
+            <button class="s-btn" disabled={busy() || !r().can_configure} onClick={() => void save(r().country!)}>Retry verification</button>
+          </Show>
         </Show>
-      </>}</Show>
+      </div>}</Show>
     </Show>
     <Show when={error()}><span role="alert">{error()}</span></Show>
   </SettingsRow>;

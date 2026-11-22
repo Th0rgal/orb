@@ -605,7 +605,7 @@ function LocalAgentsCard() {
   );
 }
 
-function BackendTab() {
+export function BackendTab(p: { standalone?: boolean } = {}) {
   const [url, setUrl] = createSignal(getApiUrl());
   const [username, setUsername] = createSignal("");
   const [password, setPassword] = createSignal("");
@@ -678,14 +678,20 @@ function BackendTab() {
     }
     setGithubBusy(true);
     void verifyIssuedAuthToken(verified.baseUrl, verified.token)
-      .then(() => {
+      .then(async () => {
         setUrl(verified.baseUrl);
-        setConnection(verified.baseUrl, verified.token);
+        await setConnection(verified.baseUrl, verified.token);
       })
       .catch((e) => setError(e instanceof Error ? e.message : String(e)))
       .finally(() => setGithubBusy(false));
   });
 
+  const canManageGitHub = () => {
+    const status = authStatus();
+    const user = currentUser() ?? status?.user;
+    if (user) return user.role === "admin";
+    return status?.auth_mode === "single_tenant" || status?.auth_mode === "disabled";
+  };
   const isMultiUser = () => health()?.auth_mode === "multi_user";
   const authNotRequired = () => health()?.auth_required === false;
   const canConnect = () => {
@@ -704,7 +710,7 @@ function BackendTab() {
     setNotice(null);
     try {
       if (authNotRequired() && !password().trim()) {
-        setConnection(url(), "dev-mode");
+        await setConnection(url(), "dev-mode");
       } else {
         await login(password(), isMultiUser() ? username() : undefined);
         setPassword("");
@@ -732,6 +738,18 @@ function BackendTab() {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setGithubBusy(false);
+    }
+  };
+
+  const disconnect = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      await clearConnection();
+    } catch {
+      setError("Could not disconnect the saved account. Check the account and try again.");
+    } finally {
+      setBusy(false);
     }
   };
 
@@ -803,6 +821,8 @@ function BackendTab() {
             <input
               class="s-input"
               type="password"
+              aria-label="Password"
+              autocomplete="current-password"
               value={password()}
               onInput={(e) => setPassword(e.currentTarget.value)}
               onKeyDown={(e) => e.key === "Enter" && void connect()}
@@ -828,7 +848,7 @@ function BackendTab() {
               </>
             }
           >
-            <button class="s-btn" onClick={() => clearConnection()}>
+            <button class="s-btn" disabled={busy()} onClick={() => void disconnect()}>
               Disconnect
             </button>
           </Show>
@@ -846,7 +866,7 @@ function BackendTab() {
                 .filter(Boolean)
                 .join(" · ")}
             >
-              <Show when={isAdminUser()}>
+              <Show when={isAdminUser() && !p.standalone}>
                 <button
                   type="button"
                   class="s-btn"
@@ -890,6 +910,7 @@ function BackendTab() {
           </Row>
         </Show>
       </Card>
+      <Show when={!p.standalone && isConnected() && canManageGitHub()}><GitHubIntegrationCard /></Show>
       <ErrorToast error={error()} title="Couldn’t connect to the backend" onDismiss={() => setError(null)} />
       <Show when={passwordDialog()}>
         <Dialog
@@ -998,7 +1019,6 @@ export function Settings(p: { onOpenPage?: (id: string) => void } = {}) {
       <div class="s-inner">
         <h2>Account</h2>
         <BackendTab />
-        <GitHubIntegrationCard />
         <CloudAccountsCard onOpenPage={p.onOpenPage} />
         <Card title="Appearance">
           <Row title="Theme" desc="Auto follows your desktop appearance.">

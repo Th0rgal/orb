@@ -1911,7 +1911,7 @@ final class OrbAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, W
             } else if let envVer = env["ORB_APP_VERSION"], !envVer.isEmpty {
                 childEnv["ORB_APP_VERSION"] = envVer
             }
-            for k in ["HOME", "PATH", "TMPDIR", "USER", "LANG", "ORB_SIGNER_BIN", "ORB_APPROVAL_KEY_PATH", "ORB_STATE_DIR", "ORB_VOICE_PYTHON", "ORB_VOICE_MODEL_DIR", "ORB_VOICE_FAKE"] {
+            for k in ["HOME", "PATH", "TMPDIR", "USER", "LANG", "ORB_SIGNER_BIN", "ORB_APPROVAL_KEY_PATH", "ORB_STATE_DIR", "ORB_VOICE_PYTHON", "ORB_VOICE_WORKER", "ORB_VOICE_MODEL_DIR", "ORB_VOICE_FAKE"] {
                 if let v = env[k] { childEnv[k] = v }
             }
             if childEnv["ORB_SIGNER_BIN"] == nil,

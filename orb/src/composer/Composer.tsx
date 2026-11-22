@@ -939,7 +939,13 @@ export function Composer(p: {
             <Show when={which() === "harness"}>
               <Picker label="Harness" searchable={false} selected={pick()?.backend}
                 emptyLabel={p.harnessIds ? "No local agent CLIs found on PATH (install claude, codex, opencode, agy, grok, or vibe-acp)" : undefined}
-                items={harnessChoices(p.uploadTarget).filter(c => !p.harnessIds || p.harnessIds.includes(c.backend.id)).map(c => ({id:c.backend.id,label:c.backend.name,description:p.remoteSupport?.(c.backend.id).note || `${c.models.length} model${c.models.length === 1 ? "" : "s"}`}))}
+                items={harnessChoices(p.uploadTarget)
+                  .filter(c => !p.harnessIds || p.harnessIds.includes(c.backend.id))
+                  .map(({backend, models}) => {
+                    const count = modelPickerItems(models, backend.id).length;
+                    return {id: backend.id, label: backend.name,
+                      description: p.remoteSupport?.(backend.id).note || `${count} model${count === 1 ? "" : "s"}`};
+                  })}
                 onClose={() => setWhich(null)} onSelect={id => {
                   const c = harnessChoices(p.uploadTarget).find(c => c.backend.id === id);
                   if (c && id !== pick()?.backend) {

@@ -7,6 +7,25 @@ const choices = [
 vi.mock("../src/api", async original => ({ ...await original<typeof import("../src/api")>(), listHarnessChoices: vi.fn(async () => choices) }));
 beforeEach(() => { vi.resetModules(); localStorage.clear(); });
 
+it("removes a withdrawn native catalog on its destination while preserving other machines", async () => {
+  const api = await import("../src/api");
+  const pick = await import("../src/harnessPick");
+  const discover = vi.spyOn(api, "listNodeAntigravityModels");
+  try {
+    discover.mockResolvedValueOnce([["carbon", "Carbon"]]);
+    await pick.refreshNodeAntigravityModels("core");
+    discover.mockResolvedValueOnce([["neon", "Neon"]]);
+    await pick.refreshNodeAntigravityModels("babylon");
+    expect(pick.harnessChoices("babylon")[0].models[0].value).toBe("neon");
+    discover.mockResolvedValueOnce([]);
+    await pick.refreshNodeAntigravityModels("babylon");
+    expect(pick.harnessChoices("babylon")).toEqual([]);
+    expect(pick.harnessChoices("core")[0].models[0].value).toBe("carbon");
+  } finally {
+    discover.mockRestore();
+  }
+});
+
 it("has no pick until the catalog is known", async () => {
   const { effectivePick } = await import("../src/harnessPick");
   expect(effectivePick()).toBeNull();

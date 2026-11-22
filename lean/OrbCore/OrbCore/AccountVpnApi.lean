@@ -39,12 +39,12 @@ private def observed? (pool : AccountVpnPool.Pool) (account : String) (pref : Pr
   return none
 
 def route (store : CoreStore) (pool? : Option AccountVpnPool.Pool) (dir account provider : String)
-    (canConfigure : Bool) (method : String) (body : ByteArray)
+    (configurationIssue : Option String) (method : String) (body : ByteArray)
     (configure? : Option (Bool → IO (Except String Unit)) := none) : IO (Nat × JVal) := do
   let err := fun (code : Nat) (reason : String) => (code, JVal.obj #[("error", .str reason)])
   if method != "GET" && method != "PUT" then return err 405 "method_not_allowed"
   if method == "PUT" then
-    if !canConfigure then return err 409 "vpn_credential_owner_unavailable"
+    if configurationIssue.isSome then return err 409 "vpn_credential_owner_unavailable"
     if body.size > 1024 then return err 413 "route_too_large"
     let .ok j := parseBytes body | return err 400 "invalid_json"
     let country? ← match j.fieldStr? "mode", j.field? "country" with
@@ -60,7 +60,9 @@ def route (store : CoreStore) (pool? : Option AccountVpnPool.Pool) (dir account 
     | .error e => return err 503 e
   let countries := ((← AirVpnSettings.endpoints store.rootDir).map (·.country)).eraseDups.mergeSort
   let mut fields := #[("countries", JVal.arr (countries.toArray.map JVal.str)),
-    ("can_configure", .bool canConfigure)]
+    ("can_configure", .bool configurationIssue.isNone)]
+  if let some issue := configurationIssue then
+    fields := fields.push ("configuration_message", .str issue)
   let some pref := preference | return (200, .obj (fields ++ #[("mode", .str "direct"), ("status", .str "direct")]))
   fields := fields ++ #[("mode", .str "vpn"), ("country", .str pref.country)]
   let mut reason := "vpn_awaiting_verification"

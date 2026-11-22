@@ -9,9 +9,10 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from unittest.mock import patch
+from unittest.mock import ANY, Mock, call, patch
 
 PKG = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PKG / 'OrbDesktop'))
@@ -40,13 +41,242 @@ def fixture():
 
 
 class Delivery(unittest.TestCase):
+    def test_shared_mission_distinct_read_state(self):
+        states = {u: {'_versions': {}} for u in ('alice', 'bob')}
+        mission = dict(id='shared', title='Result', status='completed', updated_at='2026-01-01T00:00:00Z')
+
+        completed_reads = 0
+        partial = False
+
+        class Core(BaseHTTPRequestHandler):
+            def reply(self, body, code=200):
+                self.send_response(code)
+                self.end_headers()
+                self.wfile.write(json.dumps(body).encode())
+
+            def do_GET(self):
+                nonlocal completed_reads
+                if self.path == '/api/auth/me':
+                    self.reply({'user': {'username': self.headers['Authorization'].split()[1]}})
+                elif self.path == live.INBOX_PATH:
+                    self.reply(states[self.headers['Authorization'].split()[1]])
+                elif self.path == '/api/control/missions?status=completed&limit=100':
+                    completed_reads += 1
+                    if partial and completed_reads > 1:
+                        self.reply([], 206)
+                    else:
+                        self.reply([mission])
+                elif partial and completed_reads and self.path == '/api/control/missions?limit=200&include_ancestors=true':
+                    self.reply([dict(id='next-roster', status='active')])
+                elif self.path == '/api/projects':
+                    self.reply({'projects': []})
+                else:
+                    self.reply([])
+
+            def do_PUT(self):
+                if self.path != live.INBOX_PATH + '/seen/shared':
+                    self.send_error(404)
+                    return
+                state = states[self.headers['Authorization'].split()[1]]
+                data = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
+                version = state['_versions'].get('seen:shared', 0)
+                if version != data['expectedVersion']:
+                    self.reply({}, 409)
+                    return
+                state.update({'seen:shared': data['stamp'], '_versions': {'seen:shared': version + 1}})
+                self.reply({'ok': True})
+
+            def log_message(self, *_):
+                pass
+
+        with ThreadingHTTPServer(('127.0.0.1', 0), Core) as server:
+            threading.Thread(target=server.serve_forever, daemon=True).start()
+            url = f'http://127.0.0.1:{server.server_port}'
+            def rows():
+                return [[str(v) for v in row[:4]] for row in live.inbox_snapshot(live.Connection(), [], '')
+                        if row[0] == 'U']
+            with patch.object(live, 'credentials', return_value=(url, 'alice')) as creds:
+                alice = live.Connection().binding
+                entry, = rows()
+                self.assertEqual(entry, ['U', 'shared', '1767225600000', '0'])
+                with patch.object(sys, 'stdin', io.StringIO('1767225600000 0')):
+                    self.assertEqual(live.run_mutation(alice, 'inbox-read', 'shared'), 0)
+                self.assertEqual(rows(), [])
+                creds.return_value = (url, 'bob')
+                self.assertEqual(rows(), [entry])
+                self.assertEqual(live.run_mutation(alice, 'inbox-read', 'shared'), 1)
+                self.assertEqual(states['bob'], {'_versions': {}})
+                creds.return_value = (url, 'alice')
+                mission['updated_at'] = '2026-01-01T00:01:00Z'
+                self.assertEqual(rows(), [['U', 'shared', '1767225660000', '1']])
+                with patch.object(sys, 'stdin', io.StringIO('1767225600000 0')):
+                    self.assertEqual(live.run_mutation(alice, 'inbox-read', 'shared'), 1)
+                self.assertEqual(len(rows()), 1)
+            # Exercise the actual Lean bootstrap, rendered focus order and embedded writer.
+            states['alice'] = {'_versions': {}}
+            with tempfile.TemporaryDirectory() as root:
+                for user, action in [('alice', 'read'), ('bob', 'open')]:
+                    (Path(root) / 'connection.json').write_text(json.dumps(dict(api_url=url, token=user)))
+                    subprocess.run(['lean', '--run', 'tests/LiveDelivery.lean', 'inbox', action],
+                                   cwd=Path(__file__).resolve().parents[1], check=True, timeout=30,
+                                   env={**os.environ, 'ORB_STATE_DIR': root})
+                    self.assertEqual(states[user]['seen:shared'], 1767225660000)
+                partial, completed_reads = True, 0
+                states['bob'] = {'_versions': {}}
+                subprocess.run(['lean', '--run', 'tests/LiveDelivery.lean', 'inbox', 'partial'],
+                               cwd=PKG, check=True, timeout=30, env={**os.environ, 'ORB_STATE_DIR': root})
+                self.assertEqual(states['bob'], {'_versions': {}})
+            server.shutdown()
+
+    def test_inbox_reads_bounded_windows_with_irrelevant_archive(self):
+        rules = json.loads((PKG.parents[1] / 'orb/src/projectHistoryRules.json').read_text())
+        old = dict(id='question', project='p', status='awaiting_user', callback_parent_mission_id='controller')
+        parent = dict(id='controller', project='p', status='completed')
+        query = '/api/control/missions?project=p&limit=200'
+        for count in (200, 18600):
+            history = [dict(id=f'archive-{i}', status='acknowledged', project='p') for i in range(count)] + [old, parent]
+            pages = {query + '&all=true': history[:200], query: [old, parent],
+                     '/api/control/missions?status=completed&limit=100': [],
+                     live.INBOX_PATH: {'preferences': {'includeAutonomous': True}}}
+            calls = []
+            elapsed = 0
+            def get(path, cap, *, deadline):
+                nonlocal elapsed
+                calls.append(path)
+                self.assertGreater(deadline, 0)
+                result = pages[path]
+                elapsed += 0.1 + len(result) * 0.001
+                return result
+            with patch.object(live.time, 'monotonic', side_effect=lambda: elapsed):
+                result = live.inbox_snapshot(Mock(get=get), [{'slug': 'p'}], '', rules, roster=[])
+            self.assertEqual([r[1] for r in result if r[0] == 'U'], ['question', 'controller'])
+            self.assertEqual(calls, [live.INBOX_PATH, query + '&all=true', query, '/api/control/missions?status=completed&limit=100'])
+            self.assertAlmostEqual(elapsed, 0.603)
+
+    def test_project_windows_resume_and_are_reused_after_publication(self):
+        rules = json.loads((PKG.parents[1] / 'orb/src/projectHistoryRules.json').read_text())
+        rules['pageSize'] = 1
+        projects = [{'slug': str(i)} for i in range(7)]
+        elapsed = 0
+        paths = []
+        def get(path, cap, *, deadline):
+            nonlocal elapsed
+            self.assertGreaterEqual(deadline, 1)
+            elapsed += 1
+            paths.append(path)
+            if path.endswith('&all=true'):
+                return [dict(id=path, status='acknowledged', tags=['archived'])]
+            return {} if path == live.INBOX_PATH else []
+        c = Mock(get=get)
+        windows = live.InboxWindows()
+        with patch.object(live.time, 'monotonic', side_effect=lambda: elapsed):
+            for _ in range(4):
+                with self.assertRaises(TimeoutError):
+                    live.inbox_snapshot(c, projects, '', rules, windows, [])
+            self.assertEqual(live.inbox_snapshot(c, projects, '', rules, windows, []), [('I', 'enabled')])
+            project_reads = [p for p in paths if '?project=' in p]
+            self.assertEqual(len(project_reads), 14)
+            self.assertEqual(len(set(project_reads)), 14)
+            paths.clear()
+            self.assertEqual(live.inbox_snapshot(c, projects, '', rules, windows, []), [('I', 'enabled')])
+            self.assertEqual(paths, [live.INBOX_PATH, '/api/control/missions?status=completed&limit=100'])
+            paths.clear()
+            live.inbox_snapshot(c, projects[:1], '', rules, windows, [])
+            self.assertEqual(len([p for p in paths if '?project=' in p]), 2)
+
+    def test_incomplete_window_preserves_badge_and_retries_with_fresh_receipts(self):
+        c = Mock(binding='bound')
+        windows = live.InboxWindows()
+        rules = json.loads((PKG.parents[1] / 'orb/src/projectHistoryRules.json').read_text())
+        old = dict(id='a', project='p', status='completed', updated_at='2026-01-01T00:00:00Z')
+        child = dict(id='b', project='p', status='awaiting_user', callback_parent_mission_id='missing')
+        query = '/api/control/missions?project=p&limit=200'
+        completed = '/api/control/missions?status=completed&limit=100'
+        ancestor = '/api/control/missions/missing?include_history=false'
+        current = '/api/control/missions?limit=200&include_ancestors=true'
+        project_list = [{'slug': 'p'}]
+        pages = {live.INBOX_PATH: {'preferences': {'includeAutonomous': True}},
+                 '/api/projects': {'projects': project_list}, '/api/machines': [],
+                 query + '&all=true': [old], query: [old], current: [child], completed: [old]}
+        def get(path, *args, **kwargs):
+            if path == ancestor:
+                raise live.urllib.error.HTTPError(path, 404, 'missing', {}, None)
+            return pages[path]
+        c.get.side_effect = get
+        def sample():
+            return [r[:2] for r in live.roster_rows(c, rules=rules, inbox_for='', inbox_windows=windows)
+                    if r[0] in ('I', 'U')]
+        self.assertEqual(sample(), [('I', 'enabled'), ('U', 'b'), ('U', 'a')])
+        windows.project_refresh_at = 0
+        pages[completed] = {'partial': True}
+        self.assertEqual(sample(), [('I', 'refreshing')])
+        # The roster now has a newer response than the buffered project record.
+        pages[current] = [dict(old, status='running', updated_at='2026-02-01T00:00:00Z'), child]
+        pages[live.INBOX_PATH]['seen:b'] = 1
+        pages[completed] = [old]
+        c.get.reset_mock()
+        self.assertEqual(sample(), [('I', 'enabled')])
+        self.assertNotIn(query, [args.args[0] for args in c.get.call_args_list])
+        self.assertIn(call(ancestor, 8 << 20, deadline=ANY), c.get.call_args_list)
+
+    def test_slow_inbox_http_response_respects_shared_deadline(self):
+        entered = threading.Event()
+        release = threading.Event()
+        class Core(BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(200)
+                self.end_headers()
+                if self.path == live.INBOX_PATH:
+                    self.wfile.write(b'{}')
+                else:
+                    entered.set()
+                    release.wait(3)
+            def log_message(self, *_):
+                pass
+        with ThreadingHTTPServer(('127.0.0.1', 0), Core) as server:
+            threading.Thread(target=server.serve_forever, daemon=True).start()
+            creds = (f'http://127.0.0.1:{server.server_port}', 'fixture')
+            try:
+                with patch.object(live, 'credentials', return_value=creds), patch.object(live, 'INBOX_READ_SECONDS', 0.4):
+                    start = time.monotonic()
+                    with self.assertRaises(TimeoutError):
+                        live.inbox_snapshot(live.Connection(), [], '')
+                    self.assertTrue(entered.is_set())
+                    self.assertLess(time.monotonic() - start, 1.5)
+            finally:
+                release.set()
+                server.shutdown()
+
+    def test_inbox_deadline_expires_before_second_get(self):
+        with patch.object(live, 'Connection') as client, patch.object(
+                live.time, 'monotonic', side_effect=[100, 100, 104]):
+            client.return_value.get.return_value = {}
+            with self.assertRaises(TimeoutError):
+                live.inbox_snapshot(client.return_value, [], '')
+            client.return_value.get.assert_called_once()
+
+    def test_inbox_preferences_response_time_and_order(self):
+        base = dict(status='completed', updated_at='2026-01-01T00:00:00Z')
+        missions = [dict(base, id='ready'), dict(base, id='question', status='waiting_user'),
+                    dict(base, id='worker', parent_mission_id='ready'),
+                    dict(base, id='later', last_output_at='2026-01-01T00:01:00Z'),
+                    dict(base, id='viewed', first_viewed_at=base['updated_at'])]
+        def ids(state):
+            return [row[1] for row in live.inbox_rows(missions, state) if row[0] == 'U']
+        self.assertEqual(ids({}), ['question', 'later', 'ready'])
+        self.assertIn('worker', ids({'preferences': {'includeAutonomous': True}}))
+        self.assertIn('viewed', ids({'seen:viewed': -1767225600000}))
+        self.assertEqual(ids({'preferences': {'inboxEnabled': False}}), [])
+
     def test_bootstrap_recovers_after_initial_timeout(self):
         snapshot = [('C', 'binding'), ('P', 'source', 'Source', '')]
         with patch.object(live, 'Connection') as connection, patch.object(
                 live, 'roster_rows', side_effect=[TimeoutError(), snapshot]) as read, patch.object(
                 live.time, 'sleep'), contextlib.redirect_stdout(io.StringIO()) as output:
+            connection.return_value.creds = ('https://fixture.test', 'private')
+            connection.return_value.get.return_value = {'user': {'username': 'Ben'}}
             live.roster()
-        self.assertEqual(output.getvalue().splitlines(), ['C\tbinding', 'P\tsource\tSource\t'])
+        self.assertEqual(output.getvalue().splitlines(), ['C\tbinding', 'P\tsource\tSource\t', 'A\thttps://fixture.test\tBen'])
         self.assertEqual(read.call_count, 2)
         for call in read.call_args_list:
             self.assertEqual(call.args, (connection.return_value,))
@@ -60,6 +290,41 @@ class Delivery(unittest.TestCase):
             live.roster()
         read.assert_called_once()
 
+    def test_launchable_remote_nodes_are_independent_of_personal_vms(self):
+        def node(ident, **fields):
+            return {'id': ident, 'status': 'online', **fields}
+        fleet = {'enabled': True, 'remote_launch': {'typed': True, 'harnesses': ['codex']}, 'nodes': [
+            node('uruk', display_name='Uruk'), node('core'), node('admin', labels=['admin-only']),
+            node('maintenance', cordoned=True), node('down', status='offline'),
+            node('quarantined', quarantined_harnesses=['codex']),
+            node('dgx-spark-admin', cordoned=True, labels=['manual-only', 'administration'])]}
+        with patch.object(live, 'Connection') as conn, contextlib.redirect_stdout(io.StringIO()) as output:
+            c = conn.return_value
+            c.binding = 'ben'
+            c.request.return_value = fleet
+            live.launch_machines('thomas', 'admin', 'codex')
+            c.request.assert_not_called()
+            live.launch_machines('ben', 'member', 'codex')
+            c.request.assert_called_once_with('/api/remote-nodes', deadline=15)
+            c.check.assert_called_once()
+        self.assertEqual(output.getvalue().splitlines(), ['machines', 'R\turuk\tUruk'])
+        permitted = [r[1] for r in live.launch_machine_rows(fleet, True, 'codex')]
+        self.assertEqual(permitted, ['uruk', 'admin', 'dgx-spark-admin'])
+        self.assertEqual(list(live.launch_machine_rows({**fleet, 'remote_launch': {}}, True, '')), [])
+
+    def test_picker_uses_the_harness_and_proxy_capabilities_reported_by_core(self):
+        fleet = {'enabled': True, 'nodes': [{'id': 'uruk', 'status': 'online'}],
+                 'remote_launch': {'typed': True, 'harnesses': ['antigravity', 'codex'],
+                                   'requires_proxy_harnesses': ['codex'], 'proxy_url_configured': False}}
+        def rows(harness):
+            return list(live.launch_machine_rows(fleet, False, harness))
+        self.assertEqual(rows('opencode'), [])
+        self.assertEqual(rows('codex'), [])
+        self.assertEqual(rows('antigravity'), [('R', 'uruk', 'uruk')])
+        self.assertEqual(rows(''), [('R', 'uruk', 'uruk')])
+        fleet['remote_launch']['proxy_url_configured'] = True
+        self.assertEqual(rows('codex'), [('R', 'uruk', 'uruk')])
+
     def test_provider_inventory_projects_only_the_current_users_display_fields(self):
         accounts = [{'id': 'test-member', 'name': 'Gemini', 'label': 'Work', 'provider_type_name': 'Google',
                      'enabled': True, 'user_enabled': False, 'account_email': 'private@example.test',
@@ -72,7 +337,77 @@ class Delivery(unittest.TestCase):
             conn.return_value.get.assert_not_called()
             live.provider_inventory('ben')
         self.assertEqual(output.getvalue().splitlines(), [
-            'accounts', 'A\ttest-member\tWork\tGoogle\t0\t1', 'A\tsecond\tCloud\tcustom\t1\t0'])
+            'accounts', 'A\ttest-member\tWork\tGoogle\t0\t1\t', 'A\tsecond\tCloud\tcustom\t1\t0\tcustom'])
+
+    def test_account_connection_rechecks_both_settings_after_one_failed_write(self):
+        direct = {'can_configure': True, 'countries': ['NL', 'FI', 'NL'], 'mode': 'direct', 'status': 'direct'}
+        with patch.object(live, 'Connection') as conn, contextlib.redirect_stdout(io.StringIO()) as output:
+            c = conn.return_value
+            c.binding = 'ben'
+            c.request.side_effect = TimeoutError()
+            c.get.side_effect = [direct, {'allowed': False}]
+            live.account_routes('ben', 'A/B', 'antigravity', 'routers', 'on')
+            c.request.assert_called_once_with('/api/ai/providers/A%2FB/alternative-routers',
+                                              body={'allowed': True}, method='PUT')
+            self.assertEqual([call.args[0] for call in c.get.call_args_list],
+                             ['/api/ai/providers/A%2FB/vpn', '/api/ai/providers/A%2FB/alternative-routers'])
+        rows = output.getvalue().splitlines()
+        self.assertEqual(rows[0], 'unconfirmed')
+        self.assertIn('D\t\t\tDirect\tSelected', rows)
+        self.assertEqual(rows.count('D\tvpn\tNL\tAirVPN · NL\t'), 1)
+        self.assertIn('D\trouters\ton\tAlternative routers\tOff · Native Antigravity only', rows)
+
+    def test_account_settings_keep_independent_sections_and_skip_unauthorized_controls(self):
+        read_only = {'can_configure': False, 'countries': ['NL'], 'mode': 'vpn', 'country': 'NL',
+                     'status': 'verified', 'server': 'fixture', 'exits': ['192.0.2.1']}
+        with patch.object(live, 'Connection') as conn:
+            c = conn.return_value
+            c.get.side_effect = [read_only, live.urllib.error.HTTPError('x', 503, 'Unavailable', {}, None)]
+            rows = list(live.account_route_rows(c, 'ok', True))
+            self.assertEqual(rows, [('', '', 'Account connection', 'Verified exit · NL · fixture · 192.0.2.1'),
+                                    ('refresh', '', 'Alternative routers', 'Could not load. Retry')])
+            c.get.side_effect = [live.urllib.error.HTTPError('x', code, 'Unavailable', {}, None) for code in (403, 404)]
+            self.assertEqual(list(live.account_route_rows(c, 'shared', True)), [])
+            c.binding = 'thomas'
+            c.get.reset_mock()
+            live.account_routes('ben', 'ok', 'antigravity', 'vpn', 'FI')
+            c.get.assert_not_called()
+            c.request.assert_not_called()
+
+    def test_blocked_selected_country_can_retry_and_direct_requires_confirmation(self):
+        blocked = {'can_configure': True, 'countries': ['FI'], 'mode': 'vpn', 'country': 'NL',
+                   'status': 'blocked', 'message': 'Tunnel unavailable.'}
+        rows = list(live.vpn_options(blocked))
+        self.assertIn(('vpn', 'NL', 'AirVPN · NL', 'Retry verification'), rows)
+        self.assertIn(('vpn', '', 'Direct', ''), rows)
+        with patch.object(live, 'Connection') as conn:
+            c = conn.return_value
+            c.request.return_value = blocked
+            with self.assertRaises(ValueError):
+                live.save_account_route(c, 'account', 'vpn', '')
+            c.request.assert_called_once_with('/api/ai/providers/account/vpn', body={'mode': 'direct'}, method='PUT', deadline=120)
+            c.request.reset_mock()
+            with self.assertRaises(ValueError):
+                live.save_account_route(c, 'account', 'vpn', 'NL/FI')
+            c.request.assert_not_called()
+
+    def test_two_sessions_read_the_same_shared_route_without_enabling_the_account(self):
+        with patch.object(live, 'Connection') as conn, contextlib.redirect_stdout(io.StringIO()) as output:
+            c = conn.return_value
+            shared = dict(mode='vpn', country='NL', status='verified', server='fixture',
+                          exits=['192.0.2.35'], countries=['NL'], can_configure=True)
+            c.binding = 'ben'
+            c.request.return_value = shared
+            c.get.return_value = shared
+            live.account_routes('ben', 'shared/account', 'openai', 'vpn', 'NL')
+            c.request.assert_called_once_with('/api/ai/providers/shared%2Faccount/vpn',
+                body={'mode': 'vpn', 'country': 'NL'}, method='PUT', deadline=120)
+            saved = output.getvalue()
+            self.assertIn('Verified exit · NL · fixture · 192.0.2.35', saved)
+            c.binding = 'thomas'
+            live.account_routes('thomas', 'shared/account', 'openai', '', '')
+            self.assertEqual(output.getvalue(), saved * 2)
+            self.assertEqual(c.request.call_count, 1)
 
     def test_provider_toggle_requires_the_selected_account_receipt(self):
         with patch.object(live, 'Connection') as conn:
@@ -85,6 +420,30 @@ class Delivery(unittest.TestCase):
             live.mutate('ben', 'skip-provider', 'gemini-work')
             request.assert_called_with('/api/ai/providers/gemini-work/preference',
                                        body={'enabled': False}, method='PUT')
+
+    def test_native_catalog_probes_the_selected_destination_and_rechecks_identity(self):
+        with patch.object(live, 'Connection') as conn:
+            c = conn.return_value
+            c.binding = 'ben'
+            c.request.return_value = [['gemini-4-neon', 'Neon']]
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                live.native_models('ben', 'node a')
+            c.request.assert_called_once_with('/api/providers/antigravity-models?node_id=node+a', deadline=20)
+            self.assertEqual(out.getvalue().splitlines(), ['native-models', 'N\tgemini-4-neon\tNeon'])
+            c.request.return_value = []
+            c.check.side_effect = ValueError('connection changed')
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out), self.assertRaises(ValueError):
+                live.native_models('ben', 'core')
+            self.assertEqual(out.getvalue(), '')
+            c.request.assert_called_with('/api/providers/antigravity-models', deadline=20)
+            c.check.side_effect = None
+            for bad in ({}, ['xx'], [['x\ty', 'name']]):
+                c.request.return_value = bad
+                with contextlib.redirect_stdout(out), self.assertRaises(ValueError):
+                    live.native_models('ben', 'core')
+            self.assertEqual(out.getvalue(), '')
 
     def test_catalog_recovers_without_reopening_the_window(self):
         denied = live.urllib.error.HTTPError('http://localhost', 503, 'Unavailable', {}, None)
@@ -100,12 +459,32 @@ class Delivery(unittest.TestCase):
     def test_stop_appears_when_the_roster_and_bubble_both_report_active(self):
         self.run_wire('start-running')
 
+    def test_recovery_reports_changed_reason_without_server_details(self):
+        denied = live.urllib.error.HTTPError('http://localhost', 401, 'private response', {}, None)
+        with patch.object(live, 'roster', side_effect=[FileNotFoundError(), denied]), patch.object(
+                live.time, 'sleep') as sleep, contextlib.redirect_stdout(io.StringIO()) as out:
+            live.recover_roster('missing')
+        sleep.assert_called_once_with(1)
+        self.assertEqual(out.getvalue(), 'F\tsignin\n')
+
+    def test_invalid_saved_session_is_reported_without_echoing_contents(self):
+        with tempfile.TemporaryDirectory() as home, patch.dict(os.environ, ORB_STATE_DIR=home):
+            Path(home, 'connection.json').write_text('["private"]')
+            with contextlib.redirect_stdout(io.StringIO()) as out:
+                live.recover_roster('')
+            self.assertEqual(out.getvalue(), 'F\tinvalid\n')
+
+    def test_denied_account_has_its_own_window_state(self):
+        self.run_wire('denied')
+
     def test_saved_session_recovers_inside_the_window(self):
         self.run_wire('reconnect')
 
     def run_wire(self, mode):
         paths, tokens = [], []
         db = fixture()
+        project_started = threading.Event()
+        release_project = threading.Event()
         events = '/current-bubble'
         a, b = ('/api/control/missions/' + m for m in ('a', 'b'))
 
@@ -114,12 +493,19 @@ class Delivery(unittest.TestCase):
                 path = self.path
                 paths.append(path)
                 tokens.append(self.headers.get('Authorization'))
+                if mode == 'denied':
+                    self.send_error(403)
+                    return
                 if mode == 'reconnect' and tokens[-1] == 'Bearer fixture':
                     self.send_error(401)
                     return
-                if path == '/api/projects':
+                if path == '/api/auth/me':
+                    result = {'user': {'username': 'Ben' if tokens[-1] == 'Bearer fixture' else 'Alice'}}
+                elif path == '/api/projects':
                     result = {'projects': [dict(slug='p', title='Project title', objective='Objective', color='blue')]}
-                elif path == '/api/control/missions?limit=200':
+                elif path == '/api/control/missions?limit=200&include_ancestors=true':
+                    if mode == 'project-first' and paths.count(path) > 1:
+                        release_project.wait(8)
                     if mode == 'unavailable':
                         self.send_response(302)
                         self.send_header('Location', '/redirect')
@@ -139,11 +525,23 @@ class Delivery(unittest.TestCase):
                     if mode == 'null-retry' and paths.count(path) == 3:
                         self.send_error(503)
                         return
-                elif path == '/api/machines':
+                elif path == '/api/control/missions?status=completed&limit=100':
+                    result = []
+                elif mode == 'project-first' and path.startswith('/api/control/missions?project=p&'):
+                    result = [dict(id='older', project='p', status='completed', tags=['archived'])]
+                elif path == live.INBOX_PATH:
+                    result = {'_versions': {}}
+                elif mode == 'project-lag' and path.startswith('/api/control/missions?project=p&'):
+                    project_started.set()
+                    release_project.wait(8)
+                    result = []
+                elif path.startswith('/api/control/missions?project=p&') or path == '/api/machines':
                     result = []
                 elif path.split('?')[0] in (a + events, b + events):
                     mid = path.split('/')[-2]
                     presence = path.endswith('?presence=1')
+                    if mode == 'project-lag' and mid == 'b':
+                        project_started.wait(3)
                     if mode == 'selected-session' and mid == 'b' and paths.count(path) > 1:
                         self.send_error(401)
                         return
@@ -180,7 +578,7 @@ class Delivery(unittest.TestCase):
                         api_url='', apiUrl=f'http://127.0.0.1:{server.server_port}', token=token)))
                 subprocess.run(['lean', '-j', '1', '-M', '1024', '--run', 'tests/LiveDelivery.lean', mode],
                                cwd=PKG, env={**os.environ, 'ORB_STATE_DIR': root}, check=True, timeout=20)
-                if mode == 'reconnect':
+                if mode in ('reconnect', 'settings-switch'):
                     first = tokens.index('Bearer changed')
                     self.assertGreater(first, 0)
                     self.assertTrue(all(t == 'Bearer changed' for t in tokens[first:]))
@@ -192,9 +590,9 @@ class Delivery(unittest.TestCase):
                 if mode in ('idle-share', 'idle-page-two'):
                     self.assertIn(b + events + '?presence=1', paths)
                     self.assertNotIn(b + events, paths)
-                elif mode in ('page-two', 'null-retry', 'start-running'):
+                elif mode in ('page-two', 'null-retry', 'start-running', 'project-lag'):
                     self.assertIn(b + events, paths)
-                elif mode in ('idle-identity', 'before-open', 'unavailable', 'idle-session'):
+                elif mode in ('idle-identity', 'before-open', 'unavailable', 'denied', 'idle-session', 'project-first'):
                     self.assertFalse(any(p.startswith(a) or p.startswith(b) for p in paths))
                 else:
                     # Scheduling can allow an extra valid sample on slow CI.
@@ -205,8 +603,15 @@ class Delivery(unittest.TestCase):
                     if mode == 'leave':
                         self.assertEqual(paths.count(b + events), 1)
             finally:
+                release_project.set()
                 server.shutdown()
                 db.close()
+
+    def test_project_cards_arrive_before_delayed_global_roster(self):
+        self.run_wire('project-first')
+
+    def test_conversation_updates_while_expanded_project_read_is_pending(self):
+        self.run_wire('project-lag')
 
     def test_revocation(self):
         self.run_wire('revoke')
@@ -238,6 +643,9 @@ class Delivery(unittest.TestCase):
     def test_rotation_after_bootstrap(self):
         self.run_wire('before-open')
 
+    def test_settings_recovers_after_account_switch(self):
+        self.run_wire('settings-switch')
+
     def test_rotation_without_selection(self):
         self.run_wire('idle-identity')
 
@@ -266,9 +674,24 @@ class Delivery(unittest.TestCase):
             with self.subTest(action=action, reason=reason), patch.object(live, 'mutate', side_effect=error):
                 self.assertEqual(live.run_mutation('binding', action, 'm'), expected)
 
+    def test_folder_browser_uses_selected_machine_and_preserves_absolute_paths(self):
+        for machine, route in [('core', '/api'), ('uruk', '/api/remote-nodes/uruk')]:
+            with self.subTest(machine=machine), patch.object(live, 'Connection') as factory:
+                conn = factory.return_value
+                conn.binding = 'bound'
+                conn.request.return_value = [
+                    dict(kind='file', path='/work/a.txt', name='a.txt'),
+                    dict(kind='dir', path='/work/My Folder', name='My Folder')]
+                output = io.StringIO()
+                with contextlib.redirect_stdout(output):
+                    live.list_directories('bound', machine, '/work/a & b')
+                conn.request.assert_called_once_with(route + '/fs/list?path=%2Fwork%2Fa+%26+b', deadline=18)
+                self.assertEqual(output.getvalue().splitlines(), ['directories', 'D\t/work/My Folder\tMy Folder'])
+
     def test_new_agent_sends_the_first_prompt_in_the_create_request(self):
         prompt = 'First line\tcontains a tab.\nSecond line.'
-        payload = '\t'.join(['core', 'codex', 'model', '', 'supervised', 'now', prompt])
+        directory = '/home/ben/work/Project With Spaces'
+        payload = directory + '\0' + '\t'.join(['core', 'codex', 'model', '', 'supervised', 'now', prompt])
         with patch.object(live, 'Connection') as factory, patch.object(live.sys, 'stdin') as stdin:
             stdin.buffer = io.BytesIO(payload.encode())
             connection = factory.return_value
@@ -281,20 +704,103 @@ class Delivery(unittest.TestCase):
             self.assertEqual(request.args, ('/api/control/missions',))
             self.assertEqual(request.kwargs['body']['prompt'], prompt)
             self.assertEqual(request.kwargs['body']['project'], 'now')
+            self.assertEqual(request.kwargs['body']['working_directory'], directory)
             self.assertNotIn('remote_node_id', request.kwargs['body'])
+
+    def test_restore_clears_archive_tag_without_changing_completed_work(self):
+        path = '/api/control/missions/worker'
+        c = Mock()
+        c.get.return_value = dict(id='worker', status='completed', tags=['archived'])
+        live.change_status(c, 'restore', 'worker', 'key')
+        self.assertEqual(c.request.call_args_list, [call(path + '/archive', body={'archived': False}, key='key-tag')])
+        c.reset_mock()
+        c.get.return_value['status'] = 'acknowledged'
+        live.change_status(c, 'restore', 'worker', 'key')
+        self.assertEqual(c.request.call_args_list, [
+            call(path + '/archive', body={'archived': False}, key='key-tag'),
+            call(path + '/status', body={'status': 'paused'}, key='key')])
+
+    def test_expanded_project_restores_older_active_worker_and_its_controller(self):
+        query = '/api/control/missions?project=p&limit=2'
+        def row(mid, status, **fields):
+            return dict(id=mid, project='p', status=status, **fields)
+        old = row('old', 'completed')
+        child = row('child', 'active', parent_mission_id='controller')
+        history = [row('new', 'completed'), row('archived', 'acknowledged')]
+        pages = {live.INBOX_PATH: {}, query + '&all=true': history, query: [history[0], old],
+                 query + '&offset=2': [child, row('side', 'active', tags=['btw-parent:child'])],
+                 query + '&offset=4': [], '/api/control/missions/controller?include_history=false': row('controller', 'completed'),
+                 '/api/projects': {'projects': [{'slug': 'p'}]}, '/api/machines': [],
+                 '/api/control/missions?limit=200&include_ancestors=true': [old]}
+        connection = type('Fixture', (), {'binding': 'bound', 'check': lambda _: None, 'get': lambda _, path: pages[path]})()
+        rules = json.loads((PKG.parents[1] / 'orb/src/projectHistoryRules.json').read_text())
+        rules['pageSize'] = 2
+        initial = live.roster_rows(connection)
+        self.assertEqual([r[1] for r in initial if r[0] == 'M'], ['old'])
+        loaded = live.roster_rows(connection, expanded=['p'], rules=rules)
+        self.assertIn(('G', 'p', 'archived', 'child', 'controller', 'new'), loaded)
+        self.assertIn('old', [r[1] for r in loaded if r[0] == 'M'])
+        calls = []
+        def retry_page(path):
+            calls.append(path)
+            if path == query + '&offset=2' and calls.count(path) == 1:
+                raise TimeoutError()
+            return pages[path]
+        with patch.object(connection, 'get', side_effect=retry_page), patch.object(live.time, 'sleep'):
+            self.assertEqual(live.roster_rows(connection, expanded=['p'], rules=rules), loaded)
+        self.assertEqual(calls.count(query + '&all=true'), 1)
+        self.assertEqual(calls.count(query + '&offset=2'), 2)
+        pages[query + '&offset=2'] = None
+        with self.assertRaises(ValueError):
+            live.roster_rows(connection, expanded=['p'], rules=rules)
+
+    def test_project_frame_precedes_unrelated_reads_and_reconciles_removal(self):
+        query = '/api/control/missions?project=now&limit=200'
+        members = [dict(id=str(i), project='now', status='completed') for i in range(53)]
+        members[-1]['tags'] = ['archived']
+        pages = {'/api/projects': {'projects': [{'slug': 'now'}]}, query + '&all=true': members,
+                 query: members, '/api/control/missions?limit=200&include_ancestors=true': members[:52],
+                 '/api/control/missions?status=acknowledged&limit=100': [], '/api/machines': []}
+        reads = []
+        def get(path):
+            reads.append(path)
+            time.sleep(0.02)
+            return pages[path]
+        c = Mock(binding='bound', get=get)
+        rules = json.loads((PKG.parents[1] / 'orb/src/projectHistoryRules.json').read_text())
+        frames = []
+        def publish(rows):
+            frames.append((rows, list(reads)))
+        full = live.roster_rows(c, True, ['now'], rules, publish)
+        early, first_reads = frames.pop()
+        self.assertEqual(first_reads, ['/api/projects', query + '&all=true'])
+        self.assertEqual([r for r in early if r[0] == 'G'], [r for r in full if r[0] == 'G'])
+        self.assertEqual(len([r for r in early if r[0] == 'M']), 53)
+        self.assertEqual(next(r for r in early if r[:2] == ('M', '52'))[-1], '1')
+        first_cycle = list(reads)
+        reads.clear()
+        members.pop()
+        full = live.roster_rows(c, True, ['now'], rules)
+        self.assertEqual(reads, first_cycle)
+        self.assertCountEqual(reads, pages.keys() - {query})
+        self.assertNotIn('52', next(r for r in full if r[0] == 'G')[2:])
+        c.check.side_effect = ValueError('connection changed')
+        with self.assertRaises(ValueError):
+            live.roster_rows(c, True, ['now'], rules, publish)
+        self.assertFalse(frames)
 
     def test_child_precedes_parent_in_live_roster(self):
         child = dict(id='child', folder='notes/today', parent_mission_id='launch',
-                     callback_parent_mission_id='callback', tags=['fork-of:source'],
+                     callback_parent_mission_id='callback', tags=['fork-of:source', 'archived'],
                      superseded_by_mission_id='next')
-        pages = {'/api/projects': {'projects': []}, '/api/machines': [],
-                 '/api/control/missions?limit=200': [child]}
+        pages = {live.INBOX_PATH: {}, '/api/projects': {'projects': []}, '/api/machines': [],
+                 '/api/control/missions?limit=200&include_ancestors=true': [child]}
         connection = type('Fixture', (), {'binding': 'bound', 'check': lambda _: None,
                                           'get': lambda _, path: pages[path]})()
         for missions in ([child], [child, dict(id='launch')]):
-            pages['/api/control/missions?limit=200'] = missions
+            pages['/api/control/missions?limit=200&include_ancestors=true'] = missions
             projected = next(row for row in live.roster_rows(connection) if row[0] == 'M')
-            self.assertEqual(projected[16:], ('notes/today', 'launch', 'callback', 'source', 'next'))
+            self.assertEqual(projected[16:], ('notes/today', 'launch', 'callback', 'source', 'next', '1'))
 
     def test_live_reader_accepts_both_full_roster_pages(self):
         ids = [str(i).zfill(128) for i in range(300)]
@@ -320,8 +826,8 @@ class Delivery(unittest.TestCase):
         out = io.StringIO()
         with patch.object(live, 'roster_rows', return_value=[('M','a','Title')]), patch.object(live, 'Connection', Connection), patch.object(live.time, 'sleep', side_effect=[None, KeyboardInterrupt]), contextlib.redirect_stdout(out):
             with self.assertRaises(KeyboardInterrupt):
-                live.poll('a', 'bound', {'a'})
-        self.assertEqual(out.getvalue(), 'B\t+M\x1ca\x1cTitle\tTitle\tactive\tPublic\n')
+                live.poll_bubble('a', 'bound')
+        self.assertEqual(out.getvalue(), 'B\tTitle\tactive\tPublic\n')
 
     def test_unselected_status_changes_reach_sidebar(self):
         class Connection:

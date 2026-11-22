@@ -479,6 +479,7 @@ describe("Settings multi-user login & GitHub integration", () => {
         return new Response(
           JSON.stringify({
             auth_mode: "multi_user",
+            user: { username: "alice", role: "admin" },
             password_source: "none",
             dev_mode: false,
           }),

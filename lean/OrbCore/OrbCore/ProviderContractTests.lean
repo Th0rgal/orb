@@ -1560,11 +1560,44 @@ private def routingChainProbeContract (app : CoreAppState) (jwt : String) (now :
     discard <| LeanSys.Posix.closeFd fd
   return failures
 
+/-- A persisted chain retains its account selection through a delete and reload. -/
+private def savedChainAccountDeletion (store : CoreStore) (root : String) : IO Unit := do
+  let sibling : AIProviderRecord := {
+    id := "saved-sibling", name := "Sibling", providerType := "openai",
+    apiKey := "synthetic-sibling", rpmLimit? := some 17 }
+  let selected := { sibling with id := "saved-selected", name := "Selected", apiKey := "synthetic-selected" }
+  for account in #[sibling, selected] do IO.ofExcept (← upsertAIProvider store account)
+  let generic := JVal.obj #[("provider_id", .str "openai"), ("model_id", .str "fixture")]
+  let entries := renderCompact (.arr #[generic.setField "account_id" (.str selected.id),
+    generic, generic.setField "account_id" (.str "default"),
+    ((generic.setField "accountId" (.str "legacy-inline")).setField "apiKey" (.str "inline-fixture")).setField
+      "baseUrl" (.str "https://fixture.invalid/v1")])
+  discard <| IO.ofExcept (← execParamQuery store.missionsDb
+    "INSERT INTO model_routing_chains(id,name,models_json) VALUES('saved-delete','Saved delete',?1)" #[entries])
+  let reload := do
+    let some chain := (← loadRoutingChainsFromStore store root).find? (·.id == "saved-delete")
+      | throw (IO.userError "Missing saved chain fixture")
+    pure chain.targets
+  let before ← reload
+  unless before[0]?.any (fun t => t.accountId == selected.id && t.apiKey == selected.apiKey) do
+    throw (IO.userError "Saved chain must select the pinned configured account")
+  IO.ofExcept (← deleteAIProvider store selected.id)
+  let #[implicitDefault, explicitDefault, inlineOnly] ← reload
+    | throw (IO.userError "A deleted pin must drop out of the saved chain")
+  unless #[implicitDefault, explicitDefault].all (fun t => t.accountId == sibling.id && t.apiKey == sibling.apiKey) &&
+      inlineOnly.accountId == "legacy-inline" && inlineOnly.apiKey == "inline-fixture" &&
+      inlineOnly.baseUrl == "https://fixture.invalid/v1" && inlineOnly.accountRpmLimit?.isNone do
+    throw (IO.userError "Saved default and standalone inline routes must retain their own resolution")
+  IO.ofExcept (← deleteAIProvider store sibling.id)
+  discard <| IO.ofExcept (← execParamQuery store.missionsDb "DELETE FROM model_routing_chains WHERE id='saved-delete'" #[])
+
 /-- Replay the production renderers and HTTP dispatch, never a live usage fetch. -/
 private def r21aGoogleAcquisition : IO Unit := do
   let targets := parseChainTargetsJson
     "[{\"provider_id\":\"google\",\"account_id\":\"one\",\"model_id\":\"a\"},{\"provider_id\":\"google\",\"account_id\":\"one\",\"model_id\":\"b\"},{\"provider_id\":\"google\",\"account_id\":\"two\",\"model_id\":\"a\"}]"
-    #[] #[] "" "" (some (effectiveGoogleMaxConcurrency (some 1) (some "9")))
+    #[{ id := "one", name := "One", providerType := "google", apiKey := "synthetic-one" },
+      { id := "two", name := "Two", providerType := "google", apiKey := "synthetic-two" }]
+    #[] "" "" (some (effectiveGoogleMaxConcurrency (some 1) (some "9")))
   let #[a,b,c] := targets | throw (IO.userError "r21aGoogleAcquisition: missing targets")
   let tracker ← newProxyPacingTracker
   unless ← tryAcquireTargetSlot tracker a 1 do throw (IO.userError "r21aGoogleAcquisition: first slot")
@@ -1760,6 +1793,108 @@ private def memberNativeCatalog (store : CoreStore) (root : String) : IO Unit :=
     for file in #[first, second] do
       try IO.FS.removeFile file catch _ => pure ()
 
+/-- A host key must not change the transport of a bound subscription. Both signed-in
+    users can configure the route, while the credential stays with its original owner. -/
+private def sharedCredentialRouting (app : CoreAppState) (root admin member : String) (now : UInt64) : IO Unit := do
+  let codex := "fixture-bound-codex"
+  let file := s!"{root}/auth-empty/codex-bound.json"
+  let legacy := s!"{root}/.sandboxed-sh/ai_providers.json"
+  let saved ← IO.FS.readFile legacy
+  let vars := #["OPENAI_API_KEY", "CLAUDE_CODE_PROXY_BASE_URL", "CLI_PROXY_MANAGEMENT_KEY"]
+  let previous ← vars.mapM (fun name => do pure (← IO.getEnv name))
+  let (fd, port) ← IO.ofExcept (← LeanSys.Posix.tcpListen "127.0.0.1" 0 8)
+  let endpoint := s!"http://127.0.0.1:{port}"
+  let relay ← IO.mkRef ""
+  let received ← IO.mkRef (0 : Nat)
+  let handler : String → String → IO (Nat × String) := fun line body => do
+    let request := (OrbBin.Json.parse body).toOption.getD .null
+    if line.startsWith "GET /v8/management/credentials/download?name=codex-bound.json " then
+      return (200, renderCompact (.obj #[("prefix", .str codex), ("proxy_url", .str (← relay.get))]))
+    if line.startsWith "PATCH /v8/management/credentials/fields " &&
+        request.fieldStr? "name" == some "codex-bound.json" then
+      let some url := request.fieldStr? "proxy_url" | return (400, "{}")
+      relay.set url
+      return (200, "{\"status\":\"ok\"}")
+    let model := request.fieldStr? "model"
+    if line.startsWith "POST /v1/chat/completions " && model == some (codex ++ "/gpt-5") ||
+        line.startsWith "POST /v1beta/openai/chat/completions " && model == some "gemini-fixture" then
+      received.modify (· + 1)
+      return (200, "{\"choices\":[{\"message\":{\"content\":\"fixture-ok\"}}]}")
+    return (404, "{}")
+  let stop ← IO.mkRef false
+  let server ← mockSidecarAuthFiles fd (← IO.mkRef 0) (← IO.mkRef handler) stop
+  let pool ← Std.Mutex.new ({} : AccountVpnPool.PoolState)
+  let app := { app with vpnRelayPort? := some 41001, vpnPool? := some pool }
+  let addedId ← IO.mkRef ""
+  try
+    setenvVar "OPENAI_API_KEY" "fixture-instance-key"
+    setenvVar "CLAUDE_CODE_PROXY_BASE_URL" endpoint
+    setenvVar "CLI_PROXY_MANAGEMENT_KEY" "fixture-management"
+    IO.FS.writeFile file (renderCompact (.obj #[("type", .str "codex"), ("prefix", .str codex),
+      ("access_token", .str "fixture-subscription")]))
+    IO.ofExcept (← upsertAIProvider app.store {
+      id := codex, providerType := "openai", name := "Subscription",
+      apiKey := "cli-proxy-managed" })
+    IO.FS.writeFile legacy "[{\"id\":\"legacy-google-key\",\"name\":\"Gemini\",\"provider_type\":\"google\",\"api_key\":\"fixture-legacy-key\"}]"
+    let (status, row) ← postJson app member "/api/ai/providers"
+      "{\"provider_type\":\"google\",\"name\":\"Member Gemini\",\"api_key\":\"fixture-member-key\"}" now
+    let added := (row.fieldStr? "id").getD ""
+    addedId.set added
+    unless status == 201 && !added.isEmpty do throw (IO.userError "member Gemini key creation failed")
+    let accounts ← loadHydratedProviders app.store root
+    for (id, provider, model, key) in #[(codex, "openai", "gpt-5", "fixture-service-key"),
+        (added, "google", "gemini-fixture", "fixture-member-key"),
+        ("legacy-google-key", "google", "gemini-fixture", "fixture-legacy-key")] do
+      for session in #[admin, member] do
+        let settings ← getJson app session s!"/api/ai/providers/{id}/vpn" now
+        unless settings.fieldBool? "can_configure" == some true do
+          throw (IO.userError s!"Missing shared VPN settings for {provider}")
+      let entry := renderCompact (.arr #[.obj #[("account_id", .str id), ("provider_id", .str provider),
+        ("model_id", .str model)]])
+      let targets := parseChainTargetsJson entry (← listAIProviders app.store) accounts endpoint "fixture-service-key"
+      let #[target] := targets | throw (IO.userError "expected one pinned inference target")
+      unless target.accountId == id && target.apiKey == key do throw (IO.userError "credential owner changed")
+      let routed ← if provider == "openai" then do
+          unless target.baseUrl == endpoint && target.sidecarCredential?.any (·.file == "codex-bound.json") do
+            throw (IO.userError "Codex did not resolve to its bound sidecar credential")
+          pure target
+        else do
+          unless target.baseUrl == "https://generativelanguage.googleapis.com/v1beta/openai" &&
+              target.sidecarCredential?.isNone do throw (IO.userError "unexpected Gemini API transport")
+          pure { target with baseUrl := endpoint ++ "/v1beta/openai" }
+      let chain : RoutingChain := { id := "fixture-chain", name := "test", targets := #[routed] }
+      let testApp := { app with chainsRef := ← IO.mkRef #[chain], proxyCooldownsRef := ← IO.mkRef #[] }
+      let vpn := s!"/api/ai/providers/{id}/vpn"
+      let chat := "{\"model\":\"fixture-chain\",\"messages\":[{\"role\":\"user\",\"content\":\"test\"}]}"
+      let (savedCode, _) ← putJson testApp member vpn "{\"mode\":\"vpn\",\"country\":\"NL\"}" now
+      let shared ← getJson testApp admin vpn now
+      unless savedCode == 200 && shared.fieldStr? "country" == some "NL" do
+        throw (IO.userError s!"Shared {provider} VPN selection did not persist")
+      let before ← received.get
+      let (blocked, _) ← postJson testApp member "/v1/chat/completions" chat now
+      unless blocked >= 400 && (← received.get) == before do
+        throw (IO.userError "An unavailable VPN forwarded the request")
+      let (direct, _) ← putJson testApp admin vpn "{\"mode\":\"direct\"}" now
+      unless direct == 200 && (← getJson testApp member vpn now).fieldStr? "mode" == some "direct" do
+        throw (IO.userError "Member did not observe shared Direct route")
+      for session in #[admin, member] do
+        let (code, _) ← postJson testApp session "/v1/chat/completions" chat (now + 300)
+        unless code == 200 do throw (IO.userError s!"Pinned {provider} inference returned {code}")
+      unless (← received.get) == before + 2 do throw (IO.userError "Missing loopback inference receipts")
+  finally
+    stop.set true
+    discard <| IO.wait server
+    discard <| LeanSys.Posix.closeFd fd
+    for (name, value) in vars.zip previous do
+      match value with
+      | some v => setenvVar name v
+      | none => unsetenvVar name
+    IO.FS.writeFile legacy saved
+    IO.FS.removeFile file
+    IO.ofExcept (← deleteAIProvider app.store codex)
+    let added ← addedId.get
+    if !added.isEmpty then IO.ofExcept (← deleteAIProvider app.store added)
+
 def run : IO Unit := do
   let fixtureRaw ← IO.FS.readFile "shared/orb-spec/fixtures/provider-response-contract.json"
   let .ok fixture := OrbBin.Json.parse fixtureRaw
@@ -1777,6 +1912,7 @@ def run : IO Unit := do
     try
       nativeGrantContract store
       memberNativeCatalog store root
+      savedChainAccountDeletion store root
       r21aGoogleAcquisition
       r21aAdapterReplays store root
       IO.FS.writeFile s!"{root}/.sandboxed-sh/ai_providers.json"
@@ -1810,6 +1946,7 @@ def run : IO Unit := do
         | throw (IO.userError "VPN settings member creation failed")
       nativeGatewayContract app member.id root now
       let memberJwt := mintSessionTokenV2 cfg.jwtSecret member.id member.role member.sessionEpoch (now + 3600)
+      sharedCredentialRouting app root jwt memberJwt now
       let a : HydratedProvider := { (default : HydratedProvider) with
         id := "fixture-a"
         providerType := "openai"
@@ -1823,6 +1960,10 @@ def run : IO Unit := do
         failures := failures.push "An explicitly selected account must supply its own credential"
       unless (parseChainTargetsJson entry #[] #[a, { b with enabled := false }]).isEmpty do
         failures := failures.push "A disabled selected account must not resolve another login"
+      let inlineEntry := renderCompact (.arr #[.obj #[("provider_id", .str "openai"),
+        ("account_id", .str b.id), ("model_id", .str "fixture-model"), ("api_key", .str "synthetic-inline")]])
+      unless (parseChainTargetsJson inlineEntry #[] #[a, { b with enabled := false }]).isEmpty do
+        failures := failures.push "Inline chain settings cannot override a disabled account pin"
       let sidecarAccount := { b with
         hasApiKey := false
         apiKey := ""
@@ -1880,9 +2021,73 @@ def run : IO Unit := do
       unless memberCode == 200 && saved.fieldStr? "country" == some "NL" &&
           adminView.fieldStr? "country" == some "NL" do
         failures := failures.push "An administrator must see the shared country saved by a member"
+      let configuredIdentities := fun (session : String) => do
+        let rows := (← getJson app session "/api/ai/providers" now).asArr?.getD #[]
+        return (rows.filter (·.fieldBool? "has_credentials" == some true)).map fun row =>
+          (row.fieldStr? "id", row.fieldStr? "provider_type", row.fieldBool? "enabled",
+           (row.fieldOrNull "status").fieldStr? "type")
+      unless (← configuredIdentities memberJwt) == (← configuredIdentities jwt) do
+        failures := failures.push "Both sessions list the same configured IDs, types, global state and credential status"
+      let listRow : String → IO JVal := fun session => do
+        let rows := (← getJson app session "/api/ai/providers" now).asArr?.getD #[]
+        pure ((rows.find? (·.fieldStr? "id" == some ownerRow.id)).getD .null)
+      let inChooser : String → IO Bool := fun session => do
+        let catalog ← getJson app session "/api/providers" now
+        pure (((catalog.fieldArr? "configured_ids").getD #[]).contains (.str ownerRow.id))
+      let (prefCode, _) ← putJson app memberJwt (s!"/api/ai/providers/{ownerRow.id}/preference")
+        "{\"enabled\":false}" now
+      unless prefCode == 200 && (← listRow memberJwt).fieldBool? "user_enabled" == some false &&
+          (← listRow jwt).fieldBool? "user_enabled" == some true &&
+          !(← inChooser memberJwt) && (← inChooser jwt) do
+        failures := failures.push "Personal preference persists on list reload and filters only the member's chooser"
+      IO.ofExcept (← upsertAIProvider store { ownerRow with apiKey := "synthetic-rotated" })
+      if (← upsertAIProvider store ownerRow (memberEdit := true)).isOk then
+        failures := failures.push "A concurrent shared settings edit cannot restore an owner credential"
       IO.ofExcept (← upsertAIProvider store { ownerRow with enabled := false })
+      if (← upsertAIProvider store ownerRow (memberEdit := true)).isOk then
+        failures := failures.push "A stale member edit cannot restore the previous global state"
+      let disabledMember ← listRow memberJwt
+      let disabledAdmin ← listRow jwt
+      let (reorderCode, reordered) ← postJson app memberJwt "/api/ai/providers/reorder"
+        (renderCompact (.obj #[("ids", .arr #[.str ownerRow.id])])) now
+      let reorderedAccount := (reordered.asArr?.getD #[]).find? (·.fieldStr? "id" == some ownerRow.id)
+      unless reorderCode == 200 && reorderedAccount == some (← listRow memberJwt) &&
+          reorderedAccount.any (fun row => row.fieldBool? "user_enabled" == some false) do
+        failures := failures.push "Reordering preserves the member's disabled account, preference and redaction"
+      let detail ← getJson app memberJwt s!"/api/ai/providers/{ownerRow.id}" now
+      unless detail.fieldStr? "id" == some ownerRow.id && detail.fieldBool? "user_enabled" == some false &&
+          (detail.field? "base_url").isNone do
+        failures := failures.push "A member can reopen the redacted details of a disabled shared account"
+      unless disabledMember.fieldStr? "id" == some ownerRow.id &&
+          disabledAdmin.fieldStr? "id" == some ownerRow.id &&
+          disabledMember.fieldBool? "enabled" == some false &&
+          disabledAdmin.fieldBool? "effective_enabled" == some false &&
+          (disabledMember.fieldOrNull "status").fieldStr? "type" == some "connected" &&
+          (disabledMember.field? "base_url").isNone &&
+          (← getJson app memberJwt ownerRoute now).fieldStr? "country" == some "NL" do
+        failures := failures.push "Both sessions retain the disabled configured account and its shared VPN country"
+      let legacyFile := s!"{root}/.sandboxed-sh/ai_providers.json"
+      IO.FS.rename legacyFile (legacyFile ++ ".saved")
+      try
+        let dbMember ← listRow memberJwt
+        let dbAdmin ← listRow jwt
+        unless dbMember.fieldStr? "id" == some ownerRow.id &&
+            dbMember.fieldBool? "user_enabled" == some false && dbAdmin.fieldBool? "user_enabled" == some true &&
+            dbMember.fieldBool? "globally_enabled" == some false && (dbMember.field? "base_url").isNone do
+          failures := failures.push "Database-only list retains disabled accounts with the same redaction and preferences"
+      finally
+        IO.FS.rename (legacyFile ++ ".saved") legacyFile
+      let (enableCode, _) ← putJson app memberJwt s!"/api/ai/providers/{ownerRow.id}" "{\"enabled\":true}" now
+      let pinned := renderCompact (.arr #[.obj #[("provider_id", .str "openai"),
+        ("account_id", .str ownerRow.id), ("model_id", .str "fixture-model")]])
+      unless enableCode == 403 && !(← inChooser jwt) &&
+          (parseChainTargetsJson pinned (← listAIProviders store) (← loadHydratedProviders store root)).isEmpty do
+        failures := failures.push "Global disable excludes pinned inference targets and chooser options"
+      IO.ofExcept (← upsertAIProvider store { ownerRow with enabled := false, apiKey := "", providerType := "custom" })
       let (hiddenCode, _) ← putJson app memberJwt ownerRoute "{\"mode\":\"direct\"}" now
-      unless hiddenCode == 403 do failures := failures.push "Hidden providers cannot be reconfigured by members"
+      unless hiddenCode == 403 && (← listRow memberJwt) == .null &&
+          (← listRow jwt).fieldBool? "has_credentials" == some false do
+        failures := failures.push "Only the operator sees this unconfigured placeholder"
       IO.ofExcept (← deleteAIProvider store ownerRow.id)
       let (missing, _) ← putJson app jwt accountRoute "{}" now
       if missing != 404 then failures := failures.push "VPN admin route must resolve the selected account"

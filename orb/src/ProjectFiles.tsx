@@ -149,6 +149,7 @@ export function LiveProjectsSection(p: {
   onNewAgent: (slug: string, path?: string) => void;
   onNewCloudAgent?: (slug: string, path?: string) => void;
   onDeleted?: (ids: string[]) => void;
+  onInitialProjectWindows?: (projects: ProjectSummary[]) => void;
   onProjectMissions?: (slug: string, rows: Mission[]) => void;
   onProjectEntries?: (slug: string, folders: string[], files: string[]) => void;
   /** "+" on the section header: create a project (opens the picker flow). */
@@ -865,6 +866,15 @@ export function LiveProjectsSection(p: {
   const currentConnection = (version: number) => isConnected() && connectionVersion() === version;
   const requests = createSidebarRequests();
   const warmed = new Set<string>();
+  const loadedWindows = new Set<string>();
+  let initialProjects: ProjectSummary[] | undefined;
+  let publishedWindows = false;
+  const publishInitialWindows = () => {
+    if (!publishedWindows && initialProjects?.every(project => loadedWindows.has(project.slug))) {
+      publishedWindows = true;
+      p.onInitialProjectWindows?.(initialProjects);
+    }
+  };
   const warmupQueue: string[] = [];
   let warmupActive = 0;
   createEffect(on(connectionVersion, () => {
@@ -884,6 +894,9 @@ export function LiveProjectsSection(p: {
     setMissions(reconcile({})); setDirs(reconcile({}));
     setDirErrors(reconcile({}));
     warmed.clear();
+    loadedWindows.clear();
+    initialProjects = undefined;
+    publishedWindows = false;
     warmupQueue.length = 0;
     if (!isConnected()) return;
     refresh();
@@ -897,7 +910,7 @@ export function LiveProjectsSection(p: {
     const version = connectionVersion();
     const gen = ++refreshGeneration;
     if (projects().length === 0) setProjectsLoading(true);
-    listProjects(force)
+    listProjects(force, !p.onInitialProjectWindows || publishedWindows)
       .then((list) => {
         if (!currentConnection(version) || gen !== refreshGeneration) return;
         batch(() => {
@@ -905,6 +918,8 @@ export function LiveProjectsSection(p: {
           setProjectsLoading(false);
           setError(null);
         });
+        initialProjects = list;
+        publishInitialWindows();
         warmupProjects(list);
       })
       .catch((e) => {
@@ -1032,6 +1047,8 @@ export function LiveProjectsSection(p: {
       projectSweepBusy = true;
       try {
         if (error()) refresh();
+        // Retry incomplete cold-start windows even when their projects are collapsed.
+        if (initialProjects && !publishedWindows) warmupProjects(initialProjects);
         const slugs = projects().map(proj => proj.slug).filter(slug => p.headless ? Boolean(slug) : expanded[slug]);
         for (let i = 0; i < slugs.length; i += 2) {
           if (!isConnected()) break;
@@ -1099,7 +1116,10 @@ export function LiveProjectsSection(p: {
     return requests.read(`missions:${version}:${revision}:${slug}`, () => listProjectMissions(slug, opts?.background ? { background: true } : undefined), !opts?.cached)
       .then((list) => {
         if (!currentConnection(version)) return;
-        if (revision !== missionRevision) return;
+        if (revision !== missionRevision) {
+          warmed.delete(slug);
+          return;
+        }
         const partial = isPartialList(list);
         const visibleList = list.filter(m => !deletedInSession.has(m.id) && !archivedInSession.has(m.id));
         // Reconcile, never replace: a short answer during a Core/Hermes restart keeps what is on screen.
@@ -1119,12 +1139,19 @@ export function LiveProjectsSection(p: {
           }
         });
         p.onProjectMissions?.(slug, merged);
+        if (partial) warmed.delete(slug);
+        else {
+          loadedWindows.add(slug);
+          publishInitialWindows();
+        }
         if (opts?.transcripts === false) return;
         const deleting = deletingIds();
         for (const id of selectLivePrefetchIds(merged.filter(m => !deleting.has(m.id)), isLive)) prefetchTranscript(id);
       })
       .catch(() => {
-        if (currentConnection(version) && !missions[slug]) setMissions(slug, []);
+        if (!currentConnection(version)) return;
+        warmed.delete(slug);
+        if (!missions[slug]) setMissions(slug, []);
       });
   };
 
@@ -1245,13 +1272,17 @@ export function LiveProjectsSection(p: {
     ]);
   };
   const pumpWarmup = () => {
-    if (!cacheCanPrefetch()) return;
-    const cap = Math.min(2, currentLinkBudget().p2Cap);
+    const prefetch = cacheCanPrefetch();
+    if (!prefetch && (document.hidden || !p.onInitialProjectWindows || publishedWindows)) return;
+    // Initial badge inputs can make progress on a constrained link. Only
+    // request one project summary window there and leave files to expansion.
+    const cap = prefetch ? Math.min(2, currentLinkBudget().p2Cap) : 1;
     if (cap <= 0) return;
     while (warmupActive < cap && warmupQueue.length) {
       const slug = warmupQueue.shift()!;
       warmupActive++;
-      void warmupOne(slug).finally(() => {
+      const load = prefetch ? warmupOne(slug) : loadMissions(slug, { transcripts: false, cached: true });
+      void load.finally(() => {
         warmupActive--;
         pumpWarmup();
       });

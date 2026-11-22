@@ -38,6 +38,44 @@ async function open(page: Page, fixture: Fixture, theme = 'dark') {
   await page.getByRole('button', { name: 'Inference', exact: true }).click();
 }
 
+test('a member retries Inference after a provider 401 without signing back into Orb', async ({ page }) => {
+  await page.addInitScript(() => {
+    if (!sessionStorage.getItem('fixture-started')) {
+      localStorage.setItem('orb.apiUrl', location.origin);
+      localStorage.setItem('orb.jwt', 'member-fixture');
+      sessionStorage.setItem('fixture-started', 'true');
+    }
+  });
+  let rejectProviders = true;
+  const statuses: number[] = [];
+  const member = { id: 'ben', username: 'Ben', role: 'member' };
+  await page.route('**/api/**', route => {
+    const path = new URL(route.request().url()).pathname;
+    if (path === '/api/ai/providers') {
+      expect(route.request().headers().authorization).toBe('Bearer member-fixture');
+      statuses.push(rejectProviders ? 401 : 200);
+      if (rejectProviders) return route.fulfill({ status: 401, body: 'Provider sign-in required' });
+      return route.fulfill({ json: [codex] });
+    }
+    if (path === '/api/auth/me' || path === '/api/auth/status') {
+      return route.fulfill({ json: { authenticated: true, auth_mode: 'multi_user', user: member } });
+    }
+    return route.fulfill({ json: path === '/api/projects' ? { projects: [] } : [] });
+  });
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Inference', exact: true }).click();
+  const retry = page.getByRole('button', { name: 'Retry', exact: true });
+  await expect(retry).toBeVisible();
+  expect(await page.evaluate(() => localStorage.getItem('orb.jwt'))).toBe('member-fixture');
+  rejectProviders = false;
+  await retry.click();
+  await expect(page.locator('.p-acc-wrap', { hasText: 'solo@example.com' })).toBeVisible();
+  expect(statuses[0]).toBe(401);
+  expect(statuses.at(-1)).toBe(200);
+  await page.reload();
+  expect(await page.evaluate(() => localStorage.getItem('orb.jwt'))).toBe('member-fixture');
+});
+
 const head = (page: Page) => page.locator('.p-group-head');
 const rows = (page: Page) => page.locator('.p-group-body .p-acc-wrap');
 const subscriptions = (page: Page) => page.locator('.s-sec', { has: page.getByRole('heading', { name: 'Subscriptions' }) }).locator('.s-card');

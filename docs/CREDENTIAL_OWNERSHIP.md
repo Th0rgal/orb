@@ -19,8 +19,8 @@ the user logs in again. This can cause recurring "login expired" states for Clau
 - Without management integration, the previous ownership detection remains:
   refreshable proxy files select proxy ownership; other logins use legacy flows.
 - API keys and unsupported Google/GitHub subscription integrations retain their
-  existing owners. Gemini CLI and Copilot are not native login providers in the
-  deployed CLIProxyAPI version; Antigravity is a distinct Google integration.
+  existing owners. Orb does not offer Gemini CLI or Copilot through its managed subscription
+  login selector. Antigravity has a separate Google integration.
 - The Grok CLI harness keeps its own cached login in `~/.grok/auth.json`
   (its ACP transport accepts nothing else). Treat that as a second login on
   the same account, never a copy of the proxy's token.
@@ -28,6 +28,40 @@ the user logs in again. This can cause recurring "login expired" states for Clau
 Switch: `SANDBOXED_OAUTH_OWNER=cli-proxy` (default) or `legacy` (Core
 refreshes its own copies, pre-refactor behaviour). `CLAUDE_CODE_DISABLE_CLI_PROXY=1`
 also forces legacy.
+
+## Configuring shared Google and OpenAI accounts
+
+A signed-in member can add a Google AI Studio key in Inference → Add API key → Google
+(`POST /api/ai/providers`, `provider_type: "google"`). Core assigns the account ID
+and owns the stored key. Both sessions can select the account's VPN country in its
+connection settings. Core sends requests to the Gemini OpenAI-compatible endpoint.
+A Google setup row with no account key has no credential to route. An instance
+environment key also has no individual VPN binding.
+
+The v8.0.56-0 no-plugin sidecar in CI supports configured Gemini API keys with
+per-key `proxy-url` under `gemini-api-key`. Its native Interactions API has a
+separate `interactions-api-key` entry. Those are sidecar configuration entries. Adding a key
+through Core does not write a second copy there. The sidecar also has separate
+Vertex credentials and Antigravity OAuth. None supplies a Gemini CLI subscription
+to Core. The no-plugin file watcher ignores legacy `type: "gemini"` files and
+requires a plugin to admit `gemini-cli`. Its management OAuth dispatcher has no
+built-in Google/Gemini sign-in handler. The CLI's `-login` flag alone does not
+establish a usable subscription route. The same file-watcher checks exist in
+the previously inspected 8.0.26 source.
+
+An OpenAI API key added via Core uses direct API billing. A ChatGPT subscription
+uses a Codex OAuth credential maintained by the sidecar. For an existing
+subscription account, use its Connection settings. Core
+needs a unique binding to the selected sidecar file, an account relay port, and
+a management key with a local or HTTPS management endpoint. A type-only match
+does not authorize a route. A host `OPENAI_API_KEY` belongs to a different
+credential and must not change that subscription into direct API billing.
+A member may change a shared route. Reconnecting an existing credential requires
+its creator or an admin, using the targeted login flow on the instance that owns it.
+
+[Sidecar credential file admission](https://github.com/kaitranntt/CLIProxyAPIPlus/blob/0341bcc440583738d7d0e673abefc63bbe99e131/internal/watcher/synthesizer/file.go)
+· [Management OAuth dispatcher](https://github.com/kaitranntt/CLIProxyAPIPlus/blob/0341bcc440583738d7d0e673abefc63bbe99e131/internal/api/handlers/management/auth_files_v8.go)
+· [Earlier deployed source](https://github.com/kaitranntt/CLIProxyAPIPlus/blob/a27799ec2b0cc5a60e49970d5467829ceaab8131/internal/watcher/synthesizer/file.go)
 
 ## What each harness does when the proxy owns the credential
 
