@@ -230,12 +230,30 @@ private def verifyIncompleteGoalDrain (store : CoreStore) (sup : RemoteJobSuperv
     (← cellOf store.missionsDb "SELECT COUNT(*) FROM mission_continuations WHERE mission_id=?1;" #[mid]) == "0")
     "a failed or capped final read cannot complete or continue a Goal"
 
-private def verifyCompletedGoalFollowupRecovery (store : CoreStore) (fd : LeanSys.Posix.Fd)
-    (root mid : String) (replaced : Bool) : IO Unit := do
+private def verifyStoppedGoalResume (store : CoreStore) (mid : String) : IO Unit := do
   let db := store.missionsDb
+  discard <| execParamQuery db
+    ("UPDATE missions SET backend='antigravity',goal_mode=1,goal_objective='Add seven',status='interrupted', " ++
+     "terminal_reason='remote_goal_stopped',run_generation=8 WHERE id=?1;") #[mid]
+  let noSession ← resumeStoppedRemoteGoal store mid 8 20
+  check (match noSession with | .error "remote_goal_session_missing" => true | _ => false) "missing native session leaves the stopped Goal intact"
+  discard <| execParamQuery db "UPDATE missions SET session_id='019ad719-730d-7777-9221-e0eabcd44611' WHERE id=?1;" #[mid]
+  let stale ← resumeStoppedRemoteGoal store mid 7 20
+  let first ← resumeStoppedRemoteGoal store mid 8 20
+  let second ← resumeStoppedRemoteGoal store mid 8 20
+  check ((stale.toOption == some false) && (first.toOption == some true) && (second.toOption == some false) &&
+    (← cellOf db "SELECT COUNT(*) FROM mission_continuations WHERE mission_id=?1 AND phase=1 AND reason='remote_goal' AND run_generation=8;" #[mid]) == "1")
+    "explicit resume queues exactly one Goal on the current stopped generation"
+  discard <| execParamQuery db "DELETE FROM mission_continuations WHERE mission_id=?1;" #[mid]
+
+private def verifyTerminalGoalFollowupRecovery (store : CoreStore) (fd : LeanSys.Posix.Fd)
+    (root mid : String) (replaced stopped : Bool) : IO Unit := do
+  let db := store.missionsDb
+  let status := if stopped then "interrupted" else "completed"
+  let reason := if stopped then "remote_goal_stopped" else "remote_goal_complete"
   let .ok _ ← execParamQuery db
-    ("UPDATE missions SET status='completed',terminal_reason='remote_goal_complete',goal_mode=1, " ++
-     "goal_objective='Old objective',placement_job_id='completed-job' WHERE id=?1;") #[mid]
+    ("UPDATE missions SET status=?2,terminal_reason=?3,goal_mode=1, " ++
+     "goal_objective='Old objective',placement_job_id='completed-job' WHERE id=?1;") #[mid, status, reason]
     | throw (IO.userError "completed Goal follow-up setup")
   let sup ← newRemoteJobSupervisor "goal-follow-up-recovery"
   let submit ← IO.asTask do
@@ -270,7 +288,7 @@ private def verifyCompletedGoalFollowupRecovery (store : CoreStore) (fd : LeanSy
   let state ← cellOf db "SELECT status||':'||goal_mode||':'||placement_job_id FROM missions WHERE id=?1;" #[mid]
   let runs ← cellOf db "SELECT COUNT(*) FROM mission_runs WHERE mission_id=?1 AND remote_job_id=?2;" #[mid, jid]
   if replaced then
-    check (attached == 0 && state == "completed:1:successor-goal" && runs == "0") "a stale receipt preserves the successor"
+    check (attached == 0 && state == s!"{status}:1:successor-goal" && runs == "0") "a stale receipt preserves the successor"
   else
     check (attached == 1 && state == s!"active:0:{jid}" && runs == "1") "recover the ordinary run without its old Goal"
 
@@ -744,10 +762,12 @@ def run : IO Unit := do
          check ((match staleObjective with | .ok none => true | _ => false) &&
              (← cellOf db "SELECT COUNT(*) FROM mission_continuations WHERE mission_id='m-goal-dispatch' AND phase=1;") == "0")
            "standard follow-up after Goal completion cannot rearm the settled objective"
-         for replaced in #[false, true] do
-           let mid := if replaced then "m-completed-goal-followup-replaced" else "m-completed-goal-followup"
+         for (replaced, stopped) in #[(false,false), (true,false), (false,true), (true,true)] do
+           let mid := s!"m-terminal-goal-followup-{replaced}-{stopped}"
            newMission mid "[\"remote-node:mockgoalchecks\"]"
-           verifyCompletedGoalFollowupRecovery store checksFd root mid replaced
+           verifyTerminalGoalFollowupRecovery store checksFd root mid replaced stopped
+         newMission "m-explicit-goal-resume" "[\"remote-node:mockgoalchecks\"]"
+         verifyStoppedGoalResume store "m-explicit-goal-resume"
          newMission "m-codex-goal-echo" "[\"remote-node:mockgoalchecks\"]"
          verifyCodexGoalEcho store sup checksFd root "m-codex-goal-echo"
          verifyCodexGoalEchoBoundaries store "m-codex-goal-echo"

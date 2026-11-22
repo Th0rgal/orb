@@ -978,6 +978,37 @@ private def remoteGoalDispatchOwned (store : CoreStore) (missionId jobId : Strin
     #[missionId, s!"{gen}", if initial then "1" else "0", jobId]
   return rows.map (·.size > 1)
 
+-- The caller holds the same write transaction as the mission state transition.
+private def armRemoteGoalUnlocked (store : CoreStore) (cid mid : String) (generation due : UInt64)
+    (objective requestId iso : String) : IO (Except String Unit) := do
+  return (← execParamQueryUnlocked store.missionsDb
+    ("INSERT INTO mission_continuations(id,mission_id,run_generation,phase,due_epoch,trigger_kind,reason,prompt,request_id,job_id,source,error,recurrence,stop_after_first,created_at,updated_at) " ++
+     "VALUES(?1,?2,CAST(?3 AS INTEGER),1,CAST(?4 AS INTEGER),'time','remote_goal',?5,?6,'','remote-goal','','',1,?7,?7);")
+    #[cid,mid,toString generation,toString due,remoteGoalPrompt objective,requestId,iso]).map (fun _ => ())
+
+/-- Explicit owner action on a stopped Goal. The scheduler owns delivery and
+    reuses its regular placement, session and authority checks. -/
+def resumeStoppedRemoteGoal (store : CoreStore) (mid : String) (generation now : UInt64) :
+    IO (Except String Bool) := do
+  let cid ← newUuidV4
+  let iso := formatEpochIso8601Utc now
+  withImmediateTx store.missionsDb do
+    let query := execParamQueryUnlocked store.missionsDb
+    let .ok rows ← query
+      ("UPDATE missions SET status='awaiting_user',terminal_reason='remote_goal_continuation', " ++
+       "state_revision=state_revision+1,updated_at=?3 WHERE id=?1 AND run_generation=CAST(?2 AS INTEGER) " ++
+       "AND goal_mode=1 AND status='interrupted' AND terminal_reason='remote_goal_stopped' " ++
+       "AND length(trim(goal_objective))>0 AND NOT EXISTS(SELECT 1 FROM mission_continuations " ++
+       "WHERE mission_id=?1 AND phase IN (1,2)) AND NOT EXISTS(SELECT 1 FROM remote_node_jobs " ++
+       "WHERE mission_id=?1 AND state IN ('submitting','uncertain','running','queued')) " ++
+       "RETURNING goal_objective,backend,session_id;") #[mid,toString generation,iso]
+      | return .error "remote_goal_resume_failed"
+    let some row := rows[1]? | return .ok false
+    unless resumableGoalSession (cell row 1) (cell row 2) do return .error "remote_goal_session_missing"
+    if let .error e ← armRemoteGoalUnlocked store cid mid generation now (cell row 0) cid iso then
+      return .error e
+    return .ok true
+
 /-- Settle the owning job and arm at most one intent under the same write lock as Stop. -/
 def settleRemoteGoal (store : CoreStore) (missionId jobId objective finalText : String)
     (generation nowSec : UInt64) (hasSession drained : Bool) : IO (Except String (Option (String × String × Nat))) := do
@@ -1006,10 +1037,7 @@ def settleRemoteGoal (store : CoreStore) (missionId jobId objective finalText : 
       | .park .awaitingWakeup => ("awaiting_user", "awaiting_wakeup")
       | _ => ("awaiting_user", "remote_goal_blocked")
     if reason == "remote_goal_continuation" then
-      if let .error e ← query
-        ("INSERT INTO mission_continuations(id,mission_id,run_generation,phase,due_epoch,trigger_kind,reason,prompt,request_id,job_id,source,error,recurrence,stop_after_first,created_at,updated_at) " ++
-         "VALUES(?1,?2,CAST(?3 AS INTEGER),1,CAST(?4 AS INTEGER),'time','remote_goal',?5,?6,'','remote-goal','','',1,?7,?7);")
-        #[cid, missionId, s!"{generation}", s!"{nowSec + 2}", remoteGoalPrompt objective, s!"remote-goal:{jobId}", iso] then
+      if let .error e ← armRemoteGoalUnlocked store cid missionId generation (nowSec + 2) objective s!"remote-goal:{jobId}" iso then
         return .error e
     if let .error e ← query
         "UPDATE missions SET status=?2,terminal_reason=?3,state_revision=state_revision+1,updated_at=?4 WHERE id=?1;"
@@ -1519,12 +1547,15 @@ private def activateRemoteRunUnlocked (store : CoreStore) (mid jid gen nowIso : 
     (recovering : Bool) : IO (Except String (Array (Array String))) := do
   let .ok changed ← execParamQueryUnlocked store.missionsDb
     ("WITH origin AS (SELECT json_extract(payload_json,'$.completed_goal_generation') AS gen, " ++
+     "COALESCE(json_extract(payload_json,'$.terminal_goal_reason'),'remote_goal_complete') AS reason, " ++
      "json_extract(payload_json,'$.completed_goal_job') AS job FROM remote_node_jobs WHERE job_id=?2 AND mission_id=?1 AND json_valid(payload_json)) " ++
-     "UPDATE missions SET goal_mode=CASE WHEN terminal_reason='remote_goal_complete' THEN 0 ELSE goal_mode END, " ++
+     "UPDATE missions SET goal_mode=CASE WHEN (SELECT gen FROM origin) IS NOT NULL THEN 0 ELSE goal_mode END, " ++
      "status='active',terminal_reason='remote_node_job',placement_job_id=?2,run_generation=CAST(?3 AS INTEGER), " ++
      "state_revision=state_revision+1,updated_at=?4 WHERE id=?1 AND CASE WHEN (SELECT gen FROM origin) IS NOT NULL " ++
-     "THEN status='completed' AND terminal_reason='remote_goal_complete' AND run_generation=(SELECT gen FROM origin) " ++
-     "AND placement_job_id=(SELECT job FROM origin) ELSE ?5='direct' OR status NOT IN ('cancelled','completed','failed') END RETURNING id;")
+     "THEN terminal_reason=(SELECT reason FROM origin) AND ((status='completed' AND terminal_reason='remote_goal_complete') OR " ++
+     "(status='interrupted' AND terminal_reason='remote_goal_stopped')) AND run_generation=(SELECT gen FROM origin) " ++
+     "AND placement_job_id=(SELECT job FROM origin) ELSE COALESCE(terminal_reason,'') NOT IN ('remote_goal_stopped','remote_goal_complete') " ++
+     "AND (?5='direct' OR status NOT IN ('cancelled','completed','failed')) END RETURNING id;")
     #[mid, jid, gen, nowIso, if recovering then "recovery" else "direct"]
     | return .error "remote_run_activation_failed"
   if changed.size ≤ 1 then return .error "remote_goal_dispatch_fenced"
@@ -2068,8 +2099,8 @@ partial def submitRemoteMissionTurn
       query
         ("INSERT INTO remote_node_jobs(job_id,mission_id,node_id,state,payload_json,created_at,updated_at) " ++
          "VALUES(?1,?2,?3,'submitting',COALESCE((SELECT json_set(?4,'$.completed_goal_generation',run_generation, " ++
-         "'$.completed_goal_job',placement_job_id,'$.completed_goal_lease_expires',CAST(?6 AS INTEGER)) FROM missions " ++
-         "WHERE id=?2 AND status='completed' AND terminal_reason='remote_goal_complete'),?4),?5,?5) " ++
+         "'$.completed_goal_job',placement_job_id,'$.terminal_goal_reason',terminal_reason,'$.completed_goal_lease_expires',CAST(?6 AS INTEGER)) FROM missions " ++
+         "WHERE id=?2 AND ((status='completed' AND terminal_reason='remote_goal_complete') OR (status='interrupted' AND terminal_reason='remote_goal_stopped'))),?4),?5,?5) " ++
          "ON CONFLICT(job_id) DO UPDATE SET state='submitting', node_id=excluded.node_id, updated_at=excluded.updated_at;")
         #[jobId, spec.missionId, effTarget, preMeta, submitNowIso, s!"{leaseExpires}"]
   match intentRes with

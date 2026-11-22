@@ -100,6 +100,7 @@ import {
   forceMissionSlot,
   setClientMissionStatus,
   sendMissionMessage,
+  resumeStoppedRemoteGoal,
   ApiError,
   MessageRejectedError,
   connectionVersion,
@@ -1199,6 +1200,20 @@ export function NativeMissionView(p: { id: string; active?: boolean; launch?:Lau
     const live = liveGoal();
     return { phase: phase === "active" ? live?.phase ?? phase : phase, objective: m.goal_objective ?? "", iteration: Math.max(m.goal_iteration ?? 0, live?.iteration ?? 0) };
   });
+  const [resumingGoal, setResumingGoal] = createSignal(false);
+  async function resumeStoppedGoal() {
+    const m = mission();
+    if (!m?.run_generation || resumingGoal()) return;
+    setResumingGoal(true);
+    try {
+      await resumeStoppedRemoteGoal(m.id, m.run_generation);
+      await refresh();
+    } catch (e) {
+      setSendError(launchError(e));
+    } finally {
+      setResumingGoal(false);
+    }
+  }
   const working = () => {
     if(sendError())return false;
     if(!p.id)return !p.launchError;
@@ -1777,7 +1792,11 @@ export function NativeMissionView(p: { id: string; active?: boolean; launch?:Lau
           </Show>
 
           <NextReminder mission={p.id} active={isSlotActive()} busy={busy()} archived={isArchived(mission()?.status)} />
-          <Show when={remoteGoal()}>{goal => <div role="status">{remoteGoalStatusLabel(goal())}</div>}</Show>
+          <Show when={remoteGoal()}>{goal => <><div role="status">{remoteGoalStatusLabel(goal())}</div>
+            <Show when={!participant() && mission()?.status === "interrupted" && mission()?.terminal_reason === "remote_goal_stopped" && mission()?.run_generation}>
+              <button type="button" class="error-notice-link primary" disabled={resumingGoal()} onClick={() => void resumeStoppedGoal()}>Resume Goal</button>
+            </Show>
+          </>}</Show>
           <Show when={refreshing()}><div class="agent-wait-status" role="status">Refreshing conversation…</div></Show>
         </div>
       </div>
