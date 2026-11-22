@@ -36,6 +36,10 @@ MERMAID_BACKEDGE = ('```mermaid\ngraph LR\n'
                     '  Deploy --> Verify[Verify release]\n'
                     '  Review -->|Revise| Draft\n```')
 
+MERMAID_CYCLE = ('```mermaid\ngraph LR\n'
+                 '  A[Alpha] -->|Ship| B[Beta]\n'
+                 '  B[Beta] -->|Return| A[Alpha]\n```')
+
 MD_TURN = ('# Release notes\n'
            '\n'
            '**Bold start** and *a soft italic* plus `inline code` here.\n'
@@ -527,6 +531,13 @@ class Delivery(unittest.TestCase):
             db.execute("DELETE FROM mission_events WHERE mission_id='a'")
             db.execute("INSERT INTO mission_events VALUES(NULL,'a',1,1,'assistant_message',?,'{}','')",
                        (json.dumps({'content': MERMAID_BACKEDGE, 'queued': False}),))
+        if mode == 'mermaid-cycle':
+            # The review's exact two-node bidirectional cycle: both directions must
+            # render as separate actual paths with clear labels and arrowheads at
+            # opposite targets.
+            db.execute("DELETE FROM mission_events WHERE mission_id='a'")
+            db.execute("INSERT INTO mission_events VALUES(NULL,'a',1,1,'assistant_message',?,'{}','')",
+                       (json.dumps({'content': MERMAID_CYCLE, 'queued': False}),))
         if mode == 'markdown-turn':
             # A live turn that first streams a single markdown line, then completes
             # into a multi-line markdown document with lists, links, inline styles
@@ -732,6 +743,7 @@ class Delivery(unittest.TestCase):
                                cwd=PKG, env={**os.environ, 'ORB_STATE_DIR': root,
                                              'ORB_TEST_MERMAID': MERMAID_TURN,
                                              'ORB_TEST_BACKEDGE': MERMAID_BACKEDGE,
+                                             'ORB_TEST_CYCLE': MERMAID_CYCLE,
                                              'ORB_TEST_MARKDOWN': MD_TURN}, check=True, timeout=20)
                 if mode in ('reconnect', 'settings-switch'):
                     first = tokens.index('Bearer changed')
@@ -766,6 +778,11 @@ class Delivery(unittest.TestCase):
                 elif mode == 'mermaid-backedge':
                     # The driver renders and asserts from the first bubble; mission
                     # b stays unpolled.
+                    self.assertGreaterEqual(paths.count(a + events), 1)
+                    self.assertNotIn(b + events, paths)
+                elif mode == 'mermaid-cycle':
+                    # The driver renders and asserts the bidirectional cycle from
+                    # the first bubble; mission b stays unpolled.
                     self.assertGreaterEqual(paths.count(a + events), 1)
                     self.assertNotIn(b + events, paths)
                 elif mode == 'markdown-turn':
@@ -888,9 +905,17 @@ class Delivery(unittest.TestCase):
                          ['You: First prompt', 'Ripened'])
         self.assertEqual(live.history_turns(conn, 'a', ''),
                          ['You: First prompt', 'Ripened', 'Ripened'])
-        for error in (live.ResponseTooLarge('too large'), live.urllib.error.HTTPError('x', 403, '', {}, None)):
-            conn.get.side_effect = error
-            self.assertEqual(live.history_turns(conn, 'a', ''), [])
+        # An oversized response or a 5xx degrades to an empty archive, but 401/403
+        # must propagate: the caller's access-revoked path clears prior content
+        # instead of silently keeping a stale transcript.
+        conn.get.side_effect = live.ResponseTooLarge('too large')
+        self.assertEqual(live.history_turns(conn, 'a', ''), [])
+        conn.get.side_effect = live.urllib.error.HTTPError('x', 500, '', {}, None)
+        self.assertEqual(live.history_turns(conn, 'a', ''), [])
+        for code in (401, 403):
+            conn.get.side_effect = live.urllib.error.HTTPError('x', code, '', {}, None)
+            with self.assertRaises(live.urllib.error.HTTPError):
+                live.history_turns(conn, 'a', '')
         conn.get.side_effect = None
         for broken in ({'error': 'invalid timeline'}, {'events': 'not a list', 'spine': []},
                        {'events': [dict(sequence=1, event_type='assistant_message_canonical')], 'spine': []},
@@ -943,6 +968,23 @@ class Delivery(unittest.TestCase):
         conn.get_page.reset_mock()
         conn.get_page.side_effect = live.urllib.error.HTTPError('http://localhost', 500, '', {}, None)
         self.assertEqual(live.history_turns(conn, 'a', ''), ['Spine two', 'Spine one', 'Newest'])
+        # A 401/403 on a page fetch must propagate to the revoked path too.
+        conn.get_page.reset_mock()
+        for code in (401, 403):
+            conn.get_page.side_effect = live.urllib.error.HTTPError('http://localhost', code, '', {}, None)
+            with self.assertRaises(live.urllib.error.HTTPError):
+                live.history_turns(conn, 'a', '')
+        # First paint stays bounded: even with more pages advertised, the
+        # bootstrap waits for at most SPINE_MAX_PAGES older-spine requests.
+        conn.get_page.reset_mock()
+        conn.get.return_value['spine_next_cursor'] = 7
+        conn.get_page.side_effect = [
+            ([dict(sequence=6 - 2 * n, event_type='assistant_message', content='Deep %d' % n)],
+             {'x-has-more': 'true', 'x-next-cursor': str(5 - 2 * n)})
+            for n in range(live.SPINE_MAX_PAGES + 2)]
+        self.assertEqual(live.history_turns(conn, 'a', ''),
+                         ['Deep 2', 'Deep 1', 'Deep 0', 'Spine two', 'Spine one', 'Newest'])
+        self.assertEqual(conn.get_page.call_count, live.SPINE_MAX_PAGES)
 
     def test_two_turn_live_keeps_history_and_renders_mermaid(self):
         self.run_wire('mermaid-turn')
@@ -955,6 +997,9 @@ class Delivery(unittest.TestCase):
 
     def test_back_edge_and_both_labels_render(self):
         self.run_wire('mermaid-backedge')
+
+    def test_two_node_cycle_renders_opposite_arrowheads(self):
+        self.run_wire('mermaid-cycle')
 
     def test_markdown_renders_without_literal_markers(self):
         self.run_wire('markdown-turn')

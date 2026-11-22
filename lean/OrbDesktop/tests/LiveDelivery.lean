@@ -267,7 +267,7 @@ rect mirrors the rasterized icon; driver assertions only inspect the destination
 private partial def lowerVectorIcons : WidgetNode → WidgetNode
   | .mk id focusable hit style payload children =>
     let payload := match payload with
-      | .vectorIcon _paths color badgeBg =>
+      | .vectorIcon _paths color badgeBg _stroke =>
         let size := if badgeBg.isSome then pxToSub 10 else max (pxToSub 16) style.minWidth
         .iconMask 0 { x := 0, y := 0, w := size, h := size } color badgeBg
       | p => p
@@ -334,19 +334,19 @@ private def assertDiagram (scene : SceneOutput) (observed : List (String × Rect
     throw (IO.userError "Approve edge is not directed Spec -> Build")
   unless build.x < revise.x && revise.x < fix.x do
     throw (IO.userError "Revise edge is not directed Build -> Fix")
-  -- Each orthogonal connector ends in a small accent arrowhead (a ~6 device-px
-  -- rounded square distinct from the flat 2 device-px shaft), one per directed
-  -- edge. Scene prim rects are device pixels (the driver renders at scale 120).
+  -- Each orthogonal connector ends in a small accent chevron (a real directional
+  -- tip rasterized as an ~8 device-px icon mask, distinct from the flat 2 device-px
+  -- shaft), one per directed edge. Scene prim rects are device pixels (the driver
+  -- renders at scale 120).
   let arrowheads := scene.prims.toList.filter fun p => match p with
-    | .rrect r _ (tl, _, _, _) _ _ =>
-      tl ≥ 1 && r.w ≤ 8 && r.h ≥ 4 && r.h ≤ 8
+    | .mask _ _ dst _ => dst.w ≤ 8 && dst.h ≤ 8
     | _ => false
   unless arrowheads.length ≥ 2 do
     let small := scene.prims.toList.filterMap fun p => match p with
-      | .rrect r _ (tl, _, _, _) _ _ =>
-        if r.w ≤ 12 && r.h ≤ 12 then some s!"({r.x},{r.y},{r.w},{r.h}) tl={tl}" else none
+      | .mask _ _ dst _ =>
+        if dst.w ≤ 12 && dst.h ≤ 12 then some s!"({dst.x},{dst.y},{dst.w},{dst.h})" else none
       | _ => none
-    throw (IO.userError ("rendered diagram edges have no arrowheads; small rrects: " ++
+    throw (IO.userError ("rendered diagram edges have no arrowheads; small masks: " ++
       String.intercalate " | " small))
   let devRectOf (t : String) : Option Rect :=
     (observed.filter (fun p => p.1 == t)).head?.map (fun p => p.2.2)
@@ -653,23 +653,115 @@ def main (args : List String) : IO Unit := do
       unless approve.x > review.x && revise.x < review.x do
         throw (IO.userError "Review does not show two labelled outgoing edges on opposite sides")
       let arrowheads := scene.prims.toList.filter fun p => match p with
-        | .rrect r _ (tl, _, _, _) _ _ => tl ≥ 1 && r.w ≤ 8 && r.h ≥ 4 && r.h ≤ 8
+        | .mask _ _ dst _ => dst.w ≤ 8 && dst.h ≤ 8
         | _ => false
       unless arrowheads.length ≥ 4 do
         throw (IO.userError s!"rendered diagram edges have {arrowheads.length} arrowheads, expected 4")
       let some (_, _, draftDev) := observed.filter (fun p => p.1 == "Design spec") |>.head? |
         throw (IO.userError "missing device rect for Design spec")
+      let some (_, _, reviewDev) := observed.filter (fun p => p.1 == "Code review") |>.head? |
+        throw (IO.userError "missing device rect for Code review")
       let some (_, _, verifyDev) := observed.filter (fun p => p.1 == "Verify release") |>.head? |
         throw (IO.userError "missing device rect for Verify release")
       let draftCx := draftDev.x + draftDev.w / 2
-      let laneArrows := arrowheads.filter fun p => match p with
-        | .rrect r _ (tl, _, _, _) _ _ =>
-          tl ≥ 1 && (r.x - draftCx).natAbs ≤ 16 && r.y > verifyDev.y
-        | _ => false
-      unless laneArrows.length ≥ 1 do
-        throw (IO.userError "the back edge has no arrowhead at the Draft end inside the lane row")
+      let reviewCx := reviewDev.x + reviewDev.w / 2
+      -- The lane tip: a chevron at the Draft (target) column, below the rank rows,
+      -- with the lane's continuous path directly under it spanning both columns.
+      let laneTips := arrowheads.filterMap fun p => match p with
+        | .mask _ _ dst _ =>
+          if (dst.x + dst.w / 2 - draftCx).natAbs ≤ 16 && dst.y > verifyDev.y then some dst else none
+        | _ => none
+      unless laneTips.length == 1 do
+        throw (IO.userError s!"the back edge needs exactly one chevron at the Draft end below the rows, got {laneTips.length}")
+      let some (laneTip) := laneTips.head? | throw (IO.userError "unreachable")
+      let lanePaths := scene.prims.toList.filterMap fun p => match p with
+        | .mask _ _ dst _ =>
+          if dst.w ≥ 100 && dst.y > verifyDev.y &&
+              dst.x ≤ reviewCx && reviewCx < dst.x + dst.w then some dst else none
+        | _ => none
+      unless lanePaths.length == 1 do
+        throw (IO.userError s!"the back edge needs one continuous lane path spanning Review and Draft, got {lanePaths.length}")
+      let some (lanePath) := lanePaths.head? | throw (IO.userError "unreachable")
+      -- Physically connected: the chevron sits directly on the path's row (adjacent
+      -- lane rows, no gap), and the path spans both column centers end to end.
+      unless (lanePath.y - (laneTip.y + laneTip.h)).natAbs ≤ 1 do
+        throw (IO.userError "the lane chevron is not attached to the lane path row")
+      unless (lanePath.x - min reviewCx draftCx).natAbs ≤ 2 &&
+          (lanePath.x + lanePath.w - max reviewCx draftCx).natAbs ≤ 2 do
+        throw (IO.userError "the lane path does not span the Review and Draft columns exactly")
       unless rendered.contains "Design spec" && rendered.contains "Verify release" do
         throw (IO.userError "reported graph nodes missing from the render")
+      return
+    if args == ["mermaid-cycle"] then
+      -- The review's exact contract for a two-node bidirectional cycle: both
+      -- directions render as separate actual paths with clear labels and
+      -- arrowheads at opposite targets.
+      let some cycleSrc ← IO.getEnv "ORB_TEST_CYCLE" | throw (IO.userError "missing ORB_TEST_CYCLE")
+      let st ← clickMission st a
+      let st ← awaitState slot st (fun s => streamedText s == cycleSrc)
+      let (rootBox, scene) := renderScreen st cycleSrc
+      let rendered := renderedBoxRoot rootBox
+      let observed := collectObserved rootBox 24
+      let exactlyOne (t what : String) : IO Rect := do
+        match observed.filter (fun p => p.1 == t) with
+        | [(_, sub, _)] => pure sub
+        | hits =>
+          let labels := observed.map (·.1) |> String.intercalate ","
+          throw (IO.userError ("rendered diagram " ++ what ++ " was not observed exactly once: " ++ t ++
+            s!" (hits: {hits.length}; labels: {labels})"))
+      let alpha ← exactlyOne "Alpha" "node label"
+      let beta ← exactlyOne "Beta" "node label"
+      let ship ← exactlyOne "Ship" "edge label"
+      let ret ← exactlyOne "Return" "edge label"
+      unless alpha.x < ship.x && ship.x < beta.x do
+        throw (IO.userError "Ship edge is not directed Alpha -> Beta")
+      unless alpha.x < ret.x && ret.x < beta.x do
+        throw (IO.userError "Return label is not between the two columns")
+      unless ret.y > alpha.y && ret.y > beta.y do
+        throw (IO.userError "Return back edge is not routed below the rank rows")
+      let some (_, _, alphaDev) := observed.filter (fun p => p.1 == "Alpha") |>.head? |
+        throw (IO.userError "missing device rect for Alpha")
+      let some (_, _, betaDev) := observed.filter (fun p => p.1 == "Beta") |>.head? |
+        throw (IO.userError "missing device rect for Beta")
+      let alphaCx := alphaDev.x + alphaDev.w / 2
+      let betaCx := betaDev.x + betaDev.w / 2
+      let alphaCy := alphaDev.y + alphaDev.h / 2
+      let betaCy := betaDev.y + betaDev.h / 2
+      let smallMasks := scene.prims.toList.filterMap fun p => match p with
+        | .mask _ _ dst _ => if dst.w ≤ 8 && dst.h ≤ 8 then some dst else none
+        | _ => none
+      -- Arrowheads at opposite targets: the forward tip touches the Beta node's
+      -- left edge at node height, the return tip is centered on the Alpha column
+      -- below the rank rows.
+      unless smallMasks.any fun dst =>
+          (dst.x + dst.w - (betaDev.x - 12)).natAbs ≤ 16 &&
+          (dst.y + dst.h / 2 - betaCy).natAbs ≤ 10 do
+        throw (IO.userError "the forward edge has no arrowhead at the Beta (target) column at node height")
+      unless smallMasks.any fun dst =>
+          (dst.x + dst.w / 2 - alphaCx).natAbs ≤ 16 && dst.y > betaDev.y + betaDev.h do
+        throw (IO.userError "the return edge has no arrowhead at the Alpha (target) column below the rows")
+      -- Separate actual paths: the return lane is one wide continuous mask below the
+      -- rows spanning both columns, while the forward shaft is a thin rect at node
+      -- height between the columns.
+      let lanePaths := scene.prims.toList.filterMap fun p => match p with
+        | .mask _ _ dst _ => if dst.w ≥ 60 && dst.y > betaDev.y + betaDev.h then some dst else none
+        | _ => none
+      unless lanePaths.length == 1 do
+        throw (IO.userError s!"the return edge needs one lane path below the rows, got {lanePaths.length}")
+      let some (lanePath) := lanePaths.head? | throw (IO.userError "unreachable")
+      unless (lanePath.x - min alphaCx betaCx).natAbs ≤ 2 &&
+          (lanePath.x + lanePath.w - max alphaCx betaCx).natAbs ≤ 2 do
+        throw (IO.userError "the lane path does not span the Alpha and Beta columns exactly")
+      let shafts := scene.prims.toList.filter fun p => match p with
+        | .rrect r _ _ _ _ =>
+          r.h ≤ 3 && r.w ≥ 20 &&
+            (r.y + r.h / 2 - alphaCy).natAbs ≤ 10 &&
+            r.x ≥ alphaDev.x && r.x + r.w ≤ betaDev.x + betaDev.w
+        | _ => false
+      unless shafts.length ≥ 1 do
+        throw (IO.userError "the forward edge has no shaft at node height between the columns")
+      unless !rendered.contains "```" && !rendered.contains "mermaid" do
+        throw (IO.userError "Mermaid source was rendered as literal text")
       return
     if args == ["cold-recover"] then
       -- Cold open with persisted turns, then a transient unavailable window,

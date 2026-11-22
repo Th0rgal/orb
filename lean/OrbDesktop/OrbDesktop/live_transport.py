@@ -16,6 +16,10 @@ import uuid
 
 CURRENT_MISSION_LIMIT = 200
 ARCHIVED_MISSION_LIMIT = 100
+# Older-spine pages fetched during the bootstrap (each 200 transcript rows on top
+# of the /open bundle). First paint must not wait for dozens of history requests
+# on large missions, so the archive is deliberately a bounded, deduplicated slice.
+SPINE_MAX_PAGES = 3
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -69,13 +73,11 @@ class Connection:
         if credentials() != self.creds:
             raise ValueError('connection changed')
 
-    def get(self, path, cap=4 << 20, *, deadline=6):
-        return self.request(path, cap, deadline=deadline)
-
-    def get_page(self, path, cap=4 << 20, deadline=6):
-        """GET returning ``(json, lowercased headers)`` so event pages can read the
-        ``X-Has-More`` / ``X-Next-Cursor`` continuation headers the same way the
-        web client drives its older-spine paging."""
+    def get(self, path, cap=4 << 20, *, deadline=6, headers_out=False):
+        """The one bounded GET implementation every read goes through. With
+        ``headers_out`` it returns ``(json, lowercased headers)`` so event pages can
+        read the ``X-Has-More`` / ``X-Next-Cursor`` continuation headers the same way
+        the web client drives its older-spine paging."""
         self.check()
         base, token = self.creds
         req = urllib.request.Request(base + path, headers={'Authorization': 'Bearer ' + token,
@@ -84,15 +86,22 @@ class Connection:
         signal.setitimer(signal.ITIMER_REAL, deadline)
         try:
             with self.opener.open(req, timeout=deadline if deadline > 6 else 4) as response:
+                if response.status == 206 and (path == INBOX_PATH or path.startswith('/api/control/missions?')
+                                               or path.endswith('?include_history=false')):
+                    raise ValueError('incomplete Core summary response')
                 data = response.read(cap + 1)
-                headers = {name.lower(): value for name, value in response.headers.items()}
+                page_headers = {name.lower(): value for name, value in response.headers.items()}
         finally:
             signal.alarm(0)
             signal.signal(signal.SIGALRM, previous)
         self.check()
         if len(data) > cap:
             raise ResponseTooLarge('response too large')
-        return (json.loads(data) if data else None), headers
+        body = json.loads(data) if data else None
+        return (body, page_headers) if headers_out else body
+
+    def get_page(self, path, cap=4 << 20, deadline=6):
+        return self.get(path, cap, deadline=deadline, headers_out=True)
 
     def request(self, path, cap=4 << 20, body=None, key=None, method=None, deadline=6):
         self.check()
@@ -1141,10 +1150,20 @@ def history_turns(c, mid, first_text):
     with a visible "You: " marker. The live bubble owns the current turn; when the
     newest persisted turn is exactly the text the bubble already shows, the bubble
     keeps owning it (history owns completed turns, the stream owns the turn in
-    flight)."""
+    flight).
+
+    Bounded on purpose: the bootstrap runs before first paint, so it waits for at
+    most SPINE_MAX_PAGES older-spine requests instead of walking a large mission's
+    whole history. Auth failures are not degradation: 401/403 re-raise so the
+    caller's access-revoked path (which clears prior content) still runs."""
     try:
         bundle = c.get('/api/control/missions/' + mid + '/open', 8 << 20)
-    except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, ValueError, KeyError, TypeError):
+    except urllib.error.HTTPError as error:
+        if error.code in (401, 403):
+            raise
+        error.close()
+        return []
+    except (urllib.error.URLError, TimeoutError, ValueError, KeyError, TypeError):
         return []
     if not isinstance(bundle, dict):
         return []
@@ -1156,19 +1175,23 @@ def history_turns(c, mid, first_text):
         rows.extend(page)
     # The spine page is bounded by Core (80 rows by default). Page the older
     # transcript spine with the same exclusive before-cursor the web client uses
-    # (X-Has-More / X-Next-Cursor on the /events page) so long missions reach
-    # their full history instead of silently dropping older turns. Bounded at 50
-    # pages of 200 rows; a failing page keeps what was read so far.
+    # (X-Has-More / X-Next-Cursor on the /events page) so long missions reach a
+    # bounded, deduplicated slice of their history. A failing page keeps what was
+    # read so far — except 401/403, which must reach the revoked path above.
     cursor = bundle.get('spine_next_cursor')
     pages = 0
-    while bundle.get('spine_has_more') is True and isinstance(cursor, int) and pages < 50:
+    while bundle.get('spine_has_more') is True and isinstance(cursor, int) and pages < SPINE_MAX_PAGES:
         pages += 1
         requested = cursor
         try:
             page, headers = c.get_page('/api/control/missions/' + mid +
                 '/events?before_seq=' + str(cursor) + '&view=transcript&limit=200')
-        except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError,
-                ValueError, KeyError, TypeError):
+        except urllib.error.HTTPError as error:
+            if error.code in (401, 403):
+                raise
+            error.close()
+            break
+        except (urllib.error.URLError, TimeoutError, ValueError, KeyError, TypeError):
             break
         page_rows = page.get('events') if isinstance(page, dict) else page
         if not isinstance(page_rows, list):

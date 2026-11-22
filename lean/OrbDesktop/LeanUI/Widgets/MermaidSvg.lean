@@ -2,6 +2,7 @@ import LeanUI.Defs
 import LeanUI.Kernel
 import LeanUI.Style
 import LeanUI.Layout
+import LeanUI.Text
 import LeanUI.Scene
 /-!
 # LeanUI.Widgets.MermaidSvg — Native Diagram & Vector Tile Widget (`0` FFI)
@@ -329,12 +330,16 @@ def buildDiagramNodeBox (theme : Theme) (nodeW nodeH : SubPx) (n : DiagramNode) 
       -- exactly the band the outline occupies in the square raster.
       let runs := [diagramSynthRun labelStyle n.label]
       let (_, labelW, _) := wrapInlineRuns (nodeW - pxToSub 20) theme.typo.lineTight runs
+      -- The square raster is drawn 1:1, so the historical 5.5-unit stroke would
+      -- render ~9px on a 136px node. Pick the radius whose rendered weight matches
+      -- the shared 2px widget border instead.
+      let strokeTenths := Text.iconStrokeTenthsForPxWidth (nodeW / subPerPx)
       WidgetNode.mk none false true
         (BoxStyle.row 0
           |>.withAlign .center
           |>.withJustify .center
           |>.withFixedSize nodeW nodeH)
-        (.vectorIcon (mermaidDiamondOutline nodeW nodeH) borderCol)
+        (.vectorIcon (mermaidDiamondOutline nodeW nodeH) borderCol none strokeTenths)
         [WidgetNode.text
           (BoxStyle.row 0 |>.withFixedSize (min (nodeW - pxToSub 20) labelW) (pxToSub 18))
           theme.typo.lineTight runs]
@@ -354,11 +359,14 @@ def buildDiagramNodeBox (theme : Theme) (nodeW nodeH : SubPx) (n : DiagramNode) 
   | some wid => WidgetNode.focusable wid rawBox
   | none => rawBox
 
-/-- Build an orthogonal connector segment + arrowhead between two consecutive rank layers. -/
+/-- Build an orthogonal connector segment + arrowhead between two consecutive rank layers.
+The tip is a real directional chevron (round-join polyline pointing into the target
+column) rasterized at the shared 2px stroke weight, and the arrow row anchors to the
+connector's bottom so the caller can bottom-align the stack onto the node centers. -/
 def buildOrthogonalConnectorWidget (theme : Theme) (connW connH : SubPx) (label : String) : WidgetNode :=
   let pal := theme.palette
   let lineCol := pal.textSecondary
-  let arrowHeadW : SubPx := pxToSub 6
+  let arrowHeadW : SubPx := pxToSub 8
   let shaftW : SubPx := connW - arrowHeadW
   let shaft : WidgetNode :=
     WidgetNode.rrect
@@ -366,17 +374,18 @@ def buildOrthogonalConnectorWidget (theme : Theme) (connW connH : SubPx) (label 
       lineCol
       CornerRadii.zero
   let arrowTip : WidgetNode :=
-    WidgetNode.rrect
-      (BoxStyle.row 0 |>.withFixedSize arrowHeadW (pxToSub 6))
-      pal.accent
-      (CornerRadii.uniform (pxToSub 1))
+    WidgetNode.mk none false true
+      (BoxStyle.row 0 |>.withFixedSize arrowHeadW (pxToSub 8))
+      (.vectorIcon [[(28, 16), (132, 80), (28, 144)]] pal.accent none
+        (Text.iconStrokeTenthsForPxWidth 8))
+      []
   let arrowRow : WidgetNode :=
     WidgetNode.box
       (BoxStyle.row 0 |>.withAlign .center |>.withFixedSize connW (pxToSub 10))
       [shaft, arrowTip]
   if label.isEmpty then
     WidgetNode.box
-      (BoxStyle.col 0 |>.withAlign .center |>.withJustify .center |>.withFixedSize connW connH)
+      (BoxStyle.col 0 |>.withJustify .end_ |>.withFixedSize connW connH)
       [arrowRow]
   else
     let lblStyle := Theme.mutedText theme
@@ -386,7 +395,7 @@ def buildOrthogonalConnectorWidget (theme : Theme) (connW connH : SubPx) (label 
         theme.typo.lineTight
         [diagramSynthRun lblStyle label]
     WidgetNode.box
-      (BoxStyle.col (pxToSub 2) |>.withAlign .center |>.withJustify .center |>.withFixedSize connW connH)
+      (BoxStyle.col (pxToSub 2) |>.withJustify .end_ |>.withFixedSize connW connH)
       [lblNode, arrowRow]
 
 /-- Extract sorted distinct ranks present in `nodes`. -/
@@ -404,53 +413,91 @@ private def rankPos : List Nat → Nat → Nat
 private def columnCenterX (nodeW rankGap : SubPx) (pos : Nat) : SubPx :=
   pxToSub 12 + pos * (nodeW + rankGap) + nodeW / 2
 
-/-- Horizontal routing lane for a non-adjacent edge (back edge, skip forward, self
-loop), drawn below the rank columns: the arrowhead sits at the target end and the
-edge label rides the horizontal run between the two columns. -/
-def buildBackEdgeLaneWidget (theme : Theme) (laneW : SubPx)
+/-- Physically connected routing lane for a non-adjacent edge (back edge, skip
+forward, self loop), drawn just below the rank rows: one continuous thin-stroke
+polyline leaves the source column's bottom, runs across the lane and rises into the
+target column's bottom, a directional chevron sits directly on the target stub so
+the route enters the target node from the lane side, and the edge label rides the
+lane just below the run. The stroke radius is chosen so the rendered weight matches
+the shared 2px border, so the return route reads as the same pen as the forward
+connectors. -/
+def buildLaneEdgeWidget (theme : Theme) (laneW laneH : SubPx)
     (xSource xTarget : SubPx) (label : String) : WidgetNode :=
   let pal := theme.palette
-  let arrowW : SubPx := pxToSub 6
-  let left := min xSource xTarget
-  let span := max xSource xTarget - left
-  let runs := [diagramSynthRun (Theme.mutedText theme) label]
-  let (_, measW, _) := wrapInlineRuns (max 1 (span - arrowW)) theme.typo.lineTight runs
-  let lblW := min measW (max 1 (span - arrowW))
-  let shaftW := (span - arrowW - lblW) / 2
-  let lblNode : WidgetNode :=
-    WidgetNode.text
-      (BoxStyle.row 0 |>.withFixedSize lblW (pxToSub 14))
-      theme.typo.lineTight runs
-  let arrow : WidgetNode :=
-    WidgetNode.rrect
-      (BoxStyle.row 0 |>.withFixedSize arrowW (pxToSub 6))
-      pal.accent
-      (CornerRadii.uniform (pxToSub 1))
-  let shaft : WidgetNode :=
-    WidgetNode.rrect
-      (BoxStyle.row 0 |>.withFixedSize shaftW (pxToSub 2))
-      pal.textSecondary
-      CornerRadii.zero
-  let mid : List WidgetNode :=
-    if xTarget ≤ xSource then [arrow, shaft, lblNode, shaft]
-    else [shaft, lblNode, shaft, arrow]
-  WidgetNode.box
-    (BoxStyle.row 0 |>.withAlign .center |>.withFixedSize laneW (pxToSub 20))
-    (WidgetNode.box (BoxStyle.row 0 |>.withFixedSize left (pxToSub 20)) [] :: mid)
+  let xMin := min xSource xTarget
+  let xMax := max xSource xTarget
+  let spanPx : Nat := (xMax - xMin) / subPerPx
+  let boxW : SubPx := pxToSub (spanPx + 2)
+  let tipRowH : SubPx := pxToSub 6
+  let runRowH : SubPx := pxToSub 8
+  let lblRowH : SubPx := pxToSub 12
+  -- View-box conversion for the lane raster: it is `spanPx + 2` px square, drawn 1:1
+  -- and clipped to the run row, so the visible vertical band is
+  -- `160 * runRowH / (spanPx + 2)` view units and the horizontal run sits at the
+  -- band's bottom with both stubs rising to the row's very top (the tip row, then
+  -- the node bottoms above).
+  let band : Int := max 3 (Int.ofNat (1600 / max 1 (spanPx + 2)) - 1)
+  let uOf (x : SubPx) : Int :=
+    Int.ofNat ((x - xMin + subPerPx) * 160 / max 1 boxW)
+  let xs := uOf xSource
+  let xt := uOf xTarget
+  let strokeTenths := Text.iconStrokeTenthsForPxWidth (spanPx + 2)
+  let path : List (List (Int × Int)) :=
+    [[(xs, 0), (xs, band), (xt, band), (xt, 0)]]
+  let lanePath : WidgetNode :=
+    WidgetNode.mk none false true
+      (BoxStyle.row 0 |>.withFixedSize boxW runRowH)
+      (.vectorIcon path pal.textSecondary none strokeTenths)
+      []
+  -- Directional tip: a chevron pointing up into the target node, centered on the
+  -- target column so it caps the rising stub exactly.
+  let laneTip : WidgetNode :=
+    WidgetNode.mk none false true
+      (BoxStyle.row 0 |>.withFixedSize (pxToSub 8) tipRowH)
+      (.vectorIcon [[(20, 150), (80, 10), (140, 150)]] pal.accent none
+        (Text.iconStrokeTenthsForPxWidth 8))
+      []
+  let tipRow : WidgetNode :=
+    WidgetNode.box (BoxStyle.row 0 |>.withFixedSize laneW tipRowH)
+      [WidgetNode.box (BoxStyle.row 0 |>.withFixedSize (xTarget - pxToSub 4) tipRowH) [], laneTip]
+  let leadSpacer : WidgetNode :=
+    WidgetNode.box (BoxStyle.row 0 |>.withFixedSize (xMin - subPerPx) runRowH) []
+  let runRow : WidgetNode :=
+    WidgetNode.box (BoxStyle.row 0 |>.withFixedSize laneW runRowH) [leadSpacer, lanePath]
+  let lblRow : WidgetNode :=
+    if label.isEmpty then
+      WidgetNode.box (BoxStyle.row 0 |>.withFixedSize laneW lblRowH) []
+    else
+      let runs := [diagramSynthRun (Theme.mutedText theme) label]
+      let (_, measW, _) := wrapInlineRuns (max 1 (xMax - xMin)) theme.typo.lineTight runs
+      let lblW := max 1 (min measW (max 1 (xMax - xMin)))
+      let midX : SubPx := (xMin + xMax) / 2
+      WidgetNode.box (BoxStyle.row 0 |>.withFixedSize laneW lblRowH)
+        [WidgetNode.box (BoxStyle.row 0 |>.withFixedSize (midX - lblW / 2) lblRowH) [],
+         WidgetNode.text (BoxStyle.row 0 |>.withFixedSize lblW lblRowH) theme.typo.lineTight runs]
+  WidgetNode.box (BoxStyle.col 0 |>.withFixedSize laneW laneH) [tipRow, runRow, lblRow]
 
 /-- Build a complete Mermaid / SVG diagram widget in `SubPx` using Sugiyama rank columns
 and orthogonal connector widgets. Edges between adjacent rank columns route forward, one
 orthogonal connector per edge with that edge's own label; every other edge (back edge,
-skip forward, self loop) routes through a horizontal lane below the columns so no edge or
-label is ever dropped. -/
+skip forward, self loop) routes through a physically connected lane below the columns so
+no edge or label is ever dropped. Rank columns are bottom-aligned and the canvas keeps
+no bottom padding, so each lane's stubs rise from the shared bottom edge into the node
+rects and the return route is physically attached to both endpoints. -/
 def buildMermaidDiagramWidget (theme : Theme) (availW : SubPx) (spec : DiagramSpec) : WidgetNode :=
   let pal := theme.palette
   let ranks := distinctRanks spec.nodes
   let maxColCount :=
     ranks.foldl (fun acc r => max acc (spec.nodes.filter (fun n => n.rank == r)).length) 1
-  let bodyH : SubPx :=
-    max (spec.nodeHeightSub + pxToSub 24)
-      (maxColCount * spec.nodeHeightSub + (maxColCount - 1) * spec.columnGapSub + pxToSub 24)
+  -- Intrinsic height of the tallest rank column; every column and connector band is
+  -- bottom-aligned within it so lane stubs can rise from the shared bottom edge.
+  let colsH : SubPx :=
+    max spec.nodeHeightSub
+      (maxColCount * spec.nodeHeightSub + (maxColCount - 1) * spec.columnGapSub)
+  -- Distance from the column bottom to a connector's arrow row: the arrow's center
+  -- lands exactly on the (bottom-aligned) node centers.
+  let bandPad : SubPx := spec.nodeHeightSub / 2 - pxToSub 5
+  let canvasH : SubPx := colsH + pxToSub 12
   let headerH : SubPx := if spec.title.isEmpty then 0 else pxToSub 28
   -- Resolve every edge to its endpoints' rank positions; adjacent columns route
   -- forward, everything else routes through a lane below the rank rows.
@@ -459,19 +506,20 @@ def buildMermaidDiagramWidget (theme : Theme) (availW : SubPx) (spec : DiagramSp
     let t ← spec.nodes.find? (fun n => n.id == e.toId)
     some (e, rankPos ranks s.rank, rankPos ranks t.rank)
   let laneEdges := resolved.filter (fun (_, ps, pt) => pt != ps + 1)
-  let laneH : SubPx := laneEdges.length * pxToSub 20
-  let totalH : SubPx := headerH + bodyH + laneH + pxToSub 16
+  let laneH : SubPx := laneEdges.length * pxToSub 26
+  let totalH : SubPx := headerH + canvasH + laneH + pxToSub 8
 
   let buildConnBand (pos : Nat) : WidgetNode :=
     match resolved.filter (fun (_, ps, pt) => ps == pos && pt == pos + 1) with
     | [] => WidgetNode.box
-        (BoxStyle.row 0 |>.withFixedSize spec.rankGapSub (bodyH - pxToSub 16)) []
+        (BoxStyle.row 0 |>.withFixedSize spec.rankGapSub colsH) []
     | edges =>
       let each :=
-        ((bodyH - pxToSub 16) - pxToSub 4 * (edges.length - 1)) / edges.length
+        ((colsH - bandPad) - pxToSub 4 * (edges.length - 1)) / edges.length
       WidgetNode.box
-        (BoxStyle.col (pxToSub 4) |>.withJustify .center
-          |>.withFixedSize spec.rankGapSub (bodyH - pxToSub 16))
+        (BoxStyle.col (pxToSub 4) |>.withJustify .end_
+          |>.withPadding { top := 0, right := 0, bottom := bandPad, left := 0 }
+          |>.withFixedSize spec.rankGapSub colsH)
         (edges.map fun (e, _, _) =>
           buildOrthogonalConnectorWidget theme spec.rankGapSub each e.label)
 
@@ -481,14 +529,14 @@ def buildMermaidDiagramWidget (theme : Theme) (availW : SubPx) (spec : DiagramSp
       let colNodes := spec.nodes.filter (fun n => n.rank == r)
       let colWidgets := colNodes.map (buildDiagramNodeBox theme spec.nodeWidthSub spec.nodeHeightSub)
       [WidgetNode.box
-        (BoxStyle.col spec.columnGapSub |>.withJustify .center |>.withFixedSize spec.nodeWidthSub (bodyH - pxToSub 16))
+        (BoxStyle.col spec.columnGapSub |>.withJustify .end_ |>.withFixedSize spec.nodeWidthSub colsH)
         colWidgets]
     | r :: rNext :: rest, pos =>
       let colNodes := spec.nodes.filter (fun n => n.rank == r)
       let colWidgets := colNodes.map (buildDiagramNodeBox theme spec.nodeWidthSub spec.nodeHeightSub)
       let rankCol :=
         WidgetNode.box
-          (BoxStyle.col spec.columnGapSub |>.withJustify .center |>.withFixedSize spec.nodeWidthSub (bodyH - pxToSub 16))
+          (BoxStyle.col spec.columnGapSub |>.withJustify .end_ |>.withFixedSize spec.nodeWidthSub colsH)
           colWidgets
       rankCol :: buildConnBand pos :: buildRankInterleaved (rNext :: rest) (pos + 1)
 
@@ -497,8 +545,10 @@ def buildMermaidDiagramWidget (theme : Theme) (availW : SubPx) (spec : DiagramSp
     WidgetNode.box
       (BoxStyle.row 0
         |>.withAlign .center
-        |>.withPadding (Edges.all (pxToSub 12))
-        |>.withFixedSize (availW - pxToSub 8) bodyH)
+        -- No bottom padding: the columns' bottom edge is the canvas's bottom edge,
+        -- which is exactly where the return lane's stubs begin.
+        |>.withPadding { top := pxToSub 12, right := pxToSub 12, bottom := 0, left := pxToSub 12 }
+        |>.withFixedSize (availW - pxToSub 8) canvasH)
       graphColumns
   let laneRow : List WidgetNode :=
     if laneEdges.isEmpty then []
@@ -507,7 +557,7 @@ def buildMermaidDiagramWidget (theme : Theme) (availW : SubPx) (spec : DiagramSp
       [WidgetNode.box
         (BoxStyle.col 0 |>.withFixedSize (availW - pxToSub 8) laneH)
         (laneEdges.map fun (e, ps, pt) =>
-          buildBackEdgeLaneWidget theme (availW - pxToSub 8) (xOf ps) (xOf pt) e.label)]
+          buildLaneEdgeWidget theme (availW - pxToSub 8) (pxToSub 22) (xOf ps) (xOf pt) e.label)]
 
   let children : List WidgetNode :=
     (if spec.title.isEmpty then [graphCanvas] else
