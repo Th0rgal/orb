@@ -62,7 +62,7 @@ const ApprovalTransferDialog = lazy(() => import("./ApprovalTransferDialog"));
 import { rememberLaunch, recalledLaunch, missionDestination, launchRefusal, isAdministrationNode, remoteLaunchPreflight, remoteGoalPreflight, remoteHarnessSupport, remoteLaunchUnconfirmed, missionGoal, type LaunchReceipt, type LaunchRefusal, type RemoteSupport } from "./missionLaunch";
 import { goalDraft, goalPrompt, planObjective, missionTitle, displayTitle, EMPTY_GOAL_ERROR, remoteGoalSupport, REMOTE_GOAL_UNSUPPORTED } from "./goal";
 import { chipToAttachment, type AttachChip } from "./attach";
-import { DEFAULT_PROJECT, ensureDefaultProject, projectChoices } from "./defaultProject";
+import { DEFAULT_PROJECT, ensureDefaultProject, projectChoices, requireLaunchProject } from "./defaultProject";
 import { ProjectPicker, ProjectCreation } from "./ProjectPicker";
 import { hasInteractiveOverlay, hasOverlay, overlayTrigger } from "./overlayLayer";
 import { For, Show, Switch, Match, Suspense, lazy, createMemo, createSignal, createEffect, on, onCleanup, onMount, batch, type JSX } from "solid-js";
@@ -1334,12 +1334,7 @@ export default function App() {
           setLiveProjects(current => [...current.filter(item => item.slug !== projectSlug), { ...DEFAULT_PROJECT, ...project } as ProjectSummary]);
           bumpProjects();
         } else if (projectSlug !== DEFAULT_PROJECT.slug) {
-          const version = connectionVersion();
-          const projects = await listProjects(true, false);
-          if (connectionVersion() !== version) throw new Error("The backend changed. Try again; your draft is kept.");
-          if (!projects.some(project => project.slug === projectSlug)) {
-            throw new Error(`Project “${projectSlug}” is unavailable. Choose another project or retry. Your draft is kept.`);
-          }
+          await requireLaunchProject(projectSlug);
         }
         if (machine === "local") {
           await launchLocal(text, prompt, title, projectSlug, pick, images, launchNavigation);
