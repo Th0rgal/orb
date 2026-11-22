@@ -78,7 +78,7 @@ static void add_item(GtkWidget *menu, const char *label, GtkWidget *wv, const ch
 static gboolean destroy_later(gpointer w) { gtk_widget_destroy(GTK_WIDGET(w)); g_object_unref(w); return G_SOURCE_REMOVE; }
 static void closed(GtkPopover *popup, gpointer data) { (void)data; g_idle_add(destroy_later, g_object_ref(popup)); }
 static GtkWidget *move_submenu(GtkWidget *wv, GtkWidget *list, const char *id, const char *current) {
-    GtkWidget *sub = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+    GtkWidget *sub = orb_menu_page();
     g_object_set(orb_menu_row(sub, "_Move to", NULL), "menu-name", "main", "inverted", TRUE, NULL);
     int n = 0;
     GList *rows = gtk_container_get_children(GTK_CONTAINER(list));
@@ -189,9 +189,8 @@ gboolean orb_gtk_row_context_menu(GtkWidget *wv, GtkWidget *list, GtkWidget *row
     if (!bulk && (!wv || !kind || strcmp(kind, "mission") != 0 || !target || strncmp(target, "m:", 2) != 0 || !target[2])) {
         return FALSE;
     }
-    GtkWidget *pop = gtk_popover_menu_new(), *menu = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
-    gtk_popover_set_relative_to(GTK_POPOVER(pop), row);
-    gtk_popover_set_constrain_to(GTK_POPOVER(pop), GTK_POPOVER_CONSTRAINT_WINDOW);
+    GtkWidget *pop = gtk_popover_menu_new(), *menu = orb_menu_page();
+    orb_menu_anchor(GTK_POPOVER(pop), row, ev);
     gtk_container_add(GTK_CONTAINER(pop), menu);
     gtk_container_child_set(GTK_CONTAINER(pop), menu, "submenu", "main", NULL);
     gtk_style_context_add_class(gtk_widget_get_style_context(pop), "orb-ctx");

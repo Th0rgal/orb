@@ -31,7 +31,7 @@ stdenv.mkDerivation {
     runHook preBuild
     ${clang}/bin/clang -std=gnu11 -O2 -Wall -Wextra -Werror -fstack-protector-strong -D_FORTIFY_SOURCE=2 -fPIE \
       -DORB_HAS_WEBKITGTK $(pkg-config --cflags gtk+-3.0 webkit2gtk-4.1) \
-      -o orb-webkit linux_shell/main.c linux_shell/gtk_chrome.c linux_shell/gtk_icons.c linux_shell/gtk_menu.c \
+      -o orb-webkit linux_shell/main.c linux_shell/gtk_chrome.c linux_shell/gtk_icons.c linux_shell/gtk_menu.c linux_shell/gtk_menu_layout.c \
       $(pkg-config --libs gtk+-3.0 webkit2gtk-4.1) -pie -Wl,-z,relro,-z,now
     make -C linux_shell CC=${clang}/bin/clang orb-sidebar-host.so
     runHook postBuild

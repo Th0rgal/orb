@@ -84,6 +84,8 @@ On Linux, Ctrl+B hides and restores the sidebar while a native mission row has f
 Classic routes this shortcut to the same visibility owner as the toolbar. A native
 text field or open GTK menu keeps its keyboard events.
 
+In Classic and hybrid, right-clicking a mission anchors its menu at the pointer. The Menu key or Shift+F10 opens it at the focused mission. Menu rows are 26 px high. Hover highlights the row, keyboard navigation shows a fine focus stroke, and Escape dismisses the menu.
+
 In a GTK mission menu, Return and keypad Enter activate the focused row. On “Move to” this opens the destination list. Activating a destination applies the move to the existing selection.
 
 In both Linux renderers, Ctrl-clicking A and C followed by right-clicking B clears A and C from the command targets. Escape dismisses B’s menu and leaves the previously opened conversation in place. Right-clicking C directly after selecting A and C retains both targets.

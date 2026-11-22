@@ -16,8 +16,8 @@ ifeq ($(HAS_WEBKIT),1)
   LDFLAGS += $(shell $(PKG_CONFIG) --libs $(WEBKIT_PKGS))
 endif
 
-orb-desktop: main.c gtk_chrome.c gtk_icons.c gtk_menu.c $(wildcard *.h)
-	$(CC) $(CFLAGS) -o $@ main.c gtk_chrome.c gtk_icons.c gtk_menu.c $(LDFLAGS)
+orb-desktop: main.c gtk_chrome.c gtk_icons.c gtk_menu.c gtk_menu_layout.c $(wildcard *.h)
+	$(CC) $(CFLAGS) -o $@ main.c gtk_chrome.c gtk_icons.c gtk_menu.c gtk_menu_layout.c $(LDFLAGS)
 
 test: orb-desktop
 	./orb-desktop --self-test
@@ -28,5 +28,5 @@ clean:
 .PHONY: test clean
 
 # Loaded by Lean only for the opt-in hybrid launcher.
-orb-sidebar-host.so: main.c gtk_chrome.c gtk_icons.c gtk_menu.c gtk_leanui.c gtk_leanui_model.c $(wildcard *.h) ../lean/OrbDesktop/c/sidebar_host.h
+orb-sidebar-host.so: main.c gtk_chrome.c gtk_icons.c gtk_menu.c gtk_menu_layout.c gtk_leanui.c gtk_leanui_model.c $(wildcard *.h) ../lean/OrbDesktop/c/sidebar_host.h
 	$(CC) $(CFLAGS) -fPIC -shared -DORB_LEANUI_HOST -Dmain=orb_gtk_main -o $@ $(filter %.c,$^) $(shell $(PKG_CONFIG) --libs $(WEBKIT_PKGS)) -lm -Wl,-z,defs,-z,relro,-z,now
