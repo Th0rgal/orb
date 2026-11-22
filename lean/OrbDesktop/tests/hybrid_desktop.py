@@ -200,7 +200,7 @@ def run():
                     labels = {word: (x, y) for word, x, y in read_words(image, area)}
                     if expected not in labels:
                         # Tesseract can discard dark text on the translucent light sidebar.
-                        labels.update((word, (x, y)) for word, x, y in read_words(image, area, binarize=True))
+                        labels.update((word, (x, y)) for word, x, y in read_words(image, area, contrast="binary"))
                     return labels
 
                 def click(word):

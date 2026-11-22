@@ -67,6 +67,13 @@ jobs:
       - name: Build the packaged launchers on aarch64
         id: package
         run: nix build .#orb-desktop --max-jobs 1 --cores 2 -L
+      - name: Provide the Nix Mesa driver to headless WebKit on Ubuntu
+        run: |
+          if [[ ! -e /run/opengl-driver ]]; then
+            mesa=$(nix build --inputs-from . --no-link --print-out-paths nixpkgs#mesa)
+            sudo ln -s "$mesa" /run/opengl-driver
+          fi
+          test -r /run/opengl-driver/share/glvnd/egl_vendor.d/50_mesa.json
       - name: Exercise Classic and hybrid in a private Wayland session
         env:
           ORB_TEST_SCREENSHOT: ${{ runner.temp }}/hybrid-desktop.png
