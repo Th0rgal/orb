@@ -148,3 +148,24 @@ Legacy assistant/Telegram channels configured for Gemini, or linked to a Gemini
 mission, are deactivated before webhook registration. Configure Antigravity and
 a workspace-native model, migrate linked missions without reusing Gemini native
 session IDs, then reactivate the channel. Historical mission records are retained.
+
+### Native subscription delegation qualification
+
+In an isolated qualification on 2026-11-22, the real Antigravity subscription CLI on aarch64 Linux generated a response with Neon over Direct. Separate invocations resumed the same conversation and appended to a workspace file. Credentials stayed with the CLI profile. A separate, client-placed parent in private Orb Core used its own scoped MCP and loopback-only worker for the delegation checks.
+
+| Native CLI flow | Calls reaching the Orb MCP | Children recorded under the parent |
+| --- | ---: | ---: |
+| 1.5.14 headless, full catalog and an exact permission | 0 | 0 |
+| 1.5.14 headless, single-tool server, enabledTools limited to start_mission and exact permission | 1 | 1 |
+| ACP, permission request cancelled | 0 | 0 |
+| ACP, allow_once for the specific private node, model and arguments | 1 | 1 |
+
+The exact permission was `mcp(sandboxed/start_mission)`. The single-tool server filtered tool discovery and enforced the same restriction on every call. An explicit private node gave an accepted Core receipt with a Codex child selecting `gpt-6.2-astra`. Without a node the same request returned `no_remote_nodes_available`. The worker's network isolation kept external inference out of the child test. A successful CLI exit accompanied a denied tool in the broad-catalog run. Inspect the tool result and parent linkage before counting a delegation.
+
+To reproduce the Core portion offline, run the following inside a disposable Linux namespace with only loopback enabled, a private home and a private temporary directory. The package directory must contain the three Orb binaries. The replay creates a fresh Core and node and checks the persisted parent after resending the same MCP request.
+
+```sh
+python3 scripts/test_native_parent_delegation.py /path/to/orb/package/bin
+```
+
+The shared-profile holder in this branch still requires a verified VPN and exposes the workspace MCP. Its stream-json process has no ACP permission reply channel. Native Goal dispatch and member-owned interactive decisions still need an integrated Core-to-worker test. The public Google CLI supports both headless output and interactive permissions. [Headless CLI](https://antigravity.google/docs/cli/headless/) · [CLI permissions](https://antigravity.google/docs/cli-permissions) · [ACP tool permissions](https://agentclientprotocol.com/protocol/v1/tool-calls)
