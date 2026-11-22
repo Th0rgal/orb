@@ -47,7 +47,21 @@ def catalogue : JVal := Id.run do
   let selected := props.filter fun (k,_) => allowedKeys.contains k
   let input := (schema.setField "properties" (.obj selected)).setField "required"
     (.arr (#["title","prompt","backend","model_override"].map JVal.str))
-  return .arr #[entry.setField "inputSchema" input]
+  let some read := entries.find? (fun t => t.fieldStr? "name" == some "get_mission") | return .arr #[]
+  let summary := "Read a direct child by its mission UUID. Returns status, selected model and up to 2048 characters of its latest final response when available."
+  return .arr #[entry.setField "inputSchema" input, read.setField "description" (.str summary)]
+
+/-- A native parent receives only its own child's bounded public answer, never the full mission digest. -/
+def readChild (store : CoreStore) (p : Placement) (args : JVal) : IO JVal := do
+  let .obj fields := args | return .null
+  unless fields.size == 1 do return .null
+  let some mid := args.fieldStr? "mission_id" >>= OrbBin.PosixExt.parseUuidCanonical? | return .null
+  let .ok rows ← execParamQuery store.missionsDb (include_str "native_direct_child.sql") #[p.mission, p.owner, mid]
+    | return .null
+  let some #[status, model, answer] := rows[1]? | return .null
+  return .obj #[("mission_id", .str mid), ("status", .str status), ("model_override", .str model),
+    ("final_response", if answer.isEmpty then .null else .str (answer.take 2048).toString),
+    ("truncated", .bool (answer.length > 2048))]
 
 def digest (args : JVal) : String :=
   LeanSys.Auth.bytesToHexLower (LeanSys.Auth.sha256Bytes (renderCompact args).toUTF8)

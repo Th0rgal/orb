@@ -2,6 +2,8 @@
 import json
 import uuid
 
+from .delegation import child_args
+
 
 def permission_choice(params, session, ask, ask_write=None):
     """Select one turn-local option. Core still authorizes the actual MCP call."""
@@ -30,6 +32,8 @@ def permission_choice(params, session, ask, ask_write=None):
     tool = raw.get("ServerName"), raw.get("ToolName")
     read = tool == ("workspace", "read_file") and set(args) == {"path"}
     write = tool == ("workspace", "write_file") and set(args) == {"path", "content"}
+    if tool == ("sandboxed", "get_mission") and child_args(args):
+        return choices[0]
     if read or write:
         path = args["path"]
         if isinstance(path, str) and 0 < len(path) <= 4096 and "\\" not in path and "\0" not in path and all(
