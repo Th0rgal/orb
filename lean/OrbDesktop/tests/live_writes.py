@@ -178,15 +178,15 @@ for i in range(300):
             source = wait('Source project', lambda: widget('source', '10,110 195x220'))
             click(*source)
             click(195, source[1])  # Start a draft in that project
-            click(315, 388)  # Machine, then the local Core
-            click(326, 447)
-            click(353, 388)  # Harness, then Codex below the default choice
-            choices = '305,396 450x210'
+            click(*wait('machine picker', lambda: widget('machine', '300,280 300x65')))
+            click(*wait('local Core', lambda: widget('orb-core', '300,320 400x200')))
+            click(370, 413)  # Harness in the composer toolbar
+            choices = '305,400 550x280'
             click(*wait('Codex harness', lambda: widget('codex', choices)))
             # Click the name at the right end of a provider-qualified model row.
             # Previously this visible suffix lay outside the popup hit region.
-            click(410, 388)
-            models = '320,396 590x213'
+            click(454, 413)  # Model picker beside the selected Codex harness
+            models = '305,395 645x300'
             click(*wait('visible Astra model suffix', lambda: widget('astra', models)))
             click(540, 347)
             keys(typed)
@@ -194,7 +194,7 @@ for i in range(300):
             # Undo the IME replacement; the next replacement must still see 猫 at the caret.
             keys('-M', 'ctrl', '-k', 'z', '-m', 'ctrl')
             edit([("語", len("猫".encode()), 0)])
-            click(944, 347)
+            click(881, 413)  # Send at the right edge of the composer toolbar
         else:
             wait('live project roster', lambda: widget('source', sidebar))
             keys('-M', 'ctrl', '-k', 'n', '-m', 'ctrl', '-s', '200', typed)
