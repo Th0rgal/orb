@@ -8,6 +8,10 @@ Goal objective or an unsupported remote harness before creating a mission.
 An ordinary follow-up after a completed Goal starts a standard turn in the same
 mission and harness session. The completed objective remains in history. It cannot
 arm another continuation, including for missions completed by an older Core.
+If the node accepts the follow-up but its acknowledgement is lost, Core checks
+that exact job on the original node. Adoption requires the completed Goal’s
+generation and job to still match. A superseded follow-up cannot claim its
+successor’s run.
 Remote follow-ups to an unfinished Goal steer the existing mission; `/goal` can only start a new
 remote mission. Rejected commands leave the transcript and queue untouched.
 
