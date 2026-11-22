@@ -33,3 +33,37 @@ it("shows why the selected account cannot route and rereads it after reconnectio
   await vi.waitFor(() => expect((screen.getByLabelText("Account connection") as HTMLSelectElement).disabled).toBe(false));
   expect(vi.mocked(api).mock.calls).toEqual(Array(2).fill(["/api/ai/providers/second/vpn", undefined]));
 });
+
+it("rereads a pending exit on visibility and stops once verified", async () => {
+  const route = { can_configure: true, countries: ["NL"], mode: "vpn", country: "NL" };
+  vi.mocked(api).mockClear().mockResolvedValueOnce({ ...route, status: "blocked",
+    reason: "vpn_awaiting_verification", message: "Waiting for exit verification." })
+    .mockResolvedValueOnce({ ...route, status: "verified", server: "west", exits: ["192.0.2.20"] });
+  render(() => <AccountVpnSettings account="pending" />);
+  await screen.findByText("Waiting for exit verification.");
+  document.dispatchEvent(new Event("visibilitychange"));
+  await screen.findByText("Verified exit · west · 192.0.2.20");
+  document.dispatchEvent(new Event("visibilitychange"));
+  await Promise.resolve();
+  expect(vi.mocked(api).mock.calls).toEqual(Array(2).fill(["/api/ai/providers/pending/vpn", undefined]));
+});
+
+it("keeps a newer Direct selection when an older verification read finishes", async () => {
+  const pending = { mode: "vpn", country: "NL", countries: ["NL"], can_configure: true,
+    status: "blocked", reason: "vpn_awaiting_verification", message: "Waiting for exit verification." };
+  let finishRead!: (r: unknown) => void;
+  vi.mocked(api).mockClear().mockResolvedValueOnce(pending)
+    .mockImplementationOnce(() => new Promise(resolve => { finishRead = resolve; }))
+    .mockResolvedValueOnce({ mode: "direct", countries: ["NL"], status: "direct", can_configure: true });
+  render(() => <AccountVpnSettings account="switching" />);
+  await screen.findByText("Waiting for exit verification.");
+  document.dispatchEvent(new Event("visibilitychange"));
+  await vi.waitFor(() => expect(api).toHaveBeenCalledTimes(2));
+  const select = screen.getByLabelText("Account connection") as HTMLSelectElement;
+  fireEvent.change(select, { target: { value: "" } });
+  await vi.waitFor(() => expect(screen.queryByRole("status")).toBeNull());
+  finishRead({ ...pending, status: "verified", reason: undefined, server: "west" });
+  await new Promise(resolve => setTimeout(resolve, 0));
+  expect(select.value).toBe("");
+  expect(screen.queryByText(/Verified exit/)).toBeNull();
+});
