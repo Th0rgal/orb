@@ -11,13 +11,13 @@ const node={id:"dgx-spark",status:"online",cordoned:false};
 // backend that supports native Grok remote launches says so.
 type Capability={typed?:boolean;harnesses?:string[];goal_harnesses?:string[];raw_command?:boolean;proxy_url_configured?:boolean;requires_proxy_harnesses?:string[]};
 const typedCapability:Capability={typed:true,harnesses:["claudecode","opencode"],goal_harnesses:["opencode"],raw_command:true,proxy_url_configured:true};
-async function setup(page:Page, options:{nativeOwner?:boolean;memberFleetGate?:Promise<void>;cyberRefusal?:boolean;reject?:boolean;legacy?:boolean;remoteSuccess?:boolean;missing?:boolean;failed?:boolean;remoteJob?:{phase:string;node_state?:string};emptyStatus?:string;capability?:Capability|null;fleetFailAfterFirst?:boolean;files?:{name:string;kind:string}[];emptyContext?:boolean}={}){
+async function setup(page:Page, options:{nativeOwner?:boolean;memberFleetGate?:Promise<void>;cyberRefusal?:boolean;reject?:boolean;legacy?:boolean;remoteSuccess?:boolean;missing?:boolean;failed?:boolean;remoteJob?:{phase:string;node_state?:string};emptyStatus?:string;blockedGoalRole?:"owner"|"participant";capability?:Capability|null;fleetFailAfterFirst?:boolean;files?:{name:string;kind:string}[];emptyContext?:boolean}={}){
  let attachmentReads:string[]=[];
  let posts:any[]=[], releasePost!:()=>void,releaseHistory!:()=>void, stops=0;
  const postGate=new Promise<void>(resolve=>releasePost=resolve),historyGate=new Promise<void>(resolve=>releaseHistory=resolve);
  let fail=!!options.reject;let fleetReads=0;let listReads=0;let fleetChanged=false;
  const capability=options.capability===undefined?typedCapability:options.capability;
- const m={...base,...(options.remoteSuccess?{status:"active",remote_job:{job_id:"job-123",node_id:"dgx-spark",phase:"observed"},execution:{state:"waiting_remote_job"}}:{}),...(options.remoteJob?{remote_job:{job_id:"job-123",node_id:"dgx-spark",...options.remoteJob},execution:{state:"waiting_remote_job"}}:{}),...(options.failed?{status:options.emptyStatus??"interrupted",goal_mode:true,goal_objective:"Original saved objective",terminal_reason:"orphan_no_runner",remote_node_id:"dgx-spark"}:{})};
+ const m={...base,...(options.remoteSuccess?{status:"active",remote_job:{job_id:"job-123",node_id:"dgx-spark",phase:"observed"},execution:{state:"waiting_remote_job"}}:{}),...(options.remoteJob?{remote_job:{job_id:"job-123",node_id:"dgx-spark",...options.remoteJob},execution:{state:"waiting_remote_job"}}:{}),...(options.failed?{status:options.emptyStatus??"interrupted",goal_mode:true,goal_objective:"Original saved objective",terminal_reason:"orphan_no_runner",remote_node_id:"dgx-spark"}:{}),...(options.blockedGoalRole?{backend:"antigravity",status:"awaiting_user",terminal_reason:"remote_goal_blocked",run_generation:9,viewer_role:options.blockedGoalRole}:{})};
  await page.addInitScript((nativeOwner)=>{
   localStorage.setItem("orb.apiUrl",location.origin);localStorage.setItem("orb.jwt","test");localStorage.setItem("orb-theme","dark");
   localStorage.setItem("orb.harnessPick",JSON.stringify(nativeOwner ? {backend:"antigravity",model:"gemini-4-carbon-high"} : {backend:"grok",model:"grok-4.6"}));
@@ -45,7 +45,7 @@ async function setup(page:Page, options:{nativeOwner?:boolean;memberFleetGate?:P
    listReads++;if(posts.length)await new Promise(r=>setTimeout(r,3000));return route.fulfill({json:options.failed?[m]:[]});
   }
   if(path==="/api/control/queue")return route.fulfill({json:[]});
-  if(path.endsWith("/events")) {if(!options.failed)await historyGate;return route.fulfill(eventPage(route,options.failed?[]:[{id:1,event_id:"initial",sequence:1,event_type:"user_message",content:prompt,timestamp:""}]));}
+  if(path.endsWith("/events")) {if(!options.failed)await historyGate;return route.fulfill(eventPage(route,options.blockedGoalRole?[{id:7,event_id:"failure",sequence:7,event_type:"error",content:"Antigravity CLI exited with status 1",timestamp:""}]:options.failed?[]:[{id:1,event_id:"initial",sequence:1,event_type:"user_message",content:prompt,timestamp:""}]));}
   if(path==="/api/control/stream"){if(!options.failed)await historyGate;if(options.failed)return route.fulfill({contentType:"text/event-stream",body:""});return route.fulfill({contentType:"text/event-stream",body:`event: user_message\ndata: ${JSON.stringify({id:"initial",content:prompt})}\n\n`});}
   if(path==="/api/control/missions/accepted")return route.fulfill({json:m});
    if(path==="/api/control/missions/accepted/cancel" || path==="/api/control/missions/accepted/stop") {
@@ -359,6 +359,32 @@ test("capability read failure refuses before POST and reports support as last kn
  await expect(page.getByRole("button",{name:/dgx-spark online/})).toBeVisible();
 });
 
+ for (const role of ["owner", "participant"] as const) test(`blocked remote Goal recovery for ${role}`, async ({page}) => {
+  await setup(page,{failed:true,blockedGoalRole:role});
+  const resumeRequests: unknown[] = [];
+  const ordinaryRequests: string[] = [];
+  page.on("request", req => {
+   if (req.method() === "POST" && /\/api\/control\/(message|missions\/accepted\/resume)$/.test(new URL(req.url()).pathname))
+    ordinaryRequests.push(req.url());
+  });
+  await page.route("**/api/control/missions/accepted/resume-goal", async route => {
+   resumeRequests.push(route.request().postDataJSON());
+   await route.fulfill({status:202,json:{status:"awaiting_user",terminal_reason:"remote_goal_continuation"}});
+  });
+  await page.getByRole("button",{name:"Test",exact:true}).click();
+  await page.getByRole("button",{name:/Remote task/}).click();
+  await expect(page.getByText("Goal blocked",{exact:true})).toBeVisible();
+  await expect(page.getByRole("button",{name:"Resume",exact:true})).toHaveCount(0);
+  const action=page.getByRole("button",{name:"Resume Goal",exact:true});
+  if (role === "owner") {
+   await action.click();
+   await expect.poll(()=>resumeRequests).toEqual([{run_generation:9}]);
+  } else {
+   await expect(action).toHaveCount(0);
+  }
+  expect(ordinaryRequests).toEqual([]);
+ });
+
  test("proxy URL not configured still launches native Grok OAuth",async({page})=>{
   const noProxy={...typedCapability,harnesses:["claudecode","opencode","grok"],proxy_url_configured:false};
   const state=await setup(page,{remoteSuccess:true,capability:noProxy});state.releasePost();await chooseRemote(page);
@@ -389,6 +415,7 @@ test("capability read failure refuses before POST and reports support as last kn
     resumes.push(route.request().postDataJSON());
     await route.fulfill({status:409,json:{error:"remote_goal_resume_conflict"}});
   });
+  await expect(page.getByRole("button",{name:"Resume",exact:true})).toHaveCount(0);
   await page.getByRole("button",{name:"Resume Goal",exact:true}).click();
   await expect.poll(()=>resumes).toEqual([{run_generation:8}]);
   await expect(page.getByText("Goal stopped",{exact:true})).toBeVisible();

@@ -235,20 +235,31 @@ private def verifyIncompleteGoalDrain (store : CoreStore) (sup : RemoteJobSuperv
     (← cellOf store.missionsDb "SELECT COUNT(*) FROM mission_continuations WHERE mission_id=?1;" #[mid]) == "0")
     "a failed or stalled final read cannot complete or continue a Goal"
 
-private def verifyStoppedGoalResume (store : CoreStore) (mid : String) : IO Unit := do
+private def verifyRemoteGoalResume (store : CoreStore) (mid : String) : IO Unit := do
   let db := store.missionsDb
   discard <| execParamQuery db
     ("UPDATE missions SET backend='antigravity',goal_mode=1,goal_objective='Add seven',status='interrupted', " ++
      "terminal_reason='remote_goal_stopped',run_generation=8 WHERE id=?1;") #[mid]
-  let noSession ← resumeStoppedRemoteGoal store mid 8 20
+  let noSession ← resumeRemoteGoal store mid 8 20
   check (match noSession with | .error "remote_goal_session_missing" => true | _ => false) "missing native session leaves the stopped Goal intact"
   discard <| execParamQuery db "UPDATE missions SET session_id='019ad719-730d-7777-9221-e0eabcd44611' WHERE id=?1;" #[mid]
-  let stale ← resumeStoppedRemoteGoal store mid 7 20
-  let first ← resumeStoppedRemoteGoal store mid 8 20
-  let second ← resumeStoppedRemoteGoal store mid 8 20
+  let stale ← resumeRemoteGoal store mid 7 20
+  let first ← resumeRemoteGoal store mid 8 20
+  let second ← resumeRemoteGoal store mid 8 20
   check ((stale.toOption == some false) && (first.toOption == some true) && (second.toOption == some false) &&
     (← cellOf db "SELECT COUNT(*) FROM mission_continuations WHERE mission_id=?1 AND phase=1 AND reason='remote_goal' AND run_generation=8;" #[mid]) == "1")
     "explicit resume queues exactly one Goal on the current stopped generation"
+  discard <| execParamQuery db "DELETE FROM mission_continuations WHERE mission_id=?1;" #[mid]
+  discard <| execParamQuery db "UPDATE missions SET status='awaiting_user',terminal_reason='remote_goal_evidence_incomplete' WHERE id=?1;" #[mid]
+  let incomplete ← resumeRemoteGoal store mid 8 20
+  discard <| execParamQuery db "UPDATE missions SET terminal_reason='remote_goal_blocked' WHERE id=?1;" #[mid]
+  let blockedStale ← resumeRemoteGoal store mid 7 20
+  let blocked ← resumeRemoteGoal store mid 8 20
+  let duplicate ← resumeRemoteGoal store mid 8 20
+  check (incomplete.toOption == some false && blockedStale.toOption == some false &&
+    blocked.toOption == some true && duplicate.toOption == some false &&
+    (← cellOf db "SELECT COUNT(*) FROM mission_continuations WHERE mission_id=?1 AND phase=1 AND reason='remote_goal' AND run_generation=8;" #[mid]) == "1")
+    "only an explicitly blocked Goal on the displayed generation can resume once"
   discard <| execParamQuery db "DELETE FROM mission_continuations WHERE mission_id=?1;" #[mid]
 
 private def verifyTerminalGoalFollowupRecovery (store : CoreStore) (fd : LeanSys.Posix.Fd)
@@ -808,7 +819,7 @@ def run : IO Unit := do
            newMission mid "[\"remote-node:mockgoalchecks\"]"
            verifyTerminalGoalFollowupRecovery store checksFd root mid replaced stopped
          newMission "m-explicit-goal-resume" "[\"remote-node:mockgoalchecks\"]"
-         verifyStoppedGoalResume store "m-explicit-goal-resume"
+         verifyRemoteGoalResume store "m-explicit-goal-resume"
          newMission "m-codex-goal-echo" "[\"remote-node:mockgoalchecks\"]"
          verifyCodexGoalEcho store sup checksFd root "m-codex-goal-echo"
          verifyCodexGoalEchoBoundaries store "m-codex-goal-echo"

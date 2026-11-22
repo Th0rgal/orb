@@ -100,7 +100,7 @@ import {
   forceMissionSlot,
   setClientMissionStatus,
   sendMissionMessage,
-  resumeStoppedRemoteGoal,
+  resumeRemoteGoal,
   ApiError,
   MessageRejectedError,
   connectionVersion,
@@ -1200,13 +1200,18 @@ export function NativeMissionView(p: { id: string; active?: boolean; launch?:Lau
     const live = liveGoal();
     return { phase: phase === "active" ? live?.phase ?? phase : phase, objective: m.goal_objective ?? "", iteration: Math.max(m.goal_iteration ?? 0, live?.iteration ?? 0) };
   });
-  const [resumingGoal, setResumingGoal] = createSignal(false);
-  async function resumeStoppedGoal() {
+  const goalRecovery = createMemo(() => {
     const m = mission();
-    if (!m?.run_generation || resumingGoal()) return;
+    return !!remoteGoal() && ((m?.status === "interrupted" && m.terminal_reason === "remote_goal_stopped") ||
+      (m?.status === "awaiting_user" && m.terminal_reason === "remote_goal_blocked"));
+  });
+  const [resumingGoal, setResumingGoal] = createSignal(false);
+  async function resumeGoal() {
+    const m = mission();
+    if (!goalRecovery() || participant() || !m?.run_generation || resumingGoal()) return;
     setResumingGoal(true);
     try {
-      await resumeStoppedRemoteGoal(m.id, m.run_generation);
+      await resumeRemoteGoal(m.id, m.run_generation);
       await refresh();
     } catch (e) {
       setSendError(launchError(e));
@@ -1765,9 +1770,9 @@ export function NativeMissionView(p: { id: string; active?: boolean; launch?:Lau
                 with the send, not when the turn starts ~1 s later (a second
                 shift of the transcript under the new message). */}
             <Show when={mission() && !(awaitingTurn() || optimisticList().some(item => !item.waiting && !item.failed)) && (!missionPhase(mission(), activity()).moving || ["Checking submission", "Checking remote job"].includes(missionPhase(mission(), activity()).label))}>
-              <LaunchStatus destination={missionDestination(mission(), receipt)} mission={mission()} activity={activity()} goal={missionGoal(mission(), receipt)} onResume={() => void actOnRecovery("resume")} onCancelRecovery={() => void actOnRecovery("cancel")} onResetRedeemed={() => void refresh()} recoveryPending={recoveryPending()} onForceSlot={forceSlotHandler()} forceSlotPending={forceSlotPending()} />
+              <LaunchStatus destination={missionDestination(mission(), receipt)} mission={mission()} activity={activity()} goal={missionGoal(mission(), receipt)} onResume={goalRecovery() ? undefined : () => void actOnRecovery("resume")} onCancelRecovery={() => void actOnRecovery("cancel")} onResetRedeemed={() => void refresh()} recoveryPending={recoveryPending()} onForceSlot={forceSlotHandler()} forceSlotPending={forceSlotPending()} />
             </Show>
-            <Transcript sizeKey={p.id ? `m:${p.id}` : undefined} initialBottom={Boolean(p.id && !hasPendingSearchTarget(p.id))} backend={mission()?.backend} loadToolCall={p.id ? (callId => fullToolCall(p.id!, callId)) : undefined} sending={handoff()?.promoted ? handoff()?.id : undefined} working={working()} workingLabel={(awaiting() && p.id && (transcriptVersion(), peekTranscript(p.id)?.activity)) || `${phaseLabel()} on ${missionDestination(mission(), receipt)}…`} onForceSlot={forceSlotHandler()} forceSlotPending={forceSlotPending()} prepareSearch={prepareSearch} needsPrepareSearch={needsPrepareSearch} items={nonQueuedViewItems()} pending={working() && !activity()} onSend={p.id && !participant() ? sendEditedPrompt : undefined} onOpenSource={openOriginalSource()} onResume={!busy() && !localQueueActive() && (clientPlaced() || (!remoteQueuedIds().length && !items().some(i => i.kind === "user" && i.queued))) && ((missionPhase(mission(), false).failed && missionPhase(mission(), false).label !== "Cancelled") || visibleViewItems().some(item => item.kind === "error" && item.terminal)) ? resume : undefined} checkpoints={checkpoints()} onRestoreCheckpoint={!participant() ? setPendingCheckpointRevert : undefined} />
+            <Transcript sizeKey={p.id ? `m:${p.id}` : undefined} initialBottom={Boolean(p.id && !hasPendingSearchTarget(p.id))} backend={mission()?.backend} loadToolCall={p.id ? (callId => fullToolCall(p.id!, callId)) : undefined} sending={handoff()?.promoted ? handoff()?.id : undefined} working={working()} workingLabel={(awaiting() && p.id && (transcriptVersion(), peekTranscript(p.id)?.activity)) || `${phaseLabel()} on ${missionDestination(mission(), receipt)}…`} onForceSlot={forceSlotHandler()} forceSlotPending={forceSlotPending()} prepareSearch={prepareSearch} needsPrepareSearch={needsPrepareSearch} items={nonQueuedViewItems()} pending={working() && !activity()} onSend={p.id && !participant() ? sendEditedPrompt : undefined} onOpenSource={openOriginalSource()} onResume={!goalRecovery() && !busy() && !localQueueActive() && (clientPlaced() || (!remoteQueuedIds().length && !items().some(i => i.kind === "user" && i.queued))) && ((missionPhase(mission(), false).failed && missionPhase(mission(), false).label !== "Cancelled") || visibleViewItems().some(item => item.kind === "error" && item.terminal)) ? resume : undefined} checkpoints={checkpoints()} onRestoreCheckpoint={!participant() ? setPendingCheckpointRevert : undefined} />
             <Show when={awaiting() && items().length > 0}><ActivitySkeleton /></Show>
             <TurnRecap mission={mission() ?? undefined} items={viewItems()} busy={busy()} onDraft={text=>setSideRevision({text,append:false})} />
             <ErrorToast
@@ -1787,14 +1792,14 @@ export function NativeMissionView(p: { id: string; active?: boolean; launch?:Lau
             </Show>
             <NativeInteraction mission={p.id} active={clientPlaced() ? localRunActive(p.id) : busy()} remote={!clientPlaced()} items={viewItems()} onSend={text => sendMsg(text, [], [])} />
             <Show when={!sendError()}>
-              <MissionFailure mission={mission()} active={busy() || localQueueActive() || working() || !!sentOverStop() || (awaiting() && mission()?.status_message === "Model error") || (!clientPlaced() && !hasMissionFailure() && (remoteQueuedIds().length > 0 || items().some(i => i.kind === "user" && i.queued)))} error={clientPlaced() ? localFailure(p.id) : undefined} onResume={resume} onOpenSource={openOriginalSource()} failureInTranscript={visibleViewItems().some(item => item.kind === "error")} />
+              <MissionFailure mission={mission()} active={busy() || localQueueActive() || working() || !!sentOverStop() || (awaiting() && mission()?.status_message === "Model error") || (!clientPlaced() && !hasMissionFailure() && (remoteQueuedIds().length > 0 || items().some(i => i.kind === "user" && i.queued)))} error={clientPlaced() ? localFailure(p.id) : undefined} onResume={goalRecovery() ? undefined : resume} onOpenSource={openOriginalSource()} failureInTranscript={visibleViewItems().some(item => item.kind === "error")} />
             </Show>
           </Show>
 
           <NextReminder mission={p.id} active={isSlotActive()} busy={busy()} archived={isArchived(mission()?.status)} />
           <Show when={remoteGoal()}>{goal => <><div role="status">{remoteGoalStatusLabel(goal())}</div>
-            <Show when={!participant() && mission()?.status === "interrupted" && mission()?.terminal_reason === "remote_goal_stopped" && mission()?.run_generation}>
-              <button type="button" class="error-notice-link primary" disabled={resumingGoal()} onClick={() => void resumeStoppedGoal()}>Resume Goal</button>
+            <Show when={goalRecovery() && !participant() && mission()?.run_generation}>
+              <button type="button" class="error-notice-link primary" disabled={resumingGoal()} onClick={() => void resumeGoal()}>Resume Goal</button>
             </Show>
           </>}</Show>
           <Show when={refreshing()}><div class="agent-wait-status" role="status">Refreshing conversation…</div></Show>
@@ -1836,7 +1841,7 @@ export function NativeMissionView(p: { id: string; active?: boolean; launch?:Lau
             revision={sideRevision()}
             onBtw={(question,images,files)=>sideQuestions?.ask(question,images,files)??false}
             onOpenBtw={()=>sideQuestions?.open()}
-            placeholder="Send follow-up"
+            placeholder={goalRecovery() ? "Send an ordinary follow-up" : "Send follow-up"}
             disabled={!p.id}
             picker={false}
             busy={busy()}
