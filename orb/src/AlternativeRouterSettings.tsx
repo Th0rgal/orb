@@ -1,13 +1,15 @@
 import { Show, createEffect, createResource, createSignal, onCleanup } from "solid-js";
 import { api, connectionVersion } from "./api";
+import { AccountSettingReadError } from "./AccountSettingReadError";
 import { pollWhileVisible } from "./poll";
 import { SettingsRow } from "./SettingsCard";
 import { Toggle } from "./Toggle";
 
 export function AlternativeRouterSettings(p: { account: string }) {
   const source = () => [connectionVersion(), p.account] as const;
+  const uri = (id: string) => `/api/ai/providers/${encodeURIComponent(id)}/alternative-routers`;
   async function access(id: string, allowed?: boolean) {
-    const settings = await api<{ allowed: boolean }>(`/api/ai/providers/${encodeURIComponent(id)}/alternative-routers`,
+    const settings = await api<{ allowed: boolean }>(uri(id),
       allowed === undefined ? undefined : {
         method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ allowed }),
       });
@@ -39,7 +41,8 @@ export function AlternativeRouterSettings(p: { account: string }) {
     }
   }
   return <SettingsRow title="Alternative routers" desc="Allow OpenCode and other routed clients to use this account.">
-    <Show when={!setting.error} fallback={<button class="s-btn" onClick={() => void refetch()}>Retry router settings</button>}>
+    <Show when={!setting.error} fallback={<AccountSettingReadError error={setting.error} path={uri(p.account)}
+      updateMessage="Update Core to configure alternative router access." retryLabel="Retry router settings" retry={() => void refetch()} />}>
       <Show when={setting()}>{s =>
         <Toggle label="Allow alternative routers" on={s().allowed} disabled={saving() || setting.loading}
           onClick={() => void save(!s().allowed)} />

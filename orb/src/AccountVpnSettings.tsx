@@ -1,6 +1,7 @@
 import { Show, createEffect, createResource, createSignal, onCleanup } from "solid-js";
 import { api, connectionVersion } from "./api";
 import { pollWhileVisible } from "./poll";
+import { AccountSettingReadError } from "./AccountSettingReadError";
 import { SettingsRow } from "./SettingsCard";
 
 interface Route {
@@ -59,7 +60,8 @@ export function AccountVpnSettings(p: { account: string }) {
     }
   };
   return <SettingsRow title="Account connection" stack>
-    <Show when={!route.error} fallback={<button class="s-btn" onClick={() => void refetch()}>Retry connection settings</button>}>
+    <Show when={!route.error} fallback={<AccountSettingReadError error={route.error} path={uri(p.account)}
+      updateMessage="Update Core to configure account VPNs." retryLabel="Retry connection settings" retry={() => void refetch()} />}>
       <Show when={route()}>{r => <div class="p-native-controls">
         <select class="s-input" aria-label="Account connection" disabled={busy() || !r().can_configure}
           value={r().country ?? ""} onChange={e => {

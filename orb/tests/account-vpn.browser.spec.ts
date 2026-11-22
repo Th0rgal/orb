@@ -148,3 +148,47 @@ test("admin imports an AirVPN profile and checks the saved key", async ({ page }
   await expect(page.getByText(key, { exact: true })).toHaveCount(0);
   await expect(page.getByText("PrivateKey =", { exact: false })).toHaveCount(0);
 });
+
+test("older Core explains missing routing endpoints and retries after upgrade", async ({page}) => {
+  let phase: "legacy" | "unavailable" | "ready" = "legacy";
+  await page.addInitScript(() => {
+    localStorage.setItem("orb.apiUrl", location.origin);
+    localStorage.setItem("orb.jwt", "fixture");
+  });
+  await page.route("**/api/**", route => {
+    const path = new URL(route.request().url()).pathname;
+    if (path === "/api/auth/me") return route.fulfill({json:{auth_mode:"multi_user",user:{id:"a",username:"admin",role:"admin"}}});
+    if (path === "/api/ai/providers") return route.fulfill({json:[{id:"legacy",name:"Legacy account",provider_type:"antigravity",
+      added_by_me:true, uses_oauth:true, has_oauth:true, credential_owner:"cli_proxy",status:{type:"connected"}}]});
+    if (path.startsWith("/api/ai/providers/legacy/") && /\/(vpn|alternative-routers)$/.test(path)) {
+      expect(route.request().method()).toBe("GET");
+      if (phase === "unavailable") return route.fulfill(path.endsWith("/vpn")
+        ? {status:404,json:{error:"provider_not_found"}} : {status:503,json:{error:"sidecar_unavailable"}});
+      if (phase === "legacy") return route.fulfill({status:404,json:{error:"not_found",path}});
+      return route.fulfill({json:path.endsWith("/vpn") ? {mode:"direct",status:"direct",countries:["NL"],can_configure:true} : {allowed:false}});
+    }
+    return route.fulfill({json:path === "/api/projects" ? {projects:[]} : []});
+  });
+  await page.goto("/");
+  await page.getByRole("button",{name:"Inference",exact:true}).click();
+  const group = page.locator(".p-group-head");
+  if (await group.count() && await group.getAttribute("aria-expanded") === "false") await group.click();
+  await page.locator(".p-acc-btn").first().click();
+  await expect(page.getByText("Update Core to configure account VPNs.")).toBeVisible();
+  await expect(page.getByText("Update Core to configure alternative router access.")).toBeVisible();
+  await expect(page.getByLabel("Account connection",{exact:true})).toHaveCount(0);
+  await expect(page.getByRole("switch",{name:"Allow alternative routers"})).toHaveCount(0);
+  phase = "unavailable";
+  await page.getByRole("button",{name:"Retry connection settings"}).click();
+  await page.getByRole("button",{name:"Retry router settings"}).click();
+  await expect(page.getByText(/Update Core to configure/)).toHaveCount(0);
+  await expect(page.getByLabel("Account connection",{exact:true})).toHaveCount(0);
+  await expect(page.getByRole("switch",{name:"Allow alternative routers"})).toHaveCount(0);
+  phase = "ready";
+  await page.getByRole("button",{name:"Retry connection settings"}).click();
+  await page.getByRole("button",{name:"Retry router settings"}).click();
+  await expect(page.getByLabel("Account connection",{exact:true})).toHaveValue("");
+  await expect(page.getByRole("switch",{name:"Allow alternative routers"})).toBeVisible();
+  await expect(page.getByRole("switch",{name:"Allow alternative routers"})).not.toBeChecked();
+  await expect(page.getByText(/Update Core to configure/)).toHaveCount(0);
+});
