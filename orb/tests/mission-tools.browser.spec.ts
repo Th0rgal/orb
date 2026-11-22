@@ -40,9 +40,7 @@ for (const scheme of ["light", "dark"] as const) for (const width of [1100, 640]
     await page.emulateMedia({ colorScheme: scheme });
     await openMission(page, longTitle, scheme);
     await page.setViewportSize({ width, height: 800 });
-    // Narrow windows open the sidebar as a modal drawer; close it to use the mission.
-    const toggle = page.getByRole("button", { name: "Toggle sidebar" });
-    if (width < 720 && await toggle.getAttribute("aria-expanded") === "true") await toggle.click();
+    if (width < 720) await expect(page.locator("#orb-sidebar")).toBeHidden();
     const bar = await box(page, ".titlebar"), tools = await box(page, ".mission-tools");
     const title = await box(page, ".session-title-text"), icon = await box(page, ".titlebar .files-toggle");
     // Vertically centred on the title row, like the title and the files icon.

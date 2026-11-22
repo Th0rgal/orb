@@ -108,8 +108,7 @@ for (const theme of ['dark', 'light']) test(`four Antigravity accounts collapse 
 
   // Phone width: the chips move under the title and are never clipped or overlapped.
   await page.setViewportSize({ width: 390, height: 900 });
-  const toggle = page.getByRole('button', { name: 'Toggle sidebar' });
-  if (await toggle.getAttribute('aria-expanded') === 'true') await toggle.click();
+  await expect(page.locator('#orb-sidebar')).toBeHidden();
   await expect(head(page).locator('.p-group-left').first()).toBeHidden();
   const chipBoxes = await head(page).locator('.p-usage-chip').evaluateAll(els => els.map(el => { const r = el.getBoundingClientRect(); return { left: r.left, right: r.right, clipped: el.scrollWidth > el.clientWidth }; }));
   const edge = (await head(page).boundingBox())!;
@@ -117,7 +116,7 @@ for (const theme of ['dark', 'light']) test(`four Antigravity accounts collapse 
   expect(chipBoxes[0].right).toBeLessThanOrEqual(chipBoxes[1].left);
   await shot('groups-collapsed-phone');
   await page.setViewportSize({ width: 1100, height: 900 });
-  if (await toggle.getAttribute('aria-expanded') === 'false') await toggle.click();
+  await expect(page.locator('#orb-sidebar')).toBeVisible();
 
   // Click expands: the rows keep their priority order and their own controls.
   await head(page).click();

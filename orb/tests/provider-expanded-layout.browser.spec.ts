@@ -14,7 +14,7 @@ test.use({ browserName: process.env.ORB_TEST_BROWSER === 'webkit' ? 'webkit' : '
   });
   await page.goto('/');await page.getByRole('button',{name:'Inference',exact:true}).click();
   await page.setViewportSize({width,height:1000});
-  if(width===480) {const toggle=page.getByRole('button',{name:'Toggle sidebar'});if(await toggle.getAttribute('aria-expanded')==='true') await toggle.click();}
+  if (width === 480) await expect(page.locator('#orb-sidebar')).toBeHidden();
   const openai=page.locator('.p-acc-wrap').filter({has:page.locator('.s-row-title',{hasText:'OpenAI'})});
   await openai.locator('.p-acc-btn').click();
   const row=openai.locator('.provider-usage-row');const bar=openai.getByRole('progressbar');

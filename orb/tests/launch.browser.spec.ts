@@ -562,7 +562,7 @@ test("disk refusal shows a notification clear of the draft with details, an acti
  await expect(alert.locator("pre")).toBeHidden();await alert.getByText("Details").click();await expect(alert.locator("pre")).toHaveText(raw);await alert.getByText("Details").click();
  await page.screenshot({path:"test-results/error-toast-dark.png"});
  await page.setViewportSize({width:480,height:850});
- await page.getByRole("button", {name:"Close sidebar", exact:true}).click();
+ await expect(page.locator("#orb-sidebar")).toBeHidden();
  expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);
  await alert.getByRole("button",{name:"Dismiss"}).click();await expect(alert).toHaveCount(0);await expect(input).toHaveValue("Summarize the Pareto audit progress");
 });
