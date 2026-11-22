@@ -75,6 +75,11 @@ def check_scoped_queue_replay(tmp, api, mid, submissions, restart):
     first = api(route, body)
     assert first["queued"] and first["mission_id"] == mid
 
+    def event_count(db):
+        count, = db.execute("SELECT count(*) FROM mission_events WHERE mission_id=? AND event_type='user_message' "
+                            "AND json_extract(payload,'$.id')=?", (mid, body["client_message_id"])).fetchone()
+        return count
+
     def finish_original_turn():
         with contextlib.closing(sqlite3.connect(db_path)) as db:
             db.execute("UPDATE missions SET tags=?,status='awaiting_user' WHERE id=?", (json.dumps(["remote-node:fixture"]), mid))
@@ -82,12 +87,13 @@ def check_scoped_queue_replay(tmp, api, mid, submissions, restart):
             db.commit()
 
     restart(finish_original_turn)
-    assert api(route, body) == first
     with contextlib.closing(sqlite3.connect(db_path)) as db:
+        # The original enqueue may already have been delivered before shutdown.
+        events_before_retry = event_count(db)
+        assert events_before_retry in (0, 1)
+        assert api(route, body) == first
         db.execute("UPDATE missions SET tags='[]',placement_kind='managed',status='active' WHERE id=?", (mid,))
         db.commit()
         assert api(route, body) == first
-        count, = db.execute("SELECT count(*) FROM mission_events WHERE mission_id=? AND event_type='user_message' "
-                            "AND json_extract(payload,'$.id')=?", (mid, body["client_message_id"])).fetchone()
-        assert count == 0
+        assert event_count(db) == events_before_retry
     assert not submissions
