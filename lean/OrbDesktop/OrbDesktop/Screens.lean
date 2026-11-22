@@ -284,10 +284,11 @@ def conversationStatusLabel (status : String) : String :=
   match status with
   | "awaiting_user" | "waiting_user" | "acknowledged" => "Ready for a follow-up"
   | "blocked" => "Waiting for input"
+  | "waiting_background" => "Waiting for background work"
   | _ => (status.replace "_" " ").capitalize
 
 #guard conversationStatusLabel "awaiting_user" == "Ready for a follow-up"
-#guard conversationStatusLabel "waiting_background" == "Waiting background"
+#guard conversationStatusLabel "waiting_background" == "Waiting for background work"
 
 /-- Build the Mission Transcript body (`03_mission_transcript`) matching the SolidJS transcript column. -/
 def buildMissionTranscriptBody (st : DesktopState) (mainW bodyH : SubPx)
