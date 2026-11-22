@@ -102,3 +102,49 @@ test("Default is created on first use; failed creation retains the draft and ret
   await expect(page.getByRole("option",{name:"Default"})).toHaveCount(1);
   expect(projectWrites).toBe(2);
 });
+
+test("New Agent keeps its sidebar project through a missing roster and retry", async ({ page }) => {
+  const project = { slug: "tests-ben", title: "Tests", status: "active" };
+  let projects: typeof project[] = [];
+  const writes: {path: string; body: Record<string, unknown>}[] = [];
+  await page.addInitScript(() => {
+    localStorage.setItem("orb.apiUrl", location.origin);
+    localStorage.setItem("orb.jwt", "fixture");
+    localStorage.setItem("orb.harnessPick", JSON.stringify({backend: "grok", model: "grok-test"}));
+  });
+  await page.route("**/api/**", async route => {
+    const request = route.request(), path = new URL(request.url()).pathname;
+    if ((path === "/api/projects" && request.method() === "PUT") ||
+        (path === "/api/control/missions" && request.method() === "POST")) {
+      writes.push({path, body: request.postDataJSON()});
+      return route.fulfill({status: 503, body: "Test runner unavailable"});
+    }
+    const json = path === "/api/projects" ? {projects}
+      : path === "/api/backends" ? [{id:"grok", name:"Grok"}]
+      : path === "/api/providers/backend-models" ? {backends:{grok:[{value:"grok-test",label:"Grok test"}]}}
+      : path === "/api/model-routing/chains" ? [{id:"builtin/smart", name:"Smart"}]
+      : path.endsWith("/missions") || path.endsWith("/queue") ? []
+      : path.endsWith("/files") ? {entries:[]} : path.endsWith("/crons") ? {jobs:[]} : {};
+    return route.fulfill({json});
+  });
+  await page.goto("/");
+  await expect(page.getByRole("button", {name:"Grok", exact:true})).toBeVisible();
+  // The native sidebar can issue this action before the WebView has loaded its own roster.
+  const opened = await page.evaluate(() => (window as { __ORB_NATIVE_NAV__?: (target: string) => boolean })
+    .__ORB_NATIVE_NAV__?.("new-agent:tests-ben:audit"));
+  expect(opened).toBe(true);
+  const selected = page.getByRole("button", {name:"Choose project", exact:true});
+  await expect(selected).toContainText("tests-ben");
+  await expect(selected).toContainText("/ audit");
+  const input = page.getByPlaceholder("Describe a task, / for commands, @ for context");
+  const send = page.locator(".new-agent button.send");
+  await input.fill("Check project routing");
+  await send.click();
+  await expect(page.getByRole("alert")).toContainText("tests-ben");
+  expect(writes).toEqual([]);
+  await expect(input).toHaveValue("Check project routing");
+  projects = [project];
+  await send.click();
+  await expect.poll(() => writes.length).toBe(1);
+  expect(writes[0]).toMatchObject({path:"/api/control/missions", body:{project:"tests-ben",folder:"audit"}});
+});

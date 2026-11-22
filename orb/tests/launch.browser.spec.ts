@@ -287,7 +287,7 @@ test("goal indicator overhead per keystroke stays negligible",async({page})=>{
   const state=await setup(page,{reject:true});state.releasePost();const input=composerInput(page);await input.fill(prompt);await input.press("Enter");
   await expect(page.getByRole("alert")).toContainText("Runner admission unavailable");await expect(input).toHaveValue(objective);expect(state.posts).toHaveLength(1);
   await input.fill(`${prompt} still`);await expect(page.getByRole("alert")).toContainText("Runner admission unavailable");
-  await input.fill(prompt);state.setSuccess();await input.press("Enter");await expect(page.getByPlaceholder("Send follow-up")).toBeVisible();expect(state.posts).toHaveLength(2);expect(state.posts[1].idempotency_key).toBe(state.posts[0].idempotency_key);
+  await input.fill(prompt);state.setSuccess();await input.press("Enter");await expect(page.getByPlaceholder("Send follow-up")).toBeVisible();await expect.poll(() => state.posts.length).toBe(2);expect(state.posts[1].idempotency_key).toBe(state.posts[0].idempotency_key);
  });
 
 test("missing selected node never silently launches on Core",async({page})=>{

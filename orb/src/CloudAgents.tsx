@@ -25,7 +25,7 @@ import { CloudModelPicker } from './CloudModelPicker';
 import type { ModelParam } from './cloudAgentApi';
 import { AgentChoice, AgentChoiceMenu } from './AgentChoice';
 import { type DraftImage, imagePrompt, stageRemoteImages } from './imageAttachments';
-import { DEFAULT_PROJECT, ensureDefaultProject } from './defaultProject';
+import { DEFAULT_PROJECT, ensureDefaultProject, requireLaunchProject } from './defaultProject';
 import { fulfillSearchTarget, hasPendingSearchTarget, pendingSearchTarget } from './searchTarget';
 
 function splitResultWithInlineThoughts(keyPrefix: string, raw: string, isLive: boolean, existingThoughts: Set<string>): StreamItem[] {
@@ -111,22 +111,24 @@ export function CloudAgentPage(p: { project: string; path?: string; projects?: {
   const submit = async (text: string, images: DraftImage[]) => {
     const rawPrompt = text.trim() || (images.length ? "Please look at the attached images." : "");
     const chosen = account();
-    if (busy() || !chosen?.available || !rawPrompt || !p.project) return false;
+    const project = p.project;
+    if (busy() || !chosen?.available || !rawPrompt || !project) return false;
     if (images.length && !canAttach()) { setError(cloudAttachmentBlock(provider(), chosen) ?? ''); return false; }
     const cloud = { provider: provider(), account: chosen.id, ...(model() ? {model: model()} : {}), ...(modelParams().length ? {model_params: modelParams()} : {}), ...(repo() ? {repository: repo()} : {}), ...(ref() ? {git_ref: ref()} : {}) };
     const folder = p.path ? p.path.trim() : "";
-    const signature = JSON.stringify({ prompt: rawPrompt, images: images.map(i => i.id), project: p.project, folder, cloud });
+    const signature = JSON.stringify({ prompt: rawPrompt, images: images.map(i => i.id), project, folder, cloud });
     // Show the conversation the mission will open into right away: the prompt
     // as its first bubble, the Working row and the composer in place.
     const seed: CloudLaunchSeed = { prompt: rawPrompt, images, provider: provider(), account: chosen.id };
     setBusy(true); setError(''); setLaunching(seed); p.onPending?.(seed);
     try {
-      if (p.project === DEFAULT_PROJECT.slug) await ensureDefaultProject().catch(swallow("cloudAgents.ensureDefaultProject"));
+      if (project === DEFAULT_PROJECT.slug) await ensureDefaultProject().catch(swallow("cloudAgents.ensureDefaultProject"));
+      else await requireLaunchProject(project);
       if (attempt?.signature !== signature) {
         const sent = images.length ? imagePrompt(rawPrompt, await stageRemoteImages(images, undefined, "core"), images) : rawPrompt;
         attempt = { signature, key: crypto.randomUUID(), prompt: sent };
       }
-      const m = await launchCloud({ title: rawPrompt.slice(0, 100), prompt: attempt.prompt, project: p.project, ...(folder ? { folder } : {}), cloud, idempotency_key: attempt.key });
+      const m = await launchCloud({ title: rawPrompt.slice(0, 100), prompt: attempt.prompt, project, ...(folder ? { folder } : {}), cloud, idempotency_key: attempt.key });
       cloudLaunchSeeds.set(m.id, seed);
       attempt = undefined;
       p.onCreated(m);

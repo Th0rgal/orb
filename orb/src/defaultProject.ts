@@ -17,3 +17,13 @@ export async function ensureDefaultProject(): Promise<ProjectSummary> {
   if (connectionVersion() !== version) throw new Error("The backend changed. Try again; your draft is kept.");
   return projects.find(project => project.slug === DEFAULT_PROJECT.slug) ?? await createProject(DEFAULT_PROJECT);
 }
+
+/** A sidebar selection may precede the WebView roster. Verify the selected slug before dispatch. */
+export async function requireLaunchProject(slug: string): Promise<void> {
+  const version = connectionVersion();
+  const projects = await listProjects(true, false);
+  if (connectionVersion() !== version) throw new Error("The backend changed. Try again; your draft is kept.");
+  if (!projects.some(project => project.slug === slug)) {
+    throw new Error(`Project “${slug}” is unavailable. Choose another project or retry. Your draft is kept.`);
+  }
+}
