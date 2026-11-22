@@ -41,8 +41,9 @@ private def assertTrue (label : String) (cond : Bool) : IO Unit := do
 
 private def testNativeFileAdmission : IO Unit := do
   let grant := "orb-agy-v1_private-fixture"
-  let job : JobRecord := { jobId := "job", missionId := "m", ownerUserId := "u", execUnixUser := "orb-u",
-    execUid := 2500, createdAt := "", state := .running,
+  let job : JobRecord := {
+    jobId := "job", missionId := "m", ownerUserId := "u", execUnixUser := "orb-u"
+    execUid := 2500, createdAt := "", state := .running
     payloadJson := renderCompact (.obj #[("env", .obj #[("ORB_NATIVE_ANTIGRAVITY_TOKEN", .str grant)])]) }
   let file := JVal.obj #[("action", .str "write_file")]
   let j := JVal.obj #[("uid", .nat 2500), ("unix_user", .str "orb-u"), ("owner", .str "u"), ("mission", .str "m"),
