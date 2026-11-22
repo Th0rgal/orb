@@ -129,8 +129,14 @@ jobs:
             test "$elab_syms" -eq 0
           done
 
+      - name: Replay delayed remote ACP logs against mixed-format mission history
+        run: python3 scripts/test_remote_acp_ingest.py target/debug/orb-core
+
       - name: Verify Core-owned catalog requests through independent TLS receivers
         run: python3 scripts/test_account_vpn_transport.py --discovery lean/OrbCore/.lake/build/bin/orb-core-test --probe-model-discovery
+
+      - name: Verify a targeted Direct Codex reconnect against Core
+        run: sudo unshare --net bash -ec 'ip link set lo up; exec python3 scripts/test_targeted_codex_reconnect.py target/debug/orb-core'
 
       - name: Verify per-account OAuth and inference egress with the released sidecar
         run: |

@@ -20,7 +20,7 @@ import { Toggle } from "./Toggle";
 import { For, Show, type JSX, createEffect, createMemo, createSignal, on, onCleanup, onMount } from "solid-js";
 import * as Ic from "./icons";
 import { ConfirmDialog, Dialog, DialogButton, Field } from "./Dialog";
-import { canManageProvider, isCustomBaseUrlAllowed, providerWriteError } from "./providerPermissions";
+import { canManageProvider, isCustomBaseUrlAllowed, providerWriteError, unlinkedSubscriptionMessage } from "./providerPermissions";
 import {
   api,
   getApiUrl,
@@ -872,6 +872,7 @@ function ReAuthDialog(p: { provider: AIProvider; onClose: () => void; onDone: ()
   let disposed = false;
   let completed = false;
   const [resetting, setResetting] = createSignal(false);
+  const [unlinked, setUnlinked] = createSignal(false);
   let pollGeneration = 0;
   const [phase, setPhase] = createSignal<"starting" | "awaiting" | "finishing" | "failed">("starting");
   const [error, setError] = createSignal<string | null>(null);
@@ -925,7 +926,9 @@ function ReAuthDialog(p: { provider: AIProvider; onClose: () => void; onDone: ()
         void openExternalUrl(s.url).catch(e => setError(String(e)));
       })
       .catch((e: Error) => {
-        setError(providerWriteError(e, e.message));
+        const guidance = unlinkedSubscriptionMessage(e);
+        setUnlinked(!!guidance);
+        setError(guidance ?? providerWriteError(e, e.message));
         setPhase("failed");
       });
   };
@@ -980,7 +983,7 @@ function ReAuthDialog(p: { provider: AIProvider; onClose: () => void; onDone: ()
       onClose={() => void closeLogin()}
       footer={requestClose =>
         <>
-          <Show when={phase() === "failed"}><DialogButton disabled={resetting()} onClick={() => void retryLogin()}>Try again</DialogButton></Show>
+          <Show when={phase() === "failed" && !unlinked()}><DialogButton disabled={resetting()} onClick={() => void retryLogin()}>Try again</DialogButton></Show>
           <DialogButton disabled={phase() === "finishing" || closing()} onClick={requestClose}>
             {phase() === "failed" ? "Close" : "Cancel"}
           </DialogButton>

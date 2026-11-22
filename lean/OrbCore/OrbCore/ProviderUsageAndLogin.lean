@@ -2584,17 +2584,18 @@ def reconcileCliLoginCompletion
     f.authType == sess.authFileType && !f.disabled && !f.accessToken.isEmpty &&
     !(sess.beforeFiles.contains (f.fileName, f.fingerprint)) &&
     match sess.routedFile?, target? with
-    | some file, some hp => f.fileName == file && hp.oauthFile == file
+    | some file, some hp => f.fileName == file && accountRoutingFile providers hp == file
     | some _, none => false
-    | none, none => true
+    | none, none => sess.targetProvId?.isNone
     | none, some hp =>
-      let typeOk := providerTypeMatchesAuthType hp.providerType f.authType
-      let idOk := f.prefixId == hp.id || f.accountId == hp.id
-      let emailOk := !hp.accountEmail.isEmpty && !f.email.isEmpty && hp.accountEmail.toLower == f.email.toLower
-      let sidecarOk := targetTypeUnique hp &&
-        (f.prefixId == s!"cliproxyapi:{hp.providerType}" || f.accountId == s!"cliproxyapi:{hp.providerType}" ||
-          f.prefixId.isEmpty && f.accountId.isEmpty)
-      typeOk && (idOk || emailOk || sidecarOk)
+      if sess.authFileType == "codex" then accountRoutingFile providers hp == f.fileName else
+        let typeOk := providerTypeMatchesAuthType hp.providerType f.authType
+        let idOk := f.prefixId == hp.id || f.accountId == hp.id
+        let emailOk := !hp.accountEmail.isEmpty && !f.email.isEmpty && hp.accountEmail.toLower == f.email.toLower
+        let sidecarOk := targetTypeUnique hp &&
+          (f.prefixId == s!"cliproxyapi:{hp.providerType}" || f.accountId == s!"cliproxyapi:{hp.providerType}" ||
+            f.prefixId.isEmpty && f.accountId.isEmpty)
+        typeOk && (idOk || emailOk || sidecarOk)
   let visible := files.any candidate
   let mut result := { sess with status := "completing", completionStartedSec? := some started }
   if visible then
@@ -2611,12 +2612,16 @@ def reconcileCliLoginCompletion
       (if sess.authFileType == "claude" then "anthropic" else if sess.authFileType == "codex" then "openai" else sess.authFileType)
     let typeKey := s!"cliproxyapi:{providerType}"
     let typePrefix := s!"{typeKey}:"
-    let oauthRowIds := (affected.filter (fun hp => hp.hasOAuth && !hp.hasApiKey)).map (·.id)
+    let mut oauthRowIds := (affected.filter (fun hp => hp.hasOAuth && !hp.hasApiKey)).map (·.id)
+    let targetedCodex := sess.authFileType == "codex" && sess.targetProvId?.isSome
+    if targetedCodex then
+      if let some file := files.find? candidate then
+        oauthRowIds := oauthRowIds.push (fileAccountId providerType file.fileName)
     let matchesLoginKey (k : String) : Bool :=
-      k == typeKey || k.startsWith typePrefix || oauthRowIds.contains k
+      oauthRowIds.contains k || k == typeKey || (!targetedCodex && k.startsWith typePrefix)
     discard <| execParamQuery store.missionsDb
-      "DELETE FROM provider_auth_health WHERE account_key=?1 OR substr(account_key, 1, length(?2))=?2;"
-      #[typeKey, typePrefix]
+      "DELETE FROM provider_auth_health WHERE account_key=?1 OR (?3='all' AND substr(account_key, 1, length(?2))=?2);"
+      #[typeKey, typePrefix, if targetedCodex then "selected" else "all"]
     for k in oauthRowIds do
       discard <| execParamQuery store.missionsDb "DELETE FROM provider_auth_health WHERE account_key=?1;" #[k]
     cooldowns.modify (fun cs => cs.filter (fun c => !matchesLoginKey c.accountId))
@@ -3460,12 +3465,16 @@ def dispatchProviderAndAiRoute
           let usesVpn := match route with
             | .vpn _ => true
             | .direct _ => false
-          -- A Direct Antigravity login still owns its per-file router exclusions.
-          if usesVpn || authType == "antigravity" then
+          -- Direct reconnects must update the selected credential, preserving account policy.
+          if usesVpn || authType == "antigravity" || authType == "codex" then
             let accounts ← loadHydratedProviders store workingDir
             let some hp := accounts.find? (fun p => p.id == account)
               | return some (jsonErr 409 "Selected credential unavailable")
             let file := accountRoutingFile accounts hp
+            if authType == "codex" && file.isEmpty then
+              return some (jsonResp 409 (.obj #[
+                ("code", .str "unlinked_subscription"),
+                ("error", .str "The selected OpenAI account has no uniquely linked sign-in file. In Inference, use the connected account under Subscriptions or choose Add subscription account.")]))
             unless providerTypeMatchesAuthType hp.providerType authType && !file.isEmpty &&
                 AccountVpnSidecar.validManagement mgmtBase &&
                 (effAdmin || (!callerUserId.isEmpty && hp.createdByUserId == callerUserId)) do

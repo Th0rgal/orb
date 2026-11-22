@@ -1,5 +1,6 @@
 import OrbCore.ProviderUsageAndLogin
 import OrbCore.NativeCanary
+import OrbBin.ClaudeControl
 
 namespace OrbCore.NativeSharedWorkspace
 
@@ -108,6 +109,20 @@ def turnExpired (start now : Nat) (wait : ApprovalWait) : Bool :=
 def turnReadTimeoutSecs (goal : Bool) : Nat :=
   (modelBudgetMs + (if goal then approvalBudgetMs else 0)) / 1000 + 5
 
+/-- Supply fresh, owner-scoped delegation state even when ACP loads an older conversation. -/
+def childContext (store : CoreStore) (p : Placement) : IO String := do
+  let unknown := "Orb could not verify this mission’s children. Do not assume a child exists or retry a delegation with a different key."
+  let .ok rows ← execParamQuery store.missionsDb (include_str "native_direct_child_ids.sql") #[p.mission, p.owner]
+    | return unknown
+  let children := rows.extract 1 rows.size
+  if children.isEmpty then
+    return "Orb has no direct child missions for this Goal. If the task calls for delegation, use sandboxed/start_mission with title, prompt, backend and model_override. Read a child only after its mission UUID is known."
+  let ids := (children.extract 0 16).filterMap fun row => row[0]? >>= OrbBin.PosixExt.parseUuidCanonical?
+  if ids.size != min children.size 16 then return unknown
+  let label := if children.size > 16 then "Orb’s 16 newest direct child mission IDs (additional children exist)" else "Orb’s direct child mission IDs"
+  return label ++ ": " ++ String.intercalate ", " ids.toList ++
+    ". Use sandboxed/get_mission with mission_id for the child you want to check before repeating delegated work."
+
 /-- Pump one process only. The stdin pipe ties the isolated route and profile to Core. -/
 def pumpTurn (store : CoreStore) (hub : ProviderRuntimeHub) (working grant job node owner prompt : String)
     (conversation : Option String) (expectedUid : Nat) (config : HolderConfig)
@@ -116,11 +131,15 @@ def pumpTurn (store : CoreStore) (hub : ProviderRuntimeHub) (working grant job n
   unless ← emit ByteArray.empty do return false
   let result ← withVerifiedProfile store hub working grant job node owner fun p token port => do
     unless ← claim store grant p.job do return .error "native_turn_already_claimed"
+    let turnPrompt ← if goal then do
+      let context ← childContext store p
+      pure (context ++ "\n\n" ++ prompt)
+    else pure prompt
     let packet := JVal.obj #[("unix_user", .str p.unixUser), ("owner", .str p.owner),
       ("mission", .str p.mission), ("account", .str p.account), ("model", .str p.model), ("exec_uid", .nat expectedUid),
       ("access_token", .str token), ("direct", .bool p.country.isEmpty), ("remote", .bool config.remote),
       ("port", (port.map (fun n => JVal.nat n.toNat)).getD .null), ("readonly", .bool p.readonly),
-      ("goal", .bool goal), ("prompt", .str prompt), ("conversation", (conversation.map JVal.str).getD .null)]
+      ("goal", .bool goal), ("prompt", .str turnPrompt), ("conversation", (conversation.map JVal.str).getD .null)]
     let .ok child ← (IO.Process.spawn {
       cmd := "/usr/bin/python3", args := #["-I", config.runtime ++ "/native_job_relay/main.py",
         config.runtime, config.profileUser], inheritEnv := false,
@@ -130,6 +149,7 @@ def pumpTurn (store : CoreStore) (hub : ProviderRuntimeHub) (working grant job n
     let (input, running) ← child.takeStdin
     let stopping ← IO.mkRef false
     let holderLive : IO Bool := do return !(← stopping.get)
+    let watchdogError ← IO.mkRef (none : Option String)
     let approvalWait ← IO.mkRef ({} : ApprovalWait)
     let start ← IO.monoMsNow
     let watch ← IO.asTask (prio := .dedicated) do
@@ -145,6 +165,7 @@ def pumpTurn (store : CoreStore) (hub : ProviderRuntimeHub) (working grant job n
             valid := accounts.any fun hp => hp.id == p.account && hp.providerType == "antigravity" &&
               hp.enabled && hp.hasOAuth && hp.oauthToken == token && !(accountRoutingFile accounts hp).isEmpty
           if !valid || turnExpired start (← IO.monoMsNow) (← approvalWait.get) then
+            watchdogError.set (some (if valid then "native_turn_timeout" else "native_shared_workspace_denied"))
             stopping.set true
             discard <| running.kill.toBaseIO
             break
@@ -166,7 +187,7 @@ def pumpTurn (store : CoreStore) (hub : ProviderRuntimeHub) (working grant job n
           unless config.remote do return .error "native_holder_protocol"
           let delegated := (envelope.field? "delegate").isSome
           let action := operation.fieldStr? "action"
-          unless (delegated && goal) || (!delegated && (action == some "read_file" || (action == some "write_file" && !p.readonly))) do
+          unless (delegated && goal) || (!delegated && (action == some "read_file" || (action == some "write_file" && !p.readonly && !goal))) do
             return .error "native_holder_protocol"
           let checked ← withVerifiedProfile store hub working grant job node owner fun current currentToken _ => do
             unless current == p && currentToken == token do return .error "native_shared_workspace_denied"
@@ -181,7 +202,7 @@ def pumpTurn (store : CoreStore) (hub : ProviderRuntimeHub) (working grant job n
             if delegated then return .ok (← delegateCall p operation holderLive)
             return .ok (← fileCall p operation)
           let .ok reply := checked | return .error "native_shared_workspace_denied"
-          unless ← holderLive do return .error "native_holder_closed"
+          unless ← holderLive do return .error ((← watchdogError.get).getD "native_holder_closed")
           unless (← placement? store grant job node owner (← coreEpochSec)) == some p do
             return .error "native_shared_workspace_denied"
           input.putStr (renderCompact reply ++ "\n")
@@ -195,9 +216,14 @@ def pumpTurn (store : CoreStore) (hub : ProviderRuntimeHub) (working grant job n
       unless ← reachedEof.get do discard <| running.kill.toBaseIO
       -- Only this task reaps the holder. A second wait raises ECHILD on Linux.
       exitCode.set (← running.wait)
+    if let some reason ← watchdogError.get then return .error reason
     return .ok ((← exitCode.get) == 0)
-  if let .ok ok := result then return ok
-  discard <| emit "{\"event\":\"error\",\"message\":\"Native turn unavailable\"}\n".toUTF8
-  return false
+  match result with
+  | .ok ok => return ok
+  | .error reason =>
+    let code := if (OrbBin.ClaudeControl.antigravityNativeError? reason).isSome then reason else "native_turn_unavailable"
+    let event := JVal.obj #[("event", .str "error"), ("code", .str code), ("message", .str "Native turn unavailable")]
+    discard <| emit (renderCompact event ++ "\n").toUTF8
+    return false
 
 end OrbCore.NativeSharedWorkspace

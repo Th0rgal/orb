@@ -173,6 +173,34 @@ describe("unified executionPhaseLabel & TurnRecap", () => {
     rendered.unmount();
   });
 
+  it("keeps the waiting decision and independent outcomes without reprinting a rendered diagram", () => {
+    const stamp = "2026-10-29T02:00:00Z";
+    const mission: Mission = { id: "diagram", title: "Deployment", status: "awaiting_user", history: [], created_at: stamp, updated_at: stamp };
+    const decision = "Choose which branch to deploy.";
+    const full = "### Deployment flow\n\n```mermaid\nflowchart LR\n    A[Draft] --> B{Review}\n```";
+    const long = "📦 " + "Introduction text. ".repeat(18) + "Deployment flow\n" + full + "\nSecond path\n```mermaid\nflowchart TD\nA-->B\n```";
+    const fallback = (text: string) => [...text.split("\n").map(line => line.trim()).filter(Boolean).join(" ")].slice(0, 400).join("").trimEnd();
+    const quoted = "```txt\nThe marker is ```mermaid, for example.\n```";
+    const ordinary = "Deployment finished. Please review the output.";
+    for (const [reply, outcome, hidden] of [
+      [full, fallback(full), true], [full + "\n" + full, fallback(full + "\n" + full), true],
+      [long, fallback(long), true],
+      [long, "Both paths are ready for review.", false], [quoted, fallback(quoted), false],
+      [ordinary, ordinary, false],
+    ] as const) {
+      vi.spyOn(inboxDigest, "getCachedInboxDigest").mockReturnValue({
+        updatedMs: Date.parse(stamp), verdict: "waiting", outcome, task: "deploy", decision,
+      });
+      const items: StreamItem[] = [{ kind: "text", key: "final", live: false, text: reply }];
+      const view = render(() => <TurnRecap mission={mission} items={items} busy={false} onDraft={() => {}} />);
+      const recap = view.getByLabelText("Turn summary");
+      expect(recap.textContent).toContain("Waiting");
+      expect(recap.textContent).toContain(decision);
+      expect(recap.querySelector("p:not(.dim)")?.textContent).toBe(hidden ? undefined : outcome);
+      view.unmount();
+    }
+  });
+
   it("never renders WAITING or follow-up suggestion chips on a failed launch or failed turn", () => {
     const updatedAt = "2026-10-29T02:00:00Z";
     const updatedMs = Date.parse(updatedAt);

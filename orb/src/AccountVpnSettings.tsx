@@ -2,6 +2,7 @@ import { Show, createEffect, createResource, createSignal, onCleanup } from "sol
 import { api, connectionVersion } from "./api";
 import { pollWhileVisible } from "./poll";
 import { AccountSettingReadError } from "./AccountSettingReadError";
+import { Select } from "./Select";
 import { SettingsRow } from "./SettingsCard";
 
 interface Route {
@@ -64,7 +65,7 @@ export function AccountVpnSettings(p: { account: string; nativeAccount?: boolean
     <Show when={!route.error} fallback={<AccountSettingReadError error={route.error} path={uri(p.account)}
       updateMessage="Update Core to configure account VPNs." retryLabel="Retry connection settings" retry={() => void refetch()} />}>
       <Show when={route()}>{r => <div class="p-native-controls">
-        <select class="s-input" aria-label="Account connection" disabled={busy() || !r().can_configure}
+        <Select aria-label="Account connection" disabled={busy() || !r().can_configure}
           value={r().country ?? ""} onChange={e => {
             const selected = e.currentTarget.value;
             e.currentTarget.value = r().country ?? "";
@@ -73,7 +74,7 @@ export function AccountVpnSettings(p: { account: string; nativeAccount?: boolean
           <option value="">Direct</option>
           {Array.from(new Set([...(r().country ? [r().country!] : []), ...r().countries])).map(c =>
             <option value={c}>AirVPN · {c}</option>)}
-        </select>
+        </Select>
         <Show when={p.nativeAccount && r().can_configure && r().mode === "direct" && r().saved !== true}>
           <button class="s-btn" disabled={busy()} onClick={() => void save("")}>Confirm Direct route</button>
         </Show>

@@ -209,3 +209,27 @@ canonical row rather than the op log.
 - `src/api/control_metrics.rs` records p50/p99 SSE chunk sizes so we
   can spot regressions in the streaming contract.
 - `src/api/control/mod.rs::stream()` is the server-side mission filter.
+
+### Remote log ingestion
+
+The mission event sequence increases across both the native `seq` column and the
+historical `sequence` column, including transcripts containing both formats.
+Remote ACP fragments retain their order. Core records when it ingests each
+line, and preserves the tool's reported execution times in the event payload.
+A slow log read can span several seconds within a single poll. Events from a
+later log page must carry an ingestion time at or after receipt of that page.
+
+With a built Core binary, `python3 scripts/test_remote_acp_ingest.py /path/to/orb-core`
+replays this case through a loopback worker and a disposable mixed-format store.
+
+### Terminal remote logs
+
+A terminal worker status can arrive while Core still has unread log pages. When a
+valid page advances the cursor and advertises more bytes, Core keeps the run
+active for another bounded poll. Each poll checks for cancellation. A stalled
+read cannot prove Goal completion. Core checkpoints the byte offset immediately after each batch of
+complete records. On recovery it rereads the unfinished record from the worker. A verified terminal EOF closes the last record even if the
+worker omitted its final newline.
+
+Run `python3 scripts/test_remote_acp_ingest.py /path/to/orb-core` to replay a
+split record across a Core restart and a terminal backlog spanning multiple polls.

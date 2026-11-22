@@ -1059,6 +1059,17 @@ private def testAntigravityProviderDenial : IO Unit := do
     (some "Google denied this Antigravity request. Check the account’s access to the selected model.")
   assertEq "A terms reference alone does not classify a denial" (agEvent "terms of service").errorMsg? none
 
+  let nativeError := fun (code message : String) =>
+    agEvent (renderCompact (.obj #[("event", .str "error"), ("code", .str code), ("message", .str message)]))
+  assertEq "Core legacy error is visible before the node exit" (nativeError "" "Native turn unavailable").errorMsg?
+    (some "Native turn unavailable")
+  assertEq "Unknown native error does not echo text or codes"
+    (nativeError "secret-code" "Native turn unavailable secret-value").errorMsg? (some "Antigravity turn failed")
+  assertEq "Known native code ignores external message text" (nativeError "native_turn_timeout" "secret-value").errorMsg?
+    (some "The native Antigravity turn reached its time limit.")
+  assertEq "Native holder diagnostic is retained" (nativeError "" "Native profile or bound workspace unavailable").errorMsg?
+    (some "Native profile or bound workspace unavailable")
+
 private def checkRetiredGroupIdentity : IO Unit := do
   -- Simulate numerical PGID reuse: this live child now owns the number in a
   -- completed generation's handle. A delayed Stop must never signal it.
@@ -1104,7 +1115,7 @@ def runAllTests : IO UInt32 := do
   assertEq "Antigravity tool event retains its step id" (began.map (·.id)) (some s!"agy-{sid}-2")
   assertEq "Antigravity tool end settles the same card" (ended.map (fun t => (t.id, t.done))) (some (s!"agy-{sid}-2", true))
   let failure := agEvent "{\"event\":\"result\",\"result\":{\"status\":\"ERROR\",\"error\":\"fixture refusal\"}}"
-  assertEq "Antigravity reports terminal inference error" failure.errorMsg? (some "fixture refusal")
+  assertEq "Antigravity redacts unrecognized terminal errors" failure.errorMsg? (some "Antigravity turn failed")
   assertEq "Antigravity diagnostics are not displayed as assistant text" (agEvent "diagnostic").textDelta ""
   let authLine := "Authentication required. Please visit the URL to log in: https://accounts.google.com/o/oauth2/auth?state=test-marker"
   let authMessage := (agEvent authLine).errorMsg?

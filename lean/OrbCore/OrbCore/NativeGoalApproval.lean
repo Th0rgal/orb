@@ -1,5 +1,6 @@
 import OrbCore.NativeSharedWorkspace
 import OrbBin.McpCatalog
+import OrbBin.WorkspaceFilePolicy
 
 namespace OrbCore.NativeGoalApproval
 
@@ -16,13 +17,28 @@ def currentGoal (store : CoreStore) (p : Placement) : IO Bool := do
 
 def allowedKeys := #["title","prompt","backend","model_override","remote_node_id","idempotency_key"]
 
+private def backends := #["codex","antigravity","opencode"]
+
 def validArgs (args : JVal) : Bool := Id.run do
   let .obj fields := args | return false
   unless fields.all (fun (k,v) => allowedKeys.contains k && v.asStr?.isSome) do return false
   unless #["title","prompt","backend","model_override"].all (fun k =>
       ((args.fieldStr? k).getD "").trimAscii.toString != "") do return false
-  unless #["codex","antigravity","opencode"].contains ((args.fieldStr? "backend").getD "") do return false
+  unless backends.contains ((args.fieldStr? "backend").getD "") do return false
   return (renderCompact args).utf8ByteSize ≤ 32768
+
+/-- The approval describes exactly the bytes the existing bounded workspace writer receives. -/
+def validWrite (args : JVal) : Bool := Id.run do
+  let .obj fields := args | return false
+  let some path := args.fieldStr? "path" | return false
+  let some content := args.fieldStr? "content" | return false
+  return fields.size == 2 && path.utf8ByteSize ≤ 4096 && content.utf8ByteSize ≤ 262144 &&
+    path.toList.all (fun c => c.toNat ≥ 32 && c.toNat != 127 && c != '\\') &&
+    (path.splitOn "/").all (fun part => !part.isEmpty && part != "." && part != ".." &&
+      !OrbBin.WorkspaceFilePolicy.deniedSegment part)
+
+private def permitted (p : Placement) (tool : String) (args : JVal) : Bool :=
+  (tool == "start_mission" && validArgs args) || (tool == "write_file" && !p.readonly && validWrite args)
 
 def catalogue : JVal := Id.run do
   let some raw := OrbBin.McpCatalog.catalogPrettyJsonForRole "executor" | return .arr #[]
@@ -30,10 +46,31 @@ def catalogue : JVal := Id.run do
   let some entry := entries.find? (fun t => t.fieldStr? "name" == some "start_mission") | return .arr #[]
   let schema := entry.fieldOrNull "inputSchema"
   let .obj props := schema.fieldOrNull "properties" | return .arr #[]
-  let selected := props.filter fun (k,_) => allowedKeys.contains k
+  let selected := (props.filter fun (k,_) => allowedKeys.contains k).map fun (k, v) =>
+    (k, match k with
+      | "backend" => v.setField "enum" (.arr (backends.map JVal.str))
+      | "model_override" => v.setField "description" (.str "Exact model ID for the selected harness.")
+      | "remote_node_id" => v.setField "description" (.str "Optional child placement. Omit to inherit the parent’s node.")
+      | _ => v)
   let input := (schema.setField "properties" (.obj selected)).setField "required"
     (.arr (#["title","prompt","backend","model_override"].map JVal.str))
-  return .arr #[entry.setField "inputSchema" input]
+  let some read := entries.find? (fun t => t.fieldStr? "name" == some "get_mission") | return .arr #[]
+  let summary := "Read a direct child by its mission UUID. Returns status, selected model and up to 2048 characters of its latest final response when available."
+  let start := (entry.setField "inputSchema" input).setField "description"
+    (.str "Request approval to start a direct child with title, prompt, backend and model_override. Keep the returned mission ID for get_mission.")
+  return .arr #[start, read.setField "description" (.str summary)]
+
+/-- A native parent receives only its own child's bounded public answer, never the full mission digest. -/
+def readChild (store : CoreStore) (p : Placement) (args : JVal) : IO JVal := do
+  let .obj fields := args | return .null
+  unless fields.size == 1 do return .null
+  let some mid := args.fieldStr? "mission_id" >>= OrbBin.PosixExt.parseUuidCanonical? | return .null
+  let .ok rows ← execParamQuery store.missionsDb (include_str "native_direct_child.sql") #[p.mission, p.owner, mid]
+    | return .null
+  let some #[status, model, answer] := rows[1]? | return .null
+  return .obj #[("mission_id", .str mid), ("status", .str status), ("model_override", .str model),
+    ("final_response", if answer.isEmpty then .null else .str (answer.take 2048).toString),
+    ("truncated", .bool (answer.length > 2048))]
 
 def digest (args : JVal) : String :=
   LeanSys.Auth.bytesToHexLower (LeanSys.Auth.sha256Bytes (renderCompact args).toUTF8)
@@ -50,8 +87,8 @@ def answer (store : CoreStore) (id owner explicitMid action : String) (now : UIn
   return rows[1]?.bind (·[0]?)
 
 def ask (store : CoreStore) (p : Placement) (args : JVal) (now : UInt64)
-    (announce : String → JVal → IO Unit) (live : IO Bool) : IO JVal := do
-  unless validArgs args && (← currentGoal store p) do return .null
+    (announce : String → JVal → IO Unit) (live : IO Bool) (tool : String := "start_mission") : IO JVal := do
+  unless permitted p tool args && (← currentGoal store p) do return .null
   discard <| execParamQuery store.missionsDb "DELETE FROM native_goal_approvals WHERE expires<=CAST(?1 AS INTEGER);" #[toString now]
   let id := ticketPrefix ++ (← OrbBin.PosixExt.newUuidV4)
   let expiry := min p.expires (now.toNat + 90)
@@ -62,8 +99,13 @@ def ask (store : CoreStore) (p : Placement) (args : JVal) (now : UInt64)
   let model := (((args.fieldStr? "model_override").getD "").take 100).toString
   let backend := (args.fieldStr? "backend").getD ""
   let target := (((args.fieldStr? "remote_node_id").getD "automatic placement").take 100).toString
-  let label := s!"Start child mission “{title}” using {backend} / {model} on {target}?"
-  announce id (.obj #[("method",.str "permission"),("params",.obj #[("tool",.str "start_mission"),
+  let label := if tool == "write_file" then
+      let path := (args.fieldStr? "path").getD ""
+      let bytes := ((args.fieldStr? "content").getD "").toUTF8
+      let checksum := LeanSys.Auth.bytesToHexLower (LeanSys.Auth.sha256Bytes bytes)
+      s!"Write {bytes.size} bytes to {path} in this mission workspace? SHA-256 {checksum}"
+    else s!"Start child mission “{title}” using {backend} / {model} on {target}?"
+  announce id (.obj #[("method",.str "permission"),("params",.obj #[("tool",.str tool),
     ("input",.obj #[("description",.str label),("once_only",.bool true)])])])
   for _ in [:360] do
     IO.sleep 250
@@ -76,8 +118,8 @@ def ask (store : CoreStore) (p : Placement) (args : JVal) (now : UInt64)
   discard <| execParamQuery store.missionsDb "DELETE FROM native_goal_approvals WHERE id=?1;" #[id]
   return .null
 
-def consume (store : CoreStore) (p : Placement) (args : JVal) (ticket : String) (now : UInt64) : IO Bool := do
-  unless ticket.startsWith ticketPrefix && validArgs args && (← currentGoal store p) do return false
+def consume (store : CoreStore) (p : Placement) (args : JVal) (ticket : String) (now : UInt64) (tool : String := "start_mission") : IO Bool := do
+  unless ticket.startsWith ticketPrefix && permitted p tool args && (← currentGoal store p) do return false
   let .ok rows ← execParamQuery store.missionsDb
     ("DELETE FROM native_goal_approvals WHERE id=?1 AND owner=?2 AND mission=?3 AND job=?4 " ++
      "AND input_digest=?5 AND expires>CAST(?6 AS INTEGER) AND decision='accepted' RETURNING id;")

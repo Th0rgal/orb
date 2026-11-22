@@ -2,14 +2,24 @@
 import json
 import uuid
 
+from .delegation import child_args
 
-def delegated_call(params, session):
-    """Return only an explicit start_mission request for this ACP session."""
-    if params.get("sessionId") != session:
+
+def permission_choice(params, session, ask, ask_write=None):
+    """Select one turn-local option. Core still authorizes the actual MCP call."""
+    if not isinstance(params, dict) or params.get("sessionId") != session or not session:
         return None
-    call = params.get("toolCall", {})
-    raw = call.get("rawInput", {})
-    if raw.get("ServerName") != "sandboxed" or raw.get("ToolName") != "start_mission":
+    call = params.get("toolCall")
+    raw = call.get("rawInput") if isinstance(call, dict) else None
+    if not isinstance(raw, dict):
+        return None
+    options = params.get("options")
+    if not isinstance(options, list):
+        return None
+    choices = [o.get("optionId") for o in options if isinstance(o, dict) and o.get("kind") == "allow_once"]
+    if len(choices) != 1 or not isinstance(choices[0], str) or not choices[0]:
+        return None
+    if any(o.get("optionId") == choices[0] and o.get("kind") != "allow_once" for o in options if isinstance(o, dict)):
         return None
     args = raw.get("Arguments")
     if isinstance(args, str):
@@ -17,26 +27,36 @@ def delegated_call(params, session):
             args = json.loads(args)
         except ValueError:
             return None
-    if not isinstance(args, dict) or not isinstance(args.get("prompt"), str):
+    if not isinstance(args, dict):
         return None
-    choices = [option.get("optionId") for option in params.get("options", [])
-               if option.get("kind") == "allow_once" and isinstance(option.get("optionId"), str)]
-    if len(choices) != 1:
-        return None
-    return choices[0], args
+    tool = raw.get("ServerName"), raw.get("ToolName")
+    read = tool == ("workspace", "read_file") and set(args) == {"path"}
+    write = tool == ("workspace", "write_file") and set(args) == {"path", "content"}
+    if tool == ("sandboxed", "get_mission") and child_args(args):
+        return choices[0]
+    if read or write:
+        path = args["path"]
+        if isinstance(path, str) and 0 < len(path) <= 4096 and "\\" not in path and "\0" not in path and all(
+                part not in ("", ".", "..") for part in path.split("/")):
+            if read or (ask_write and isinstance(args["content"], str) and ask_write(args)):
+                return choices[0]
+    elif tool == ("sandboxed", "start_mission") and isinstance(args.get("prompt"), str) and ask(args):
+        return choices[0]
+    return None
 
-
-def turn(child, packet, ask, emit):
+def turn(child, packet, ask, emit, ask_write=None):
     """The outer supervisor bounds lifetime and kills the process on revocation."""
     session = ""
     next_id = 0
+    saw_text = False
+    denied = False
 
     def send(value):
         child.stdin.write(json.dumps({"jsonrpc": "2.0", **value}).encode() + b"\n")
         child.stdin.flush()
 
     def call(method, params):
-        nonlocal next_id
+        nonlocal next_id, saw_text, denied
         next_id += 1
         send({"id": next_id, "method": method, "params": params})
         while True:
@@ -55,15 +75,18 @@ def turn(child, packet, ask, emit):
                 if msg["method"] != "session/request_permission":
                     send({"id": msg["id"], "error": {"code": -32601, "message": "Unavailable"}})
                     continue
-                candidate = delegated_call(request, session) if method == "session/prompt" and session else None
+                choice = permission_choice(request, session, ask, ask_write) if method == "session/prompt" else None
                 outcome = {"outcome": "cancelled"}
-                if candidate and ask(candidate[1]):
-                    outcome = {"outcome": "selected", "optionId": candidate[0]}
+                if choice is not None:
+                    outcome = {"outcome": "selected", "optionId": choice}
+                elif method == "session/prompt" and request.get("sessionId") == session:
+                    denied = True
                 send({"id": msg["id"], "result": {"outcome": outcome}})
             elif method == "session/prompt" and msg["method"] == "session/update" and request.get("sessionId") == session:
                 update = request.get("update", {})
                 content = update.get("content", {})
                 if update.get("sessionUpdate") == "agent_message_chunk" and content.get("type") == "text":
+                    saw_text = saw_text or bool(content["text"].strip())
                     emit({"event": "step_update", "step_update": {"step_type": "agent_response", "text_delta": content["text"]}})
 
     init = call("initialize", {"protocolVersion": 1, "clientCapabilities": {}})
@@ -98,4 +121,9 @@ def turn(child, packet, ask, emit):
     reply = call("session/prompt", {"sessionId": session, "prompt": [{"type": "text", "text": packet["prompt"]}]})
     if reply.get("stopReason") != "end_turn":
         raise RuntimeError("Native ACP turn interrupted")
+    if not saw_text:
+        diagnostic = ("A tool permission was declined and Antigravity ended the turn without an assistant response."
+                      if denied else "Antigravity ended the turn without an assistant response.")
+        emit({"event": "result", "result": {"status": "FAILED", "error": diagnostic}})
+        return
     emit({"event": "result", "result": {"status": "SUCCESS"}})

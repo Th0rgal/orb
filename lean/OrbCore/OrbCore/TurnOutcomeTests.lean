@@ -218,6 +218,11 @@ private def verifyIncompleteGoalDrain (store : CoreStore) (sup : RemoteJobSuperv
           let off := chunk.utf8ByteSize + i
           check (req.path.contains s!"/log?offset={off}&") "final drain advances one bounded slice at a time"
           mockNodeReply conn "200 OK" (slice off (off + 1) (chunk.utf8ByteSize + 9) "\n")
+      let off := chunk.utf8ByteSize + 8
+      let stall := fun conn => mockNodeReply conn "200 OK" (slice off off (off + 1) "")
+      withMockNodeRequest fd fun conn _ => stall conn
+      withMockNodeRequest fd fun conn _ => mockNodeReply conn "200 OK" "{\"state\":\"succeeded\",\"exit_code\":0}"
+      withMockNodeRequest fd fun conn _ => stall conn
     else
       withMockNodeRequest fd fun conn _ => mockNodeReply conn "503 Service Unavailable" "{}"
   spawnRemoteJobPoller store none none none sup root mid "opencode" "mockgoalchecks" jid ""
@@ -228,22 +233,52 @@ private def verifyIncompleteGoalDrain (store : CoreStore) (sup : RemoteJobSuperv
   check ((← cellOf store.missionsDb "SELECT status || ':' || terminal_reason FROM missions WHERE id=?1;" #[mid]) ==
     "awaiting_user:remote_goal_evidence_incomplete" &&
     (← cellOf store.missionsDb "SELECT COUNT(*) FROM mission_continuations WHERE mission_id=?1;" #[mid]) == "0")
-    "a failed or capped final read cannot complete or continue a Goal"
+    "a failed or stalled final read cannot complete or continue a Goal"
 
-private def verifyStoppedGoalResume (store : CoreStore) (mid : String) : IO Unit := do
+private def verifyRemoteGoalResume (store : CoreStore) (mid : String) : IO Unit := do
   let db := store.missionsDb
   discard <| execParamQuery db
     ("UPDATE missions SET backend='antigravity',goal_mode=1,goal_objective='Add seven',status='interrupted', " ++
      "terminal_reason='remote_goal_stopped',run_generation=8 WHERE id=?1;") #[mid]
-  let noSession ← resumeStoppedRemoteGoal store mid 8 20
+  let noSession ← resumeRemoteGoal store mid 8 20
   check (match noSession with | .error "remote_goal_session_missing" => true | _ => false) "missing native session leaves the stopped Goal intact"
   discard <| execParamQuery db "UPDATE missions SET session_id='019ad719-730d-7777-9221-e0eabcd44611' WHERE id=?1;" #[mid]
-  let stale ← resumeStoppedRemoteGoal store mid 7 20
-  let first ← resumeStoppedRemoteGoal store mid 8 20
-  let second ← resumeStoppedRemoteGoal store mid 8 20
+  let stale ← resumeRemoteGoal store mid 7 20
+  let first ← resumeRemoteGoal store mid 8 20
+  let second ← resumeRemoteGoal store mid 8 20
   check ((stale.toOption == some false) && (first.toOption == some true) && (second.toOption == some false) &&
     (← cellOf db "SELECT COUNT(*) FROM mission_continuations WHERE mission_id=?1 AND phase=1 AND reason='remote_goal' AND run_generation=8;" #[mid]) == "1")
     "explicit resume queues exactly one Goal on the current stopped generation"
+  discard <| execParamQuery db "DELETE FROM mission_continuations WHERE mission_id=?1;" #[mid]
+  discard <| execParamQuery db "UPDATE missions SET status='awaiting_user',terminal_reason='remote_goal_evidence_incomplete' WHERE id=?1;" #[mid]
+  let incomplete ← resumeRemoteGoal store mid 8 20
+  discard <| execParamQuery db "UPDATE missions SET terminal_reason='remote_goal_blocked' WHERE id=?1;" #[mid]
+  let blockedStale ← resumeRemoteGoal store mid 7 20
+  let blocked ← resumeRemoteGoal store mid 8 20
+  let duplicate ← resumeRemoteGoal store mid 8 20
+  check (incomplete.toOption == some false && blockedStale.toOption == some false &&
+    blocked.toOption == some true && duplicate.toOption == some false &&
+    (← cellOf db "SELECT COUNT(*) FROM mission_continuations WHERE mission_id=?1 AND phase=1 AND reason='remote_goal' AND run_generation=8;" #[mid]) == "1")
+    "only an explicitly blocked Goal on the displayed generation can resume once"
+  discard <| execParamQuery db "DELETE FROM mission_continuations WHERE mission_id=?1;" #[mid]
+
+  let jid := "failed-native-goal-job"
+  discard <| execParamQuery db "UPDATE missions SET status='failed',terminal_reason='remote_job_failed',placement_job_id=?2 WHERE id=?1;" #[mid,jid]
+  discard <| execParamQuery db "INSERT INTO remote_node_jobs(job_id,mission_id,state,payload_json) VALUES(?1,?2,'failed','{}');" #[jid,mid]
+  let .ok _ ← db.mu.atomically do
+    insertMissionRunUnlocked db "failed-goal-run" mid "8" "terminal" "remote_job_failed" jid "t1"
+    | throw (IO.userError "failed Goal fixture run")
+  let ordinaryFailed ← resumeRemoteGoal store mid 8 20
+  discard <| execParamQuery db "UPDATE remote_node_jobs SET payload_json=?2 WHERE job_id=?1;" #[jid,"{\"goal_claim\":\"native\",\"goal_generation\":7}"]
+  discard <| execParamQuery db "INSERT INTO remote_node_jobs(job_id,mission_id,state) VALUES('busy-native-goal-job',?1,'unreachable');" #[mid]
+  let stillRunning ← resumeRemoteGoal store mid 8 20
+  discard <| execParamQuery db "DELETE FROM remote_node_jobs WHERE job_id='busy-native-goal-job';" #[]
+  let failedStale ← resumeRemoteGoal store mid 7 20
+  let failed ← resumeRemoteGoal store mid 8 20
+  let failedTwice ← resumeRemoteGoal store mid 8 20
+  check (ordinaryFailed.toOption == some false && stillRunning.toOption == some false &&
+    failedStale.toOption == some false && failed.toOption == some true && failedTwice.toOption == some false)
+    "only the current failed native Goal run with no live job can resume once"
   discard <| execParamQuery db "DELETE FROM mission_continuations WHERE mission_id=?1;" #[mid]
 
 private def verifyTerminalGoalFollowupRecovery (store : CoreStore) (fd : LeanSys.Posix.Fd)
@@ -630,6 +665,17 @@ private def verifyNativeApprovalBudget (root : String) : IO Unit := do
     execute "INSERT INTO mission_runs(id,mission_id,remote_job_id,generation,execution_state) VALUES('r','m','j',8,'running');"
     let placement : NativeSharedWorkspace.Placement :=
       ⟨"m", "member", "orb-member", "j", "node", "account", "model", false, 8, 1, 1, "", 1, 200⟩
+    let empty ← NativeSharedWorkspace.childContext store placement
+    check (empty.contains "no direct child" && empty.contains "sandboxed/start_mission") "empty Goal starts with creation guidance"
+    let child ← newUuidV4
+    let foreign ← newUuidV4
+    let elsewhere ← newUuidV4
+    discard <| execParamQuery db
+      "INSERT INTO missions(id,parent_mission_id,owner_user_id) VALUES(?1,'m','member'),(?2,'m','other'),(?3,'elsewhere','member');"
+      #[child,foreign,elsewhere]
+    let resumed ← NativeSharedWorkspace.childContext store placement
+    check (resumed.contains child && resumed.contains "sandboxed/get_mission" && !resumed.contains foreign &&
+      !resumed.contains elsewhere) "resumed Goal receives only its own existing child UUID"
     let args := JVal.obj #[("title", .str "test"), ("prompt", .str "test"),
       ("model_override", .str "test"), ("backend", .str "codex")]
     let closed ← IO.mkRef false
@@ -640,6 +686,25 @@ private def verifyNativeApprovalBudget (root : String) : IO Unit := do
     check ((← closed.get) && result == .null &&
       (← cellOf db "SELECT COUNT(*) FROM native_goal_approvals;") == "0")
       "holder closure withdraws the ticket before the permission timeout"
+    let write := JVal.obj #[("path", .str "summary.md"), ("content", .str "fixture contents")]
+    check (!NativeGoalApproval.validWrite (write.setField "path" (.str "../outside")) &&
+      !NativeGoalApproval.validWrite (write.setField "path" (.str ".git/config"))) "private and escaping write paths refused"
+    let readonly ← NativeGoalApproval.ask store {placement with readonly := true} write 100
+      (fun _ _ => throw (IO.userError "readonly approval unexpectedly announced")) (pure true) "write_file"
+    check (readonly == .null) "read-only workspace cannot request a write"
+    let approved ← NativeGoalApproval.ask store placement write 100 (fun id notice => do
+      let label := renderCompact notice
+      check (label.contains "summary.md" && label.contains "SHA-256" && !label.contains "fixture contents")
+        "approval shows path and hash and omits file contents"
+      check ((← NativeGoalApproval.answer store id "other" "m" "accept" 101).isNone)
+        "another member cannot accept the file"
+      check ((← NativeGoalApproval.answer store id "member" "m" "accept" 101).isSome) "member accepted"
+    ) (pure true) "write_file"
+    let some ticket := approved.fieldStr? "ticket" | throw (IO.userError "missing approved file ticket")
+    for changed in #[write.setField "path" (.str "other.md"), write.setField "content" (.str "different")] do
+      check (!(← NativeGoalApproval.consume store placement changed ticket 101 "write_file")) "changed operation refused"
+    check ((← NativeGoalApproval.consume store placement write ticket 101 "write_file") &&
+      !(← NativeGoalApproval.consume store placement write ticket 101 "write_file")) "one exact write per decision"
   finally
     closeCoreStore store
 
@@ -803,7 +868,7 @@ def run : IO Unit := do
            newMission mid "[\"remote-node:mockgoalchecks\"]"
            verifyTerminalGoalFollowupRecovery store checksFd root mid replaced stopped
          newMission "m-explicit-goal-resume" "[\"remote-node:mockgoalchecks\"]"
-         verifyStoppedGoalResume store "m-explicit-goal-resume"
+         verifyRemoteGoalResume store "m-explicit-goal-resume"
          newMission "m-codex-goal-echo" "[\"remote-node:mockgoalchecks\"]"
          verifyCodexGoalEcho store sup checksFd root "m-codex-goal-echo"
          verifyCodexGoalEchoBoundaries store "m-codex-goal-echo"

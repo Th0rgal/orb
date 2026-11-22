@@ -49,9 +49,12 @@ def start_profile(nsenter, bwrap, rootfs, home, ipc, namespace, port, uid, gid,
     config = {"mcpServers": {"workspace": {"command": "/bin/socat", "args": ["STDIO", "UNIX-CONNECT:/ipc/workspace.sock"],
                                           "enabledTools": enabled}}}
     if goal:
-        settings["permissions"]["ask"] = ["mcp(sandboxed/start_mission)"]
+        agent += " After starting a child, keep its mission ID and use sandboxed/get_mission to read its status and final response."
+        settings["permissions"] = {"allow": ["mcp(workspace/read_file)", "mcp(sandboxed/get_mission)"], "ask": ["mcp(sandboxed/start_mission)"]}
+        if not readonly:
+            settings["permissions"]["ask"].append("mcp(workspace/write_file)")
         config["mcpServers"]["sandboxed"] = {"command": "/bin/socat", "args": ["STDIO", "UNIX-CONNECT:/ipc/delegate.sock"],
-                                              "enabledTools": ["start_mission"]}
+                                              "enabledTools": ["start_mission", "get_mission"]}
     if not workspace:
         config = {"mcpServers": {}}
         settings = {}
