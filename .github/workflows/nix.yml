@@ -82,7 +82,8 @@ jobs:
             export ORB_WEBKIT_TEST_BINARY="$PWD/result/bin/orb-desktop"
             export ORB_HYBRID_TEST_BINARY="$PWD/result/bin/orb-desktop-hybrid"
             export ORB_DIST_DIR="$(nix build .#orb-desktop.webUi --no-link --print-out-paths)"
-            dbus-run-session -- python3 -B lean/OrbDesktop/tests/hybrid_desktop.py
+            # D-Bus activates the accessibility registry using its initial environment.
+            HOME="$(mktemp -d)" XDG_RUNTIME_DIR="$(mktemp -d)" dbus-run-session -- python3 -B lean/OrbDesktop/tests/hybrid_desktop.py
           '
       - name: Replay packaged sidebar actions in all three clients
         if: ${{ !cancelled() && steps.package.outcome == 'success' }}
@@ -98,7 +99,8 @@ jobs:
             export TMPDIR="$(mktemp -d)"
             status=0
             for client in webkit hybrid leanui; do
-              dbus-run-session -- python3 -Bu lean/OrbDesktop/tests/live_writes.py --sidebar-menu "$client" 2>&1 | tee "$results/$client.log" || status=1
+              HOME="$(mktemp -d)" XDG_RUNTIME_DIR="$(mktemp -d)" dbus-run-session -- \
+                python3 -Bu lean/OrbDesktop/tests/live_writes.py --sidebar-menu "$client" 2>&1 | tee "$results/$client.log" || status=1
             done
             for frame in "$TMPDIR"/orb-{webkit,hybrid,leanui}-{sidebar,refusal}-*.png; do
               if [[ -f "$frame" ]]; then cp "$frame" "$results/"; fi
