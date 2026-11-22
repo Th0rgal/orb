@@ -230,6 +230,50 @@ private def verifyIncompleteGoalDrain (store : CoreStore) (sup : RemoteJobSuperv
     (← cellOf store.missionsDb "SELECT COUNT(*) FROM mission_continuations WHERE mission_id=?1;" #[mid]) == "0")
     "a failed or capped final read cannot complete or continue a Goal"
 
+private def verifyCompletedGoalFollowupRecovery (store : CoreStore) (fd : LeanSys.Posix.Fd)
+    (root mid : String) (replaced : Bool) : IO Unit := do
+  let db := store.missionsDb
+  let .ok _ ← execParamQuery db
+    ("UPDATE missions SET status='completed',terminal_reason='remote_goal_complete',goal_mode=1, " ++
+     "goal_objective='Old objective',placement_job_id='completed-job' WHERE id=?1;") #[mid]
+    | throw (IO.userError "completed Goal follow-up setup")
+  let sup ← newRemoteJobSupervisor "goal-follow-up-recovery"
+  let submit ← IO.asTask do
+    submitRemoteMissionTurn store none none none sup root {
+      missionId := mid, targetNodeId := "mockgoalchecks", backend := "codex", prompt := "Add seven"
+    } 24
+  let job ← IO.mkRef ""
+  withMockNodeRequest fd fun _ req => do
+    check (req.method == "POST" && req.path == "/jobs") "follow-up reached the node before transport loss"
+    let .ok body := OrbBin.Json.parseBytes req.bodySlice.toByteArray | throw (IO.userError "follow-up body")
+    let jid := (body.fieldStr? "job_id").getD ""
+    check (!jid.isEmpty) "follow-up job identity"
+    job.set jid
+    sup.mu.atomically do modify (·.push jid)
+  let jid ← job.get
+  let submitted ← IO.ofExcept submit.get
+  check (match submitted with | .error e => e.startsWith "remote_dispatch_uncertain:" | _ => false)
+    "a lost follow-up acknowledgement leaves a probeable job"
+  if replaced then
+    discard <| execParamQuery db
+      "UPDATE missions SET run_generation=run_generation+1,placement_job_id='successor-goal' WHERE id=?1;" #[mid]
+  let node ← IO.asTask do
+    withMockNodeRequest fd fun conn req => do
+      check (req.method == "GET" && req.path == s!"/jobs/{jid}") "probe the accepted follow-up identity"
+      mockNodeReply conn "200 OK" (renderCompact (.obj #[("job_id", .str jid), ("state", .str "running")]))
+    if replaced then
+      withMockNodeRequest fd fun conn req => do
+        check (req.method == "POST" && req.path == s!"/jobs/{jid}/cancel") "cancel only the superseded job"
+        mockNodeReply conn "200 OK" "{}"
+  let attached ← reconcileUncertainRemoteSubmissions store none none none sup root false
+  IO.ofExcept node.get
+  let state ← cellOf db "SELECT status||':'||goal_mode||':'||placement_job_id FROM missions WHERE id=?1;" #[mid]
+  let runs ← cellOf db "SELECT COUNT(*) FROM mission_runs WHERE mission_id=?1 AND remote_job_id=?2;" #[mid, jid]
+  if replaced then
+    check (attached == 0 && state == "completed:1:successor-goal" && runs == "0") "a stale receipt preserves the successor"
+  else
+    check (attached == 1 && state == s!"active:0:{jid}" && runs == "1") "recover the ordinary run without its old Goal"
+
 private def verifyGoalStartupRetry (store : CoreStore) (sup : RemoteJobSupervisor)
     (fd : LeanSys.Posix.Fd) (root mid : String) (stop : Bool) : IO Unit := do
   let jid := s!"job-{mid}"
@@ -677,6 +721,33 @@ def run : IO Unit := do
          check (match completed with | .ok (some ("completed", "remote_goal_complete", _)) => true | _ => false)
            "only the current Goal job can settle completion"
          setenvVar "SANDBOXED_REMOTE_NODES" s!"mockgoalchecks=http://127.0.0.1:{checksPort}|TURN_OUTCOME_MOCK_TOK"
+         -- A normal turn after a completed Goal must not arm its old objective.
+         -- The live poller retires the run before settleRemoteGoal.
+         discard <| execParamQuery db
+           "UPDATE mission_runs SET execution_state='terminal' WHERE mission_id='m-goal-dispatch';" #[]
+         let followSup ← newRemoteJobSupervisor "goal-follow-up-fixture"
+         let standard ← IO.asTask do
+           submitRemoteMissionTurn store none none none followSup root {
+             missionId := "m-goal-dispatch", targetNodeId := "mockgoalchecks", backend := "codex",
+             prompt := "Add seven", resumeSessionId? := some "019ad719-730d-7777-9221-e0eabcd44611"
+           } 24
+         withMockNodeRequest checksFd fun conn req => do
+           check (req.method == "POST" && req.path == "/jobs") "standard follow-up dispatched"
+           let .ok body := OrbBin.Json.parseBytes req.bodySlice.toByteArray | throw (IO.userError "standard follow-up body")
+           -- This test exercises settlement itself after the transaction commits.
+           followSup.mu.atomically do modify (·.push ((body.fieldStr? "job_id").getD ""))
+           mockNodeReply conn "200 OK" "{\"accepted\":true}"
+         let .ok standardJob ← IO.ofExcept standard.get | throw (IO.userError "standard follow-up refused")
+         let newGen ← cellOf db "SELECT run_generation FROM missions WHERE id='m-goal-dispatch';"
+         let staleObjective ← settleRemoteGoal store "m-goal-dispatch" standardJob "Ship it" "26"
+           (newGen.toNat?.getD 0).toUInt64 25 true true
+         check ((match staleObjective with | .ok none => true | _ => false) &&
+             (← cellOf db "SELECT COUNT(*) FROM mission_continuations WHERE mission_id='m-goal-dispatch' AND phase=1;") == "0")
+           "standard follow-up after Goal completion cannot rearm the settled objective"
+         for replaced in #[false, true] do
+           let mid := if replaced then "m-completed-goal-followup-replaced" else "m-completed-goal-followup"
+           newMission mid "[\"remote-node:mockgoalchecks\"]"
+           verifyCompletedGoalFollowupRecovery store checksFd root mid replaced
          newMission "m-codex-goal-echo" "[\"remote-node:mockgoalchecks\"]"
          verifyCodexGoalEcho store sup checksFd root "m-codex-goal-echo"
          verifyCodexGoalEchoBoundaries store "m-codex-goal-echo"
