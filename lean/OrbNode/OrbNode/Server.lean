@@ -643,6 +643,32 @@ def admitNodeLeaseRole (cfg : NodeConfig) (claims : LeaseClaims) (requireAdmin :
     else
       throw (textResp 403 "member node execution requires a valid confined unix_username")
 
+/-- Match every untrusted field to the worker ledger before starting the UID-dropped helper. -/
+def admittedNativeFile? (rec : JobRecord) (j : JVal) : Option JVal := do
+  guard (rec.state == .running && rec.execUid > 0 && !rec.execUnixUser.isEmpty && !rec.ownerUserId.isEmpty)
+  guard (j.fieldStr? "mission" == some rec.missionId && j.fieldStr? "owner" == some rec.ownerUserId &&
+    j.fieldStr? "unix_user" == some rec.execUnixUser && j.fieldNat? "uid" == some rec.execUid.toNat)
+  let jobPayload ← (OrbBin.Json.parse rec.payloadJson).toOption
+  let grant ← (jobPayload.field? "env").bind (·.fieldStr? "ORB_NATIVE_ANTIGRAVITY_TOKEN")
+  guard (grant.startsWith "orb-agy-v1_" &&
+    j.fieldStr? "grant_sha256" == some (LeanSys.Auth.bytesToHexLower (LeanSys.Auth.sha256Bytes grant.toUTF8)))
+  let file ← j.field? "file"
+  let action := file.fieldStr? "action"
+  guard (action == some "read_file" || (action == some "write_file" && rec.authorityMode == "writer"))
+  return file
+
+private def nativeJobFile (rt : NodeRuntime) (jid : String) (req : HttpRequest) : IO HttpResponse := do
+  unless verifyBearerHeader (req.header? "authorization") rt.cfg.token rt.cfg.tokenPrevious? do
+    return textResp 401 "invalid node token"
+  let denied := textResp 403 "native_workspace_denied"
+  let some rec := rt.ledger.jobs.get? jid | return denied
+  unless req.body.size ≤ 2 * 1024 * 1024 do return denied
+  let some j := (OrbBin.Json.parseBytes req.body).toOption | return denied
+  let some file := admittedNativeFile? rec j | return denied
+  match ← userNativeJobFile rt.cfg.privdSocket rec.execUnixUser rec.missionId file with
+  | .error _ => return textResp 400 "native_file_unavailable"
+  | .ok result => return jsonResp 200 result
+
 /-- Core route dispatcher over `NodeRuntime` returning `(updatedRuntime, response, pendingLaunches, steerWatchers)`
     so `handleRequestConcurrent` runs blocking checkout preparation and tool-steer watchers outside `Std.Mutex`. -/
 def handleNonExecRequestCore (rt0 : NodeRuntime) (req : HttpRequest) :
@@ -957,28 +983,7 @@ def handleNonExecRequestCore (rt0 : NodeRuntime) (req : HttpRequest) :
     | .ok (l', updated) =>
       return ({ rt with ledger := l' }, jsonResp 200 (updated.toStatusJson none), preLaunches, #[])
   | "POST", ["jobs", jid, "native-file"] =>
-    -- The authenticated Core supplies the expected placement. The ledger owns
-    -- the Unix identity and checkout used by privd, including the write mode.
-    let denied := (rt, textResp 403 "native_workspace_denied", preLaunches, #[])
-    let some rec := rt.ledger.jobs.get? jid | return denied
-    unless rec.state == .running && rec.execUid > 0 && !rec.execUnixUser.isEmpty &&
-        !rec.ownerUserId.isEmpty && req.body.size ≤ 2 * 1024 * 1024 do return denied
-    let some j := (OrbBin.Json.parseBytes req.body).toOption | return denied
-    unless j.fieldStr? "mission" == some rec.missionId && j.fieldStr? "owner" == some rec.ownerUserId &&
-        j.fieldStr? "unix_user" == some rec.execUnixUser && j.fieldNat? "uid" == some rec.execUid.toNat do
-      return denied
-    let some jobPayload := (OrbBin.Json.parse rec.payloadJson).toOption | return denied
-    let some grant := (jobPayload.field? "env").bind (·.fieldStr? "ORB_NATIVE_ANTIGRAVITY_TOKEN") | return denied
-    unless grant.startsWith "orb-agy-v1_" &&
-        j.fieldStr? "grant_sha256" == some (LeanSys.Auth.bytesToHexLower (LeanSys.Auth.sha256Bytes grant.toUTF8)) do
-      return denied
-    let some file := j.field? "file" | return denied
-    let action := file.fieldStr? "action"
-    unless action == some "read_file" || (action == some "write_file" && rec.authorityMode == "writer") do
-      return denied
-    match ← userNativeJobFile rt.cfg.privdSocket rec.execUnixUser rec.missionId file with
-    | .error _ => return (rt, textResp 400 "native_file_unavailable", preLaunches, #[])
-    | .ok result => return (rt, jsonResp 200 result, preLaunches, #[])
+    return (rt, ← nativeJobFile rt jid req, preLaunches, #[])
   | "POST", ["jobs", jid, "files"] =>
     let key := (parseUuidCanonical? jid).getD jid
     let some rec := rt.ledger.jobs.get? key
@@ -1392,6 +1397,11 @@ def handleRequest (rt0 : NodeRuntime) (req : HttpRequest) : IO (NodeRuntime × H
 def handleRequestConcurrent
     (mtx : Std.Mutex NodeRuntime) (transferMtx : Std.Mutex Unit) (req : HttpRequest) : IO HttpResponse := do
   let segs := (req.path.splitOn "/").filter (fun s => !s.isEmpty)
+  if req.method == "POST" then
+    if let ["jobs", jid, "native-file"] := segs then
+      -- File I/O under the member UID must never hold the scheduler mutex.
+      let snapshot ← mtx.atomically get
+      return ← nativeJobFile snapshot jid req
   if req.method == "POST" && segs == ["execute"] then
     let (prep, preLaunches) ← mtx.atomically do
       let (rt, preL) ← tickRuntimeReserve (← get)
