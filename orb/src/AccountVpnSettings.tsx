@@ -7,6 +7,7 @@ interface Route {
   country?: string;
   countries: string[];
   can_configure: boolean;
+  configuration_message?: string;
   status: "direct" | "verified" | "blocked";
   server?: string;
   exits?: string[];
@@ -54,7 +55,8 @@ export function AccountVpnSettings(p: { account: string }) {
           {Array.from(new Set([...(r().country ? [r().country!] : []), ...r().countries])).map(c =>
             <option value={c}>AirVPN · {c}</option>)}
         </select>
-        <Show when={!r().can_configure}><span>This credential’s connection is managed by the sidecar.</span></Show>
+        <Show when={!r().can_configure}><span>{r().configuration_message ?? "VPN routing is unavailable for this credential."}</span>
+          <button class="s-btn" disabled={route.loading} onClick={() => void refetch()}>Refresh connection settings</button></Show>
         <Show when={r().can_configure && !r().countries.length}><span>Import a named server profile in AirVPN Settings to enable VPN routing.</span></Show>
         <Show when={r().status === "verified"}><span>Verified exit · {r().server} · {r().exits?.join(", ")}</span></Show>
         <Show when={r().status === "blocked"}>

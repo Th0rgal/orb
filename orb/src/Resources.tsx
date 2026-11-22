@@ -196,6 +196,7 @@ export default function Resources(props: {
   let activeAbort: AbortController | null = null;
 
   async function refresh(showSkeleton = false, isBackgroundPoll = false) {
+    if (isBackgroundPoll && activeAbort) return;
     activeAbort?.abort();
     const ac = new AbortController();
     activeAbort = ac;
@@ -225,6 +226,7 @@ export default function Resources(props: {
         setError(err instanceof Error ? err.message : String(err));
       }
     } finally {
+      if (activeAbort === ac) activeAbort = null;
       if (!ac.signal.aborted) setLoading(false);
     }
   }

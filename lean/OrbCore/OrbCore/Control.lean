@@ -857,11 +857,17 @@ def parseChainTargetsJson
       let inlineUrl? := (it.fieldStr? "base_url").orElse (fun _ => it.fieldStr? "baseUrl") |>.filter (!·.isEmpty)
       let inlineKey? := (it.fieldStr? "api_key").orElse (fun _ => it.fieldStr? "apiKey") |>.filter (!·.isEmpty)
       -- A chain can name one account among several of the same provider type.
-      -- Once that identity exists, resolve credentials and limits only on its rows.
-      let pinned := hasExplicitAcct && (providers.any (fun p => p.id == acctRaw) ||
-        hydratedProvs.any (fun hp => hp.id == acctRaw))
+      -- A saved identity stays pinned across deletion. Only a default selector
+      -- may search siblings. A standalone inline entry supplies its own route.
+      let pinned := hasExplicitAcct && (!acctRaw.isEmpty && acctRaw != "default" ||
+        providers.any (fun p => p.id == acctRaw) || hydratedProvs.any (fun hp => hp.id == acctRaw))
       let eligibleRows := if pinned then providers.filter (fun p => p.id == acctRaw) else providers
       let eligibleHydrated := if pinned then hydratedProvs.filter (fun p => p.id == acctRaw) else hydratedProvs
+      if pinned && eligibleRows.isEmpty && eligibleHydrated.isEmpty &&
+          inlineUrl?.isNone && inlineKey?.isNone then continue
+      -- Inline chain settings cannot override the global switch of a known account.
+      if pinned && (eligibleRows.any (fun p => !p.enabled) ||
+          eligibleHydrated.any (fun hp => !hp.enabled)) then continue
       -- A stored restriction also rules out explicit chains and generic pool
       -- fallbacks when there is no remaining alternative-router credential.
       if pinned && eligibleHydrated.any (·.nativeOnly) then continue
@@ -1950,7 +1956,16 @@ private def handleProxyRequest (st : CoreAppState) (req : HttpRequest) (cleanPat
     (bodyTimedOutRef? := some bodyTimedOutRef)
     (resolveTransport := fun target => do
       let some owner := target.sidecarCredential? |
-        return ← AccountVpnPool.resolve st.vpnPool? st.store st.vpnCoordinatorDir target.accountId
+        return ← AccountVpnRoutes.resolve st.store.missionsDb target.accountId fun pref => do
+          let some pool := st.vpnPool? | return .error "vpn_coordinator_unavailable"
+          let provider? ← match ← getAIProvider? st.store target.accountId with
+            | some row => pure (some row.providerType)
+            | none => do
+              let accounts ← loadHydratedProviders st.store st.cfg.workingDir
+              pure ((accounts.find? (fun p => p.id == target.accountId && p.hasAccountApiKey && !p.hasOAuth)).map (·.providerType))
+          let some provider := provider? | return .error "vpn_credential_owner_unknown"
+          AccountVpnPool.allocate pool st.store.rootDir st.vpnCoordinatorDir st.store.missionsDb
+            target.accountId provider pref
       let .ok pref ← AccountVpnRoutes.read st.store.missionsDb target.accountId | return .error "vpn_route_store_unavailable"
       let some selected := pref | return .ok none
       unless !owner.modelPrefix.isEmpty && target.modelId.startsWith (owner.modelPrefix ++ "/") do
@@ -3720,7 +3735,7 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
       let providers ← loadHydratedProviders st.store st.cfg.workingDir
       let selected := providers.find? (fun p => p.id == account)
       if caller.role != "admin" && !selected.any (fun p =>
-          if setting == "vpn" then providerVisibleTo p false caller.userId else providerAddedBy p caller.userId) then
+          if setting == "vpn" then providerListedFor p false caller.userId else providerAddedBy p caller.userId) then
         return .ok (mkJson 403 "{\"error\":\"provider_access_denied\"}")
       let some hp := selected
         | return .ok (mkJson 404 "{\"error\":\"provider_not_found\"}")
@@ -3740,19 +3755,24 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
         match ← AccountVpnSidecar.alternativeRouterAccess (← resolveCliProxyBaseUrl) key file allowed? with
         | .ok allowed => return .ok (mkJson 200 (renderCompact (.obj #[("allowed", .bool allowed)])))
         | .error reason => return .ok (mkJson 503 (renderCompact (.obj #[("error", .str reason)])))
-      let stored ← getAIProvider? st.store account
-      let coreOwned := !hp.hasOAuth && stored.any (fun p => !p.apiKey.isEmpty && p.apiKey != "cli-proxy-managed")
+      let coreOwned := !hp.hasOAuth && hp.hasAccountApiKey
       let mut configure? : Option (Bool → IO (Except String Unit)) := none
-      if hp.hasOAuth && !hp.hasApiKey && ["codex", "claude", "antigravity", "kimi"].any (providerTypeMatchesAuthType hp.providerType) &&
-          !file.isEmpty then
+      let supportsOAuthRoute := hp.hasOAuth && !hp.hasApiKey &&
+        ["codex", "claude", "antigravity", "kimi"].any (providerTypeMatchesAuthType hp.providerType)
+      if supportsOAuthRoute && !file.isEmpty then
         if let some url := st.vpnRelayPort?.bind (fun port =>
             AccountVpnRelay.proxyUrl (effectiveJwtSecret st.cfg) port hp.providerType hp.id) then
           if let some key ← resolveCliProxyMgmtKey? then
             let base ← resolveCliProxyBaseUrl
             if AccountVpnSidecar.validManagement base then
               configure? := some (AccountVpnSidecar.configure base key file url)
+      let configurationIssue := if coreOwned || configure?.isSome then none
+        else if supportsOAuthRoute && file.isEmpty then
+          some "Orb could not match a unique provider sign-in to this account. Check the account connection, then refresh."
+        else if supportsOAuthRoute then some "Check the VPN relay configuration on Core."
+        else some "VPN routing is unavailable for this credential."
       let (status, result) ← AccountVpnApi.route st.store st.vpnPool? st.vpnCoordinatorDir account hp.providerType
-        (coreOwned || configure?.isSome) req.method req.bodySlice.toByteArray configure?
+        configurationIssue req.method req.bodySlice.toByteArray configure?
       return .ok (mkJson status (renderCompact result))
 
   if cleanPath == "/api/settings/airvpn" then
@@ -4828,6 +4848,7 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
         offset?          := (qLookup "offset").bind String.toNat?
         updatedSince?    := (qLookup "updated_since").orElse (fun _ => qLookup "since_updated_at")
         statusesFilter   := statusesArr
+        includeAncestors := qLookup "include_ancestors" == some "true"
         includeArchived  := includeArchived
         bootstrapAdminId := st.bootstrapAdminId
         project?         := if unassignedOnly then none else rawProjF?.filter (!·.isEmpty)
@@ -5602,7 +5623,9 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
     if let some params := matchRoutePattern? "/api/ai/providers/:id/preference" rawTarget then
       if req.method == "PUT" || req.method == "PATCH" then
         let pid := (params.find? (fun p => p.1 == "id")).map Prod.snd |>.getD ""
-        let some existing ← getAIProvider? st.store pid
+        let accounts ← loadHydratedProviders st.store st.cfg.workingDir
+        let isAdm := caller.isLegacyUnscoped || caller.role == "admin"
+        let some account := accounts.find? (fun p => p.id == pid && providerListedFor p isAdm caller.userId)
           | return .ok (mkJson 404 "{\"error\":\"provider_not_found\"}")
         let .ok jv := OrbBin.Json.parseBytes req.bodySlice.toByteArray
           | return .ok (mkJson 400 "{\"error\":\"invalid_json\"}")
@@ -5612,10 +5635,16 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
         match ← setUserProviderPref st.store prefUid pid userEn s!"{nowEpochSec}" with
         | .error e => return .ok (mkJson 500 s!"\{\"error\":{jsonEscape e}}")
         | .ok () =>
-          let obs? ← match st.pacingTracker? with
-            | some tr => lookupObservedKeyRpm? tr existing.id
-            | none => pure none
-          return .ok (mkJson 200 (renderAIProviderForCallerJson existing (caller.role == "admin") userEn obs?))
+          if let some stored ← getAIProvider? st.store pid then
+            let obs? ← match st.pacingTracker? with
+              | some tr => if isAdm then lookupObservedKeyRpm? tr pid else pure none
+              | none => pure none
+            return .ok (mkJson 200 (renderAIProviderForCallerJson stored isAdm userEn obs?
+              (some (memberProviderDisplayName accounts account))))
+          let response := if isAdm then renderHydratedProviderJv account (some userEn)
+            else renderMemberHydratedProviderJv account (memberProviderDisplayName accounts account) (some userEn)
+          return .ok (mkJson 200 (renderCompact ((response.setField "globally_enabled" (.bool account.enabled)).setField
+            "effective_enabled" (.bool (account.enabled && userEn)))))
     if req.method == "GET" && cleanPath == "/api/ai/providers/audit" then
       if !caller.isLegacyUnscoped then
         if let some (cCode, cBody) := requireAdminPrincipal caller then
@@ -5628,29 +5657,15 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
         req.method cleanPath rawTarget req.bodySlice.toByteArray
         caller.userId (caller.role == "admin") caller.isLegacyUnscoped (healthTracker? := st.healthTracker?) then
       return .ok { status := pCode, contentType := pCtype, corsOrigin? := reqOrigin?, body := pBody }
-    if req.method == "GET" && cleanPath == "/api/ai/providers" then
+    if caller.isLegacyUnscoped && req.method == "GET" && cleanPath == "/api/ai/providers" then
       let providers ← listAIProviders st.store
-      if caller.isLegacyUnscoped then
-        let mut items : Array String := Array.mkEmpty providers.size
-        for p in providers do
-          let obs? ← match st.pacingTracker? with
-            | some tr => lookupObservedKeyRpm? tr p.id
-            | none => pure none
-          items := items.push (renderAIProviderJson p obs?)
-        return .ok (mkJson 200 ("[" ++ String.intercalate "," items.toList ++ "]"))
-      else
-        let isAdm := caller.role == "admin"
-        let uPrefs ← getUserProviderPrefs st.store caller.userId
-        let mut items : Array String := Array.mkEmpty providers.size
-        for p in providers do
-          let own := !p.createdByUserId.isEmpty && p.createdByUserId == caller.userId
-          if isAdm || own || (!p.apiKey.isEmpty && p.enabled) then
-            let obs? ← match st.pacingTracker? with
-              | some tr => if isAdm then lookupObservedKeyRpm? tr p.id else pure none
-              | none => pure none
-            let uEn := isUserProviderEnabled uPrefs p.id
-            items := items.push (renderAIProviderForCallerJson p (isAdm || own) uEn obs?)
-        return .ok (mkJson 200 ("[" ++ String.intercalate "," items.toList ++ "]"))
+      let mut items : Array String := Array.mkEmpty providers.size
+      for p in providers do
+        let obs? ← match st.pacingTracker? with
+          | some tr => lookupObservedKeyRpm? tr p.id
+          | none => pure none
+        items := items.push (renderAIProviderJson p obs?)
+      return .ok (mkJson 200 ("[" ++ String.intercalate "," items.toList ++ "]"))
     else if req.method == "POST" && cleanPath == "/api/ai/providers" then
       -- Members may add accounts to the shared pool (docs/MULTI_USER.md "Shared inference
       -- providers"): Core picks the id, the key is write-only, `created_by_user_id` records them.
@@ -5712,6 +5727,8 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
         let own := !existing.createdByUserId.isEmpty && existing.createdByUserId == caller.userId
         -- Members edit settings of any shared account; credentials and endpoint only on their own.
         if !isAdm then
+          if (jv.fieldBool? "enabled").any (· != existing.enabled) then
+            return .ok (mkJson 403 "{\"error\":\"admin_required\",\"field\":\"enabled\"}")
           let newKey := ((jv.fieldStr? "api_key").getD "").trimAscii.toString
           if !newKey.isEmpty && (!own || newKey == "cli-proxy-managed") then
             return .ok (mkJson 403 "{\"error\":\"not_account_owner\",\"field\":\"api_key\"}")
@@ -5762,7 +5779,8 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
           rpmLimit? := rpm?, maxConcurrency? := conc?, customModels := cModels,
           updatedAt := s!"{nowEpochSec}"
         }
-        match ← upsertAIProvider st.store updated with
+        match ← upsertAIProvider st.store updated (memberEdit := !isAdm) (credentialOwner := own) with
+        | .error "provider_changed" => return .ok (mkJson 409 "{\"error\":\"provider_changed\"}")
         | .error e => return .ok (mkJson 400 s!"\{\"error\":\"invalid_provider_limits\",\"detail\":{jsonEscape e}}")
         | .ok () =>
           let changed := #[("name", existing.name != updated.name), ("enabled", existing.enabled != updated.enabled),

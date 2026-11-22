@@ -6,6 +6,8 @@ test("Resources page renders global Compute/Inference Sankey, USD toggle, bottom
   const missionId = "11111111-1111-4111-8111-111111111111";
   const childId = "22222222-2222-4222-8222-222222222222";
   const overviewRangesRequested: string[] = [];
+  let releaseFirstOverview!: () => void;
+  const firstOverview = new Promise<void>((resolve) => { releaseFirstOverview = resolve; });
 
   await page.addInitScript(() => {
     localStorage.setItem("orb.apiUrl", location.origin);
@@ -21,6 +23,7 @@ test("Resources page renders global Compute/Inference Sankey, USD toggle, bottom
     if (path === "/api/resources/overview") {
       const range = url.searchParams.get("range") ?? "6h";
       overviewRangesRequested.push(range);
+      if (overviewRangesRequested.length === 1) await firstOverview;
       const now = Date.now();
       return route.fulfill({
         json: {
@@ -372,8 +375,14 @@ test("Resources page renders global Compute/Inference Sankey, USD toggle, bottom
   await page.goto("/");
   await page.getByTestId("sb-resources").click();
 
+  // Returning to the visible tab while the initial graph loads triggers a background poll.
+  await expect.poll(() => overviewRangesRequested.length).toBe(1);
+  await page.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
+  releaseFirstOverview();
   await expect(page.getByTestId("resources-page")).toBeVisible();
   await expect(page.getByTestId("res-sankey-svg")).toBeVisible();
+
+  expect(overviewRangesRequested).toEqual(["6h"]);
 
   // Verify Inference is the first/default tab and Compute is the second tab
   const lensTabs = page.locator('[aria-label="Resource lens"] button');

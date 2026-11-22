@@ -1284,7 +1284,7 @@ function LiveRow(p: { a: AIProvider; open?: boolean; onOpenChange?: (open: boole
   // Quota severity uses the shared level colors (warning 80-99%, danger exhausted).
   const stClass = () => status() === "connected" ? "connected" : ["quota_exhausted", "pool_exhausted", "out_of_credit"].includes(status()) ? "exhausted" : status() === "quota_warning" ? "warning" : ["needs_reauth", "needs_verification", "error", "auth_failed", "disabled_by_provider", "disabled"].includes(status()) ? "needs_reauth" : "not_configured";
   // Core's `ready` means credentials are saved, not that a live authentication probe succeeded.
-  const stLabel = () => (!manages() && globallyDisabled() ? "Disabled by admin" : !isAdminUser() && userSkipped() ? "Skipped for your missions" : ({ connected: "Connected", ready: "Configured", disabled: "Disabled", disabled_by_provider: "Disabled by provider", needs_reauth: "Sign in again", needs_verification: "Verification required", quota_exhausted: quota()?.level === "exhausted" ? quota()!.label : "Quota exhausted", pool_exhausted: quota()?.label || "Quota exhausted", quota_warning: quota()?.label || "Connected", out_of_credit: "Out of credit", auth_failed: "Auth failed", needs_auth: "Needs auth", error: "Error" }[status()] ?? "Unknown"));
+  const stLabel = () => (!isAdminUser() && globallyDisabled() ? "Disabled by admin" : !isAdminUser() && userSkipped() ? "Skipped for your missions" : ({ connected: "Connected", ready: "Configured", disabled: "Disabled", disabled_by_provider: "Disabled by provider", needs_reauth: "Sign in again", needs_verification: "Verification required", quota_exhausted: quota()?.level === "exhausted" ? quota()!.label : "Quota exhausted", pool_exhausted: quota()?.label || "Quota exhausted", quota_warning: quota()?.label || "Connected", out_of_credit: "Out of credit", auth_failed: "Auth failed", needs_auth: "Needs auth", error: "Error" }[status()] ?? "Unknown"));
   // Pool names and percentages already live in the quota summary.
   const statusText = () => a.provider_type === "antigravity" && quota()
     ? ["quota_exhausted", "pool_exhausted"].includes(status()) ? "Limit reached"
@@ -1343,7 +1343,7 @@ function LiveRow(p: { a: AIProvider; open?: boolean; onOpenChange?: (open: boole
       ...(authItems.length > 0 ? [{ kind: "sep" as const }] : []),
       ...rankItems,
       ...(rankItems.length > 0 ? [{ kind: "sep" as const }] : []),
-      { kind: "item", label: globallyDisabled() ? "Enable" : "Disable", icon: globallyDisabled() ? Ic.CheckIcon : Ic.BanIcon, onClick: () => p.onToggle(globallyDisabled()) },
+      ...(isAdminUser() ? [{ kind: "item" as const, label: globallyDisabled() ? "Enable" : "Disable", icon: globallyDisabled() ? Ic.CheckIcon : Ic.BanIcon, onClick: () => p.onToggle(globallyDisabled()) }] : []),
       ...(p.onToggleUserPref && currentUser()
         ? [{
             kind: "item" as const,

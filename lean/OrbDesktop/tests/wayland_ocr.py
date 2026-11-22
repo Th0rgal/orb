@@ -3,11 +3,12 @@ import csv
 import subprocess
 
 
-def read_words(image, geometry, full_frame=False):
+def read_words(image, geometry, full_frame=False, binarize=False):
     origin, size = geometry.split()
     crop = ['-crop', size + '+' + origin.replace(',', '+'), '+repage'] if full_frame else []
+    threshold = ['-threshold', '50%'] if binarize else []
     png = subprocess.check_output(['magick', '-', *crop, '-colorspace', 'gray', '-auto-level',
-                                   '-resize', '300%', 'png:-'], input=image)
+                                   '-resize', '300%', *threshold, 'png:-'], input=image)
     result = subprocess.check_output(['tesseract', 'stdin', 'stdout', '--psm', '11', 'tsv'],
                                      input=png, stderr=subprocess.DEVNULL, text=False)
     ox, oy = map(int, geometry.split(' ')[0].split(','))

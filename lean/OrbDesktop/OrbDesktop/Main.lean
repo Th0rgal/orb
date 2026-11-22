@@ -16,7 +16,9 @@ import LeanUI.Vulkan
 import LeanUI.Runtime
 import OrbDesktop.RepaintCheck
 import OrbDesktop.State
+import OrbDesktop.Voice
 import OrbDesktop.Core
+import OrbDesktop.EmbeddedSidebar
 import OrbDesktop.Chrome
 import OrbDesktop.Screens
 /-!
@@ -198,12 +200,21 @@ partial def shapeWidgetTree (ac : Text.GlyphAtlasCache) (font mono bold medium s
           let isSynth := !r.glyphs.isEmpty && r.glyphs.all (fun g => g.sizePx.1 == 0 && g.sizePx.2 == 0)
           if isSynth then
             let txt := String.ofList (r.glyphs.map (fun g => Char.ofNat g.glyphId))
-            let (ac', rs) ← shapeDesktopRuns curAc (if r.style.monospace then mono else if r.style.weight >= 700 then bold else if r.style.weight >= 600 then semibold else if r.style.weight >= 500 then medium else font) scale120 r.style txt
+            let face := if r.style.monospace then mono else if r.style.weight >= 700 then bold else if r.style.weight >= 600 then semibold else if r.style.weight >= 500 then medium else font
+            let (ac', rs) ← shapeDesktopRuns curAc face scale120 r.style txt
             curAc := ac'
-            let rsAdjusted := rs.map (fun sr =>
-              { sr with allowBreakAfter := r.allowBreakAfter, hardBreakAfter := r.hardBreakAfter })
-            for sr in rsAdjusted do
-              shapedRuns := shapedRuns.push sr
+            -- HarfBuzz clusters are UTF-8 byte offsets within this shaped run.
+            -- Editor navigation and IME both address the draft in Unicode scalars.
+            let scalarAtByte := if r.editorStart.isSome && face.facePtr != 0 then
+                (txt.toList.mapIdx fun i c => List.replicate c.utf8Size i).flatten.toArray else #[]
+            for sr in rs do
+              let glyphs := match r.editorStart with
+                | none => sr.glyphs
+                | some start => sr.glyphs.map fun g =>
+                  { g with cluster := start + scalarAtByte[g.cluster]?.getD g.cluster }
+              shapedRuns := shapedRuns.push { sr with
+                glyphs, editorStart := r.editorStart
+                allowBreakAfter := r.allowBreakAfter, hardBreakAfter := r.hardBreakAfter }
           else
             shapedRuns := shapedRuns.push r
         -- A fixed-width clipped label is a CSS single-line ellipsis label.
@@ -234,7 +245,9 @@ partial def shapeWidgetTree (ac : Text.GlyphAtlasCache) (font mono bold medium s
 
 private partial def scrollRegionsOf (b : ComputedBox) : List Runtime.ScrollRegion :=
   match b.id, b.scrollLimitXY with
-  | some id, some (_, lim) => [⟨id, b.contentRectSub, lim⟩]
+  | some id, some (_, limitY) =>
+    let lines := (b.children.head?.map (·.lines)).getD []
+    [{ id, bounds := b.contentRectSub, limitY, offsetY := (b.scrollOffset.getD (0, 0)).2, textLines := lines }]
   | _, _ => b.children.flatMap scrollRegionsOf
 
 /-- Render one frame of `DesktopState` via `OrbDesktop.buildDesktopScreen`, `Layout.layoutNode`,
@@ -278,7 +291,7 @@ def renderDesktopView (rt : Runtime.RuntimeState DesktopState) :
     diffAddRuns := addRuns
   }
 
-  let widgetRootRaw := buildDesktopScreen st availW availH shapedRuns liveWindow (st.sidebarHoverRow rt.hoveredEntity)
+  let widgetRootRaw := buildDesktopScreen st availW availH shapedRuns liveWindow (st.hoverTarget rt.hoveredEntity)
   let (ac6, widgetRoot) ← shapeWidgetTree ac5 rt.primaryFont rt.monoFont rt.boldFont rt.mediumFont rt.semiboldFont sc widgetRootRaw
   let layoutRoot := widgetRoot.toLayoutNode
   let t1 ← IO.monoNanosNow
@@ -288,7 +301,7 @@ def renderDesktopView (rt : Runtime.RuntimeState DesktopState) :
   let sceneOut := buildSceneFromLayout sc rt.focus theme widgetRoot rootBox (recordNodes := false)
   if profile then IO.eprintln s!"u7-view-ns {t1-t0} {t2-t1} {(← IO.monoNanosNow)-t2}"
   if let some menu := st.missionMenu then
-    let w := min availW (pxToSub 228)
+    let w := min availW (pxToSub (if menu.page == .picker .model then 440 else 228))
     let count := min (max 1 ((availH - pxToSub 14) / pxToSub 30)) (missionMenuRows st menu).length
     let h := min availH (pxToSub (14 + 30 * count))
     let left := max 0 (min menu.x (availW - w : Nat))
@@ -332,14 +345,40 @@ def desktopReducer (rt : Runtime.RuntimeState DesktopState) :
   let scale := rt.wayland.scale120
   let viewport := rt.viewportDeviceRect
   fun st ev => Id.run do
+    if let .key key mods state := ev then
+      if rt.focus.owner == some 1 && state != .released && st.hasLiveConnection && st.writeRequest.isNone then
+        if let some menu := st.missionMenu then
+          if menu.page == .rename || menu.page == .draftDirectory then
+            if let some draft := menu.draft.editKey? key mods then
+              return ({ st with missionMenu := some { menu with draft } }, if draft == menu.draft then none else some viewport)
+        else if st.cloudCanCreate || st.cloudAllows "send" then
+          if let some draft := st.cloudDraft.editKey? key mods then
+            return ({ st with cloudDraft := draft, cloudAttempt := if draft.text == st.cloudDraft.text then st.cloudAttempt else "" }, some viewport)
+        else if st.openMission.isSome || st.screen == .controlEmpty || st.screen == .controlPopulated then
+          let rows := if key == 0xff52 || key == 0xff54 then
+              match regions.find? (·.id == Widgets.composerViewportId) with
+              | some r => editorRows r.textLines st.composer.text.length
+              | none => []
+            else []
+          if let some composer := st.composer.editKey? key mods rows then
+            return ({ st with composer }, if composer == st.composer then none else some viewport)
     if let .pointerMove x y := ev then
       return (st, st.sidebarHoverDamage rt.hitRegions scale rt.hoveredEntity (hitTest rt.hitRegions x y))
     if let .pointerLeave := ev then
       return (st, st.sidebarHoverDamage rt.hitRegions scale rt.hoveredEntity none)
     if let .activate id := ev then
       if st.hasLiveConnection && st.missionMenu.isNone && st.writeRequest.isNone then
+        if id == draftDirectoryPickerId && st.openMission.isNone then
+          let some (_, r) := rt.hitRegions.find? (fun (entry : EntityId × Rect) => entry.1 == id) | return (st, none)
+          let draft : Widgets.ComposerBuffer := { text := st.draftDirectory, cursorOffset := st.draftDirectory.length }
+          let menu : MissionMenu := { mission := "", x := r.x, y := r.bottom, trigger := id, page := .draftDirectory, draft, browsePath := st.draftDirectory }
+          return ({ st with missionMenu := some menu }, some viewport)
+        if id == 714 || (id == draftProjectPickerId && st.openMission.isNone) then
+          let some (_, r) := rt.hitRegions.find? (fun (entry : EntityId × Rect) => entry.1 == id) | return (st, none)
+          return ({ st with missionMenu := some { mission := st.openMission.getD "", x := r.x, y := r.bottom, trigger := id, page := if id == draftProjectPickerId then .draftProject else .settings } }, some viewport)
         if let some field := settingTrigger id then
           let some (_, r) := rt.hitRegions.find? (fun (entry : EntityId × Rect) => entry.1 == id) | return (st, none)
+          let st := if field == .machine then { st with launchMachines := none, launchMachinesFailed := false } else st
           return ({ st with missionMenu := some {
             mission := st.openMission.getD "", x := r.x, y := r.bottom, trigger := id,
             page := .picker field } }, some viewport)
@@ -371,6 +410,11 @@ def desktopReducer (rt : Runtime.RuntimeState DesktopState) :
         let h := r.bounds.h.toNat
         let content := r.limitY + h
         let damage := some (roundRectOut scale r.bounds)
+        if r.id == Widgets.composerViewportId then
+          let current := st.composer.wheelTop.getD r.offsetY
+          let top := scrollStep content h current dy
+          if top == current then return (st, none)
+          return ({ st with composer := { st.composer with wheelTop := some top } }, damage)
         if r.id == rosterViewportId then
           let top := scrollStep content h (min r.limitY st.rosterTopSub) dy
           if top == st.rosterTopSub then return (st, none)
@@ -582,6 +626,8 @@ private def runningBadgeDamage (rt : Runtime.RuntimeState DesktopState) : Damage
       | some (_, rect) => Damage.add damage (roundRect rt.wayland.scale120 rect)) none
 
 def main (args : List String) : IO UInt32 := do
+  if let ["--gtk-sidebar-host", path] := args then
+    return ← runEmbeddedSidebar path shapeWidgetTree
   let dcfg := parseDesktopArgs args
   let rcfg := dcfg.runtimeCfg
   if let some iters := dcfg.benchIterations then
@@ -607,23 +653,39 @@ def main (args : List String) : IO UInt32 := do
       pure (pref.stdout.trimAscii != "false")
     catch _ => pure true
     let rt0 ← Runtime.openWindowRuntime rcfg "orb-desktop" initSt
+    let capability ← IO.mkRef ({} : VoiceCapability)
+    let voiceSlot ← IO.mkRef (none : Option VoiceSession)
     let slot ← IO.mkRef (none : Option LiveSubscription)
+    let traceInbox := (← IO.getEnv "ORB_TRACE_INBOX_IDS") == some "1"
     let rt ← Runtime.withProducerWake fun wakeFd notify => do
       withLiveSources rcfg.darkTheme notify fun readSources => do
+        let probe ← IO.asTask (prio := .dedicated) do
+          capability.set (← probeVoice)
+          notify
         try
           Runtime.runWindow { rt0 with focus := initSt.initialFocusState } desktopReducer renderDesktopView
             (fun rt => do
               let vp := rt.viewportDeviceRect
               let (st, damage) ← readLiveFrame slot rt.wayland.scale120 vp rt.app notify
+              if traceInbox && st.inboxAvailable &&
+                  (!rt.app.inboxAvailable || st.inboxItems != rt.app.inboxItems || st.inboxEnabled != rt.app.inboxEnabled) then
+                let ids := if st.inboxEnabled then st.inboxItems.map (·.mission) else []
+                IO.eprintln ("Inbox badge IDs: " ++ String.intercalate "," ids)
               let phase := ((← IO.monoMsNow) / 100) % 12
               let spin := animations && phase != st.badgePhase
               let damage := if spin then (runningBadgeDamage rt).elim damage (Damage.add damage) else damage
               let st := if spin then { st with badgePhase := phase } else st
-              let some updated ← readSources st | return (st, damage)
-              return (updated, some vp))
+              let updated ← readSources st
+              let next := updated.getD st
+              let voiced ← pollVoice voiceSlot capability next notify
+              return (voiced, if updated.isSome || voiced.voiceAvailable != next.voiceAvailable ||
+                voiced.voicePhase != next.voicePhase then some vp else damage))
             (·.liveData) desktopFocusChange (some wakeFd) (·.writeRequest.isSome)
             (fun rt => animations && (runningBadgeDamage rt).isSome)
-        finally closeLiveSubscription slot
+        finally
+          discard (IO.wait probe)
+          closeVoice voiceSlot
+          closeLiveSubscription slot
     Runtime.shutdownRuntime rt
     return 0
   catch e =>

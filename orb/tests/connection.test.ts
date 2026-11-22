@@ -14,6 +14,20 @@ it("concurrent unauthorized responses disconnect once", async () => {
   expect(connectionVersion()).toBe(version + 1);
 });
 
+it.each([200, 503])("keeps the Core session after a provider 401 and identity status %s", async status => {
+  setConnection("http://core.test", "member-token");
+  const fetcher = vi.fn(async (url: string) => url.endsWith("/api/auth/me")
+    ? Response.json({}, { status })
+    : new Response("Provider sign-in required", { status: 401 }));
+  vi.stubGlobal("fetch", fetcher);
+  await expect(api("/api/providers/antigravity-models")).rejects.toThrow("Provider sign-in required");
+  expect(fetcher.mock.calls.map(([url]) => new URL(url).pathname)).toEqual([
+    "/api/providers/antigravity-models", "/api/auth/me",
+  ]);
+  expect(getJwt()).toBe("member-token");
+  expect(isConnected()).toBe(true);
+});
+
 it("a previous connection's delayed 401 cannot log out the new connection", async () => {
   setConnection("http://old.test", "old-token");
   let respond!: (response: Response) => void;

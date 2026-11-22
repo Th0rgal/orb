@@ -300,10 +300,12 @@ struct OrbProvidersSettings: View {
                             }
                         }
                         let globallyDisabled = !Self.isGloballyEnabled(provider)
-                        Button(globallyDisabled ? "Enable" : "Disable") {
-                            Task { await toggleGlobal(provider) }
+                        if isAdmin {
+                            Button(globallyDisabled ? "Enable" : "Disable") {
+                                Task { await toggleGlobal(provider) }
+                            }
+                            .disabled(!ready || busy)
                         }
-                        .disabled(!ready || busy)
                         if OrbCore.shared.currentUser != nil {
                             let userSkipped = Self.isUserSkipped(provider)
                             Button(userSkipped ? "Use for my missions" : "Skip for my missions") {
@@ -1216,7 +1218,9 @@ private struct OrbAccountVpnSettings: View {
                 }
                 .disabled(busy || !route["can_configure"].flag)
                 if !route["can_configure"].flag {
-                    Text("This credential’s connection is managed by the sidecar.").font(.caption)
+                    let message = route["configuration_message"].text
+                    Text(message.isEmpty ? "VPN routing is unavailable for this credential." : message).font(.caption)
+                    Button("Refresh connection settings") { Task { await update() } }.disabled(busy)
                 } else if countries.isEmpty {
                     Text("Import a named server profile in AirVPN Settings to enable VPN routing.").font(.caption)
                 }
