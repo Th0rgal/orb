@@ -1,5 +1,6 @@
 import OrbCore.ProviderUsageAndLogin
 import OrbCore.NativeCanary
+import OrbBin.ClaudeControl
 
 namespace OrbCore.NativeSharedWorkspace
 
@@ -130,6 +131,7 @@ def pumpTurn (store : CoreStore) (hub : ProviderRuntimeHub) (working grant job n
     let (input, running) ← child.takeStdin
     let stopping ← IO.mkRef false
     let holderLive : IO Bool := do return !(← stopping.get)
+    let watchdogError ← IO.mkRef (none : Option String)
     let approvalWait ← IO.mkRef ({} : ApprovalWait)
     let start ← IO.monoMsNow
     let watch ← IO.asTask (prio := .dedicated) do
@@ -145,6 +147,7 @@ def pumpTurn (store : CoreStore) (hub : ProviderRuntimeHub) (working grant job n
             valid := accounts.any fun hp => hp.id == p.account && hp.providerType == "antigravity" &&
               hp.enabled && hp.hasOAuth && hp.oauthToken == token && !(accountRoutingFile accounts hp).isEmpty
           if !valid || turnExpired start (← IO.monoMsNow) (← approvalWait.get) then
+            watchdogError.set (some (if valid then "native_turn_timeout" else "native_shared_workspace_denied"))
             stopping.set true
             discard <| running.kill.toBaseIO
             break
@@ -181,7 +184,7 @@ def pumpTurn (store : CoreStore) (hub : ProviderRuntimeHub) (working grant job n
             if delegated then return .ok (← delegateCall p operation holderLive)
             return .ok (← fileCall p operation)
           let .ok reply := checked | return .error "native_shared_workspace_denied"
-          unless ← holderLive do return .error "native_holder_closed"
+          unless ← holderLive do return .error ((← watchdogError.get).getD "native_holder_closed")
           unless (← placement? store grant job node owner (← coreEpochSec)) == some p do
             return .error "native_shared_workspace_denied"
           input.putStr (renderCompact reply ++ "\n")
@@ -195,9 +198,14 @@ def pumpTurn (store : CoreStore) (hub : ProviderRuntimeHub) (working grant job n
       unless ← reachedEof.get do discard <| running.kill.toBaseIO
       -- Only this task reaps the holder. A second wait raises ECHILD on Linux.
       exitCode.set (← running.wait)
+    if let some reason ← watchdogError.get then return .error reason
     return .ok ((← exitCode.get) == 0)
-  if let .ok ok := result then return ok
-  discard <| emit "{\"event\":\"error\",\"message\":\"Native turn unavailable\"}\n".toUTF8
-  return false
+  match result with
+  | .ok ok => return ok
+  | .error reason =>
+    let code := if (OrbBin.ClaudeControl.antigravityNativeError? reason).isSome then reason else "native_turn_unavailable"
+    let event := JVal.obj #[("event", .str "error"), ("code", .str code), ("message", .str "Native turn unavailable")]
+    discard <| emit (renderCompact event ++ "\n").toUTF8
+    return false
 
 end OrbCore.NativeSharedWorkspace
