@@ -158,6 +158,17 @@ Set `ORB_NATIVE_WORKSPACE_NODE` to one
 explicit static worker with HTTPS and a valid server certificate. Configure
 `ORB_NATIVE_PROFILE_RUNTIME` and `ORB_NATIVE_PROFILE_USER` for the private
 holder, and persist the account's Direct or VPN selection before testing.
+For a temporary rollout on the Core that holds the subscriptions, set
+`ORB_NATIVE_SUBSCRIPTION_CANARY=<member-id>/<provider-account-id>` and
+`ORB_NATIVE_WORKSPACE_NODE` to the isolated HTTPS worker. This optional operator
+setting narrows profile admission to those three identities. Other members
+cannot select the worker and automatic placement excludes it. Existing sessions
+and newly issued grants are checked against the same selection. The account
+inventory and personal provider choices retain their ordinary meaning. The
+separate dedicated-owner enrollment and relay endpoints remain closed during
+this rollout. Disable the opt-in and remove the worker roster entry before
+clearing the canary setting.
+
 The selected member must have an enabled account, a Linux identity, and a
 permitted fleet placement. Core and administration nodes are reserved. Nodes
 reserved for a specific account's dedicated enrollment retain their launch gate.

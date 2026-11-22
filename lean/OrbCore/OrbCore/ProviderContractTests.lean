@@ -1800,7 +1800,25 @@ private def memberNativeCatalog (store : CoreStore) (root : String) : IO Unit :=
     for file in #[first, second] do
       try IO.FS.removeFile file catch _ => pure ()
 
+def checkNativeCanary : IO Unit := do
+  let permits := fun (scope : NativeCanary.Scope) node owner account => match scope.accountFor node owner with
+    | .ok only => only.all (· == account)
+    | .error _ => false
+  let specific := NativeCanary.parse (some "member/account") "worker"
+  unless permits specific "worker" "member" "account" &&
+      !permits specific "worker" "other" "account" && !permits specific "other" "member" "account" &&
+      !permits specific "worker" "member" "other" && specific.permitsNode "ordinary" "other" &&
+      !specific.permitsNode "worker" "other" && permits (NativeCanary.parse none "worker") "any" "any" "any" do
+    throw (IO.userError "native canary crossed its node, member or account fence")
+  for raw in #["", "member", "/account", "member/", "member/account/extra"] do
+    let incomplete := NativeCanary.parse (some raw) "worker"
+    unless !permits incomplete "worker" "member" "account" && !incomplete.permitsNode "worker" "member" do
+      throw (IO.userError "incomplete native canary setting admitted a member")
+  unless !permits (NativeCanary.parse (some "member/account") "") "worker" "member" "account" do
+    throw (IO.userError "native canary accepted a missing worker")
+
 def run : IO Unit := do
+  checkNativeCanary
   let fixtureRaw ← IO.FS.readFile "shared/orb-spec/fixtures/provider-response-contract.json"
   let .ok fixture := OrbBin.Json.parse fixtureRaw
     | throw (IO.userError "provider-response-contract fixture parse failed")

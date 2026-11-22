@@ -643,7 +643,7 @@ private def probeNativeAccount (hp : HydratedProvider) (resolve : ResolveTranspo
 /-- The admin CLI profile has its own catalog. Members see positively discovered
     models of enabled, unambiguously bound accounts they have opted into. -/
 def nativeAntigravityAccounts (hub : ProviderRuntimeHub) (store : CoreStore) (workingDir userId : String)
-    (probe : Bool) : IO (Array (String × Array (String × String))) := do
+    (probe : Bool) (onlyAccount : Option String := none) : IO (Array (String × Array (String × String))) := do
   if userId.isEmpty then return #[]
   let accounts ← loadHydratedProviders store workingDir
   let prefs ← getUserProviderPrefs store userId
@@ -651,6 +651,7 @@ def nativeAntigravityAccounts (hub : ProviderRuntimeHub) (store : CoreStore) (wo
   let mut reads : Array NativeCatalogRead := #[]
   let mut failed := false
   for hp in accounts do
+    if !onlyAccount.all (· == hp.id) then continue
     let file := accountRoutingFile accounts hp
     if hp.providerType != "antigravity" || !hp.enabled || !hp.hasOAuth || hp.oauthToken.isEmpty ||
       file.isEmpty || !isUserProviderEnabled prefs hp.id then continue
