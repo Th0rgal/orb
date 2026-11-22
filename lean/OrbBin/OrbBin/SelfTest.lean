@@ -1074,7 +1074,9 @@ private def checkRetiredGroupIdentity : IO Unit := do
     discard <| waitpidBlock other.pid
   assertTrue "delayed Stop preserves the process that reused a reaped PGID" stillRunning
 
-private def runCompanionTests : IO UInt32 := do
+set_option maxRecDepth 2048 in
+def runAllTests : IO UInt32 := do
+  checkRetiredGroupIdentity
   runCodexMessageBoundaryTests
   let prompt := "--model is part of this prompt\nwith 'quotes' and a trailing newline\n"
   assertEq "Antigravity delivers a flag-shaped prompt verbatim alongside model, effort and resume"
@@ -1766,8 +1768,5 @@ private def runCompanionTests : IO UInt32 := do
   IO.println "=== ALL ORB-BIN WAVE 1 SELF-TESTS PASSED ==="
   return 0
 
-def runAllTests : IO UInt32 := do
-  checkRetiredGroupIdentity
-  runCompanionTests
 
 end OrbBin.SelfTest
