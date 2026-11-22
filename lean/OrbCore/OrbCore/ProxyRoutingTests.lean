@@ -1475,6 +1475,67 @@ def run : IO Unit := do
     runPostForwardSuite "ref" { app with proxyMockTransport? := some mcMock }
     let mcHealthTracker ← newProviderHealthTracker 1 2
     runPostForwardSuite "health" { app with proxyMockTransport? := some mcMock, healthTracker? := some mcHealthTracker }
+
+    -- Dedicated 3-segment `fileAccountId` (`cliproxyapi:<provider>:<sha256>`) is NOT a shared
+    -- wildcard: `model_cooldown` records a cooldown so failover chains route around it.
+    let hashA := "cliproxyapi:openai:29b740ffb1b48a3f2b5c3b0b12564542c77b2d8ff73c0c9def17d338a58e0819"
+    let hashB := "cliproxyapi:openai:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    check (isSharedCliProxyAccount "cliproxyapi:openai" == true)
+      "2-segment cliproxyapi:openai is a shared sidecar wildcard"
+    check (isSharedCliProxyAccount hashA == false)
+      "3-segment cliproxyapi:openai:<sha256> is a dedicated per-account ID, not a shared wildcard"
+    check (isSharedCliProxyAccount "cliproxyapi:antigravity" == false)
+      "cliproxyapi:antigravity is not treated as a shared wildcard"
+    let hashCooldown := cooldownForOutcome {
+      status := 503
+      headers := #[("Retry-After", "101648")]
+      body := "{\"error\":{\"type\":\"model_cooldown\",\"message\":\"cooling down\"}}".toUTF8
+      selectedAccount := hashA
+      attemptsUsed := 1
+    } nowT
+    check (match hashCooldown with
+           | some c => c.accountId == hashA && c.reason == .usageLimit && c.untilEpoch == nowT + 3600
+           | none => false)
+      "3-segment cliproxyapi:openai:<sha256> records clamped 3600s .usageLimit cooldown on 503 model_cooldown"
+    let hashChain : RoutingChain := {
+      id := "hash-failover", name := "Hash Failover",
+      targets := #[
+        { accountId := hashA, provider := "openai", baseUrl := "http://127.0.0.1:1", apiKey := "k-a", modelId := "gpt-6.2-astra" },
+        { accountId := hashB, provider := "openai", baseUrl := "http://127.0.0.1:1", apiKey := "k-b", modelId := "gpt-6.2-astra" }
+      ]
+    }
+    let hashHtr ← newProviderHealthTracker 1 2
+    let hashAttempts ← IO.mkRef (#[] : Array String)
+    let hashMock : ProviderTarget → IO (Except String HttpsResponse) := fun target => do
+      hashAttempts.modify (·.push target.accountId)
+      if target.accountId == hashA then
+        return .ok {
+          status := 503
+          headers := #[("Content-Type", "application/json"), ("Retry-After", "101648")]
+          body := "{\"error\":{\"type\":\"model_cooldown\",\"message\":\"All credentials for model gpt-6.2-astra are cooling down\"}}".toUTF8
+        }
+      else
+        return .ok {
+          status := 200
+          headers := #[("Content-Type", "application/json")]
+          body := "{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"hashB ok\"},\"finish_reason\":\"stop\"}]}".toUTF8
+        }
+    let hOut1 ← forwardProxyChain hashChain "POST" "/v1/chat/completions" #[]
+      "{\"model\":\"gpt-6.2-astra\",\"messages\":[]}".toUTF8
+      (mockTransport? := some hashMock) (healthTracker? := some hashHtr) (nowEpoch? := some nowT)
+    check (hOut1.status == 200 && hOut1.selectedAccount == hashB && (← hashAttempts.get) == #[hashA, hashB])
+      s!"failover chain hashA -> hashB must route around hashA on 503 model_cooldown: status={hOut1.status} sel={hOut1.selectedAccount} attempts={← hashAttempts.get}"
+    let hashARec ← lookupAccountHealthRecord hashHtr hashA
+    check (match hashARec.cooldown? with
+           | some c => c.reason == .usageLimit && c.untilEpoch == nowT + 3600
+           | none => false)
+      "hashA must have a 3600s .usageLimit cooldown recorded in ProviderHealthTracker"
+    hashAttempts.set #[]
+    let hOut2 ← forwardProxyChain hashChain "POST" "/v1/chat/completions" #[]
+      "{\"model\":\"gpt-6.2-astra\",\"messages\":[]}".toUTF8
+      (mockTransport? := some hashMock) (healthTracker? := some hashHtr) (nowEpoch? := some (nowT + 10))
+    check (hOut2.status == 200 && hOut2.selectedAccount == hashB && (← hashAttempts.get) == #[hashB])
+      s!"subsequent request in hashA -> hashB chain must skip cooling hashA directly to hashB: status={hOut2.status} attempts={← hashAttempts.get}"
   finally
     closeCoreStore store
     IO.FS.removeDirAll root

@@ -350,11 +350,15 @@ def modelCooldownHint (body : String) : Bool :=
   let low := body.toLower
   containsSubstring low "model_cooldown" || containsSubstring low "cooling down"
 
-/-- Shared CLIProxyAPI sidecar accounts serve multiple models under one `accountId`; per-model
-    `model_cooldown` must not park the shared account globally for unrelated models. -/
+/-- Shared CLIProxyAPI sidecar wildcards (`cliproxyapi` or `cliproxyapi:<provider>`,
+    excluding `antigravity` and 3-segment dedicated per-account `fileAccountId` IDs such as
+    `cliproxyapi:openai:<sha256>`) serve multiple models under one `accountId`; per-model
+    `model_cooldown` must not park the shared wildcard globally for unrelated models. -/
 def isSharedCliProxyAccount (accountId : String) : Bool :=
-  (accountId == "cliproxyapi" || accountId.startsWith "cliproxyapi:") &&
-  !accountId.startsWith "cliproxyapi:antigravity:"
+  match accountId.splitOn ":" with
+  | ["cliproxyapi"] => true
+  | ["cliproxyapi", prov] => !prov.isEmpty && prov != "antigravity"
+  | _ => false
 
 def authHint (body : String) : Bool :=
   let low := body.toLower
