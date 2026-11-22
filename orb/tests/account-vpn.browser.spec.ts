@@ -36,7 +36,7 @@ for (const theme of ["light", "dark"]) test(`account VPN retry and Direct select
       if (route.request().method() === "GET") {
         const verified = verifying && path === "/api/ai/providers/a/vpn";
         return route.fulfill({ json: verified ? { ...direct, mode: "vpn", country: "NL",
-          status: "verified", server: "west", exits: ["192.0.2.35"] } : direct });
+          status: "verified", server: "west", exits: ["192.0.2.35", "2001:db8:abcd:abcd:abcd:abcd:abcd:1234"] } : direct });
       }
       const body = route.request().postDataJSON();
       changes.push([path, body]);
@@ -83,6 +83,10 @@ for (const theme of ["light", "dark"]) test(`account VPN retry and Direct select
   const verified = page.getByText("Verified exit · west · 192.0.2.35");
   await expect(page.getByText("Waiting for exit verification.")).toBeVisible();
   await expect(verified).toBeVisible({ timeout: 10000 });
+  const countryBox = (await select.boundingBox())!;
+  const statusBox = (await verified.boundingBox())!;
+  expect(Math.max(statusBox.x - countryBox.x - countryBox.width,
+    statusBox.y - countryBox.y - countryBox.height)).toBeGreaterThanOrEqual(8);
   await select.selectOption("");
   await expect(verified).toHaveCount(0);
   const path = "/api/ai/providers/a/vpn";
