@@ -327,6 +327,39 @@ private def assertDiagram (scene : SceneOutput) (observed : List (String × Rect
   unless !rendered.contains "```" && !rendered.contains "mermaid" do
     throw (IO.userError "Mermaid source was rendered as literal text")
 
+/-- Render persisted turns as a cold transcript would show them. -/
+private def renderedTurns (turns : List String) :
+    List (String × Rect × Rect) × SceneOutput × String :=
+  let st := { coldFixture with liveTurns := turns }
+  let (rootBox, scene) := renderScreen st ""
+  (collectObserved rootBox 24, scene, renderedBoxRoot rootBox)
+
+private def observedOnce (observed : List (String × Rect × Rect)) (t : String) : Option Rect :=
+  match observed.filter (fun p => p.1 == t) with
+  | [(_, sub, _)] => some sub
+  | _ => none
+
+-- Chained statements link each target to its preceding node, so A --> B --> C
+-- renders two forward steps instead of a shortcut from A to C.
+private def chainTurn : String := "```mermaid\ngraph LR\n  A --> B --> C\n```"
+private def chainObserved := (renderedTurns [chainTurn]).1
+#guard [observedOnce chainObserved "A", observedOnce chainObserved "B",
+  observedOnce chainObserved "C"].all (·.isSome)
+#guard match (observedOnce chainObserved "A", observedOnce chainObserved "B",
+    observedOnce chainObserved "C") with
+  | (some a, some b, some c) => a.x < b.x && b.x < c.x
+  | _ => false
+#guard !((renderedTurns [chainTurn]).2.2.contains "```")
+
+-- A cycle must not inflate ranks on every pass: the layout stays stable with
+-- coordinates bounded by the rendered transcript instead of walking off screen.
+private def cycleTurn : String := "```mermaid\ngraph LR\n  P --> Q --> P\n```"
+private def cycleObserved := (renderedTurns [cycleTurn]).1
+#guard [observedOnce cycleObserved "P", observedOnce cycleObserved "Q"].all (·.isSome)
+#guard match (observedOnce cycleObserved "P", observedOnce cycleObserved "Q") with
+  | (some p, some q) => p.x < q.x && q.x + q.w <= pxToSub 800 && q.y + q.h <= pxToSub 600
+  | _ => false
+
 def main (args : List String) : IO Unit := do
   for dark in [true, false] do
     for width in [480, 1000] do
@@ -541,6 +574,17 @@ def main (args : List String) : IO Unit := do
       let st ← awaitState slot st (!·.hasLiveConnection)
       unless st.missionCards.isEmpty && st.accountUsername.isEmpty && st.accountEndpoint.isEmpty && (← slot.get).isNone do throw (IO.userError "roster outlived identity")
       return
+    if args == ["access-loss"] then
+      -- Access loss is not a turn boundary: the earlier and current output clears
+      -- without archiving, stale retained replies never resurrect it while Core
+      -- stays unreachable, and a fresh projection re-renders without archiving.
+      let st ← clickMission st b
+      let st ← awaitState slot st (fun s => streamedText s == "second\n\tλ🙂\n")
+      let st ← awaitState slot st (fun s => s.liveTurns.isEmpty && (streamedText s).isEmpty)
+      let st ← awaitState slot st (fun s => streamedText s == "third turn")
+      unless st.liveTurns.isEmpty && st.openMission == some b.missionId do
+        throw (IO.userError "access loss archived or resurrected cleared output")
+      return
     let st ← clickMission st a
     let st ← awaitState slot st (fun s => streamedText s == "canonical")
     let (stopped, damage) := stepDesktopEvent 120 vp st (.activate 2)
@@ -560,7 +604,9 @@ def main (args : List String) : IO Unit := do
     let st ← awaitState slot st (fun s => streamedText s == "second\n\tλ🙂\n")
     if args == ["revoke"] then
       let next ← awaitState slot st (·.openMission.isNone)
-      unless next.hasLiveConnection && (streamedText next).isEmpty && next.missionCards.length == 1 &&
+      -- The late racing reply is not a turn boundary: nothing it showed is archived.
+      unless next.hasLiveConnection && (streamedText next).isEmpty && next.liveTurns.isEmpty &&
+          next.missionCards.length == 1 &&
           !next.sidebarRows.any (·.widgetId == b.widgetId) && next.missionCards.head?.any (·.missionId == a.missionId) do
         throw (IO.userError "mission revocation lost unrelated roster or retained selected data")
       return

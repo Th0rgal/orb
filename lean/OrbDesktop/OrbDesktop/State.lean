@@ -1555,11 +1555,18 @@ def applyLiveText (scale : Nat) (viewport : Rect) (st : DesktopState) (mission t
   if !st.liveData || st.screen != .missionTranscript || st.openMission != some mission || streamedText st == text then
     (st, none)
   else
-    -- Even an empty replacement is a real frame (turn boundary / access loss).
+    -- Even an empty replacement is a real frame (turn boundary).
     let liveTurns :=
       if text.isEmpty && !(streamedText st).isEmpty then st.liveTurns ++ [streamedText st]
       else st.liveTurns
     flushStreamFrame scale viewport { st with liveTurns, stream := { st.stream with shown := [], pending := [text] } }
+
+/-- Access loss (Core unreachable, an invalid projection or the mission revoked) is not
+a turn boundary: the shown content came from a stream the client can no longer read,
+so clear the earlier and current output instead of archiving it. A fresh cold-open
+history read or bubble frame repopulates from the timeline. -/
+def clearLiveTranscript (st : DesktopState) : DesktopState :=
+  { st with liveTurns := [], stream := { st.stream with shown := [], pending := [] } }
 
 /-- Cold open of a persisted mission: the Core timeline owns completed turns, so a fresh
 history batch read from `GET /events` replaces the client's archive; the live bubble keeps

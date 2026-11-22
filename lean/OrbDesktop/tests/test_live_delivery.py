@@ -564,26 +564,36 @@ class Delivery(unittest.TestCase):
                     result = []
                 elif path.startswith('/api/control/missions?project=p&') or path == '/api/machines':
                     result = []
-                elif path.split('?')[0] == a + '/events':
-                    # Real Core timeline projection (bounded canonical page, newest
-                    # first), read from the same mission_events rows the bubble reads.
-                    query = live.urllib.parse.parse_qs(live.urllib.parse.urlsplit(path).query)
-                    if query.get('types') != ['assistant_message_canonical'] or query.get('limit') != ['200']:
-                        self.send_error(400)
-                        return
+                elif path.split('?')[0] == a + '/open':
+                    # Real Core open bundle: mission detail, first events page and the
+                    # older transcript spine, read from the same mission_events rows
+                    # the bubble reads. The client filters completed canonical turns.
                     rows = db.execute(
-                        "SELECT id, COALESCE(NULLIF(seq,0),sequence), payload, content FROM mission_events"
-                        " WHERE mission_id='a' AND event_type='assistant_message_canonical'"
+                        "SELECT id, COALESCE(NULLIF(seq,0),sequence), event_type, payload, content"
+                        " FROM mission_events WHERE mission_id='a'"
                         " ORDER BY COALESCE(NULLIF(seq,0),sequence) DESC, id DESC LIMIT 200").fetchall()
-                    result = []
+                    events_page = []
                     for row in reversed(rows):
-                        payload = json.loads(row[2]) if row[2] else {}
-                        content = payload.get('content') if isinstance(payload.get('content'), str) else row[3]
-                        result.append(dict(id=row[0], mission_id='a', sequence=row[1],
-                                           event_type='assistant_message_canonical', content=content))
+                        payload = json.loads(row[3]) if row[3] else {}
+                        content = payload.get('content') if isinstance(payload.get('content'), str) else row[4]
+                        events_page.append(dict(id=row[0], mission_id='a', sequence=row[1],
+                                                event_type=row[2], content=content))
+                    result = dict(protocol=1, mission=dict(id='a'), events=events_page, spine=[],
+                                  queue=[], max_seq=events_page[-1]['sequence'] if events_page else 0,
+                                  has_more=False, spine_has_more=False, spine_next_cursor=None,
+                                  next_cursor=None, page_max_seq=None, reset=False)
                 elif path.split('?')[0] in (a + events, b + events):
                     mid = path.split('/')[-2]
                     presence = path.endswith('?presence=1')
+                    if mode == 'access-loss' and mid == 'b' and 2 <= paths.count(path) <= 4:
+                        # Core unreachable: a projection reply that no client can parse.
+                        self.send_response(200)
+                        self.end_headers()
+                        try:
+                            self.wfile.write(b'{not json')
+                        except (BrokenPipeError, ConnectionResetError):
+                            pass
+                        return
                     if mode == 'project-lag' and mid == 'b':
                         project_started.wait(3)
                     if mode == 'selected-session' and mid == 'b' and paths.count(path) > 1:
@@ -621,6 +631,8 @@ class Delivery(unittest.TestCase):
                         self.send_error(404)
                         return
                     result = dict(id=mid,title=row[0],status=row[1],text=row[2])
+                    if mode == 'access-loss' and mid == 'b' and paths.count(path) >= 5:
+                        result['text'] = 'third turn'
                     if mode == 'oversize' and mid == 'b' and paths.count(path) > 1:
                         result['text'] = 'x' * (5 << 20)
                 else:
@@ -663,12 +675,17 @@ class Delivery(unittest.TestCase):
                     self.assertGreaterEqual(paths.count(a + events), 3)
                     self.assertNotIn(b + events, paths)
                 elif mode == 'cold-open':
-                    # One bounded history read populates the cold open; the third
+                    # One bounded /open read populates the cold open; the third
                     # turn must stage across later polls; mission b stays unpolled.
-                    self.assertEqual(paths.count(a + '/events?types=assistant_message_canonical&limit=200'), 1)
+                    self.assertEqual(paths.count(a + '/open'), 1)
                     self.assertGreaterEqual(paths.count(a + events), 3)
                     self.assertNotIn(b + events, paths)
                     self.assertFalse(any(p.split('?')[0] == b + '/events' for p in paths))
+                elif mode == 'access-loss':
+                    # The malformed window must pass before the fresh projection; the
+                    # bubble is polled repeatedly and mission a stays unpolled.
+                    self.assertGreaterEqual(paths.count(b + events), 5)
+                    self.assertFalse(any(p.split('?')[0] == a + events for p in paths))
                 elif mode in ('page-two', 'null-retry', 'start-running', 'project-lag'):
                     self.assertIn(b + events, paths)
                 elif mode in ('idle-identity', 'before-open', 'unavailable', 'denied', 'idle-session', 'project-first'):
@@ -695,6 +712,9 @@ class Delivery(unittest.TestCase):
     def test_revocation(self):
         self.run_wire('revoke')
 
+    def test_access_loss_clears_output_and_ignores_stale_replies(self):
+        self.run_wire('access-loss')
+
     def test_idle_share_loss(self):
         self.run_wire('idle-share')
 
@@ -717,24 +737,31 @@ class Delivery(unittest.TestCase):
         self.run_wire('oversize')
 
     def test_cold_open_history_yields_the_newest_persisted_turn_to_the_live_bubble(self):
-        rows = [
-            dict(sequence=4, event_type='assistant_message_canonical', content='graph LR'),
-            dict(sequence=2, event_type='assistant_message_canonical', content='Amber blossom'),
-            dict(sequence=3, event_type='user_message', content='PRIVATE'),
-            dict(sequence=5, event_type='tool_call', content='PRIVATE'),
-        ]
         conn = Mock(binding='bound')
-        conn.get.return_value = rows
-        path = '/api/control/missions/a/events?types=assistant_message_canonical&limit=200'
-        self.assertEqual(live.history_turns(conn, 'a', 'graph LR'), ['Amber blossom'])
-        self.assertEqual(conn.get.call_args.args[0], path)
-        self.assertEqual(live.history_turns(conn, 'a', 'Ripened fruit'), ['Amber blossom', 'graph LR'])
+        conn.get.return_value = dict(
+            protocol=1, mission=dict(id='a'),
+            events=[
+                dict(sequence=4, event_type='assistant_message_canonical', content='graph LR'),
+                dict(sequence=2, event_type='assistant_message_canonical', content='Amber blossom'),
+                dict(sequence=3, event_type='user_message', content='PRIVATE'),
+                dict(sequence=5, event_type='tool_call', content='PRIVATE'),
+            ],
+            spine=[dict(sequence=6, event_type='assistant_message_canonical', content='Oldest spine page turn')],
+        )
+        self.assertEqual(live.history_turns(conn, 'a', 'graph LR'),
+                         ['Amber blossom', 'graph LR', 'Oldest spine page turn'])
+        self.assertEqual(conn.get.call_args.args[0], '/api/control/missions/a/open')
+        self.assertEqual(live.history_turns(conn, 'a', 'Oldest spine page turn'),
+                         ['Amber blossom', 'graph LR'])
         for error in (live.ResponseTooLarge('too large'), live.urllib.error.HTTPError('x', 403, '', {}, None)):
             conn.get.side_effect = error
             self.assertEqual(live.history_turns(conn, 'a', ''), [])
         conn.get.side_effect = None
-        conn.get.return_value = {'error': 'invalid timeline'}
-        self.assertEqual(live.history_turns(conn, 'a', ''), [])
+        for broken in ({'error': 'invalid timeline'}, {'events': 'not a list', 'spine': []},
+                       {'events': [dict(sequence=1, event_type='assistant_message_canonical')], 'spine': []},
+                       [dict(sequence=1, event_type='assistant_message_canonical', content='x')]):
+            conn.get.return_value = broken
+            self.assertEqual(live.history_turns(conn, 'a', ''), [])
 
     def test_two_turn_live_keeps_history_and_renders_mermaid(self):
         self.run_wire('mermaid-turn')

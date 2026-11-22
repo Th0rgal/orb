@@ -75,7 +75,8 @@ Pure line-based parser for fenced ```mermaid transcript blocks. Supported: `grap
 and `flowchart LR|TD|TB` headers, node references with `[label]` / `(label)` / `{label}`
 shapes, `-->` edges with optional `|label|` annotations, chained statements on one line and
 standalone node declarations. Anything else fails closed (`none`); callers fall back to
-plain text. Ranks use bounded longest-path relaxation, so cycles stay terminating. -/
+plain text. Ranks use layered peeling with cycle cutting, so they stay bounded by the
+node count and a cycle can neither inflate them nor destabilize the layout. -/
 
 /-- Mermaid node reference: identifier plus optional display label and shape. -/
 private structure MermaidRef where
@@ -150,15 +151,26 @@ private def mermaidInsert (acc : MermaidAcc) (ref : MermaidRef) : MermaidAcc :=
   | some sh => { acc with shapes := (acc.shapes.filter (·.1 != ref.id)) ++ [(ref.id, sh)] }
   | none => acc
 
-/-- Longest-path rank per node id via bounded relaxation (at most one pass per node). -/
+/-- Layered rank per node id via Kahn peeling with cycle cutting: each round places
+the nodes whose predecessors are all placed; when only cycles remain, the first
+unplaced node in declaration order is cut free at the next layer. One round per node,
+so ranks stay bounded by the node count and a cycle can never inflate them. -/
 private def mermaidRanks (order : List String) (edges : List (String × String × String)) :
     List (String × Nat) :=
-  let relax (m : List (String × Nat)) (e : String × String × String) : List (String × Nat) :=
-    match m.lookup e.1, m.lookup e.2.1 with
-    | some ra, some rb =>
-      if rb ≤ ra then m.map fun p => if p.1 == e.2.1 then (p.1, ra + 1) else p else m
-    | _, _ => m
-  ((List.range order.length).foldl (fun m _ => edges.foldl relax m) (order.map (·, 0)))
+  let predecessors (id : String) : List String := (edges.filter fun e => e.2.1 == id).map (·.1)
+  (List.range order.length).foldl (fun (m : List (String × Nat)) _ =>
+    let placed := m.map (·.1)
+    let layer := match m with
+      | [] => 0
+      | _ => (m.foldl (fun acc p => max acc p.2) 0) + 1
+    let fresh := order.filter fun id =>
+      !(placed.contains id) && (predecessors id).all (placed.contains ·)
+    match fresh with
+    | [] => match order.find? fun id => !placed.contains id with
+      | some cut => m ++ [(cut, layer)]
+      | none => m
+    | _ => m ++ fresh.map (·, layer)) []
+  |> fun m => order.map fun id => (id, (m.lookup id).getD 0)
 
 /-- Parse a Mermaid flowchart source into a `DiagramSpec`, or `none` when the subset does
 not match (callers then render the text plainly). Widget ids stay unassigned: the renderer
@@ -183,9 +195,14 @@ def parseMermaidFlowchart (src : String) : Option DiagramSpec := do
     let acc ← stmts.foldlM (fun (acc : MermaidAcc) line => do
       let (src, targets) ← parseMermaidStmt line
       let acc := mermaidInsert acc src
-      targets.foldlM (fun acc (lbl, dst) => do
-        let acc := mermaidInsert acc dst
-        pure { acc with edges := acc.edges ++ [(src.id, dst.id, lbl)] }) acc) {}
+      -- Each target chains from its preceding node, so `A --> B --> C` yields the
+      -- edges A→B and B→C, never a shortcut from A to C.
+      let (acc, _) := targets.foldl
+        (fun (state : MermaidAcc × String) (lbl, dst) =>
+          let acc := mermaidInsert state.1 dst
+          ({ acc with edges := acc.edges ++ [(state.2, dst.id, lbl)] }, dst.id))
+        (acc, src.id)
+      pure acc) {}
     let ids := acc.order
     let ranks := mermaidRanks ids acc.edges
     let maxRank := ranks.foldl (fun acc p => max acc p.2) 0

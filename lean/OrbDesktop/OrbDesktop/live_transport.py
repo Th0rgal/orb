@@ -1108,17 +1108,23 @@ def projection(c, mid, presence=False):
 
 
 def history_turns(c, mid, first_text):
-    """Completed assistant turns from the real Core timeline, one bounded page,
-    ascending. The live bubble owns the current turn; when the newest persisted
-    turn is exactly the text the bubble already shows, the bubble keeps owning it
-    (history owns completed turns, the stream owns the turn in flight)."""
+    """Completed assistant turns from the real /open bundle (the same endpoint other
+    clients use to open a mission: first events page plus the older transcript spine),
+    ascending. The live bubble owns the current turn; when the newest persisted turn
+    is exactly the text the bubble already shows, the bubble keeps owning it (history
+    owns completed turns, the stream owns the turn in flight)."""
     try:
-        rows = c.get('/api/control/missions/' + mid + '/events?types=assistant_message_canonical&limit=200',
-                     8 << 20)
+        bundle = c.get('/api/control/missions/' + mid + '/open', 8 << 20)
     except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, ValueError, KeyError, TypeError):
         return []
-    if not isinstance(rows, list):
+    if not isinstance(bundle, dict):
         return []
+    rows = []
+    for key in ('events', 'spine'):
+        page = bundle.get(key)
+        if not isinstance(page, list):
+            return []
+        rows.extend(page)
     turns = [(r.get('sequence') or 0, r['content']) for r in rows
              if isinstance(r, dict) and r.get('event_type') == 'assistant_message_canonical'
              and isinstance(r.get('content'), str)]

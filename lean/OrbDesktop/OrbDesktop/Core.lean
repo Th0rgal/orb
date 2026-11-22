@@ -577,12 +577,19 @@ def readLiveFrame (slot : IO.Ref (Option LiveSubscription)) (scale : Nat) (viewp
     let (st, histDamage) := applyHistoryTurns scale viewport st sub.mission history
     if let some .revoked := bubble then
       closeLiveSubscription slot
-      let next := { st with
+      -- Revocation is access loss, not a turn boundary: clear the earlier and
+      -- current output explicitly (a racing late reply is never archived).
+      let next := clearLiveTranscript { st with
         missionCards := cards.filter (·.missionId != sub.mission)
         sidebarRows := rows.filter (·.rowId != "mission:" ++ sub.mission) }
       return ((stepDesktopEvent scale viewport next (.activate 101)).1, some viewport)
     if let some .unavailable := bubble then
-      let (next, damage) := applyLiveText scale viewport st sub.mission ""
+      -- Drop the retained reply so later roster frames cannot resurrect cleared
+      -- output, and clear instead of archiving: access loss is not a boundary.
+      sub.lastBubble.set none
+      let (next, damage) :=
+        if st.liveTurns.isEmpty && (streamedText st).isEmpty then (st, none)
+        else (clearLiveTranscript st, some (transcriptDamageRect scale viewport st.sidebarWidth))
       return (next, histDamage.orElse (fun _ => if changed then some viewport else damage))
     let some (.text title status text) := bubble | return (st, histDamage.orElse (fun _ => if changed then some viewport else none))
     let (next, damage) := applyLiveText scale viewport st sub.mission text
