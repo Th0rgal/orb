@@ -31,6 +31,7 @@ import { MissionGlyph, missionStatusPresentation } from "./MissionGlyph";
 import { isMissionUnread } from "./missionUnread";
 import { MdSource, MdView, mdSource, setMdSource } from "./Markdown";
 import { missionDestination } from "./missionLaunch";
+import type { NativeProjectAction } from "./nativeChromeBridge";
 import {
   api,
   currentUser,
@@ -132,6 +133,8 @@ export function LiveProjectsSection(p: {
    *  (optimistic status, in-flight guard, rollback). Consumed then acknowledged. */
   archiveRequests?: readonly { mission: Mission; restore: boolean }[];
   onArchiveRequestsHandled?: (count: number) => void;
+  projectActionRequests?: readonly { action: NativeProjectAction; slug: string }[];
+  onProjectActionRequestsHandled?: (count: number) => void;
   onArchiveStatus?: (rows: Mission[]) => void;
   onArchiveError?: (id: string, restore: boolean, message: string) => void;
   onArchiveSettled?: () => void;
@@ -1092,10 +1095,10 @@ export function LiveProjectsSection(p: {
       }
     };
     const onNativeProjectMenu = (event: Event) => {
-      const { slug, y } = (event as CustomEvent<{ slug: string; y: number }>).detail;
+      const { slug, x, y } = (event as CustomEvent<{ slug: string; x?: number; y: number }>).detail;
       if (!p.headless || !slug) return;
       setActionFocus(true);
-      setActionMenu({ x: 4, y, slug, path: "" });
+      setActionMenu({ x: x ?? 4, y, slug, path: "" });
     };
     window.addEventListener("orb:native-project-menu", onNativeProjectMenu);
     window.addEventListener("orb:native-expand", onNativeExpand);
@@ -1785,6 +1788,21 @@ export function LiveProjectsSection(p: {
       void changeArchiveState(r.mission, r.restore, report).then(() => {
         if (currentConnection(version)) p.onArchiveSettled?.();
       });
+    }
+  }));
+  createEffect(on(() => p.projectActionRequests, reqs => {
+    if (!reqs?.length) return;
+    p.onProjectActionRequestsHandled?.(reqs.length);
+    for (const r of reqs) {
+      switch (r.action) {
+        case "new-agent": p.onNewAgent(r.slug, ""); break;
+        case "new-cloud-agent": p.onNewCloudAgent?.(r.slug, ""); break;
+        case "new-folder": beginFolder(r.slug, ""); break;
+        case "settings": setActionMenu(null); p.open(`ps:${r.slug}`); break;
+        case "rename": beginRename(r.slug); break;
+        case "archive": void removeProject(r.slug, "archive"); break;
+        case "delete": setActionError(null); setDeleteProjectSlug(r.slug); break;
+      }
     }
   }));
   const reopenConversation = (mission: Mission) => changeArchiveState(mission, true);

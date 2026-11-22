@@ -15,7 +15,7 @@ export function useOverlayPosition(root: () => HTMLElement, options: {
       if (anchor && !anchor.isConnected) return;
       const a = anchor?.getBoundingClientRect();
       const point = options.point?.();
-      const margin = 16, gap = 4;
+      const margin = !a && point ? 8 : 16, gap = 4;
       const requestedWidth = options.width?.();
       const width = Math.min(window.innerWidth - margin * 2, requestedWidth === "anchor" ? a?.width ?? el.offsetWidth : requestedWidth ?? el.offsetWidth);
       el.style.width = `${width}px`;
@@ -33,6 +33,8 @@ export function useOverlayPosition(root: () => HTMLElement, options: {
           if (y + height > window.innerHeight - margin) y = Math.max(margin, a.bottom + menuInset(el) - height);
         }
         else { y = a.bottom + gap; if (y + height > window.innerHeight - margin && a.top - height - gap >= margin) y = a.top - height - gap; }
+      } else if (point && y + height > window.innerHeight - margin && y - height >= margin) {
+        y = y - height;
       }
       setStyle({position: "fixed", left: `${Math.max(margin, Math.min(x, window.innerWidth - width - margin))}px`, top: `${Math.max(margin, Math.min(y, window.innerHeight - height - margin))}px`, width: `${width}px`, "max-height": `${window.innerHeight - margin * 2}px`});
     };

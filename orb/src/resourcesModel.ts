@@ -1366,4 +1366,60 @@ export function buildMissionFlowSankeyInput(
   return { nodes, links };
 }
 
+let sankeyMeasureCtx: CanvasRenderingContext2D | null | undefined;
+
+function getSankeyMeasureCtx(): CanvasRenderingContext2D | null {
+  if (sankeyMeasureCtx !== undefined) return sankeyMeasureCtx;
+  if (typeof document === "undefined") {
+    sankeyMeasureCtx = null;
+    return null;
+  }
+  try {
+    sankeyMeasureCtx = document.createElement("canvas").getContext("2d");
+  } catch {
+    sankeyMeasureCtx = null;
+  }
+  return sankeyMeasureCtx;
+}
+
+export function measureSankeyText(text: string, font: string, fallbackCharWidth: number): number {
+  if (!text) return 0;
+  const ctx = getSankeyMeasureCtx();
+  if (ctx) {
+    ctx.font = font;
+    const width = ctx.measureText(text).width;
+    if (Number.isFinite(width) && width > 0) return width;
+  }
+  return text.length * fallbackCharWidth;
+}
+
+export function fitSankeyText(
+  raw: string,
+  maxWidth: number,
+  font: string,
+  fallbackCharWidth: number,
+): { text: string; width: number } {
+  const fullW = measureSankeyText(raw, font, fallbackCharWidth);
+  if (fullW <= maxWidth || raw.length <= 2) {
+    return { text: raw, width: fullW };
+  }
+  let lo = 1;
+  let hi = raw.length - 1;
+  let bestText = `${raw.slice(0, 1)}…`;
+  let bestW = measureSankeyText(bestText, font, fallbackCharWidth);
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    const cand = `${raw.slice(0, mid).trimEnd()}…`;
+    const width = measureSankeyText(cand, font, fallbackCharWidth);
+    if (width <= maxWidth) {
+      bestText = cand;
+      bestW = width;
+      lo = mid + 1;
+    } else {
+      hi = mid - 1;
+    }
+  }
+  return { text: bestText, width: bestW };
+}
+
 export type { MissionDagBar };

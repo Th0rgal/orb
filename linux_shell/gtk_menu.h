@@ -1,4 +1,4 @@
-/* linux_shell/gtk_menu.h — Native Chrome sidebar context menu (right-click on a mission row). */
+/* linux_shell/gtk_menu.h — Native Chrome sidebar context menu (right-click on a mission or project row). */
 #ifndef ORB_GTK_MENU_H
 #define ORB_GTK_MENU_H
 
@@ -11,7 +11,8 @@ int orb_gtk_menu_self_test(void);
 GtkWidget *orb_menu_page(void);
 gboolean orb_menu_key(GtkWidget *row, GdkEventKey *event, gpointer data);
 void orb_menu_anchor(GtkPopover *pop, GtkWidget *row, const GdkEvent *event);
-/* Pops up the menu for `row` when it is a mission row; returns TRUE when it did. */
+void orb_project_menu_populate(GtkWidget *wv, GtkWidget *menu, const char *slug);
+/* Pops up the menu for `row` when it is a mission or project row; returns TRUE when it did. */
 gboolean orb_gtk_row_context_menu(GtkWidget *wv, GtkWidget *list, GtkWidget *row, const GdkEvent *ev);
 /* Multi-selection: re-apply after the list is rebuilt, toggle/extend on a modified click, clear,
  * and delete the selected missions (or `fallback`, a `m:<id>` target) with one confirmation. */
