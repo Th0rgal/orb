@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import secrets
+import shutil
 import signal
 import sys
 import socket
@@ -83,7 +84,19 @@ for i in range(300):
     time.sleep(.12)
 """)
     harness.chmod(0o700)
-    env = dict(PATH=f'{tmp}:{os.environ["PATH"]}', HOME=str(home), HOST='127.0.0.1', PORT=str(port),
+    client_path = os.environ["PATH"]
+    if menu_client is not None:
+        # This scenario exercises a remote mission. Local model discovery can
+        # start a detached provider CLI that writes to HOME during teardown.
+        bins = tmp / "provider-fixtures"
+        bins.mkdir()
+        unavailable = shutil.which("false")
+        if unavailable is None:
+            raise RuntimeError("Missing false executable for provider fixtures")
+        for name in ("claude", "codex", "opencode", "agy", "grok", "vibe-acp"):
+            (bins / name).symlink_to(unavailable)
+        client_path = str(bins) + os.pathsep + client_path
+    env = dict(PATH=f'{tmp}:{client_path}', HOME=str(home), HOST='127.0.0.1', PORT=str(port),
                LD_LIBRARY_PATH=os.getenv('LD_LIBRARY_PATH', ''), WORKING_DIR=str(tmp), DEV_MODE='true')
     core = [Path(os.environ.get('ORB_CORE_TEST_BINARY', ROOT / 'target/release/orb-core')).resolve(strict=True)]
     with contextlib.ExitStack() as stack:
@@ -109,7 +122,7 @@ for i in range(300):
             mid = api('/api/control/missions', {'title': 'Indigo', 'project': 'source', 'backend': 'codex'})['id']
         config = tmp / 'sway.conf'
         config.write_text('output * mode 1000x700\ndefault_border none\nxwayland disable\n')
-        graphical = dict(os.environ, XDG_RUNTIME_DIR=str(tmp), WLR_BACKENDS='headless', WLR_RENDERER='pixman',
+        graphical = dict(os.environ, PATH=client_path, XDG_RUNTIME_DIR=str(tmp), WLR_BACKENDS='headless', WLR_RENDERER='pixman',
                          WLR_LIBINPUT_NO_DEVICES='1', ORB_STATE_DIR=str(tmp))
         stack.enter_context(process(['sway', '-c', config], graphical, tmp))
         graphical['WAYLAND_DISPLAY'] = wait('private compositor', lambda: next((p.name for p in tmp.glob('wayland-*') if p.is_socket()), None))
