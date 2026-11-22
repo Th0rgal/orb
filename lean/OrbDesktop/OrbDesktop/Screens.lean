@@ -290,6 +290,92 @@ def conversationStatusLabel (status : String) : String :=
 #guard conversationStatusLabel "awaiting_user" == "Ready for a follow-up"
 #guard conversationStatusLabel "waiting_background" == "Waiting for background work"
 
+/-! ## Live transcript turns
+
+`applyLiveText` keeps completed turns in `st.liveTurns` (oldest first); the current turn is
+`streamedText st`. A fenced ```mermaid block renders as a native diagram widget; every other
+segment renders as wrapped prose. Diagram nodes draw widget ids from the reserved live band
+below so keyboard focus and pointer hit-testing reach the rendered graph. -/
+
+/-- First widget id of the reserved live-diagram band (16 ids per diagram). -/
+private def liveDiagramBandBase : Nat := 9311
+/-- Number of widget ids reserved per rendered diagram. -/
+private def liveDiagramStride : Nat := 16
+
+/-- Split live text into `(isMermaidFence, content)` segments in source order. An unclosed
+fence stays prose until its closing line arrives, matching the current plain-text behavior. -/
+private def splitMermaidFences (src : String) : List (Bool × String) := Id.run do
+  let mut segs : List (Bool × String) := []
+  let mut inFence := false
+  let mut fenceBuf : Array String := #[]
+  let mut proseBuf : Array String := #[]
+  for line in src.splitOn "\n" do
+    let t := mermaidTrim line
+    if !inFence && t.startsWith "```mermaid" then
+      if !proseBuf.isEmpty then
+        segs := segs ++ [(false, String.intercalate "\n" proseBuf.toList)]
+        proseBuf := #[]
+      inFence := true
+      fenceBuf := #[]
+    else if inFence && t == "```" then
+      segs := segs ++ [(true, String.intercalate "\n" fenceBuf.toList)]
+      inFence := false
+      fenceBuf := #[]
+    else if inFence then
+      fenceBuf := fenceBuf.push line
+    else
+      proseBuf := proseBuf.push line
+  if inFence then
+    proseBuf := proseBuf ++ ["```mermaid"] ++ fenceBuf
+  if !proseBuf.isEmpty then
+    segs := segs ++ [(false, String.intercalate "\n" proseBuf.toList)]
+  return segs
+
+/-- One wrapped prose row of the live transcript, synthesized from plain text; the runtime
+`shapeWidgetTree` pass re-shapes synth runs with HarfBuzz on real displays. -/
+private def liveProseRow (theme : Theme) (colW width : SubPx) (text : String) : WidgetNode :=
+  let runs := [synthInlineRun { (Theme.bodyText theme) with color := theme.palette.textPrimary } text]
+  let (_, _, height) := wrapInlineRuns width theme.typo.lineBase runs
+  WidgetNode.box
+    (BoxStyle.row 0
+      |>.withPadding (Edges.xy (pxToSub 20) (pxToSub 6))
+      |>.withFixedSize colW (height + pxToSub 12))
+    [WidgetNode.text
+      (BoxStyle.row 0 |>.withFixedSize width height)
+      theme.typo.lineBase runs]
+
+/-- Render one turn's text: mermaid fences become diagram widgets (node widget ids from
+`base`, one stride per diagram); everything else becomes prose rows. Returns the nodes and
+the next free widget-id base for the following turn. -/
+private def buildOneLiveTurn (theme : Theme) (colW width : SubPx) (base : Nat) (text : String) :
+    List WidgetNode × Nat := Id.run do
+  let mut rows : List WidgetNode := []
+  let mut next := base
+  for (isFence, seg) in splitMermaidFences text do
+    if isFence then
+      match parseMermaidFlowchart seg with
+      | some spec0 =>
+        let spec := { spec0 with nodes := spec0.nodes.mapIdx fun i n =>
+          { n with widgetId := some (next + i) } }
+        rows := rows ++ [buildMermaidDiagramWidget theme colW spec]
+        next := next + liveDiagramStride
+      | none => rows := rows ++ [liveProseRow theme colW width seg]
+    else
+      rows := rows ++ [liveProseRow theme colW width seg]
+  return (rows, next)
+
+/-- Render the completed live turns oldest first, returning the nodes and the next free
+widget-id base so the live turn's diagrams never collide with them. -/
+private def buildLiveTurnsNodes (theme : Theme) (colW width : SubPx) (turns : List String) :
+    List WidgetNode × Nat := Id.run do
+  let mut rows : List WidgetNode := []
+  let mut base := liveDiagramBandBase
+  for turn in turns do
+    let (r, b) := buildOneLiveTurn theme colW width base turn
+    rows := rows ++ r
+    base := b
+  return (rows, base)
+
 /-- Build the Mission Transcript body (`03_mission_transcript`) matching the SolidJS transcript column. -/
 def buildMissionTranscriptBody (st : DesktopState) (mainW bodyH : SubPx)
     (_runs : ShapedScreenRuns) : WidgetNode :=
@@ -307,10 +393,14 @@ def buildMissionTranscriptBody (st : DesktopState) (mainW bodyH : SubPx)
       [ screenTextLine theme (pxToSub 200) (pxToSub 21) (pxToSub 12) (pxToSub 21) pal.textMuted "Working on selected machine…"
       , screenTextLine theme (pxToSub 60) (pxToSub 21) (pxToSub 13) (pxToSub 21) pal.textFaint "11 h 50"
       ]
+  let width := transcriptTextWidth mainW
+  let (priorRows, nextBand) := buildLiveTurnsNodes theme colW width st.liveTurns
+  let currentText := streamedText st
   let liveStreamRow : List WidgetNode :=
-    if _runs.streamRuns.isEmpty then []
+    if (splitMermaidFences currentText).any (·.1) then
+      (buildOneLiveTurn theme colW width nextBand currentText).1
+    else if _runs.streamRuns.isEmpty then []
     else Id.run do
-      let width := transcriptTextWidth mainW
       let (_, _, height) := wrapInlineRuns width theme.typo.lineBase _runs.streamRuns
       return [WidgetNode.box
       (BoxStyle.row 0
@@ -320,7 +410,7 @@ def buildMissionTranscriptBody (st : DesktopState) (mainW bodyH : SubPx)
         (BoxStyle.row 0 |>.withFixedSize width height)
         theme.typo.lineBase _runs.streamRuns (some 900)]]
 
-  let liveRows := liveStreamRow ++ (st.selectedCard.toList.map fun c =>
+  let liveRows := priorRows ++ liveStreamRow ++ (st.selectedCard.toList.map fun c =>
     screenTextLine theme colW (pxToSub 21) (pxToSub 12) (pxToSub 21) pal.textMuted (conversationStatusLabel c.status))
   Id.run do
     let rows := if st.liveData then liveRows else [turn58, turn59] ++ liveStreamRow ++ [workingRow]

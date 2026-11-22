@@ -445,6 +445,9 @@ structure DesktopState where
   rosterTopSub : SubPx := 0
   fleetTopSub : SubPx := 0
   stream : StreamCoalescer := Orb.Stream.Coalescer.empty
+  /-- Completed live turns of the open mission, oldest first. `applyLiveText` is the single
+  owner: an empty replacement frame (turn boundary) moves the finished turn here. -/
+  liveTurns : List String := []
   liveData : Bool := false
   initialRosterPending : Bool := false
   connectionIssue : ConnectionIssue := .unavailable
@@ -560,7 +563,7 @@ def resetSelection (st : DesktopState) (card : Option MissionSummaryCard) : Desk
   let mid := if cloud.isSome then none else card.map (·.missionId)
   { st with
     unconfirmedSend := none, writeError := ""
-    voicePhase := .idle, voiceGeneration := st.voiceGeneration + 1, openMission := mid, missionMenu := none, stream := { shown := [], pending := [], renders := 1 }, scroll := {}
+    voicePhase := .idle, voiceGeneration := st.voiceGeneration + 1, openMission := mid, missionMenu := none, stream := { shown := [], pending := [], renders := 1 }, liveTurns := [], scroll := {}
     composer := { isRunning := card.any (·.isRunning) }
     messageSent := false, missionStopped := false, missionArchived := false, sidePanelOpen := false
     sidebarRows := st.sidebarRows.map fun row => { row with selected := row.widgetId == (card.map (·.widgetId)).getD 101 } }
@@ -1544,13 +1547,18 @@ def applyStreamFrame (scale120 : Nat) (viewport : Rect) (st : DesktopState)
   let queued := deltas.foldl pushStreamDelta st
   flushStreamFrame scale120 viewport queued
 
-/-- RemoteDispatch emits cumulative content, including authoritative corrections. -/
+/-- RemoteDispatch emits cumulative content, including authoritative corrections. An empty
+replacement is a turn boundary: the finished turn moves to `liveTurns` so the transcript keeps
+earlier assistant turns instead of dropping them. -/
 def applyLiveText (scale : Nat) (viewport : Rect) (st : DesktopState) (mission text : String) :
     DesktopState × Damage :=
   if !st.liveData || st.screen != .missionTranscript || st.openMission != some mission || streamedText st == text then
     (st, none)
   else
     -- Even an empty replacement is a real frame (turn boundary / access loss).
-    flushStreamFrame scale viewport { st with stream := { st.stream with shown := [], pending := [text] } }
+    let liveTurns :=
+      if text.isEmpty && !(streamedText st).isEmpty then st.liveTurns ++ [streamedText st]
+      else st.liveTurns
+    flushStreamFrame scale viewport { st with liveTurns, stream := { st.stream with shown := [], pending := [text] } }
 
 end OrbDesktop

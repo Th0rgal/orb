@@ -187,6 +187,17 @@ private def openedProject := (stepDesktopEvent 120 vp unsentDraft (.activate 100
 #guard (stepDesktopEvent 120 vp hierarchyFixture (.key 0x33 8 .pressed)).1.screen == .machinesFleet
 #guard (stepDesktopEvent 120 vp hierarchyFixture (.key 0x33 0 .pressed)).1.screen != .machinesFleet
 
+-- The wire driver renders without font files, so every synthesized run stores its
+-- Unicode codepoint in `glyphId`; decoding the laid-out boxes recovers the text.
+private def renderedBoxText : ComputedBox → Nat → String
+  | _box, 0 => ""
+  | box, depth + 1 =>
+    let self := box.lines.foldl (fun acc line =>
+      line.glyphs.foldl (fun acc pg => acc ++ String.singleton (Char.ofNat pg.glyph.glyphId)) acc) ""
+    box.children.foldl (fun acc child => acc ++ renderedBoxText child depth) self
+
+private def renderedBoxRoot (box : ComputedBox) : String := renderedBoxText box 24
+
 /-- Use the live screen with a populated header run, as in a shaped window.
 Obtain the target from the lowered scene, never by injecting an activate event. -/
 private def clickMission (st : DesktopState) (card : MissionSummaryCard) : IO DesktopState := do
@@ -346,6 +357,28 @@ def main (args : List String) : IO Unit := do
   unless st.expandedProjects == ["p"] do throw (IO.userError "single project was collapsed at launch")
   let slot ← IO.mkRef (none : Option LiveSubscription)
   try
+    if args == ["mermaid-turn"] then
+      -- Two-turn live case: the earlier assistant turn must survive the follow-up
+      -- turn, whose canonical Mermaid fence renders as an actual diagram.
+      let some source ← IO.getEnv "ORB_TEST_MERMAID" | throw (IO.userError "missing ORB_TEST_MERMAID")
+      let st ← clickMission st a
+      let st ← awaitState slot st (fun s => streamedText s == "Amber blossom")
+      let st ← awaitState slot st (fun s => streamedText s == source)
+      -- Mirror Main.lean's stream feed; synthesized runs match the no-font driver.
+      let stream := Widgets.synthInlineRun (Theme.bodyText st.theme) source
+      let (rootBox, scene) := renderWidgetTree 120 (pxToSub 800) (pxToSub 600) st.initialFocusState st.theme
+        (buildDesktopScreen st (pxToSub 800) (pxToSub 600) { streamRuns := [stream] } true)
+      let rendered := renderedBoxRoot rootBox
+      unless rendered.contains "Amber blossom" do
+        throw (IO.userError "earlier assistant turn was dropped from the live transcript")
+      -- Live diagram nodes own the reserved widget-id band 9310 + (index + 1).
+      unless [9311, 9312, 9313].all (fun wid => scene.hitRegionsSub.any (fun r => r.1 == wid)) do
+        throw (IO.userError "live Mermaid fence rendered without diagram nodes")
+      unless rendered.contains "Approve" && rendered.contains "Revise" do
+        throw (IO.userError "rendered transcript is missing diagram edge labels")
+      unless !rendered.contains "```" && !rendered.contains "mermaid" do
+        throw (IO.userError "Mermaid source was rendered as literal text")
+      return
     if args == ["start-running"] then
       let st ← clickMission st b
       if st.composer.isRunning then throw (IO.userError "pending mission offered Stop")

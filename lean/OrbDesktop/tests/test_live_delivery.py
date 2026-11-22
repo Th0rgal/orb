@@ -21,6 +21,14 @@ import live_transport as live
 
 QUERY = (PKG.parent / 'OrbCore/OrbCore/current_bubble.sql').read_text()
 
+# Reconstruction (labeled as such in the PR) of the reported live gap: an earlier
+# assistant turn followed by a canonical turn whose content is a fenced Mermaid
+# graph with an S --Approve--> T edge and a Revise branch. The native renderer must
+# expose live diagram nodes in the reserved widget-id band 9310 + (index + 1).
+MERMAID_TURN = ('```mermaid\ngraph LR\n'
+                '  S[Spec] -->|Approve| T[Build]\n'
+                '  T -->|Revise| R[Fix]\n```')
+
 
 def fixture():
     db = sqlite3.connect(':memory:', check_same_thread=False)
@@ -483,6 +491,14 @@ class Delivery(unittest.TestCase):
     def run_wire(self, mode):
         paths, tokens = [], []
         db = fixture()
+        if mode == 'mermaid-turn':
+            # Two-turn live case: turn one is already persisted when the client
+            # attaches; the handler stages the follow-up turn across later polls.
+            db.execute("DELETE FROM mission_events WHERE mission_id='a'")
+            db.execute("INSERT INTO mission_events VALUES(NULL,'a',1,1,'user_message',?,'{}','')",
+                       (json.dumps({'content': 'PRIVATE', 'queued': False}),))
+            db.execute("INSERT INTO mission_events VALUES(NULL,'a',2,2,'assistant_message_canonical',?,'{}','')",
+                       (json.dumps({'content': 'Amber blossom'}),))
         project_started = threading.Event()
         release_project = threading.Event()
         events = '/current-bubble'
@@ -545,7 +561,17 @@ class Delivery(unittest.TestCase):
                     if mode == 'selected-session' and mid == 'b' and paths.count(path) > 1:
                         self.send_error(401)
                         return
-                    if mid == 'a' and paths.count(path) > 1:
+                    if mid == 'a' and mode == 'mermaid-turn':
+                        # Stage the follow-up turn one event at a time so the client sees
+                        # the real projection sequence: turn, boundary, new canonical turn.
+                        if paths.count(path) == 2:
+                            db.execute("INSERT INTO mission_events VALUES(NULL,'a',3,3,'user_message',?,'{}','')",
+                                       (json.dumps({'content': 'PRIVATE', 'queued': False}),))
+                        elif paths.count(path) >= 3 and not db.execute(
+                                "SELECT 1 FROM mission_events WHERE mission_id='a' AND seq=4").fetchone():
+                            db.execute("INSERT INTO mission_events VALUES(NULL,'a',4,4,'assistant_message_canonical',?,'{}','')",
+                                       (json.dumps({'content': MERMAID_TURN}),))
+                    elif mid == 'a' and paths.count(path) > 1:
                         db.execute("UPDATE missions SET title='Updated', status='awaiting_user' WHERE id='a'")
                         db.execute("UPDATE mission_events SET payload=json_set(payload,'$.queued',json('false')) WHERE mission_id='a' AND seq=3")
                     if mid == 'b' and ((mode == 'revoke' and paths.count(path) > 1) or mode == 'idle-share'):
@@ -577,7 +603,8 @@ class Delivery(unittest.TestCase):
                     (Path(root) / filename).write_text(json.dumps(dict(
                         api_url='', apiUrl=f'http://127.0.0.1:{server.server_port}', token=token)))
                 subprocess.run(['lean', '-j', '1', '-M', '1024', '--run', 'tests/LiveDelivery.lean', mode],
-                               cwd=PKG, env={**os.environ, 'ORB_STATE_DIR': root}, check=True, timeout=20)
+                               cwd=PKG, env={**os.environ, 'ORB_STATE_DIR': root,
+                                             'ORB_TEST_MERMAID': MERMAID_TURN}, check=True, timeout=20)
                 if mode in ('reconnect', 'settings-switch'):
                     first = tokens.index('Bearer changed')
                     self.assertGreater(first, 0)
@@ -589,6 +616,11 @@ class Delivery(unittest.TestCase):
                 self.assertNotIn(b, paths)
                 if mode in ('idle-share', 'idle-page-two'):
                     self.assertIn(b + events + '?presence=1', paths)
+                    self.assertNotIn(b + events, paths)
+                elif mode == 'mermaid-turn':
+                    # The follow-up turn must be staged through at least three polls
+                    # (turn, boundary, canonical) and mission b stays unpolled.
+                    self.assertGreaterEqual(paths.count(a + events), 3)
                     self.assertNotIn(b + events, paths)
                 elif mode in ('page-two', 'null-retry', 'start-running', 'project-lag'):
                     self.assertIn(b + events, paths)
@@ -636,6 +668,9 @@ class Delivery(unittest.TestCase):
 
     def test_oversized_bubble_preserves_roster(self):
         self.run_wire('oversize')
+
+    def test_two_turn_live_keeps_history_and_renders_mermaid(self):
+        self.run_wire('mermaid-turn')
 
     def test_credential_rotation(self):
         self.run_wire('identity')

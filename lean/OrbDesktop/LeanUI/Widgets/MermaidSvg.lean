@@ -69,6 +69,144 @@ structure DiagramSpec where
   columnGapSub : SubPx := pxToSub 20
   deriving Repr, Inhabited
 
+/-! ## Mermaid flowchart parsing (`graph` / `flowchart` subset)
+
+Pure line-based parser for fenced ```mermaid transcript blocks. Supported: `graph LR|TD|TB`
+and `flowchart LR|TD|TB` headers, node references with `[label]` / `(label)` / `{label}`
+shapes, `-->` edges with optional `|label|` annotations, chained statements on one line and
+standalone node declarations. Anything else fails closed (`none`); callers fall back to
+plain text. Ranks use bounded longest-path relaxation, so cycles stay terminating. -/
+
+/-- Mermaid node reference: identifier plus optional display label and shape. -/
+private structure MermaidRef where
+  id : String
+  label : Option String := none
+  shape : Option DiagramNodeShape := none
+
+private def isMermaidSpace (c : Char) : Bool := c == ' ' || c == '\t'
+
+private def isMermaidIdentChar (c : Char) : Bool :=
+  c.isAlpha || c.isDigit || c == '_' || c == '-'
+
+/-- Trim spaces and tabs (the prelude-only `LeanUI` environment has no `String.trim`). -/
+def mermaidTrim (s : String) : String :=
+  String.ofList (((s.toList.dropWhile isMermaidSpace).reverse.dropWhile isMermaidSpace).reverse)
+
+/-- Parse one node reference: `Id`, `Id[label]`, `Id(label)` or `Id{label}`. -/
+private def parseMermaidRef (raw : String) : Option MermaidRef :=
+  let s := (mermaidTrim raw).toList
+  match s.findIdx? fun c => c == '[' || c == '(' || c == '{' with
+  | none =>
+    if s.isEmpty || !(s.all isMermaidIdentChar) then none else some { id := String.ofList s }
+  | some idx =>
+    let idPart := s.take idx
+    let opener := s[idx]!
+    let closer : Char := match opener with
+      | '[' => ']'
+      | '(' => ')'
+      | _ => '}'
+    let shape : DiagramNodeShape := match opener with
+      | '[' => .rounded
+      | '(' => .pill
+      | _ => .diamond
+    if idPart.isEmpty || !(idPart.all isMermaidIdentChar) || s.getLast? != some closer then none
+    else
+      some { id := String.ofList idPart
+             label := some (mermaidTrim (String.ofList (((s.drop (idx + 1)).reverse.drop 1).reverse)))
+             shape := some shape }
+
+/-- Parse one statement line into its source ref and successive `-->` targets with optional
+`|label|` edge labels; a line without `-->` declares a standalone node. -/
+private def parseMermaidStmt (line : String) : Option (MermaidRef × List (String × MermaidRef)) :=
+  match line.splitOn "-->" with
+  | [] => none
+  | srcSeg :: rest => do
+    let src ← parseMermaidRef srcSeg
+    let targets ← rest.mapM fun seg => do
+      let t := mermaidTrim seg
+      if t.startsWith "|" then
+        match (String.ofList (t.toList.drop 1)).splitOn "|" with
+        | label :: tail =>
+          let ref ← parseMermaidRef (String.intercalate "|" tail)
+          return (mermaidTrim label, ref)
+        | [] => none
+      else
+        return ("", ← parseMermaidRef t)
+    return (src, targets)
+
+/-- Accumulator keeping node declaration order, last label/shape per node and all edges. -/
+private structure MermaidAcc where
+  order : List String := []
+  labels : List (String × String) := []
+  shapes : List (String × DiagramNodeShape) := []
+  edges : List (String × String × String) := []
+
+private def mermaidInsert (acc : MermaidAcc) (ref : MermaidRef) : MermaidAcc :=
+  let acc := if acc.order.contains ref.id then acc else { acc with order := acc.order ++ [ref.id] }
+  let acc := match ref.label with
+    | some l => { acc with labels := (acc.labels.filter (·.1 != ref.id)) ++ [(ref.id, l)] }
+    | none => acc
+  match ref.shape with
+  | some sh => { acc with shapes := (acc.shapes.filter (·.1 != ref.id)) ++ [(ref.id, sh)] }
+  | none => acc
+
+/-- Longest-path rank per node id via bounded relaxation (at most one pass per node). -/
+private def mermaidRanks (order : List String) (edges : List (String × String × String)) :
+    List (String × Nat) :=
+  let relax (m : List (String × Nat)) (e : String × String × String) : List (String × Nat) :=
+    match m.lookup e.1, m.lookup e.2.1 with
+    | some ra, some rb =>
+      if rb ≤ ra then m.map fun p => if p.1 == e.2.1 then (p.1, ra + 1) else p else m
+    | _, _ => m
+  ((List.range order.length).foldl (fun m _ => edges.foldl relax m) (order.map (·, 0)))
+
+/-- Parse a Mermaid flowchart source into a `DiagramSpec`, or `none` when the subset does
+not match (callers then render the text plainly). Widget ids stay unassigned: the renderer
+owns the reserved widget-id band. -/
+def parseMermaidFlowchart (src : String) : Option DiagramSpec := do
+  let lines := (src.splitOn "\n").filterMap fun l =>
+    let t := mermaidTrim l
+    if t.isEmpty then none else some t
+  match lines with
+  | [] => none
+  | header :: stmts =>
+    let dir : DiagramDirection ←
+      match (header.splitOn " ").filter (· != "") with
+      | [kind, d] =>
+        if kind == "graph" || kind == "flowchart" then
+          match d with
+          | "LR" => some .leftRight
+          | "TD" | "TB" => some .topDown
+          | _ => none
+        else none
+      | _ => none
+    let acc ← stmts.foldlM (fun (acc : MermaidAcc) line => do
+      let (src, targets) ← parseMermaidStmt line
+      let acc := mermaidInsert acc src
+      targets.foldlM (fun acc (lbl, dst) => do
+        let acc := mermaidInsert acc dst
+        pure { acc with edges := acc.edges ++ [(src.id, dst.id, lbl)] }) acc) {}
+    let ids := acc.order
+    let ranks := mermaidRanks ids acc.edges
+    let maxRank := ranks.foldl (fun acc p => max acc p.2) 0
+    let colOf : List (String × Nat) := Id.run do
+      let mut col : List (String × Nat) := []
+      for r in [:maxRank + 1] do
+        let inRank := ids.filter fun id => ranks.lookup id == some r
+        col := col ++ inRank.mapIdx fun i id => (id, i)
+      return col
+    let nodes := ids.mapIdx fun i id =>
+      ({ id := i
+         label := (acc.labels.lookup id).getD id
+         rank := (ranks.lookup id).getD 0
+         column := (colOf.lookup id).getD 0
+         shape := (acc.shapes.lookup id).getD .rounded } : DiagramNode)
+    let edges := acc.edges.map fun e =>
+      ({ fromId := (ids.findIdx? (· == e.1)).getD 0
+         toId := (ids.findIdx? (· == e.2.1)).getD 0
+         label := e.2.2 } : DiagramEdge)
+    return { direction := dir, nodes := nodes, edges := edges }
+
 /-- Positioned diagram node in `SubPx` after Sugiyama rank/column assignment. -/
 structure PositionedDiagramNode where
   node : DiagramNode
