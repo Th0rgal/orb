@@ -256,9 +256,20 @@ test("open, rename and move replay (2026-11-12): the row never vanishes and the 
   let row = mission(id, "Draft title", 5, { folder: "" });
   const others = [1, 2, 3].map(i => mission(`o${i}`, `Other ${i}`, 50 + i));
   const stale = { ...row };
-  let detailReads = 0;
-  core.list = project => project === "other" ? [] : [row, ...others];
-  core.get = mid => mid === id ? (++detailReads === 2 ? stale : row) : others.find(o => o.id === mid);
+  let staleReads = true;
+  let rosterReads = 0;
+  core.list = project => {
+    rosterReads++;
+    return project === "other" ? [] : [staleReads ? stale : row, ...others];
+  };
+  core.get = mid => mid === id ? (staleReads ? stale : row) : others.find(o => o.id === mid);
+  const refresh = async (stale: boolean) => {
+    staleReads = stale;
+    const before = rosterReads;
+    await poll(page);
+    await expect.poll(() => rosterReads).toBeGreaterThan(before);
+    await settle(page);
+  };
   await core.install(page);
   await page.route(`**/api/control/missions/${id}/title`, async route => {
     row = { ...row, title: route.request().postDataJSON().title, metadata_updated_at: at(90) };
@@ -288,7 +299,11 @@ test("open, rename and move replay (2026-11-12): the row never vanishes and the 
   await dialog.getByRole("textbox").fill("Final title");
   await dialog.getByRole("button", { name: "Rename", exact: true }).click();
   await expect(target).toContainText("Final title");
-  for (let i = 0; i < 3; i++) { await poll(page); await settle(page); }   // includes the stale detail answer
+  // An acknowledgement can arrive before any roster confirms the rename.
+  await refresh(true);
+  await refresh(false);
+  // The open detail and roster may both go stale after a confirmed row.
+  await refresh(true);
   await tree.getByRole("button", { name: "Other 1", exact: true }).click();
   await target.click();                                   // reopen
   await poll(page); await settle(page);
@@ -303,7 +318,7 @@ test("open, rename and move replay (2026-11-12): the row never vanishes and the 
   const moved = { ...row, folder: "Research", placement_revision: 1 };
   const beforeMove = row;
   row = moved;
-  await poll(page); await settle(page);
+  await refresh(false);
   const folder = tree.getByRole("button", { name: "Research", exact: true });
   await expect(folder).toBeVisible();
   if (!(await target.isVisible())) await folder.click();
@@ -313,4 +328,7 @@ test("open, rename and move replay (2026-11-12): the row never vanishes and the 
   row = moved; await poll(page); await settle(page);
   await expect(target).toContainText("Final title");
   await expect(target).not.toHaveAttribute("data-depth", "1");
+  row = { ...moved, title: "Draft title", metadata_updated_at: at(100) };
+  await refresh(false);
+  await expect(target).toContainText("Draft title");
 });

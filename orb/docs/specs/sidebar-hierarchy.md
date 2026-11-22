@@ -3,9 +3,13 @@
 Status: normative. Applies to the desktop Orb (`orb/`), and in reduced form to
 iOS (`ios_dashboard/`) and Android (`android_dashboard/`).
 
-Once a full row reports a rename with `metadata_updated_at`, a full response
-with an older or missing metadata timestamp cannot roll back the title. Other
-fields in that response still follow their usual merge rules.
+**A confirmed rename survives stale reads.** The open conversation and
+project roster can deliver their copies in either order. Once a row has a
+title stamped by Core, a full or partial row carrying older or missing
+`metadata_updated_at` keeps that title and timestamp. Other fields in the
+response follow their usual merge rules, including status. A later timestamp
+can rename the mission again, including back to its previous title. Legacy rows without a known title timestamp keep merging
+in arrival order.
 
 ## Problem
 
