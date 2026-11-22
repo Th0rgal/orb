@@ -1581,6 +1581,12 @@ def formatEpochIso8601Utc (epochSecs : UInt64) : String :=
     else s!"{k}"
   s!"{pad4 yr}-{pad2 m}-{pad2 d}T{pad2 hh}:{pad2 mm}:{pad2 ss}Z"
 
+/-- Both sequence columns exist in imported stores. Two indexed endpoints avoid
+    rescanning the entire transcript for each streamed fragment. -/
+private def nextEventSeqSql : String :=
+  "SELECT 1 + MAX(0, COALESCE((SELECT MAX(seq) FROM mission_events WHERE mission_id=?1 AND seq>0),0), " ++
+  "COALESCE((SELECT MAX(sequence) FROM mission_events WHERE mission_id=?1),0));"
+
 /-- Server start only (after the listen socket is bound, before any turn is launched):
     a mission still `active` with no surviving run belonged to a previous Core process.
     Left `active` it would look busy forever and its armed wake-up would never be
@@ -1609,7 +1615,7 @@ def interruptTurnsLostToRestart (mDb : SqliteDb) : IO Nat := do
       let mid := (row[0]?).getD ""
       if mid.isEmpty then continue
       let seqRes ← execParamQuery mDb
-        "SELECT COALESCE(MAX(CASE WHEN COALESCE(seq,0)>=COALESCE(sequence,0) THEN COALESCE(seq,0) ELSE COALESCE(sequence,0) END),0)+1 FROM mission_events WHERE mission_id=?1;"
+        nextEventSeqSql
         #[mid]
       let nextSeq : UInt64 :=
         match seqRes with
@@ -4634,7 +4640,7 @@ def appendMissionEvent
           discard <| sqliteExecRaw st.missionsDb.handle "ROLLBACK;"
           return .error "event_generation_fenced"
       let seqRes ← execParamQueryUnlocked st.missionsDb
-        "SELECT COALESCE(MAX(CASE WHEN COALESCE(seq,0)>=COALESCE(sequence,0) THEN COALESCE(seq,0) ELSE COALESCE(sequence,0) END), 0) + 1 FROM mission_events WHERE mission_id=?1;" #[missionId]
+        nextEventSeqSql #[missionId]
       let .ok srs := seqRes
         | discard <| sqliteExecRaw st.missionsDb.handle "ROLLBACK;"
           return .error "mission_events_seq_failed"
