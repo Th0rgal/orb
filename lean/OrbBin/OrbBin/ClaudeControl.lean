@@ -1665,6 +1665,23 @@ def antigravityAccountError? (diagnostic : String) : Option String :=
     some "Antigravity needs a native Google sign-in for the account on this machine. Check its connection in Inference before retrying."
   else none
 
+/-- The native holder and the transcript decoder share this closed diagnostic vocabulary. -/
+def antigravityNativeError? : String → Option String
+  | "native_turn_timeout" => some "The native Antigravity turn reached its time limit."
+  | "native_shared_workspace_denied" => some "Orb could no longer verify the native account and workspace for this turn."
+  | "native_holder_protocol" => some "The native Antigravity connection returned an invalid response."
+  | "native_holder_unavailable" => some "Orb could not start the native Antigravity runner."
+  | "native_turn_already_claimed" => some "This native Antigravity job has already started."
+  | _ => none
+
+private def antigravityFailure (event : JVal) (diagnostic : JVal) : String := Id.run do
+  if let some message := event.fieldStr? "code" >>= antigravityNativeError? then return message
+  if let .str text := diagnostic then
+    if ["Native turn unavailable", "Native profile or bound workspace unavailable",
+        "A tool permission was declined and Antigravity ended the turn without an assistant response.",
+        "Antigravity ended the turn without an assistant response."].contains text then return text
+  return (antigravityAccountError? (renderCompact diagnostic)).getD "Antigravity turn failed"
+
 /-- Extract session ID, assistant text, tool activities, thinking, and structured JSON errors from a single stdout line. -/
 def parseOneShotHarnessEvent (harness : String) (rawLine : String) : OneShotLineParsed := Id.run do
   let trimmed := rawLine.trimAscii.toString
@@ -1672,6 +1689,8 @@ def parseOneShotHarnessEvent (harness : String) (rawLine : String) : OneShotLine
   if harness == "antigravity" then
     let .ok event := OrbBin.Json.parse trimmed | return { errorMsg? := antigravityAccountError? trimmed }
     match event.fieldStr? "event" with
+    | some "error" =>
+      return { errorMsg? := some (antigravityFailure event (event.fieldOrNull "message")) }
     | some "init" =>
       return { sessionId? := event.fieldStr? "conversation_id" >>= parseUuidCanonical? }
     | some "step_update" =>
@@ -1692,13 +1711,11 @@ def parseOneShotHarnessEvent (harness : String) (rawLine : String) : OneShotLine
       let ok := result.fieldStr? "status" == some "SUCCESS"
       let usage := result.fieldOrNull "usage"
       let error := result.fieldOrNull "error"
-      let diagnostic := (result.fieldStr? "error").getD "Antigravity turn failed"
-      let accountError := antigravityAccountError? (renderCompact error)
       return {
         sessionId? := result.fieldStr? "conversation_id" >>= parseUuidCanonical?
         textDelta := if ok then (result.fieldStr? "response").getD "" else ""
         finalTextFallback := true
-        errorMsg? := if ok then none else some (accountError.getD (diagnostic.take 500).toString)
+        errorMsg? := if ok then none else some (antigravityFailure result error)
         inputTokens? := usage.fieldUInt64? "input_tokens", outputTokens? := usage.fieldUInt64? "output_tokens",
         cacheReadTokens? := usage.fieldUInt64? "cache_read_tokens" }
     | _ => return {}
