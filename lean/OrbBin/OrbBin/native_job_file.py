@@ -72,6 +72,7 @@ def job_file(root, request, private_name):
         content = request.get("content")
         if not isinstance(content, str) or len(content.encode("utf-8")) > MAX_BYTES:
             raise ValueError("Invalid workspace contents")
+        mode = 0o600
         try:
             info = os.stat(name, dir_fd=parent, follow_symlinks=False)
         except FileNotFoundError:
@@ -79,11 +80,14 @@ def job_file(root, request, private_name):
         else:
             if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
                 raise ValueError("Expected a private regular file")
+            mode = info.st_mode & 0o777
         temp = ".orb-write-" + secrets.token_hex(16)
         fd = os.open(temp, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600, dir_fd=parent)
         try:
             with os.fdopen(fd, "wb") as dst:
                 size = dst.write(content.encode("utf-8"))
+                dst.flush()
+                os.fchmod(dst.fileno(), mode)
             os.replace(temp, name, src_dir_fd=parent, dst_dir_fd=parent)
         finally:
             with contextlib.suppress(FileNotFoundError):

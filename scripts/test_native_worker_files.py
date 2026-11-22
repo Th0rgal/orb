@@ -52,6 +52,11 @@ def main():
         assert not tool("write_file", "src/proof", "hello")["result"]["isError"]
         assert tool("read_file", "src/proof", readonly=True)["result"]["content"][0]["text"] == "hello"
         assert (checkout / "src/proof").read_text() == "hello"
+        proof = checkout / "src/proof"
+        assert proof.stat().st_mode & 0o7777 == 0o600
+        proof.chmod(0o6751)
+        assert not tool("write_file", "src/proof", "hello")["result"]["isError"]
+        assert proof.stat().st_mode & 0o7777 == 0o751
         before = calls[:]
         assert tool("write_file", "src/proof", "blocked", readonly=True)["error"]["code"] == -32602
         assert tool("exec", "src/proof")["error"]["code"] == -32602
