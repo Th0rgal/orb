@@ -6,7 +6,7 @@ namespace OrbCore.NativeGoalApproval
 open OrbCore.Store OrbBin.Json OrbBin.Sqlite
 open OrbCore.NativeSharedWorkspace (Placement)
 
-def ticketPrefix :=  "native-goal-approval-"
+def ticketPrefix := "native-goal-approval-"
 
 def currentGoal (store : CoreStore) (p : Placement) : IO Bool := do
   let .ok rows ← execParamQuery store.missionsDb
@@ -15,8 +15,8 @@ def currentGoal (store : CoreStore) (p : Placement) : IO Bool := do
      "AND m.run_generation=CAST(?4 AS INTEGER) AND m.status='active' AND j.state='running';")
     #[p.mission,p.job,p.owner,toString p.runGeneration] | return false
   let some #[raw] := rows[1]? | return false
-  let .ok meta := parse raw | return false
-  return meta.fieldNat? "goal_generation" == some p.runGeneration
+  let .ok jobPayload := parse raw | return false
+  return jobPayload.fieldNat? "goal_generation" == some p.runGeneration
 
 def allowedKeys := #["title","prompt","backend","model_override","remote_node_id","idempotency_key"]
 
@@ -49,13 +49,14 @@ def answer (store : CoreStore) (id owner explicitMid action : String) (now : UIn
   let .ok rows ← execParamQuery store.missionsDb
     ("UPDATE native_goal_approvals SET decision=?1 WHERE id=?2 AND owner=?3 AND (?4='' OR mission=?4) " ++
      "AND expires>CAST(?5 AS INTEGER) AND decision='pending' AND EXISTS(SELECT 1 FROM missions m " ++
-     "WHERE m.id=mission AND m.owner_user_id=?3 AND m.placement_job_id=job AND m.status='active' AND m.goal_mode=1) RETURNING mission;")
+     "WHERE m.id=mission AND m.owner_user_id=?3 AND m.placement_job_id=job AND m.status='active' AND m.goal_mode=1 AND EXISTS(SELECT 1 FROM remote_node_jobs j WHERE j.job_id=m.placement_job_id AND j.state='running')) RETURNING mission;")
     #[result,id,owner,explicitMid,toString now] | return none
   return rows[1]?.bind (·[0]?)
 
 def ask (store : CoreStore) (p : Placement) (args : JVal) (now : UInt64)
     (announce : String → JVal → IO Unit) (live : IO Bool) : IO JVal := do
   unless validArgs args && (← currentGoal store p) do return .null
+  discard <| execParamQuery store.missionsDb "DELETE FROM native_goal_approvals WHERE expires<=CAST(?1 AS INTEGER);" #[toString now]
   let id := ticketPrefix ++ (← OrbBin.PosixExt.newUuidV4)
   let expiry := min p.expires (now.toNat + 90)
   let .ok _ ← execParamQuery store.missionsDb
