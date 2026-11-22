@@ -1,4 +1,3 @@
-/* linux_shell/gtk_chrome.c — Hybrid Native Chrome GTK3 split view & sidebar (<= 220 LOC). */
 #define _POSIX_C_SOURCE 200809L
 #include "gtk_chrome.h"
 #include "gtk_icons.h"
@@ -14,6 +13,7 @@
 #if defined(ORB_HAS_WEBKITGTK)
 #include "gtk_leanui.h"
 #include "gtk_disclosure.h"
+#include "gtk_shortcuts.h"
 typedef struct { GtkWidget *win, *wv, *paned, *sb_box, *sb_list, *back_btn, *fwd_btn, *foot_btn, *foot_badge; OrbIconSpinner spin; JSCContext *jsc; GIOChannel *sse_ch; guint sse_src, retry_src; GString *sse_buf; GtkCssProvider *css; unsigned port; char token[128], *sb_scope; guint64 sb_req_gen, sb_scope_gen, sb_min_gen, sb_rev; int sb_inflight, sb_dirty, closed; } OrbGtkChrome;
 typedef struct { OrbGtkChrome *c; unsigned port; char token[128], *body, *resp; int kind; guint64 gen; } RpcJob;
 static int accept_sb_resp(char **cur_sc, guint64 *sc_gen, guint64 min_gen, guint64 *cur_rv, guint64 rg, const char *sc, double rv) {
@@ -151,7 +151,7 @@ static GtkWidget *make_tb_btn(OrbGtkChrome *c, const char *ic, const char *tip, 
 }
 static void on_foot_clicked(GtkButton *b, gpointer ud) { (void)b; OrbGtkChrome *c = (OrbGtkChrome *)ud; if (!gtk_style_context_has_class(gtk_widget_get_style_context(c->foot_btn), "orb-selected")) { eval_wv_target(c, "footer", "settings"); } }
 static void on_win_destroy(GtkWidget *w, gpointer ud) { (void)w; OrbGtkChrome *c = (OrbGtkChrome *)ud; c->closed = 1; orb_spinner_stop(&c->spin); }
-static gboolean on_win_key_press(GtkWidget *w, GdkEventKey *ev, gpointer ud) { (void)w; OrbGtkChrome *c = (OrbGtkChrome *)ud; guint mod = ev->state & gtk_accelerator_get_default_mod_mask(); gboolean prim = (mod & (GDK_CONTROL_MASK | GDK_SUPER_MASK | GDK_META_MASK)) != 0; if (prim && (ev->keyval == GDK_KEY_Delete || ev->keyval == GDK_KEY_KP_Delete) && !gtk_widget_has_focus(c->wv) && !GTK_IS_ENTRY(gtk_window_get_focus(GTK_WINDOW(c->win)))) { return orb_sel_delete(c->wv, c->sb_list, "m:current"); } /* WebView focus: ProjectFiles handles it (never while typing) */ if (ev->keyval == GDK_KEY_Escape && !gtk_widget_has_focus(c->wv) && orb_sel_clear(c->sb_list)) { return TRUE; } if (ORB_EMBEDDED && prim && !ev->is_modifier && !gtk_widget_has_focus(c->wv)) { gtk_widget_grab_focus(c->wv); return gtk_window_propagate_key_event(GTK_WINDOW(w), ev); } return FALSE; }
+static gboolean on_win_key_press(GtkWidget *w, GdkEventKey *ev, gpointer ud) { OrbGtkChrome *c = ud; return orb_gtk_window_shortcut(GTK_WINDOW(w), ev, c->wv, c->sb_list); }
 static void on_script_msg(WebKitUserContentManager *ucm, WebKitJavascriptResult *jr, gpointer ud) {
     (void)ucm; OrbGtkChrome *c = (OrbGtkChrome *)ud; JSCValue *v = webkit_javascript_result_get_js_value(jr); if (!v || !jsc_value_is_object(v)) { return; }
     char *cmd = jv_str(v, "command"); JSCValue *args = jsc_value_object_get_property(v, "args");
