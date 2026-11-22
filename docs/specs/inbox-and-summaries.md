@@ -80,3 +80,5 @@ the server-side invariants on `POST /api/control/missions/:id/inbox-digest`:
    - Core enforces the same 1-hour quiet window on `mission.updated_at` (with a
      5-second clock-skew tolerance, `3,595s`), serving exact cache hits for free
      and returning `409 Conflict` otherwise.
+
+The desktop turn recap keeps the verdict, decision and suggestions when the transcript already renders a Mermaid diagram. It omits a verbatim fallback outcome that repeats the diagram source, including a fallback truncated inside the fence. An independently written outcome remains visible.
