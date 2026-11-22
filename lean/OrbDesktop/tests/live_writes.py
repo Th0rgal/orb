@@ -12,6 +12,8 @@ import signal
 import sys
 import socket
 import subprocess
+import select as polling
+import lost_reply
 import tempfile
 import time
 import urllib.request
@@ -51,7 +53,7 @@ def process(args, env, cwd, stdin=None):
             child.wait()
 
 
-def run(tmp, mouse=False, menu_client=None, providers=False):
+def run(tmp, mouse=False, menu_client=None, providers=False, replay=None):
     with socket.socket() as s:
         s.bind(('127.0.0.1', 0))
         port = s.getsockname()[1]
@@ -70,7 +72,8 @@ def run(tmp, mouse=False, menu_client=None, providers=False):
     home = tmp / 'home'
     home.mkdir()
     harness = tmp / 'codex'
-    harness.write_text(f"#!{sys.executable}\n" + r"""import json
+    launches = tmp / 'launches'
+    harness.write_text(f"#!{sys.executable}\nimport os\nwith open({str(launches)!r}, 'a') as f: print(os.getpid(), file=f)\n" + r"""import json
 import time
 
 for i in range(300):
@@ -93,11 +96,17 @@ for i in range(300):
             account = api('/api/ai/providers', {'provider_type': 'custom', 'name': 'Indigo',
                           'base_url': base, 'api_key': 'fixture-key', 'enabled': True})['id']
             token = api('/api/auth/login', {'username': 'provider-fixture', 'password': password})['token']
-        (tmp / 'connection.json').write_text(json.dumps({'api_url': base, 'token': token}))
+        def occupy(mid):
+            api('/api/control/message', {'mission_id': mid, 'content': 'other client'})
+            wait('other child registered', lambda: launches.exists() and launches.read_text().strip())
+        endpoint, attempts = stack.enter_context(lost_reply.proxy(port, occupy if replay == 'busy' else None)) if replay else (base, [])
+        (tmp / 'connection.json').write_text(json.dumps({'api_url': endpoint, 'token': token}))
         assert api('/api/control/missions') == []
         if menu_client is None and not providers:
             api('/api/projects', {'slug': 'menu-test', 'title': 'Menu test'})
             api('/api/projects', {'slug': 'source', 'title': 'Source project'})
+        if replay:
+            mid = api('/api/control/missions', {'title': 'Indigo', 'project': 'source', 'backend': 'codex'})['id']
         config = tmp / 'sway.conf'
         config.write_text('output * mode 1000x700\ndefault_border none\nxwayland disable\n')
         graphical = dict(os.environ, XDG_RUNTIME_DIR=str(tmp), WLR_BACKENDS='headless', WLR_RENDERER='pixman',
@@ -109,7 +118,7 @@ for i in range(300):
         def sway(*args):
             return subprocess.check_output(['swaymsg', '-r', *args], env=graphical)
 
-        if mouse:
+        if mouse or replay:
             pointer = Pointer(graphical)
             stack.callback(pointer.close)
             click = pointer.click
@@ -154,19 +163,30 @@ for i in range(300):
             return
         edit = stack.enter_context(wayland_ime.session(graphical))
         typed, committed = 'Indigo ' + secrets.token_hex(5) + ' ', '日本語'
-        if mouse:
+        sidebar = '10,110 195x305'
+        if replay:
+            if not widget('indigo', sidebar):
+                click(*wait('Source project', lambda: widget('source', sidebar)))
+            click(*wait('existing mission', lambda: widget('indigo', sidebar)))
+            time.sleep(.5)
+            click(540, 626)
+            keys(typed)
+            edit([(committed, 0, 0)], preedit='未確定')
+            keys('-k', 'Tab')  # abandon the preedit before clicking Send
+            click(946, 626)
+        elif mouse:
             source = wait('Source project', lambda: widget('source', '10,110 195x220'))
             click(*source)
             click(195, source[1])  # Start a draft in that project
-            click(315, 388)  # Machine, then the local Core
-            click(326, 447)
-            click(353, 388)  # Harness, then Codex below the default choice
-            choices = '305,396 450x210'
+            click(*wait('machine picker', lambda: widget('machine', '300,280 300x65')))
+            click(*wait('local Core', lambda: widget('orb-core', '300,320 400x200')))
+            click(370, 413)  # Harness in the composer toolbar
+            choices = '305,400 550x280'
             click(*wait('Codex harness', lambda: widget('codex', choices)))
             # Click the name at the right end of a provider-qualified model row.
             # Previously this visible suffix lay outside the popup hit region.
-            click(410, 388)
-            models = '320,396 590x213'
+            click(454, 413)  # Model picker beside the selected Codex harness
+            models = '305,395 645x300'
             click(*wait('visible Astra model suffix', lambda: widget('astra', models)))
             click(540, 347)
             keys(typed)
@@ -174,10 +194,9 @@ for i in range(300):
             # Undo the IME replacement; the next replacement must still see 猫 at the caret.
             keys('-M', 'ctrl', '-k', 'z', '-m', 'ctrl')
             edit([("語", len("猫".encode()), 0)])
-            click(944, 347)
+            click(881, 413)  # Send at the right edge of the composer toolbar
         else:
-            roster = '10,110 195x180'
-            wait('live project roster', lambda: any(word == 'source' for word, _, _ in read_words(crop(roster), roster)))
+            wait('live project roster', lambda: widget('source', sidebar))
             keys('-M', 'ctrl', '-k', 'n', '-m', 'ctrl', '-s', '200', typed)
             edit([(committed, 0, 0)])
             keys('-k', 'Return')
@@ -185,6 +204,19 @@ for i in range(300):
         assert len(created) == 1
         mid = created[0]['id']
         path = '/api/control/missions/' + mid
+        if replay == 'busy':
+            wait('busy refusal', lambda: len(attempts) == 1)
+            def messages():
+                return [e['content'] for e in api(path + '/events') if e['event_type'] == 'user_message']
+            assert messages() == ['other client']
+            api(path + '/cancel', {})
+            time.sleep(2)
+            click(946, 626)
+            wait('retained draft delivered', lambda: messages() == ['other client', typed + committed])
+            wait('second harness launch', lambda: len(launches.read_text().splitlines()) >= 2)
+            assert len(attempts) == len(set(attempts)) == len(launches.read_text().splitlines()) == 2
+            api(path + '/cancel', {})
+            return
         if mouse:
             mission = api(path)
             assert mission['project'] == 'source' and mission['backend'] == 'codex', mission['id']
@@ -198,6 +230,18 @@ for i in range(300):
                 return row, messages[0]
 
         active, message = wait('exact submitted text on active mission', observed)
+        pid = int(wait('one real launch', lambda: launches.exists() and launches.read_text().strip()))
+        pidfd = os.pidfd_open(pid)
+        stack.callback(os.close, pidfd)
+        exited = polling.poll()
+        exited.register(pidfd, polling.POLLIN)
+        assert not exited.poll(0)
+        if replay:
+            time.sleep(1.5)
+            click(946, 626)
+            wait('same logical Send retried', lambda: len(attempts) >= 2)
+            assert attempts == [message['event_id']] * 2 and observed()
+            assert launches.read_text().splitlines() == [str(pid)]
         def streamed_events():
             return [e for e in api(path + '/events') if e['event_type'] == 'text_delta' and
                     e['mission_id'] == mid and (e.get('content') or '').startswith('Transcript line')]
@@ -217,17 +261,19 @@ for i in range(300):
             pointer.scroll(620, 330, 10000)
             wait('wheel returned to live output', lambda: transcript_frame() != top)
         time.sleep(1.5)  # wait for the desktop status subscription
-        if mouse:
+        if mouse or replay:
             click(946, 626)
         else:
             keys('-k', 'Tab', '-k', 'Tab', '-k', 'Return')
         stopped = wait('hosted stop', lambda: (r if (r := api(path))['status'] == 'interrupted' else None))
+        assert exited.poll(3000), f'original harness {pid} still alive after Stop'
         time.sleep(1.5)
         if mouse:
             sidebar_region = '10,110 195x305'
             def locate(label, region):
                 rows = read_words(crop(region), region)
-                return next(((x, y) for text, x, y in rows if text == label), None)
+                return next(((x, y) for text, x, y in rows
+                             if text == label or (label == 'move' and text == 'moveto')), None)
             def select(label, region):
                 click(*wait('visible ' + label, lambda: locate(label, region)))
             def open_actions():
@@ -241,6 +287,7 @@ for i in range(300):
             edit([('Indigo edited', len(api(path)['title'].encode()), 0)])
             select('save', region)
             wait('renamed mission', lambda: api(path)['title'] == 'Indigo edited')
+            wait('renamed row rendered', lambda: locate('edited', sidebar_region) and not locate('save', region))
             region = open_actions()
             select('move', region)
             select('menu', region)
@@ -300,5 +347,7 @@ if __name__ == '__main__':
             run(Path(directory), mouse=True, menu_client=sys.argv[2])
         elif sys.argv[1:] == ["--providers"]:
             run(Path(directory), mouse=True, providers=True)
+        elif sys.argv[1:] in (['all'], ['busy']):
+            run(Path(directory), replay=sys.argv[1])
         else:
             run(Path(directory), mouse="--mouse" in sys.argv)

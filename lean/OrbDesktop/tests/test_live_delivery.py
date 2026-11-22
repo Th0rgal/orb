@@ -674,6 +674,25 @@ class Delivery(unittest.TestCase):
             with self.subTest(action=action, reason=reason), patch.object(live, 'mutate', side_effect=error):
                 self.assertEqual(live.run_mutation('binding', action, 'm'), expected)
 
+    def test_native_send_distinguishes_busy_goal_refusal_and_another_receipt(self):
+        key = 'fd1bb40a-51e4-47c7-a55d-5b0cae729598'
+        for code, payload, expected in [
+                (409, {'id': key, 'message_accepted': False, 'error': 'local_run_busy'}, 2),
+                (400, {'error': 'remote_goal_followup_unsupported'}, 4),
+                (200, {'id': 'another-receipt'}, 1),
+                (200, {'id': key, 'message_accepted': True}, 0)]:
+            with self.subTest(code=code, payload=payload), patch.object(live, 'Connection') as factory:
+                conn = factory.return_value
+                conn.binding = 'bound'
+                if code == 200:
+                    conn.request.return_value = payload
+                else:
+                    conn.request.side_effect = live.urllib.error.HTTPError('http://localhost', code, '', {},
+                                                                           io.BytesIO(json.dumps(payload).encode()))
+                with patch.object(sys, 'stdin', io.TextIOWrapper(io.BytesIO(b'test message'))):
+                    self.assertEqual(live.run_mutation('bound', 'send', 'mission', key), expected)
+                self.assertEqual(conn.request.call_args.kwargs['body']['client_message_id'], key)
+
     def test_folder_browser_uses_selected_machine_and_preserves_absolute_paths(self):
         for machine, route in [('core', '/api'), ('uruk', '/api/remote-nodes/uruk')]:
             with self.subTest(machine=machine), patch.object(live, 'Connection') as factory:

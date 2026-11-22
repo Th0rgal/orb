@@ -217,6 +217,12 @@ def stepEvent (rt : RuntimeState σ) (onEvent : σ → Event → σ × Damage) (
         else rt
       else rt
     | _ => rt
+  let lostEditor := rt.focus.owner == some 1 &&
+    (rt1.focus.owner != some 1 || (rt.windowFocused && !rt1.windowFocused))
+  let rt1 := if lostEditor then
+      let (app, dmg) := onEvent rt1.app (.preedit "" 0 0)
+      { rt1 with app, damage := dmg.elim rt1.damage (Damage.add rt1.damage) }
+    else rt1
   let isText := match ev with
     | .text _ | .preedit .. | .imeBatch .. => true
     | _ => false
@@ -475,7 +481,7 @@ def runWindow {σ : Type} (rt0 : RuntimeState σ)
         | some id => if rt.focusableOrder.contains id then 4 else 1
         | none => 1
       let wl ← Wayland.syncCursor rt.wayland shape
-      let wl ← Wayland.syncTextFocus wl (rt.focus.owner == some 1 && rt.focusableOrder.contains 1)
+      let wl ← Wayland.syncTextFocus wl (rt.windowFocused && rt.focus.owner == some 1 && rt.focusableOrder.contains 1)
       rt := { rt with wayland := wl }
       if rt.framesRendered != rendered then
         let wl ← Wayland.present rt.wayland rt.vulkan.framebuffer

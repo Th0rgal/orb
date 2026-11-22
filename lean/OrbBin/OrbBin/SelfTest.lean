@@ -1057,7 +1057,26 @@ private def testAntigravityProviderDenial : IO Unit := do
     (some "Google denied this Antigravity request. Check the account’s access to the selected model.")
   assertEq "A terms reference alone does not classify a denial" (agEvent "terms of service").errorMsg? none
 
+private def checkRetiredGroupIdentity : IO Unit := do
+  -- Simulate numerical PGID reuse: this live child now owns the number in a
+  -- completed generation's handle. A delayed Stop must never signal it.
+  let other ← spawnPgrp "/bin/sh" #["-c", "exec sleep 10"] (← environList)
+  let expired : HarnessProcessGroup := {
+    toSpawnedPgrp := other
+    lock := ← Std.Mutex.new ()
+    state := ← IO.mkRef (.reaped 0) }
+  let warmMgr ← newWarmHarnessManager
+  warmMgr.activeGroupsRef.set #[("stale-generation", expired)]
+  stopHarnessRun warmMgr "stale-generation"
+  let stillRunning := (← waitpidWnohang other.pid) == 0xFFFFFFFF
+  if stillRunning then
+    discard <| killSig (-other.pid) 9
+    discard <| waitpidBlock other.pid
+  assertTrue "delayed Stop preserves the process that reused a reaped PGID" stillRunning
+
+set_option maxRecDepth 2048 in
 def runAllTests : IO UInt32 := do
+  checkRetiredGroupIdentity
   runCodexMessageBoundaryTests
   let prompt := "--model is part of this prompt\nwith 'quotes' and a trailing newline\n"
   assertEq "Antigravity delivers a flag-shaped prompt verbatim alongside model, effort and resume"
@@ -1748,5 +1767,6 @@ def runAllTests : IO UInt32 := do
   try IO.FS.removeDirAll tmpDir catch _ => pure ()
   IO.println "=== ALL ORB-BIN WAVE 1 SELF-TESTS PASSED ==="
   return 0
+
 
 end OrbBin.SelfTest

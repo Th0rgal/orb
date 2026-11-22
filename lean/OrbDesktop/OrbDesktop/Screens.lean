@@ -1148,7 +1148,9 @@ def buildDesktopScreen (st : DesktopState) (availW availH : SubPx)
     | .missionTranscript =>
       let bodyH := availH - headerH - composerH
       let bodyNode := buildMissionTranscriptBody st mainW bodyH runs
-      let composerNode := buildComposerWidget theme mainW composerH st.composer []
+      let retrySend := st.unconfirmedSend.any (·.2 == st.composer.text)
+      let composerNode := buildComposerWidget theme mainW composerH
+        { st.composer with isRunning := st.composer.isRunning && !retrySend } []
         (if st.liveData then some (liveComposerControls st (min (pxToSub 748) (mainW - pxToSub 68))) else none)
       WidgetNode.box
         (BoxStyle.col 0 |>.withFixedSize mainW availH |>.withBg mainFill)

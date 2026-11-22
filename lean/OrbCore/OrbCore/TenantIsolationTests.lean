@@ -790,6 +790,30 @@ def run (root : String) : IO Unit := do
       let .ok request := parseRequest wire.toUTF8 none | throw (IO.userError "isolation request")
       let .ok response ← dispatchCoreRequest app request now | throw (IO.userError "isolation dispatch")
       return (response.status, (parseBytes response.body).toOption.getD .null)
+    -- A storage refusal must leave a remote follow-up retryable through either desktop endpoint.
+    let queueMid := "remote-queue-write-test"
+    let .ok () ← upsertMission store {
+      id := queueMid, ownerUserId := "member", title := "queue fixture", status := "active",
+      backend := "opencode", modelOverride := "", workingDirectory := path, updatedAt := "",
+      tagsJson := "[\"remote-node:fixture\"]" } | throw (IO.userError "remote queue fixture")
+    let queueApp := { st with remoteSup? := some (← OrbCore.RemoteDispatch.newRemoteJobSupervisor st.cfg.jwtSecret) }
+    for (route, key) in #[("/api/control/message", "retry-native"), (s!"/api/control/missions/{queueMid}/message", "retry-scoped")] do
+      let body := JVal.obj #[("mission_id", .str queueMid), ("content", .str "follow up"), ("client_message_id", .str key)]
+      sql store.missionsDb "CREATE TRIGGER refuse_test_followup BEFORE INSERT ON remote_message_queue BEGIN SELECT RAISE(ABORT,'synthetic queue write failure'); END;"
+      let (failed, refusal) ← send "POST" route member body queueApp
+      check (failed == 500 && refusal.fieldStr? "error" == some "message_enqueue_failed" &&
+        refusal.fieldBool? "queued" == some false && refusal.fieldBool? "message_accepted" == some false) "queue write failure is visible"
+      sql store.missionsDb "DROP TRIGGER refuse_test_followup;"
+      for _ in [0:2] do
+        let (ok, receipt) ← send "POST" route member body queueApp
+        check (ok == 200 && receipt.fieldBool? "queued" == some true) "failed queue write can be retried"
+      let .ok rows ← execParamQuery store.missionsDb
+        "SELECT COUNT(*) FROM remote_message_queue WHERE mission_id=?1 AND message_id=?2;" #[queueMid, key]
+        | throw (IO.userError "query queued follow-up")
+      check ((rows[1]?.bind (·[0]?)) == some "1") "retry persisted one follow-up"
+    sql store.missionsDb "DELETE FROM remote_message_queue WHERE mission_id=?1;" #[queueMid]
+    sql store.missionsDb "DELETE FROM queue_item_receipts WHERE mission_id=?1;" #[queueMid]
+    sql store.missionsDb "DELETE FROM missions WHERE id=?1;" #[queueMid]
     -- The desktop's bounded read must pass the same mission guard as /events,
     -- including zero-oracle denial to an unrelated administrator.
     let bubblePath := "/api/control/missions/member-other/current-bubble"
@@ -801,6 +825,53 @@ def run (root : String) : IO Unit := do
       projection.fieldStr? "text" == some "" && (projection.field? "history").isNone &&
       anonCode == 401 && foreignCode == 404 && missingCode == 404 && renderCompact denied == renderCompact missing)
       "current bubble requires an authenticated mission reader"
+    let placementMid := "retry-managed-placement"
+    let .ok () ← upsertMission store {
+      id := placementMid, ownerUserId := "member", title := "placement fixture", status := "awaiting_user",
+      backend := "opencode", modelOverride := "", workingDirectory := path, updatedAt := "",
+      tagsJson := "[\"remote-node:auto-managed\"]" } | throw (IO.userError "remote placement fixture")
+    let placementApp := { st with managedStore? := none, remoteSup? := some (← OrbCore.RemoteDispatch.newRemoteJobSupervisor st.cfg.jwtSecret) }
+    let placementBody := JVal.obj #[("mission_id", .str placementMid), ("content", .str "resume"), ("client_message_id", .str "placement-retry")]
+    for _ in [0:2] do
+      let (code, rejection) ← send "POST" "/api/control/message" member placementBody placementApp
+      check (code == 409 && rejection.fieldStr? "error" == some "managed_compute_unavailable") "placement preflight releases the same submission ID"
+    sql store.missionsDb "UPDATE missions SET status='active' WHERE id=?1;" #[placementMid]
+    for _ in [0:2] do
+      let (code, accepted) ← send "POST" "/api/control/message" member placementBody placementApp
+      check (code == 200 && accepted.fieldBool? "queued" == some true) "placement recovery accepts and replays the original submission"
+    let .ok placementRows ← execParamQuery store.missionsDb
+      "SELECT COUNT(*) FROM remote_message_queue WHERE mission_id=?1 AND message_id='placement-retry';" #[placementMid]
+      | throw (IO.userError "query recovered follow-up")
+    check ((placementRows[1]?.bind (·[0]?)) == some "1") "placement recovery queues once"
+    let scopedRoute := s!"/api/control/missions/{placementMid}/message"
+    let scopedBody := JVal.obj #[("mission_id", .str placementMid), ("content", .str "scoped"), ("client_message_id", .str "scoped-replay")]
+    let original ← send "POST" scopedRoute member scopedBody placementApp
+    check (original.1 == 200 && original.2.fieldBool? "queued" == some true) "scoped endpoint originally enqueued"
+    sql store.missionsDb "UPDATE missions SET status='awaiting_user' WHERE id=?1;" #[placementMid]
+    sql store.missionsDb "DELETE FROM remote_message_queue WHERE mission_id=?1 AND message_id='scoped-replay';" #[placementMid]
+    let replayed ← send "POST" scopedRoute member scopedBody placementApp
+    check (replayed == original) "scoped endpoint replays the authorized acknowledgment after the live queue row disappears"
+    sql store.missionsDb "UPDATE missions SET tags='[]',placement_kind='managed',status='active' WHERE id=?1;" #[placementMid]
+    check ((← send "POST" scopedRoute member scopedBody placementApp) == original)
+      "an active local mission replays its original remote queue acknowledgment"
+    let foreignReplay ← send "POST" scopedRoute admin scopedBody placementApp
+    let unknownReplay ← send "POST" "/api/control/missions/unknown-scoped-replay/message" admin scopedBody placementApp
+    check (foreignReplay == unknownReplay && foreignReplay.1 == 404) "a queue receipt cannot expose another user's mission"
+    sql store.missionsDb "DELETE FROM remote_message_queue WHERE mission_id=?1;" #[placementMid]
+    sql store.missionsDb "DELETE FROM queue_item_receipts WHERE mission_id=?1;" #[placementMid]
+    sql store.missionsDb "UPDATE missions SET tags='[\"remote-node:fixture\"]',status='awaiting_user' WHERE id=?1;" #[placementMid]
+    sql store.missionsDb "CREATE TRIGGER refuse_remote_message BEFORE INSERT ON mission_events WHEN NEW.event_type='user_message' BEGIN SELECT RAISE(ABORT,'test event failure'); END;"
+    for (route, key) in #[("/api/control/message", "append-native"), (s!"/api/control/missions/{placementMid}/message", "append-scoped")] do
+      let body := JVal.obj #[("mission_id", .str placementMid), ("content", .str "resume"), ("client_message_id", .str key)]
+      for _ in [0:2] do
+        let (code, refusal) ← send "POST" route member body placementApp
+        check (code == 500 && refusal.fieldStr? "error" == some "message_append_failed")
+          "a refused event prevents remote dispatch and is retryable before provisioning"
+    sql store.missionsDb "DROP TRIGGER refuse_remote_message;"
+    let .ok eventRows ← execParamQuery store.missionsDb "SELECT COUNT(*) FROM mission_events WHERE mission_id=?1 AND event_type='user_message';" #[placementMid]
+      | throw (IO.userError "query refused user event")
+    check ((eventRows[1]?.bind (·[0]?)) == some "0") "a refused remote send leaves no user event"
+    sql store.missionsDb "DELETE FROM missions WHERE id=?1;" #[placementMid]
     for method in #["GET", "POST"] do
       let route := "/api/workspaces/member-workspace/resources"
       let body := JVal.obj #[("memory_max", .str "1G"), ("cpu_quota", .str "50%")]
@@ -907,10 +978,12 @@ def run (root : String) : IO Unit := do
       let prelude ← OrbCore.Skills.remoteInstallPrelude path none "codex" path "member" "admin"
       check ((prelude.splitOn "owner-only-skill").length == 1 && (prelude.splitOn "member-only-skill").length > 1)
         "library 5: member remote install"
+      let missionDir := System.FilePath.mk path / "library-mission-workspace"
+      IO.FS.createDirAll missionDir
       let .ok () ← upsertMission store {
         id := "library-mission", ownerUserId := "member",
-        title := "library fixture", status := "awaiting_user", backend := "opencode", modelOverride := "",
-        workingDirectory := path, updatedAt := "2026-11-14T00:00:00Z" }
+        title := "library fixture", status := "awaiting_user", backend := "codex", modelOverride := "",
+        workingDirectory := missionDir.toString, updatedAt := "2026-11-14T00:00:00Z" }
         | throw (IO.userError "library mission fixture")
       let installWorkspace := System.FilePath.mk path / "member-installed-workspace"
       IO.FS.createDirAll installWorkspace
@@ -921,9 +994,27 @@ def run (root : String) : IO Unit := do
         "library 5: actual member workspace contains only member skills"
       -- 6. Coordinator steers another owner's mission; selection follows the mission.
       sql store.missionsDb "INSERT INTO mission_shares(mission_id,user_id,granted_by) VALUES('library-mission','admin','member');"
-      let (steerCode, _) ← send "POST" "/api/control/message" admin
-        (.obj #[("mission_id", .str "library-mission"), ("content", .str "/skill:member-only-skill continue")])
-      check (steerCode == 200) "library 6: coordinator selects member mission skills"
+      let steer := JVal.obj #[("mission_id", .str "library-mission"), ("content", .str "/skill:member-only-skill continue")]
+      let (unavailable, deniedLaunch) ← send "POST" "/api/control/message" admin steer
+      check (unavailable == 503 && deniedLaunch.fieldStr? "error" == some "local_launcher_unavailable" &&
+        deniedLaunch.fieldBool? "message_accepted" == some false && deniedLaunch.fieldBool? "queued" == some false)
+        "library 6: missing local launcher refuses delivery, distinctly from busy"
+      let launcher := System.FilePath.mk path / "library-fixture-codex"
+      IO.FS.writeFile launcher "#!/bin/sh\nset -eu\nfor prompt do :; done\ncat .agents/skills/member-only-skill/SKILL.md > selected-skill\ntest ! -e .agents/skills/owner-only-skill/SKILL.md\nprintf %s \"$prompt\" > captured.tmp\nmv captured.tmp captured-prompt\n"
+      let chmod ← IO.Process.output { cmd := "chmod", args := #["700", launcher.toString] }
+      check (chmod.exitCode == 0) "library 6: prepare disposable launcher"
+      let app := { st with warmMgr? := some (← OrbBin.ClaudeControl.newWarmHarnessManager), warmHarnessBinOverride? := some launcher.toString }
+      let (steerCode, delivery) ← send "POST" "/api/control/message" admin steer app
+      check (steerCode == 200 && delivery.fieldBool? "message_accepted" == some true) "library 6: coordinator selects member mission skills"
+      let captured := missionDir / "captured-prompt"
+      for _ in [0:200] do
+        if ← captured.pathExists then break
+        IO.sleep 10
+      let prompt ← IO.FS.readFile captured
+      check (delivery.fieldStr? "delivered_prompt" == some prompt && prompt.contains ".agents/skills/member-only-skill/SKILL.md" &&
+        !prompt.contains "owner-only-skill" && (← IO.FS.readFile (missionDir / "selected-skill")) ==
+          (← IO.FS.readFile (System.FilePath.mk memberLibrary / "skill/member-only-skill/SKILL.md")))
+        "library 6: launched member workspace received the selected directive and exact member skill"
       let .ok turn ← OrbCore.RemoteDispatch.bindRemoteTurnOwner store (some mc)
         { missionId := "library-mission", targetNodeId := "dedicated", backend := "codex", prompt := "coordinator turn" }
         "dedicated" #[{ id := "dedicated", baseUrl := "https://unused.invalid", tokenEnv := "SYNTHETIC_UNUSED_NODE_TOKEN" }]

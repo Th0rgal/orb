@@ -901,14 +901,56 @@ structure HarnessCallbacks where
   onStructuredEvent  : String → JVal → IO Unit := fun _ _ => pure () -- `(eventType, payload)` for Core `mission_events`
   onTurnFinished     : LocalRunState → IO Unit := fun _ => pure ()
 
+/-- Only this owner may reap the group leader. The kernel reserves its numerical PID
+    until reap, including when it has exited ahead of its descendants. -/
+inductive HarnessGroupState where
+  | running | stopping | reaped (status : UInt32)
+
+structure HarnessProcessGroup extends SpawnedPgrp where
+  lock : Std.Mutex Unit
+  state : IO.Ref HarnessGroupState
+
+private def ownGroup (sp : SpawnedPgrp) : IO HarnessProcessGroup := do
+  return { toSpawnedPgrp := sp, lock := ← Std.Mutex.new (), state := ← IO.mkRef .running }
+
+private def HarnessProcessGroup.pollExit (g : HarnessProcessGroup) : IO (Option UInt32) :=
+  g.lock.atomically do
+    match ← g.state.get with
+    | .stopping => return none
+    | .reaped code => return some code
+    | .running =>
+      let code ← waitpidWnohang g.pid
+      if code == 0xFFFFFFFF then return none
+      g.state.set (.reaped code)
+      return some code
+
+private def HarnessProcessGroup.waitExit (g : HarnessProcessGroup) : IO UInt32 := do
+  repeat
+    if let some code ← g.pollExit then return code
+    IO.sleep 20
+  return 1
+
+private def HarnessProcessGroup.signalRunning (g : HarnessProcessGroup) (sig : Int32) : IO Unit :=
+  g.lock.atomically do
+    if let .running ← g.state.get then discard <| killSig (-g.pid) sig
+
+private def HarnessProcessGroup.claimStop (g : HarnessProcessGroup) : IO Unit :=
+  g.lock.atomically do
+    if let .running ← g.state.get then g.state.set .stopping
+
+private def HarnessProcessGroup.finishStop (g : HarnessProcessGroup) : IO Unit :=
+  g.lock.atomically do
+    if let .stopping ← g.state.get then
+      discard <| killSig (-g.pid) 15
+      IO.sleep 80
+      discard <| killSig (-g.pid) 9
+      g.state.set (.reaped (← waitpidBlock g.pid))
+
 /-- Live warm Claude Code process entry held open across multiple conversational turns. -/
-structure WarmClaudeEntry where
+structure WarmClaudeEntry extends HarnessProcessGroup where
   missionId        : String
   binPath          : String
   cwd              : String
-  pid              : Int64
-  stdinFd          : Int32
-  stdoutFd         : Int32
   writeMu          : Std.Mutex Unit
   aliveRef         : IO.Ref Bool
   pendingReqsRef   : IO.Ref (Array PendingControlRequest)
@@ -920,18 +962,27 @@ structure WarmClaudeEntry where
 /-- Shared manager supervising warm Claude Code processes and active one-shot CLI runs (`codex`, `opencode`, `antigravity`, `grok`, `vibe`). -/
 structure WarmHarnessManager where
   mu           : Std.Mutex Unit
+  registration : Std.Mutex Unit
+  stopEpochs : IO.Ref (Std.HashMap String Nat)
+  launchGenerations : IO.Ref (Std.HashMap String UInt64)
   runsRef      : IO.Ref (Array (String × IO.Ref LocalRunState))
   warmProcsRef : IO.Ref (Array (String × WarmClaudeEntry))
-  activePidsRef : IO.Ref (Array (String × Int64))
+  activeGroupsRef : IO.Ref (Array (String × HarnessProcessGroup))
+  /-- Children claimed by Stop but not yet reaped. Protected by `registration`. -/
+  stoppingGroupsRef : IO.Ref (Array (String × HarnessProcessGroup))
   callbacksRef : IO.Ref (Array (String × HarnessCallbacks))
 
 /-- Create a fresh `WarmHarnessManager`. -/
 def newWarmHarnessManager : IO WarmHarnessManager := do
   return {
     mu := ← Std.Mutex.new ()
+    registration := ← Std.Mutex.new ()
+    stopEpochs := ← IO.mkRef {}
+    launchGenerations := ← IO.mkRef {}
     runsRef := ← IO.mkRef #[]
     warmProcsRef := ← IO.mkRef #[]
-    activePidsRef := ← IO.mkRef #[]
+    activeGroupsRef := ← IO.mkRef #[]
+    stoppingGroupsRef := ← IO.mkRef #[]
     callbacksRef := ← IO.mkRef #[]
   }
 
@@ -1030,36 +1081,31 @@ def setSessionPermissionMode
 
 /-- Stop any active run or warm Claude process for `id`, signalling the entire process group (`SIGTERM` then `SIGKILL`). -/
 def stopHarnessRun (mgr : WarmHarnessManager) (id : String) : IO Unit := do
-  let (warm?, oneShotPid?, stateRef?) ← mgr.mu.atomically do
+  let (groups, stateRef?) ← mgr.registration.atomically <| mgr.mu.atomically do
+    mgr.stopEpochs.modify fun epochs => epochs.insert id (epochs.getD id 0 + 1)
     let ws ← mgr.warmProcsRef.get
     let w? := (ws.find? (fun (k, _) => k == id)).map Prod.snd
+    if let some entry := w? then entry.aliveRef.set false
     mgr.warmProcsRef.set (ws.filter (fun (k, _) => k != id))
-    let pids ← mgr.activePidsRef.get
+    let pids ← mgr.activeGroupsRef.get
     let p? := (pids.find? (fun (k, _) => k == id)).map Prod.snd
-    mgr.activePidsRef.set (pids.filter (fun (k, _) => k != id))
+    mgr.activeGroupsRef.set (pids.filter (fun (k, _) => k != id))
     let runs ← mgr.runsRef.get
     let r? := (runs.find? (fun (k, _) => k == id)).map Prod.snd
-    pure (w?, p?, r?)
+    let claimed := (w?.map (·.toHarnessProcessGroup)).toList ++ p?.toList
+    for g in claimed do g.claimStop
+    let pending ← mgr.stoppingGroupsRef.get
+    mgr.stoppingGroupsRef.set (pending ++ (claimed.map fun g => (id, g)).toArray)
+    pure (claimed ++ (pending.filterMap fun (k, g) => if k == id then some g else none).toList, r?)
   if let some stRef := stateRef? then
     stRef.modify fun s =>
       if s.done then s else { s with stopping := true, done := true, exitCode? := some 143 }
-  if let some entry := warm? then
-    entry.aliveRef.set false
-    closeFdRaw entry.stdinFd
-    let _ ← killSig (-entry.pid) 15
-    IO.sleep 80
-    let st ← waitpidWnohang entry.pid
-    if st == 0xFFFFFFFF then
-      let _ ← killSig (-entry.pid) 9
-      let _ ← waitpidBlock entry.pid
-    closeFdRaw entry.stdoutFd
-  if let some pid := oneShotPid? then
-    let _ ← killSig (-pid) 15
-    IO.sleep 80
-    let st ← waitpidWnohang pid
-    if st == 0xFFFFFFFF then
-      let _ ← killSig (-pid) 9
-      let _ ← waitpidBlock pid
+  -- The warm reader owns both pipe descriptors; Stop only signals and waits.
+  for g in groups do
+    g.finishStop
+    mgr.registration.atomically do
+      let pending ← mgr.stoppingGroupsRef.get
+      mgr.stoppingGroupsRef.set (← pending.filterM fun (_, h) => return !(← g.state.ptrEq h.state))
   if let some stRef := stateRef? then
     let finalSt ← stRef.get
     let cb ← getCallbacksFor mgr id
@@ -1217,7 +1263,7 @@ private def launchOrReuseWarmClaude
     (permMode : ClaudePermissionMode)
     (imagePaths : Array String)
     (stRef : IO.Ref LocalRunState)
-    (extraEnv : Array (String × String) := #[]) : IO (Except String Unit) := do
+    (extraEnv : Array (String × String) := #[]) (launchAllowed : IO Bool := pure true) : IO (Except String Unit) := do
   -- Plan prefix (`/plan ...`) automatically activates Claude's `plan` permission mode
   let trimmed := prompt.trimAscii.toString
   let (effectiveMode, effectivePrompt) :=
@@ -1227,7 +1273,8 @@ private def launchOrReuseWarmClaude
   stRef.modify fun s => { s with permissionMode := effectiveMode }
 
   let imgBlocks ← loadClaudeImageBlocks imagePaths
-  let existingWarm? ← mgr.mu.atomically do
+  let existingWarm? ← mgr.registration.atomically do
+    if !(← launchAllowed) then return none
     let ws ← mgr.warmProcsRef.get
     pure ((ws.find? (fun (k, _) => k == missionId)).map Prod.snd)
 
@@ -1246,12 +1293,7 @@ private def launchOrReuseWarmClaude
       if ok then
         return .ok ()
       -- Warm pipe closed; clean up and respawn seamlessly with `--resume`
-      mgr.mu.atomically do
-        let ws ← mgr.warmProcsRef.get
-        mgr.warmProcsRef.set (ws.filter (fun (k, _) => k != missionId))
-      closeFdRaw entry.stdinFd
-      closeFdRaw entry.stdoutFd
-      let _ ← waitpidWnohang entry.pid
+      -- The reader owns both descriptors. Stop may already have removed this entry.
 
   -- Case 2: Spawn a fresh warm Claude process (`sh -c 'cd "$1" && exec "$2" ...'`)
   let (sid, isResume) ← match sessionId?.map (·.trimAscii.toString) |>.filter (!·.isEmpty) with
@@ -1273,40 +1315,35 @@ private def launchOrReuseWarmClaude
   -- Keep Claude's stderr (otherwise discarded) so a startup failure has a visible reason.
   let stderrPath := s!"/tmp/orb-claude-{missionId}.stderr"
   let shArgs := #["-c", "umask 077; f=\"$1\"; shift; cd \"$1\" && shift && exec \"$@\" 2>\"$f\"", "sh", stderrPath, cwd, binPath] ++ claudeArgs
-  let spawned ← match ← (spawnPgrp "/bin/sh" shArgs envStrs (pipeStdin := true) (nullStdio := true) (pipeStdout := true)).toBaseIO with
-    | .error e => return .error s!"Failed to start Claude Code: {e}"
-    | .ok sp => pure sp
-
   let writeMu ← Std.Mutex.new ()
   let readerExitedRef ← IO.mkRef false
   let aliveRef ← IO.mkRef true
   let pendingReqsRef ← IO.mkRef (#[] : Array PendingControlRequest)
   let implementPlanRef ← IO.mkRef false
   let permModeRef ← IO.mkRef effectiveMode
-  let entry : WarmClaudeEntry := {
+  let makeEntry := fun (g : HarnessProcessGroup) => ({
     missionId := missionId
     binPath := binPath
     cwd := cwd
-    pid := spawned.pid
-    stdinFd := spawned.stdinFd
-    stdoutFd := spawned.stdoutFd
+    toHarnessProcessGroup := g
     writeMu := writeMu
     aliveRef := aliveRef
     pendingReqsRef := pendingReqsRef
     implementPlanRef := implementPlanRef
     permissionModeRef := permModeRef
     readerExitedRef := readerExitedRef
-  }
-  mgr.mu.atomically do
-    let ws ← mgr.warmProcsRef.get
-    let filtered := ws.filter (fun (k, _) => k != missionId)
-    mgr.warmProcsRef.set (filtered.push (missionId, entry))
-
-  -- Send initial `initialize` + first user turn over warm stdin
-  let _ ← writeWarmStdinLine entry (encodeInitializeRequest "orb-init")
-  let sentOk ← writeWarmStdinLine entry (encodeClaudeUserTurn effectivePrompt imgBlocks)
-  if !sentOk then
-    return .error "Claude Code closed stdin before receiving prompt"
+  } : WarmClaudeEntry)
+  let registered : Except String WarmClaudeEntry ← mgr.registration.atomically do
+    if !(← launchAllowed) then return .error "launch_fenced"
+    match ← (spawnPgrp "/bin/sh" shArgs envStrs (pipeStdin := true) (nullStdio := true) (pipeStdout := true)).toBaseIO with
+    | .error e => return .error s!"Failed to start Claude Code: {e}"
+    | .ok sp =>
+      let entry := makeEntry (← ownGroup sp)
+      mgr.mu.atomically do
+        let ws ← mgr.warmProcsRef.get
+        mgr.warmProcsRef.set ((ws.filter (fun (k, _) => k != missionId)).push (missionId, entry))
+      return .ok entry
+  let .ok entry := registered | return registered.map fun _ => ()
 
   -- Background stdout NDJSON stream reader for the lifetime of this warm process
   discard <| IO.asTask (prio := .dedicated) do
@@ -1382,12 +1419,14 @@ private def launchOrReuseWarmClaude
                       cb.onTurnFinished doneSnap
     -- EOF on stdout: reap child process and mark current turn done if still active
     entry.aliveRef.set false
+    closeFdRaw entry.stdoutFd
+    -- Keep the PID visible to Stop until exit: closing stdout doesn't imply
+    -- the child exited or that a writer blocked on its stdin can finish.
+    let rawExit ← entry.waitExit
+    entry.writeMu.atomically do closeFdRaw entry.stdinFd
     mgr.mu.atomically do
       let ws ← mgr.warmProcsRef.get
-      mgr.warmProcsRef.set (ws.filter (fun (k, _) => k != missionId))
-    closeFdRaw entry.stdinFd
-    closeFdRaw entry.stdoutFd
-    let rawExit ← waitpidBlock entry.pid
+      mgr.warmProcsRef.set (← ws.filterM fun (_, e) => return !(← e.state.ptrEq entry.state))
     let curSnap ← stRef.get
     if !curSnap.done then
       let exitInt : Int := Int.ofNat rawExit.toNat
@@ -1411,6 +1450,10 @@ private def launchOrReuseWarmClaude
       ])
       cb.onTurnFinished finalSnap
     entry.readerExitedRef.set true
+  -- Stop can now see and kill the child even if the peer never drains stdin.
+  let _ ← writeWarmStdinLine entry (encodeInitializeRequest "orb-init")
+  if !(← writeWarmStdinLine entry (encodeClaudeUserTurn effectivePrompt imgBlocks)) then
+    return .error "Claude Code closed stdin before receiving prompt"
   return .ok ()
 
 /-- Normalize an Antigravity model + optional effort for `agy` CLI 1.5+ (where Carbon and Argon
@@ -1862,10 +1905,12 @@ def acpConfigSteps (turn : OpenCodeAcpTurn) : List (String × String) :=
     unchanged; the session id is reported as `{"type":"acp_session","sessionId":…}` and a
     failed request as `{"type":"error",…}`, so `parseOneShotHarnessEvent "opencode"` reads
     all of it. Returns the process exit code (non-zero when the turn failed). -/
-def runOpenCodeAcpTurn (bin : String) (env : Array String) (turn : OpenCodeAcpTurn)
-    (onLine : String → IO Unit) (onSpawn : Int64 → IO Unit := fun _ => pure ()) : IO UInt32 := do
+private def spawnAcp (bin : String) (env : Array String) (turn : OpenCodeAcpTurn) : IO SpawnedPgrp := do
   let shArgs := #["-c", "cd \"$1\" && shift && exec \"$@\"", "sh", turn.cwd, bin, "acp"]
-  let sp ← spawnPgrp "/bin/sh" shArgs env (pipeStdin := true) (nullStdio := true) (pipeStdout := true)
+  spawnPgrp "/bin/sh" shArgs env (pipeStdin := true) (nullStdio := true) (pipeStdout := true)
+
+private def driveOpenCodeAcpTurn (sp : HarnessProcessGroup) (turn : OpenCodeAcpTurn)
+    (onLine : String → IO Unit) (onSpawn : Int64 → IO Unit) : IO UInt32 := do
   onSpawn sp.pid
   let send := fun (b : ByteArray) => do discard <| writeFdAll sp.stdinFd b
   let cwdJ := JVal.str turn.cwd
@@ -1951,13 +1996,21 @@ def runOpenCodeAcpTurn (bin : String) (env : Array String) (turn : OpenCodeAcpTu
   let mut exited := false
   for _ in [0:60] do
     if !exited then
-      if (← waitpidWnohang sp.pid) != 0xFFFFFFFF then exited := true
+      if (← sp.pollExit).isSome then exited := true
       else IO.sleep 50
   if !exited then
-    discard <| killSig (-sp.pid) 15
-    discard <| waitpidBlock sp.pid
+    sp.signalRunning 15
+    discard <| sp.waitExit
   closeFdRaw sp.stdoutFd
   return if failed then 1 else 0
+
+def runOpenCodeAcpTurn (bin : String) (env : Array String) (turn : OpenCodeAcpTurn)
+    (onLine : String → IO Unit) (onSpawn : Int64 → IO Unit := fun _ => pure ())
+    (spawned? : Option SpawnedPgrp := none) : IO UInt32 := do
+  let sp ← match spawned? with
+    | some sp => pure sp
+    | none => spawnAcp bin env turn
+  driveOpenCodeAcpTurn (← ownGroup sp) turn onLine onSpawn
 
 /-- Launch a turn for any supported local harness (`claudecode` via warm bidirectional stdio, or one-shot CLI for others).
     Automatically evaluates worktree isolation when requested and captures pre/post-turn git checkpoints! -/
@@ -1980,7 +2033,7 @@ def startHarnessTurn
     -- Set by Core for turns it runs itself: proxy environment and CLI arguments
     -- (see `OrbCore.RemoteDispatch.harnessProxySetup`). The model is then used as given.
     (extraEnv : Array (String × String) := #[])
-    (extraArgs : Array String := #[]) : IO (Except String LocalRunState) := do
+    (extraArgs : Array String := #[]) (launchAllowed : IO Bool := pure true) : IO (Except String LocalRunState) := do
   let resolvedBin? ←
     if !binPath.trimAscii.toString.isEmpty && (← System.FilePath.pathExists binPath.trimAscii.toString) then
       pure (some binPath.trimAscii.toString)
@@ -2009,21 +2062,23 @@ def startHarnessTurn
   -- Such turns never reuse it: retire it and wait for its reader to finish *before* this
   -- turn's callbacks and state exist, so its end-of-stream handling cannot touch this turn.
   if harness == "claudecode" && !extraEnv.isEmpty then
-    let old? ← mgr.mu.atomically do
+    let old? ← mgr.registration.atomically <| mgr.mu.atomically do
+      if !(← launchAllowed) then return none
       let ws ← mgr.warmProcsRef.get
-      mgr.warmProcsRef.set (ws.filter (fun (k, _) => k != id))
-      pure ((ws.find? (fun (k, _) => k == id)).map Prod.snd)
+      let old? := (ws.find? (fun (k, _) => k == id)).map Prod.snd
+      if let some old := old? then old.aliveRef.set false
+      return old?
     if let some old := old? then
       old.aliveRef.set false
-      let _ ← killSig (-old.pid) 15
+      old.signalRunning 15
       let mut waitedMs := 0
       while !(← old.readerExitedRef.get) && waitedMs < 10000 do
         if waitedMs == 3000 then
-          let _ ← killSig (-old.pid) 9
+          old.signalRunning 9
         IO.sleep 50
         waitedMs := waitedMs + 50
+      if !(← old.readerExitedRef.get) then return .error "warm_retirement_unconfirmed"
 
-  setCallbacksFor mgr id callbacks
   let prevState? ← getRunState? mgr id
   let prevTurns := (prevState?.map (·.turnCount)).getD 0
   let effSid? := sessionId?.filter (!·.trimAscii.toString.isEmpty) |>.orElse (fun _ => prevState?.bind (·.sessionId?))
@@ -2048,11 +2103,23 @@ def startHarnessTurn
     turnCount := prevTurns
     model? := model?.map (·.trimAscii.toString) |>.filter (!·.isEmpty)
   }
-  let stRef ← upsertRunStateRef mgr id initState
+  let state? ← mgr.registration.atomically do
+    if !(← launchAllowed) then return none
+    setCallbacksFor mgr id callbacks
+    if harness == "claudecode" && extraEnv.isEmpty then
+      return some (← upsertRunStateRef mgr id initState)
+    -- One-shot readers and non-reusable warm processes retain their own state
+    -- until EOF; never reset the previous generation's ref in place.
+    let r ← IO.mkRef initState
+    mgr.mu.atomically do
+      mgr.runsRef.modify fun runs => (runs.filter (fun p => p.1 != id)).push (id, r)
+    return some r
+  let some stRef := state? | return .error "launch_fenced"
   callbacks.onOutputEvent (.obj #[("text", .str ""), ("reset", .bool true), ("activities", .arr #[])])
 
   if harness == "claudecode" then
-    match ← launchOrReuseWarmClaude mgr id actualBin effectiveCwd prompt model? effort? effSid? permissionMode imagePaths stRef extraEnv with
+    let result ← launchOrReuseWarmClaude mgr id actualBin effectiveCwd prompt model? effort? effSid? permissionMode imagePaths stRef extraEnv launchAllowed
+    match result with
     | .error e =>
       stRef.modify fun s => { s with done := true, exitCode? := some 1, error? := some e }
       return .error e
@@ -2095,9 +2162,14 @@ def startHarnessTurn
     if harness == "opencode" && !envPairs.any (fun (k, _) => k == "OPENCODE_PERMISSION") && permissionMode != .plan then
       envStrs := envStrs.push "OPENCODE_PERMISSION={\"*\":\"allow\"}"
     let lastMsgRef ← IO.mkRef (none : Option String)
-    let registerPid := fun (pid : Int64) => mgr.mu.atomically do
-      let pids ← mgr.activePidsRef.get
-      mgr.activePidsRef.set ((pids.filter (fun (k, _) => k != id)).push (id, pid))
+    let registerGroup := fun (g : HarnessProcessGroup) => mgr.mu.atomically do
+      let pids ← mgr.activeGroupsRef.get
+      mgr.activeGroupsRef.set ((pids.filter (fun (k, _) => k != id)).push (id, g))
+    let spawnRegistered : IO SpawnedPgrp → IO HarnessProcessGroup := fun spawn => mgr.registration.atomically do
+      if !(← launchAllowed) then throw <| IO.userError "launch_fenced"
+      let sp ← ownGroup (← spawn)
+      registerGroup sp
+      return sp
     let handleLine : String → IO Unit := fun ln => do
       let parsed := parseOneShotHarnessEvent harness ln
       if let some sid := parsed.sessionId? then
@@ -2152,12 +2224,17 @@ def startHarnessTurn
         let cb ← getCallbacksFor mgr id
         cb.onStructuredEvent "text_delta" (.obj #[("content", .str fullText)])
         cb.onOutputEvent (.obj #[("text", .str emittedDelta), ("reset", .bool false)])
-    let finishTurn : UInt32 → IO Unit := fun code => do
-      mgr.mu.atomically do
-        let pids ← mgr.activePidsRef.get
-        mgr.activePidsRef.set (pids.filter (fun (k, _) => k != id))
+    let finishTurn : HarnessProcessGroup → UInt32 → IO Unit := fun g code => do
+      let owned ← mgr.mu.atomically do
+        let pids ← mgr.activeGroupsRef.get
+        let live ← pids.filterM fun (_, h) => return !(← g.state.ptrEq h.state)
+        if live.size == pids.size then return false
+        mgr.activeGroupsRef.set live
+        return true
+      if !owned then return
       let postTurnIdx := prevTurns + 1
       discard <| captureCheckpoint effectiveCwd id postTurnIdx s!"post-{generation}" s!"Turn {postTurnIdx}"
+      if !(← launchAllowed) then return
       let priorErr? := (← stRef.get).error?
       let err? := priorErr?.orElse (fun _ => if code == 0 then none else some s!"{harness} exited with code {code}")
       stRef.modify fun s => {
@@ -2168,7 +2245,7 @@ def startHarnessTurn
         turnCount := s.turnCount + 1
       }
       let finalSnap ← stRef.get
-      let cb ← getCallbacksFor mgr id
+      let cb := callbacks
       if !finalSnap.text.isEmpty && err?.isNone then
         cb.onStructuredEvent "assistant_message" (.obj #[("content", .str finalSnap.text)])
       if let some em := err? then
@@ -2187,20 +2264,21 @@ def startHarnessTurn
       let turn : OpenCodeAcpTurn := {
         cwd := effectiveCwd, prompt := delivered, model? := resolvedModel?, effort? := effort?,
         sessionId? := effSid?, plan := permissionMode == .plan || isPlanPrompt }
+      let .ok sp ← (spawnRegistered (spawnAcp actualBin envStrs turn)).toBaseIO
+        | return .error "acp_launch_failed_or_fenced"
       discard <| IO.asTask (prio := .dedicated) do
-        let code ← try runOpenCodeAcpTurn actualBin envStrs turn handleLine registerPid
+        let code ← try driveOpenCodeAcpTurn sp turn handleLine (fun _ => pure ())
           catch e => do
             handleLine (renderCompact (.obj #[("type", .str "error"), ("error", .obj #[("message", .str s!"Failed to start opencode: {e}")])]))
             pure 1
-        finishTurn code
+        finishTurn sp code
       return .ok (← stRef.get)
     let shArgs := #["-c", "cd \"$1\" && shift && exec \"$@\"", "sh", effectiveCwd, actualBin] ++ cliArgs
-    let spawned ← match ← (spawnPgrp "/bin/sh" shArgs envStrs (pipeStdin := false) (nullStdio := true) (pipeStdout := true)).toBaseIO with
+    let spawned ← match ← (spawnRegistered (spawnPgrp "/bin/sh" shArgs envStrs (pipeStdin := false) (nullStdio := true) (pipeStdout := true))).toBaseIO with
       | .error e =>
         stRef.modify fun s => { s with done := true, exitCode? := some 1, error? := some s!"{e}" }
         return .error s!"Failed to start {harness}: {e}"
       | .ok sp => pure sp
-    registerPid spawned.pid
 
     discard <| IO.asTask (prio := .dedicated) do
       let mut buf := ByteArray.empty
@@ -2216,7 +2294,7 @@ def startHarnessTurn
             for ln in lines do
               handleLine ln
       closeFdRaw spawned.stdoutFd
-      finishTurn (← waitpidBlock spawned.pid)
+      finishTurn spawned (← spawned.waitExit)
     return .ok (← stRef.get)
 
 end OrbBin.ClaudeControl

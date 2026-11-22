@@ -105,9 +105,9 @@ class MissionNotIdle(ValueError):
     pass
 
 
-def run_mutation(binding, action, mid):
+def run_mutation(binding, action, mid, message_id=''):
     try:
-        mutate(binding, action, mid)
+        mutate(binding, action, mid, message_id)
         return 0
     except MissionNotIdle:
         return 2
@@ -295,11 +295,11 @@ def account_routes(binding, account, provider, action, value):
         print('\t'.join(map(label, ('D', *row))))
 
 
-def mutate(binding, action, mid):
+def mutate(binding, action, mid, message_id=''):
     c = Connection()
     if c.binding != binding:
         raise ValueError('connection changed')
-    key = str(uuid.uuid4())
+    key = str(uuid.UUID(message_id)) if action == 'send' else str(uuid.uuid4())
     if action == 'cloud-create':
         attempt, provider, account, project, prompt = sys.stdin.buffer.read().decode().split('\n', 4)
         attempt = attempt or key
@@ -370,9 +370,16 @@ def mutate(binding, action, mid):
         if receipt.get('message_accepted') is False:
             raise ValueError('message refused')
     elif action == 'send':
-        receipt = c.request('/api/control/message', body={'mission_id': mid, 'content': sys.stdin.buffer.read().decode(),
-                            'queue_followup': True, 'client_message_id': key}, key='msg:' + mid + ':' + key)
-        if not receipt.get('id') or receipt.get('message_accepted') is False:
+        try:
+            receipt = c.request('/api/control/message', body={'mission_id': mid, 'content': sys.stdin.buffer.read().decode(),
+                                'queue_followup': True, 'client_message_id': key}, key='msg:' + mid + ':' + key)
+        except urllib.error.HTTPError as e:
+            if e.code == 409:
+                refusal = json.loads(e.read(4096))
+                if refusal.get('id') == key and refusal.get('message_accepted') is False and refusal.get('error') == 'local_run_busy':
+                    raise MissionNotIdle() from e
+            raise
+        if receipt.get('id') != key or receipt.get('message_accepted') is False:
             raise ValueError('message not accepted')
     elif action == 'stop':
         c.request(path + '/cancel', body={}, key=key)

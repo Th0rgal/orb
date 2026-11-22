@@ -1278,7 +1278,10 @@ def openCoreStore (rootDir : String) (bootEpoch : UInt64 := 0) (singleTenantUser
   let .ok iDb := iRes | do
     sqliteCloseRaw mDb.handle; sqliteCloseRaw pDb.handle; sqliteCloseRaw aDb.handle
     return .error (match iRes with | .error e => e | .ok _ => "err")
-  if let .error cleanErr ← iDb.mu.atomically (sqliteExecRaw iDb.handle "DELETE FROM idempotency_keys WHERE phase='in_progress';") then
+  -- A native Send may already have appended or dispatched. Keep its original
+  -- reservation even if receipt writes remain unavailable across restart.
+  let recoverySql := "DELETE FROM idempotency_keys WHERE phase='in_progress' AND instr(scope,'[\"control_message\",')!=1;"
+  if let .error cleanErr ← iDb.mu.atomically (sqliteExecRaw iDb.handle recoverySql) then
     sqliteCloseRaw mDb.handle; sqliteCloseRaw pDb.handle; sqliteCloseRaw aDb.handle; sqliteCloseRaw iDb.handle
     return .error s!"core_store_idempotency_recovery_failed:{cleanErr}"
   match ← recoverDispatchLeases mDb pDb effBoot with
@@ -3397,7 +3400,8 @@ def restoreMissionStatus
     stopping it is the job of cancel/interrupt, and writing a status over a live run would leave the
     run without an owner. -/
 def setMissionStatusFromClient
-    (st : CoreStore) (missionId nextStatus updatedAt : String) : IO (Except String Bool) :=
+    (st : CoreStore) (missionId nextStatus updatedAt : String)
+    (fenceArchive : IO Bool := pure true) : IO (Except String Bool) :=
   withImmediateTx st.missionsDb do
     let q ← execParamQueryUnlocked st.missionsDb
       ("SELECT m.status, (SELECT COUNT(*) FROM mission_runs r WHERE r.mission_id=m.id AND " ++
@@ -3413,8 +3417,9 @@ def setMissionStatusFromClient
       if liveRuns > 0 || (nextStatus == "acknowledged" && isLiveMissionStatus curStatus) then
         return .error "mission_running"
       if curStatus == nextStatus then return .ok false
+      if nextStatus == "acknowledged" && !(← fenceArchive) then return .error "mission_running"
       let upd ← execParamQueryUnlocked st.missionsDb
-        "UPDATE missions SET status=?2,state_revision=state_revision+1,updated_at=?3 WHERE id=?1;"
+        "UPDATE missions SET status=?2,state_revision=state_revision+1,run_generation=run_generation+CASE WHEN ?2='acknowledged' THEN 1 ELSE 0 END,updated_at=?3 WHERE id=?1;"
         #[missionId, nextStatus, updatedAt]
       return upd.map (fun _ => true)
 
@@ -4498,7 +4503,8 @@ def registerMissionEventListener
     asynchronously on a single ordered dispatcher task so callers never block on listener or
     socket backpressure while committed `seq` order is strictly preserved. -/
 def appendMissionEvent
-    (st : CoreStore) (missionId eventType payloadJson createdAt : String) : IO (Except String UInt64) := do
+    (st : CoreStore) (missionId eventType payloadJson createdAt : String)
+    (generation? : Option UInt64 := none) : IO (Except String UInt64) := do
   let enqueueNotice (n : PendingMissionEventNotice) : IO Bool :=
     match st.eventDispatchState? with
     | none => pure false
@@ -4516,6 +4522,12 @@ def appendMissionEvent
     match ← sqliteExecRaw st.missionsDb.handle "BEGIN IMMEDIATE;" with
     | .error e => return .error s!"tx_begin_failed:{e}"
     | .ok () =>
+      if let some generation := generation? then
+        let owner ← execParamQueryUnlocked st.missionsDb
+          "SELECT 1 FROM missions WHERE id=?1 AND run_generation=CAST(?2 AS INTEGER) AND status='active';" #[missionId, s!"{generation}"]
+        unless owner.toOption.any (·.size > 1) do
+          discard <| sqliteExecRaw st.missionsDb.handle "ROLLBACK;"
+          return .error "event_generation_fenced"
       let seqRes ← execParamQueryUnlocked st.missionsDb
         "SELECT COALESCE(MAX(CASE WHEN COALESCE(seq,0)>=COALESCE(sequence,0) THEN COALESCE(seq,0) ELSE COALESCE(sequence,0) END), 0) + 1 FROM mission_events WHERE mission_id=?1;" #[missionId]
       let .ok srs := seqRes

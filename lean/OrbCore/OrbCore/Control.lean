@@ -1986,12 +1986,12 @@ def tickLocalHarnessSupervisor (st : CoreAppState) (nowIso : String) : IO Nat :=
   let some mgr := st.warmMgr?
     | return 0
   let runs ← mgr.runsRef.get
-  let pids ← mgr.activePidsRef.get
+  let pids ← mgr.activeGroupsRef.get
   let mut observed : Nat := 0
   for (mid, runRef) in runs do
     let run ← runRef.get
     if run.done || run.stopping then continue
-    let pid? := (pids.find? (fun p => p.1 == mid)).map Prod.snd
+    let pid? := (pids.find? (fun p => p.1 == mid)).map fun p => p.2.pid
     let some pid := pid?
       | continue
     let alive ← (System.FilePath.mk s!"/proc/{pid}").pathExists
@@ -2019,7 +2019,7 @@ def tickLocalHarnessSupervisor (st : CoreAppState) (nowIso : String) : IO Nat :=
 
 /-- Map structured `HarnessCallbacks` from `OrbBin.ClaudeControl` onto persisted `mission_events` rows
     and record pending `control_request` call IDs so `POST /api/control/tool_result` can route answers cleanly. -/
-def buildCoreHarnessCallbacks (st : CoreAppState) (missionId : String) : OrbBin.ClaudeControl.HarnessCallbacks := {
+def buildCoreHarnessCallbacks (st : CoreAppState) (missionId : String) (generation? : Option UInt64 := none) : OrbBin.ClaudeControl.HarnessCallbacks := {
   onStructuredEvent := fun evType payload => do
     let nowSec ← coreEpochSec
     let ts := formatEpochIso8601Utc nowSec
@@ -2033,15 +2033,17 @@ def buildCoreHarnessCallbacks (st : CoreAppState) (missionId : String) : OrbBin.
             let trimmed := if xs.size ≥ 512 then xs.extract 1 xs.size else xs
             (trimmed.filter (fun p => p.1 != cid)).push (cid, missionId)
       let pl := renderCompact (.obj #[("tool_call_id", .str cid), ("tool_name", .str nm), ("args", args)])
-      discard <| appendMissionEvent st.store missionId "tool_call" pl ts
+      discard <| appendMissionEvent st.store missionId "tool_call" pl ts generation?
     else
-      discard <| appendMissionEvent st.store missionId evType (renderCompact payload) ts
+      discard <| appendMissionEvent st.store missionId evType (renderCompact payload) ts generation?
   onTurnFinished := fun finalSnap => do
+    let some owner ← getMission? st.store missionId | return
+    if owner.runGeneration != finalSnap.generation || owner.status != "active" then return
     let nowSec ← coreEpochSec
     let ts := formatEpochIso8601Utc nowSec
     if let some sid := finalSnap.sessionId?.map (·.trimAscii.toString) |>.filter (!·.isEmpty) then
       discard <| execParamQuery st.store.missionsDb
-        "UPDATE missions SET session_id=?2, resumable=1 WHERE id=?1;" #[missionId, sid]
+        "UPDATE missions SET session_id=?2, resumable=1 WHERE id=?1 AND run_generation=CAST(?3 AS INTEGER);" #[missionId, sid, s!"{finalSnap.generation}"]
     let isErr := finalSnap.error?.isSome || (finalSnap.exitCode?.getD 0) != 0
     let mut armedWakeups : Nat := 0
     let mut isSideQ := false
@@ -2072,15 +2074,15 @@ def buildCoreHarnessCallbacks (st : CoreAppState) (missionId : String) : OrbBin.
     -- A failed turn must say why: record the harness's own error text.
     if isErr && transientVerdict?.isNone then
       if let some errText := finalSnap.error?.map (·.trimAscii.toString) |>.filter (!·.isEmpty) then
-        discard <| appendMissionEvent st.store missionId "error" (renderCompact (.obj #[("content", .str errText)])) ts
+        discard <| appendMissionEvent st.store missionId "error" (renderCompact (.obj #[("content", .str errText)])) ts generation?
     if let some (_, tReason) := transientVerdict? then
       discard <| execParamQuery st.store.missionsDb
-        "UPDATE missions SET status=?2,terminal_reason=?3,state_revision=state_revision+1,updated_at=?4 WHERE id=?1 AND status IN ('active','pending');"
-        #[missionId, nextStatus, tReason, ts]
+        "UPDATE missions SET status=?2,terminal_reason=?3,state_revision=state_revision+1,updated_at=?4 WHERE id=?1 AND run_generation=CAST(?5 AS INTEGER) AND status IN ('active','pending');"
+        #[missionId, nextStatus, tReason, ts, s!"{finalSnap.generation}"]
     else
       discard <| execParamQuery st.store.missionsDb
-        "UPDATE missions SET status=?2,state_revision=state_revision+1,updated_at=?3 WHERE id=?1 AND status IN ('active','pending');"
-        #[missionId, nextStatus, ts]
+        "UPDATE missions SET status=?2,state_revision=state_revision+1,updated_at=?3 WHERE id=?1 AND run_generation=CAST(?4 AS INTEGER) AND status IN ('active','pending');"
+        #[missionId, nextStatus, ts, s!"{finalSnap.generation}"]
     if let some tSink := st.telemetrySink? then
       let mRec? ← getMission? st.store missionId
       let bLow := finalSnap.harness.trimAscii.toString.toLower
@@ -2123,7 +2125,7 @@ private def launchLocalCoreMissionTurn
     (sessionId? : Option String := none)
     (worktreeMode : String := "")
     (appendUserEvent : Bool := false)
-    (wakeup? : Option WakeupClaim := none) : IO (Except String String) := do
+    (wakeup? : Option WakeupClaim := none) (admittedGeneration? : Option UInt64 := none) : IO (Except String String) := do
   let some mgr := st.warmMgr? | return .error "warm_harness_manager_unavailable"
   let effRawCwd := if cwd.trimAscii.toString.isEmpty then st.cfg.workingDir else cwd
   let safeCwd ← match ← confineWorkingDirectory st.cfg.workingDir effRawCwd with
@@ -2149,15 +2151,12 @@ private def launchLocalCoreMissionTurn
   if appendUserEvent then
     let userPl := renderCompact (.obj #[("content", .str prompt)])
     discard <| appendMissionEvent st.store missionId "user_message" userPl ts
-  let prevSt? ← OrbBin.ClaudeControl.getRunState? mgr missionId
-  let mut dbGen : UInt64 := 1
-  if let .ok gRows ← execParamQuery st.store.missionsDb
-      "SELECT COALESCE(run_generation,1) FROM missions WHERE id=?1;" #[missionId] then
-    if gRows.size > 1 then dbGen := (Nat.max 1 (((gRows[1]?.bind (·[0]?)).bind String.toNat?).getD 1)).toUInt64
-  let nextGen :=
-    match prevSt? with
-    | some s => max (dbGen + 1) (s.generation + 1)
-    | none => if sessionId?.isSome then dbGen + 1 else dbGen
+  -- Capture before activation CAS. A Stop after CAS invalidates this cheap
+  -- in-memory check under the registration lock, with no SQLite I/O there.
+  let launchEpoch := (← mgr.stopEpochs.get).getD missionId 0
+  let dbGen := admittedGeneration?.getD mission.runGeneration
+  if dbGen == 0xffffffffffffffff then return .error "run_generation_overflow"
+  let nextGen := dbGen + 1
   let started ← withImmediateTx st.store.missionsDb do
     let query := execParamQueryUnlocked st.store.missionsDb
     if let some claim := wakeup? then
@@ -2170,14 +2169,26 @@ private def launchLocalCoreMissionTurn
         | return .error "wakeup_claim_write_failed"
       if rows.size ≤ 1 then return .error "wakeup_claim_fenced"
     carryArmedWakeupsForward query missionId nextGen.toNat ts
-    query "UPDATE missions SET status='active', run_generation=CAST(?2 AS INTEGER), state_revision=state_revision+1, updated_at=?3 WHERE id=?1;"
-      #[missionId, s!"{nextGen}", ts]
+    let changed ← query ("UPDATE missions SET status='active', run_generation=CAST(?2 AS INTEGER), state_revision=state_revision+1, updated_at=?3 " ++
+      "WHERE id=?1 AND status!='acknowledged' AND run_generation=CAST(?4 AS INTEGER) RETURNING id;") #[missionId, s!"{nextGen}", ts, s!"{dbGen}"]
+    if let .ok rows := changed then
+      if rows.size ≤ 1 then return .error "launch_generation_fenced"
+    -- Publish the generation before the transaction releases the mission DB lock.
+    -- A registered one-shot must finish or be stopped, never be displaced.
+    if let .ok _ := changed then
+      let claimed ← mgr.registration.atomically do
+        if (← mgr.stopEpochs.get).getD missionId 0 != launchEpoch then return false
+        if (← mgr.activeGroupsRef.get).any (·.1 == missionId) then return false
+        mgr.launchGenerations.modify fun gs => gs.insert missionId nextGen
+        return true
+      if !claimed then return .error "local_run_busy_or_fenced"
+    return changed
   if let .error e := started then return .error e
   let model? := if model.trimAscii.toString.isEmpty then none else some model.trimAscii.toString
   let effort? := if effort.trimAscii.toString.isEmpty then none else some effort.trimAscii.toString
   let parsedPerm := OrbBin.ClaudeControl.parsePermissionMode permMode
   let wtArg := if worktreeMode.trimAscii.toString.isEmpty then "local" else worktreeMode.trimAscii.toString
-  let cbs := buildCoreHarnessCallbacks st missionId
+  let cbs := buildCoreHarnessCallbacks st missionId (some nextGen)
   let normHarness := if harness.trimAscii.toString.toLower == "claude" then "claudecode" else harness.trimAscii.toString
   if let some tSink := st.telemetrySink? then
     let ownerUid? := if mission.ownerUserId.trimAscii.toString.isEmpty then none else some mission.ownerUserId.trimAscii.toString
@@ -2228,7 +2239,8 @@ private def launchLocalCoreMissionTurn
       pure ({ model := model? } : OrbCore.RemoteDispatch.HarnessProxySetup)
   match ← OrbBin.ClaudeControl.startHarnessTurn
       mgr missionId normHarness binOverride safeCwd prompt nextGen setup.model effort? sessionId? parsedPerm wtArg #[] cbs (some safeRoot)
-      setup.env setup.args with
+      setup.env setup.args (do return (← mgr.stopEpochs.get).getD missionId 0 == launchEpoch &&
+        (← mgr.launchGenerations.get).get? missionId == some nextGen) with
   | .ok runSt =>
     if runSt.cwd != safeCwd && !runSt.cwd.isEmpty then
       if let .ok safeWt ← confineWorkingDirectory st.cfg.workingDir runSt.cwd then
@@ -2243,11 +2255,15 @@ def launchLocalWakeup (st : CoreAppState) (mr : MissionRecord) (prompt : String)
   return (← launchLocalCoreMissionTurn st mr.id mr.backend mr.workingDirectory prompt mr.modelOverride
     mr.modelEffort "bypassPermissions" sid? "local" false (some claim)).isOk
 
+private inductive ManagedTargetFailure where
+  | preflight (response : Nat × String)
+  | provisioning (response : Nat × String)
+
 /-- Resolve or provision a concrete remote node when a control-plane mission turn targets
     `auto-managed[:provider][:size]`. Reuses any existing scoped ready machine for the mission/user;
     otherwise provisions a managed VM for the mission owner through the shared admission, provider
     choice, pricing, and project-scoped snapshot path, and binds `owner_mission := missionId`. -/
-def resolveOrProvisionAutoManagedTarget
+private def resolveManagedTarget
     (st : CoreAppState)
     (caller : CallerPrincipal)
     (missionId : String)
@@ -2255,18 +2271,18 @@ def resolveOrProvisionAutoManagedTarget
     (missionProject : String)
     (rawTarget : String)
     (reqBodyJv : JVal)
-    (nowEpochSec : UInt64) : IO (Except (Nat × String) (String × String)) := do
+    (nowEpochSec : UInt64) : IO (Except ManagedTargetFailure (String × String)) := do
   let clean := rawTarget.trimAscii.toString
   let lower := clean.toLower
   if lower != "auto-managed" && !lower.startsWith "auto-managed:" then
     return .ok (clean, "")
   let some mst := st.managedStore?
-    | return .error (409, "{\"error\":\"managed_compute_unavailable\"}")
+    | return .error <| .preflight (409, "{\"error\":\"managed_compute_unavailable\"}")
   if let some existingNode ← scopedReadyManagedMachine? mst (some (st.store, missionId)) then
     return .ok (existingNode, "")
   let (namedProvider?, namedSize?) ← match parseAutoManagedTarget clean with
     | .ok target => pure target
-    | .error e => return .error (400, renderCompact (.obj #[("error", .str e)]))
+    | .error e => return .error <| .preflight (400, renderCompact (.obj #[("error", .str e)]))
   let ownerUid := if !missionOwnerUserId.isEmpty then missionOwnerUserId else caller.userId
   let prefUid := if ownerUid.isEmpty then "admin" else ownerUid
   let nowIso := formatEpochIso8601Utc nowEpochSec
@@ -2276,11 +2292,11 @@ def resolveOrProvisionAutoManagedTarget
     | .ok l => pure l
     | .error _ => pure mf0
   if !live.enabled then
-    return .error (409, "{\"error\":\"managed_fleet_disabled\",\"message\":\"Managed machines are turned off for this Core.\"}")
+    return .error <| .preflight (409, "{\"error\":\"managed_fleet_disabled\",\"message\":\"Managed machines are turned off for this Core.\"}")
   let uPrefs ← getUserManagedPrefs mst prefUid
   let ownerUser? ← if ownerUid.isEmpty then pure none else getUserById? st.store ownerUid
   if !ownerUid.isEmpty && !caller.isLegacyUnscoped && (ownerUser?.isNone || (ownerUser?.map (·.disabled)).getD true) then
-    return .error (403, "{\"error\":\"user_unavailable\"}")
+    return .error <| .preflight (403, "{\"error\":\"user_unavailable\"}")
   let effRole := (ownerUser?.map (·.role)).getD caller.role
   let effCap? := if ownerUser?.isSome then ownerUser?.bind (·.dailySpendCapCents?) else caller.dailySpendCapCents?
   let (infS, cmpS) ← if ownerUid.isEmpty then pure (0, 0) else getUserSpentTodayCents st.store ownerUid utcDay
@@ -2303,27 +2319,27 @@ def resolveOrProvisionAutoManagedTarget
       (infS + cmpS) effCap? st.managedProvisioningOverride?
   let prov := choice.provider
   if !isKnownProvider prov then
-    return .error (400, "{\"error\":\"unknown_provider\"}")
+    return .error <| .preflight (400, "{\"error\":\"unknown_provider\"}")
   if !isUserManagedProviderEnabled uPrefs prov then
-    return .error (403, "{\"error\":\"provider_disabled_for_user\",\"message\":\"This cloud provider is disabled in your preferences.\"}")
+    return .error <| .preflight (403, "{\"error\":\"provider_disabled_for_user\",\"message\":\"This cloud provider is disabled in your preferences.\"}")
   let providerEnabled ← match ← ManagedProviderSettings.isEnabled mst prov with
     | .ok value => pure value
-    | .error e => return .error (503, renderCompact (.obj #[("error", .str e)]))
+    | .error e => return .error <| .preflight (503, renderCompact (.obj #[("error", .str e)]))
   if !providerEnabled then
-    return .error (409, renderCompact (.obj #[("error", .str "provider_disabled"), ("provider", .str prov)]))
+    return .error <| .preflight (409, renderCompact (.obj #[("error", .str "provider_disabled"), ("provider", .str prov)]))
   let sz ← match ← resolveObservedSpawnSize st.store.rootDir prov (.obj sizeFields) st.managedProvisioningOverride?.isNone with
     | .ok s => pure s
-    | .error e => return .error (400, renderCompact (.obj #[("error", .str e)]))
+    | .error e => return .error <| .preflight (400, renderCompact (.obj #[("error", .str e)]))
   let estCents ← match quoteManagedSpawnCents prov sz ttlMins (st.managedProvisioningOverride?.map Prod.fst) with
     | .ok cents => pure cents
-    | .error e => return .error (400, renderCompact (.obj #[("error", .str e)]))
+    | .error e => return .error <| .preflight (400, renderCompact (.obj #[("error", .str e)]))
   let denyCode := admitManagedSpawnMultiUser live estCents (infS + cmpS) effCap? ttlMins.toUInt32
   if denyCode == 2 then
-    return .error (429, "{\"error\":\"daily_spend_cap_exceeded\",\"scope\":\"user\"}")
+    return .error <| .preflight (429, "{\"error\":\"daily_spend_cap_exceeded\",\"scope\":\"user\"}")
   if denyCode != 0 then
     if estCents > live.dailyCapCents || live.spentTodayCents > live.dailyCapCents - estCents then
-      return .error (429, "{\"error\":\"daily_spend_cap_exceeded\",\"scope\":\"global\"}")
-    return .error (429, renderCompact (.obj #[("error", .str "managed_concurrency_limit_reached"),
+      return .error <| .preflight (429, "{\"error\":\"daily_spend_cap_exceeded\",\"scope\":\"global\"}")
+    return .error <| .preflight (429, renderCompact (.obj #[("error", .str "managed_concurrency_limit_reached"),
       ("max_concurrent", JVal.uint64 live.maxConcurrent)]))
   let userAdmission? := managedUserAdmissionOf effRole effCap? infS cmpS (← memberMaxMachines)
   let vmId ← nextUniqueId st "vm" nowEpochSec
@@ -2350,11 +2366,11 @@ def resolveOrProvisionAutoManagedTarget
       | some pair => pure pair.1
       | none => match ← resolveManagedProvider st.store.rootDir prov with
         | .ok p => pure p
-        | .error e => return .error (409, renderCompact (.obj #[("error", .str e)]))
+        | .error e => return .error <| .preflight (409, renderCompact (.obj #[("error", .str e)]))
     let unscopeProj := (unscopeProjectSlugForOwner ownerUid st.bootstrapAdminId missionProject).getD missionProject
     match ← resolveProjectSnapshot st.store snapshotProvider unscopeProj requestedSnapshot with
     | .ok name => pure name
-    | .error e => return .error (409, renderCompact (.obj #[("error", .str e)]))
+    | .error e => return .error <| .preflight (409, renderCompact (.obj #[("error", .str e)]))
   let spawnArgs := JVal.obj (#[("provider", .str prov), ("size", .str sz)] ++ rentFields)
   match ← spawnConfiguredManagedWorker mst st.store.rootDir live vmRec spawnArgs "" st.managedProvisioningOverride? userAdmission? resolvedSnapshot with
   | .error e =>
@@ -2362,7 +2378,7 @@ def resolveOrProvisionAutoManagedTarget
       if e == "provider_at_capacity" || e == "managed_provider_availability_unavailable" then 503
       else if e == "managed_user_spend_cap_exceeded" || e == "managed_user_machine_limit_reached" then 429
       else 409
-    return .error (status, renderCompact (.obj #[("error", .str e)]))
+    return .error <| .provisioning (status, renderCompact (.obj #[("error", .str e)]))
   | .ok spawned =>
     if spawned.created && !ownerUid.isEmpty && estCents > 0 then
       discard <| addUserSpendCents st.store ownerUid utcDay 0 estCents s!"{nowEpochSec}"
@@ -2370,6 +2386,19 @@ def resolveOrProvisionAutoManagedTarget
       st.managedRef.set refreshed
     let concreteNode := s!"managed-{spawned.machine.id}"
     return .ok (concreteNode, spawned.machine.id)
+
+def resolveOrProvisionAutoManagedTarget
+    (st : CoreAppState)
+    (caller : CallerPrincipal)
+    (missionId : String)
+    (missionOwnerUserId : String)
+    (missionProject : String)
+    (rawTarget : String)
+    (reqBodyJv : JVal)
+    (nowEpochSec : UInt64) : IO (Except (Nat × String) (String × String)) := do
+  match ← resolveManagedTarget st caller missionId missionOwnerUserId missionProject rawTarget reqBodyJv nowEpochSec with
+  | .ok target => return .ok target
+  | .error (.preflight response) | .error (.provisioning response) => return .error response
 
 def updateMissionBoundManagedNode (store : CoreStore) (missionId concreteNode nowIso : String) : IO String := do
   let mut tags : Array String := #[]
@@ -2538,7 +2567,7 @@ private def maybeSpawnWarmHarnessTurn
     (placementKind : String)
     (missionId harness cwd prompt model effort permMode : String)
     (worktreeMode : String := "")
-    (appendUserEvent : Bool := true) : IO (Option String) := do
+    (appendUserEvent : Bool := true) (admittedGeneration? : Option UInt64 := none) : IO (Option String) := do
   if !(caller.isLegacyUnscoped || caller.role == "admin") then return none
   if placementKind != "managed" && placementKind != "local" then return none
   let mut sid? : Option String := none
@@ -2546,7 +2575,7 @@ private def maybeSpawnWarmHarnessTurn
     if sRows.size > 1 then
       let s := (cell sRows[1]! 0).trimAscii.toString
       if !s.isEmpty then sid? := some s
-  match ← launchLocalCoreMissionTurn st missionId harness cwd prompt model effort permMode sid? worktreeMode appendUserEvent with
+  match ← launchLocalCoreMissionTurn st missionId harness cwd prompt model effort permMode sid? worktreeMode appendUserEvent (admittedGeneration? := admittedGeneration?) with
   | .ok dir => return some dir
   | .error err =>
     if st.warmMgr?.isSome then
@@ -2903,6 +2932,12 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
 
   if req.method == "OPTIONS" then
     return .ok { status := 204, corsOrigin? := reqOrigin?, body := ByteArray.empty }
+
+  let queueRefusal (msgId error : String) : CoreHttpResponse :=
+    let invalid := error.startsWith "deferred_batch_"
+    let reason := if invalid then error else "message_enqueue_failed"
+    mkJson (if invalid then 400 else 500) (renderCompact (.obj #[
+      ("id", .str msgId), ("error", .str reason), ("message_accepted", .bool false), ("queued", .bool false)]))
 
   -- 1. Public Health Endpoint (`GET /api/health`)
   if req.method == "GET" && cleanPath == "/api/health" then
@@ -4006,6 +4041,8 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
       revokeSessionScopedMacTethersForMission st.store st.macTether? mid nowEpochSec
       match ← hostedStop st.store mid nowIso (if remoteGoal then "remote_goal_stopped" else "hosted_stop") with
       | .ok gen =>
+        if let some mgr := st.warmMgr? then
+          OrbBin.ClaudeControl.stopHarnessRun mgr mid
         if remoteGoal then
           discard <| cancelActiveRemoteJobForMission st.store st.managedStore? st.relayHub? mid "Goal stopped on Core"
           let payload := renderCompact (.obj #[("status", .str "stopped"), ("run_generation", JVal.uint64 gen)])
@@ -4032,7 +4069,17 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
       if encodeRollbackStatus nextStatus == 255 then
         return .ok (mkJson 400 "{\"error\":\"unsupported_status\"}")
       let nowIso := formatEpochIso8601Utc nowEpochSec
-      match ← setMissionStatusFromClient st.store mid nextStatus nowIso with
+      let fenceArchive : IO Bool := do
+        let some mgr := st.warmMgr? | return true
+        mgr.registration.atomically do
+          if (← mgr.stoppingGroupsRef.get).any (·.1 == mid) then return false
+          if (← mgr.activeGroupsRef.get).any (·.1 == mid) then return false
+          if let some (_, entry) := (← mgr.warmProcsRef.get).find? (·.1 == mid) then
+            if !(← entry.aliveRef.get) then return false
+            if (← OrbBin.ClaudeControl.getRunState? mgr mid).any (!·.done) then return false
+          mgr.launchGenerations.modify (·.erase mid)
+          return true
+      match ← setMissionStatusFromClient st.store mid nextStatus nowIso fenceArchive with
       | .ok changed =>
         if changed then
           -- An archived mission must not be woken again by its own reminders.
@@ -5269,10 +5316,18 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
         discard <| mark_mission_opened st.store mid nowIso
         return .ok (mkJson 200 "{\"ok\":true}")
       let content := ((jv.fieldStr? "content").orElse (fun _ => jv.fieldStr? "message")).getD ""
+      let receipt (queued : Bool) := mkJson 200 s!"\{\"ok\":true,\"queued\":{if queued then "true" else "false"},\"mission_id\":{jsonEscape mid},\"sender_user_id\":{jsonEscape caller.userId},\"sender_username\":{jsonEscape caller.username}}"
       let mut queued := false
       if !content.trimAscii.toString.isEmpty then
         let defMsgId ← nextUniqueId st "msg" nowEpochSec
         let msgId := (jv.fieldStr? "client_message_id").getD defMsgId
+        if cleanPath.endsWith "/message" && (jv.fieldStr? "client_message_id").any (!·.isEmpty) then
+          -- A committed enqueue survives removal of the live row and changes in placement.
+          let replay ← execParamQuery st.store.missionsDb
+            "SELECT 1 FROM queue_item_receipts WHERE mission_id=?1 AND message_id=?2 LIMIT 1;" #[mid, msgId]
+          match replay with
+          | .error _ => return .ok (mkJson 500 "{\"error\":\"message_receipt_unconfirmed\"}")
+          | .ok rows => if rows.size > 1 then return .ok (receipt true)
         let pl := renderCompact (.obj #[
           ("type", .str "user_message"),
           ("id", .str msgId),
@@ -5284,7 +5339,8 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
         match st.remoteSup?, (← resolveMissionRemoteNode? st.store st.managedStore? mid) with
         | some sup, some targetNode =>
           if mRec.status == "active" || mRec.status == "pending" then
-            discard <| enqueueStructuredFollowup st.store "core" msgId mid content "control" nowIso
+            if let .error e ← enqueueStructuredFollowup st.store "core" msgId mid content "control" nowIso then
+              return .ok (queueRefusal msgId e)
             queued := true
           else
             let (resolvedNode, rentedVmId) ← match ← resolveOrProvisionAutoManagedTarget st caller mid mRec.ownerUserId mRec.project targetNode jv nowEpochSec with
@@ -5293,7 +5349,8 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
             let effTagsJson ← if !rentedVmId.isEmpty then
               updateMissionBoundManagedNode st.store mid resolvedNode nowIso
             else pure mRec.tagsJson
-            discard <| appendMissionEvent st.store mid "user_message" pl nowIso
+            if let .error _ ← appendMissionEvent st.store mid "user_message" pl nowIso then
+              return .ok (mkJson 500 "{\"error\":\"message_append_failed\"}")
             if let some tSink := st.telemetrySink? then
               let actorUid? := if caller.isLegacyUnscoped || caller.userId.isEmpty then none else some caller.userId
               let actorUname? := if caller.isLegacyUnscoped || caller.username.isEmpty then none else some caller.username
@@ -5336,7 +5393,7 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
         discard <| execParamQuery st.store.missionsDb
           "UPDATE missions SET status='awaiting_user', orphaned_at='', state_revision=state_revision+1, updated_at=?2 WHERE id=?1;"
           #[mid, nowIso]
-      return .ok (mkJson 200 s!"\{\"ok\":true,\"queued\":{if queued then "true" else "false"},\"mission_id\":{jsonEscape mid},\"sender_user_id\":{jsonEscape caller.userId},\"sender_username\":{jsonEscape caller.username}}")
+      return .ok (receipt queued)
 
   -- Cloud Agent & Parity Sub-Routes before `/api/control/missions/:id`
   if cleanPath.startsWith "/api/cloud/" ||
@@ -6460,6 +6517,17 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
     let delivContent := if selectedSkills.isEmpty then content else withDirective content selectedSkills
     let mut queued := false
     let mut dispatchedRemote := false
+    let mut localRefused := false
+    -- Reserve before enqueue, append or spawn. Never release an uncertain claim
+    -- once dispatch begins. The authorized retry gets the original receipt.
+    let receiptScope := renderCompact (.arr #[.str "control_message", .str caller.userId, .str (mid?.getD "")])
+    let keyed := mid?.isSome && (bodyJv.fieldStr? "client_message_id").any (!·.isEmpty)
+    if keyed then
+      match ← claimIdempotencySlot st.store receiptScope msgId nowIso with
+      | .error _ => return .ok (mkJson 500 "{\"error\":\"message_claim_failed\"}")
+      | .ok .InFlight => return .ok (mkJson 409 "{\"error\":\"message_outcome_uncertain\"}")
+      | .ok (.Replayed rec) => return .ok (mkJson rec.statusCode rec.bodyJson)
+      | .ok .Claimed => pure ()
     if let some mid := mid? then
       let evPayload :=
         s!"\{\"type\":\"user_message\",\"id\":{jsonEscape msgId},\"content\":{jsonEscape content}," ++
@@ -6467,16 +6535,30 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
       if let (some sup, some m, some targetNode) := (st.remoteSup?, mission?, ← resolveMissionRemoteNode? st.store st.managedStore? mid) then
         dispatchedRemote := true
         if m.status == "active" || m.status == "pending" then
-          discard <| enqueueStructuredFollowup st.store "core" msgId mid delivContent "control" nowIso
+          if let .error e ← enqueueStructuredFollowup st.store "core" msgId mid delivContent "control" nowIso then
+            -- The enqueue transaction rolled back. A retry may safely reuse this message ID.
+            if keyed then
+              if let .error _ ← abortIdempotencySlot st.store receiptScope msgId then
+                return .ok (mkJson 500 "{\"error\":\"message_receipt_unconfirmed\"}")
+            return .ok (queueRefusal msgId e)
           queued := true
         else
-          let (resolvedNode, rentedVmId) ← match ← resolveOrProvisionAutoManagedTarget st caller mid m.ownerUserId m.project targetNode bodyJv nowEpochSec with
+          let (resolvedNode, rentedVmId) ← match ← resolveManagedTarget st caller mid m.ownerUserId m.project targetNode bodyJv nowEpochSec with
             | .ok pair => pure pair
-            | .error (errCode, errBody) => return .ok (mkJson errCode errBody)
+            | .error (.preflight (errCode, errBody)) =>
+              if keyed then
+                if let .error _ ← abortIdempotencySlot st.store receiptScope msgId then
+                  return .ok (mkJson 500 "{\"error\":\"message_receipt_unconfirmed\"}")
+              return .ok (mkJson errCode errBody)
+            | .error (.provisioning (errCode, errBody)) => return .ok (mkJson errCode errBody)
           let effTagsJson ← if !rentedVmId.isEmpty then
             updateMissionBoundManagedNode st.store mid resolvedNode nowIso
           else pure m.tagsJson
-          let _ ← appendMissionEvent st.store mid "user_message" evPayload nowIso
+          if let .error _ ← appendMissionEvent st.store mid "user_message" evPayload nowIso then
+            if keyed && rentedVmId.isEmpty then
+              if let .error _ ← abortIdempotencySlot st.store receiptScope msgId then
+                return .ok (mkJson 500 "{\"error\":\"message_receipt_unconfirmed\"}")
+            return .ok (mkJson 500 "{\"error\":\"message_append_failed\"}")
           let mut resumeSid? : Option String := none
           if let .ok sRows ← execParamQuery st.store.missionsDb "SELECT COALESCE(session_id,'') FROM missions WHERE id=?1;" #[mid] then
             if sRows.size > 1 then
@@ -6507,7 +6589,21 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
           if let .error dispErr ← submitRemoteMissionTurn st.store st.managedStore? st.relayHub? st.broadcastHub? sup st.cfg.workingDir spec nowEpochSec then
             return .ok (mkJson 502 s!"\{\"error\":{jsonEscape dispErr}}")
       else
-        let _ ← appendMissionEvent st.store mid "user_message" evPayload nowIso
+        if let some m := mission? then
+          let localSend := (bodyJv.fieldBool? "spawn_harness").getD (m.placementKind == "managed" && !isCloudBackendName m.backend)
+          if localSend then
+            let refusal? ← match st.warmMgr? with
+              | none => pure (some (503, "local_launcher_unavailable"))
+              | some mgr => pure (if (← mgr.activeGroupsRef.get).any (·.1 == mid) then some (409, "local_run_busy") else none)
+            if let some (status, reason) := refusal? then
+              let refusal := s!"\{\"id\":{jsonEscape msgId},\"error\":{jsonEscape reason},\"message_accepted\":false,\"queued\":false}"
+              if keyed then
+                if let .error _ ← recordOrReplayIdempotency st.store receiptScope msgId status refusal nowIso then
+                  return .ok (mkJson 500 "{\"error\":\"message_receipt_unconfirmed\"}")
+              return .ok (mkJson status refusal)
+        if let .error _ ← appendMissionEvent st.store mid "user_message" evPayload nowIso then
+          if keyed then discard <| abortIdempotencySlot st.store receiptScope msgId
+          return .ok (mkJson 500 "{\"error\":\"message_append_failed\"}")
       if !queued && !dispatchedRemote then
         if let some tSink := st.telemetrySink? then
           let actorUid? := if caller.isLegacyUnscoped || caller.userId.isEmpty then none else some caller.userId
@@ -6530,12 +6626,22 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
               if sRows.size > 1 then
                 let s := (cell sRows[1]! 0).trimAscii.toString
                 if !s.isEmpty then sid? := some s
-            discard <| launchLocalCoreMissionTurn st mid m.backend m.workingDirectory delivContent m.modelOverride m.modelEffort permMode sid? "local" false
+            localRefused := (← launchLocalCoreMissionTurn st mid m.backend m.workingDirectory delivContent m.modelOverride m.modelEffort permMode sid? "local" false (admittedGeneration? := some m.runGeneration)).isOk == false
           else
-            discard <| maybeSpawnWarmHarnessTurn st caller m.placementKind mid m.backend m.workingDirectory delivContent m.modelOverride m.modelEffort permMode "" false
-    return .ok (mkJson 200 (
+            localRefused := (← maybeSpawnWarmHarnessTurn st caller m.placementKind mid m.backend m.workingDirectory delivContent m.modelOverride m.modelEffort permMode "" false (some m.runGeneration)).isNone
+    if localRefused then
+      let receipt := s!"\{\"id\":{jsonEscape msgId},\"error\":\"local_delivery_not_confirmed\",\"queued\":false,\"message_accepted\":false}"
+      if keyed then
+        if let .error _ ← recordOrReplayIdempotency st.store receiptScope msgId 409 receipt nowIso then
+          return .ok (mkJson 500 "{\"error\":\"message_receipt_unconfirmed\"}")
+      return .ok (mkJson 409 receipt)
+    let receipt :=
       s!"\{\"id\":{jsonEscape msgId},\"queued\":{if queued then "true" else "false"},\"message_accepted\":true," ++
-      s!"\"sender_user_id\":{jsonEscape caller.userId},\"sender_username\":{jsonEscape caller.username}{deliveredField}}"))
+      s!"\"sender_user_id\":{jsonEscape caller.userId},\"sender_username\":{jsonEscape caller.username}{deliveredField}}"
+    if keyed then
+      if let .error _ ← recordOrReplayIdempotency st.store receiptScope msgId 200 receipt nowIso then
+        return .ok (mkJson 500 "{\"error\":\"message_receipt_unconfirmed\"}")
+    return .ok (mkJson 200 receipt)
 
   -- Mission Resume (`POST /api/control/missions/:id/resume`)
   if let some params := matchRoutePattern? "/api/control/missions/:id/resume" rawTarget then
