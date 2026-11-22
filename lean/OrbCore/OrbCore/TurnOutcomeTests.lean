@@ -177,8 +177,8 @@ private def verifyCodexGoalEchoBoundaries (store : CoreStore) (mid : String) : I
   let jid := "codex-boundary"
   let snap := fun (job id text : String) (length : Nat) => renderCompact (.obj #[("content", .str text),
     ("codex_goal_job", .str job), ("codex_item_id", .str id), ("codex_item_chars", .nat length)])
-  let replay := fun (prefix prev next prevJob nextId : String) (tool : Bool) => do
-    let prior := prefix ++ prev
+  let replay := fun (earlier prev next prevJob nextId : String) (tool : Bool) => do
+    let prior := earlier ++ prev
     let raw := prior ++ "\n\n" ++ next
     discard <| appendMissionEvent store mid "text_delta" (snap prevJob "a" prior prev.length) "t0"
     if tool then discard <| appendMissionEvent store mid "tool_result" "{}" "t0"
