@@ -163,8 +163,8 @@ for i in range(300):
             return
         edit = stack.enter_context(wayland_ime.session(graphical))
         typed, committed = 'Indigo ' + secrets.token_hex(5) + ' ', '日本語'
+        sidebar = '10,110 195x305'
         if replay:
-            sidebar = '10,110 195x305'
             if not widget('indigo', sidebar):
                 click(*wait('Source project', lambda: widget('source', sidebar)))
             click(*wait('existing mission', lambda: widget('indigo', sidebar)))
@@ -196,8 +196,7 @@ for i in range(300):
             edit([("語", len("猫".encode()), 0)])
             click(944, 347)
         else:
-            roster = '10,110 195x180'
-            wait('live project roster', lambda: any(word == 'source' for word, _, _ in read_words(crop(roster), roster)))
+            wait('live project roster', lambda: widget('source', sidebar))
             keys('-M', 'ctrl', '-k', 'n', '-m', 'ctrl', '-s', '200', typed)
             edit([(committed, 0, 0)])
             keys('-k', 'Return')
@@ -214,6 +213,7 @@ for i in range(300):
             time.sleep(2)
             click(946, 626)
             wait('retained draft delivered', lambda: messages() == ['other client', typed + committed])
+            wait('second harness launch', lambda: len(launches.read_text().splitlines()) >= 2)
             assert len(attempts) == len(set(attempts)) == len(launches.read_text().splitlines()) == 2
             api(path + '/cancel', {})
             return
