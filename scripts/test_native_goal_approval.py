@@ -83,7 +83,7 @@ def replay_workspace_read():
         assert not asked
         return next(r["result"]["outcome"] for r in replies if r["id"] == 17), events[-1]["result"]
 
-    for args in ({"path": "docs/plan.md"}, '{"path":"docs/plan.md"}'):
+    for args in ({"path": "notes/plan.md"}, '{"path":"notes/plan.md"}'):
         choice, result = run(args, "Read complete")
         assert choice == {"outcome": "selected", "optionId": "one"} and result["status"] == "SUCCESS"
     for args in ({"path": "/etc/passwd"}, {"path": "../file"}, {"path": "file", "content": "x"}, {}):
