@@ -2,6 +2,7 @@ import LeanUI.Defs
 import LeanUI.Kernel
 import LeanUI.Style
 import LeanUI.Layout
+import LeanUI.Text
 import LeanUI.Scene
 /-!
 # LeanUI.Widgets.MermaidSvg — Native Diagram & Vector Tile Widget (`0` FFI)
@@ -9,7 +10,8 @@ import LeanUI.Scene
 Pure native diagram and vector-tile widget supporting:
 - `DiagramNode`, `DiagramEdge`, and `SvgPathCmd` (`moveTo`, `lineTo`, `quadTo`, `cubicTo`, `closePath`)
 - Directed Sugiyama-style layered rank/column layout in `SubPx`
-- Rounded box/pill/diamond diagram nodes, orthogonal connector segments, arrowheads, and edge labels
+- Rounded box/pill nodes, stroked rhombus decision nodes sized to the node rectangle,
+  orthogonal connector segments, arrowheads, and edge labels
   lowered directly into declarative `WidgetNode`s.
 -/
 namespace LeanUI.Widgets
@@ -68,6 +70,161 @@ structure DiagramSpec where
   rankGapSub : SubPx := pxToSub 44
   columnGapSub : SubPx := pxToSub 20
   deriving Repr, Inhabited
+
+/-! ## Mermaid flowchart parsing (`graph` / `flowchart` subset)
+
+Pure line-based parser for fenced ```mermaid transcript blocks. Supported: `graph LR|TD|TB`
+and `flowchart LR|TD|TB` headers, node references with `[label]` / `(label)` / `{label}`
+shapes, `-->` edges with optional `|label|` annotations, chained statements on one line and
+standalone node declarations. Anything else fails closed (`none`); callers fall back to
+plain text. Ranks use layered peeling with cycle cutting, so they stay bounded by the
+node count and a cycle can neither inflate them nor destabilize the layout. -/
+
+/-- Mermaid node reference: identifier plus optional display label and shape. -/
+private structure MermaidRef where
+  id : String
+  label : Option String := none
+  shape : Option DiagramNodeShape := none
+
+private def isMermaidSpace (c : Char) : Bool := c == ' ' || c == '\t'
+
+private def isMermaidIdentChar (c : Char) : Bool :=
+  c.isAlpha || c.isDigit || c == '_' || c == '-'
+
+/-- Trim spaces and tabs (the prelude-only `LeanUI` environment has no `String.trim`). -/
+def mermaidTrim (s : String) : String :=
+  String.ofList (((s.toList.dropWhile isMermaidSpace).reverse.dropWhile isMermaidSpace).reverse)
+
+/-- Parse one node reference: `Id`, `Id[label]`, `Id(label)` or `Id{label}`. -/
+private def parseMermaidRef (raw : String) : Option MermaidRef :=
+  let s := (mermaidTrim raw).toList
+  match s.findIdx? fun c => c == '[' || c == '(' || c == '{' with
+  | none =>
+    if s.isEmpty || !(s.all isMermaidIdentChar) then none else some { id := String.ofList s }
+  | some idx =>
+    let idPart := s.take idx
+    let opener := s[idx]!
+    let closer : Char := match opener with
+      | '[' => ']'
+      | '(' => ')'
+      | _ => '}'
+    let shape : DiagramNodeShape := match opener with
+      | '[' => .rounded
+      | '(' => .pill
+      | _ => .diamond
+    if idPart.isEmpty || !(idPart.all isMermaidIdentChar) || s.getLast? != some closer then none
+    else
+      some { id := String.ofList idPart
+             label := some (mermaidTrim (String.ofList (((s.drop (idx + 1)).reverse.drop 1).reverse)))
+             shape := some shape }
+
+/-- Parse one statement line into its source ref and successive `-->` targets with optional
+`|label|` edge labels; a line without `-->` declares a standalone node. -/
+private def parseMermaidStmt (line : String) : Option (MermaidRef × List (String × MermaidRef)) :=
+  match line.splitOn "-->" with
+  | [] => none
+  | srcSeg :: rest => do
+    let src ← parseMermaidRef srcSeg
+    let targets ← rest.mapM fun seg => do
+      let t := mermaidTrim seg
+      if t.startsWith "|" then
+        match (String.ofList (t.toList.drop 1)).splitOn "|" with
+        | label :: tail =>
+          let ref ← parseMermaidRef (String.intercalate "|" tail)
+          return (mermaidTrim label, ref)
+        | [] => none
+      else
+        return ("", ← parseMermaidRef t)
+    return (src, targets)
+
+/-- Accumulator keeping node declaration order, last label/shape per node and all edges. -/
+private structure MermaidAcc where
+  order : List String := []
+  labels : List (String × String) := []
+  shapes : List (String × DiagramNodeShape) := []
+  edges : List (String × String × String) := []
+
+private def mermaidInsert (acc : MermaidAcc) (ref : MermaidRef) : MermaidAcc :=
+  let acc := if acc.order.contains ref.id then acc else { acc with order := acc.order ++ [ref.id] }
+  let acc := match ref.label with
+    | some l => { acc with labels := (acc.labels.filter (·.1 != ref.id)) ++ [(ref.id, l)] }
+    | none => acc
+  match ref.shape with
+  | some sh => { acc with shapes := (acc.shapes.filter (·.1 != ref.id)) ++ [(ref.id, sh)] }
+  | none => acc
+
+/-- Layered rank per node id via Kahn peeling with cycle cutting: each round places
+the nodes whose predecessors are all placed; when only cycles remain, the first
+unplaced node in declaration order is cut free at the next layer. One round per node,
+so ranks stay bounded by the node count and a cycle can never inflate them. -/
+private def mermaidRanks (order : List String) (edges : List (String × String × String)) :
+    List (String × Nat) :=
+  let predecessors (id : String) : List String := (edges.filter fun e => e.2.1 == id).map (·.1)
+  (List.range order.length).foldl (fun (m : List (String × Nat)) _ =>
+    let placed := m.map (·.1)
+    let layer := match m with
+      | [] => 0
+      | _ => (m.foldl (fun acc p => max acc p.2) 0) + 1
+    let fresh := order.filter fun id =>
+      !(placed.contains id) && (predecessors id).all (placed.contains ·)
+    match fresh with
+    | [] => match order.find? fun id => !placed.contains id with
+      | some cut => m ++ [(cut, layer)]
+      | none => m
+    | _ => m ++ fresh.map (·, layer)) []
+  |> fun m => order.map fun id => (id, (m.lookup id).getD 0)
+
+/-- Parse a Mermaid flowchart source into a `DiagramSpec`, or `none` when the subset does
+not match (callers then render the text plainly). Widget ids stay unassigned: the renderer
+owns the reserved widget-id band. -/
+def parseMermaidFlowchart (src : String) : Option DiagramSpec := do
+  let lines := (src.splitOn "\n").filterMap fun l =>
+    let t := mermaidTrim l
+    if t.isEmpty then none else some t
+  match lines with
+  | [] => none
+  | header :: stmts =>
+    let dir : DiagramDirection ←
+      match (header.splitOn " ").filter (· != "") with
+      | [kind, d] =>
+        if kind == "graph" || kind == "flowchart" then
+          match d with
+          | "LR" => some .leftRight
+          | "TD" | "TB" => some .topDown
+          | _ => none
+        else none
+      | _ => none
+    let acc ← stmts.foldlM (fun (acc : MermaidAcc) line => do
+      let (src, targets) ← parseMermaidStmt line
+      let acc := mermaidInsert acc src
+      -- Each target chains from its preceding node, so `A --> B --> C` yields the
+      -- edges A→B and B→C, never a shortcut from A to C.
+      let (acc, _) := targets.foldl
+        (fun (state : MermaidAcc × String) (lbl, dst) =>
+          let acc := mermaidInsert state.1 dst
+          ({ acc with edges := acc.edges ++ [(state.2, dst.id, lbl)] }, dst.id))
+        (acc, src.id)
+      pure acc) {}
+    let ids := acc.order
+    let ranks := mermaidRanks ids acc.edges
+    let maxRank := ranks.foldl (fun acc p => max acc p.2) 0
+    let colOf : List (String × Nat) := Id.run do
+      let mut col : List (String × Nat) := []
+      for r in [:maxRank + 1] do
+        let inRank := ids.filter fun id => ranks.lookup id == some r
+        col := col ++ inRank.mapIdx fun i id => (id, i)
+      return col
+    let nodes := ids.mapIdx fun i id =>
+      ({ id := i
+         label := (acc.labels.lookup id).getD id
+         rank := (ranks.lookup id).getD 0
+         column := (colOf.lookup id).getD 0
+         shape := (acc.shapes.lookup id).getD .rounded } : DiagramNode)
+    let edges := acc.edges.map fun e =>
+      ({ fromId := (ids.findIdx? (· == e.1)).getD 0
+         toId := (ids.findIdx? (· == e.2.1)).getD 0
+         label := e.2.2 } : DiagramEdge)
+    return { direction := dir, nodes := nodes, edges := edges }
 
 /-- Positioned diagram node in `SubPx` after Sugiyama rank/column assignment. -/
 structure PositionedDiagramNode where
@@ -136,6 +293,18 @@ def collectDiagramSvgPaths (spec : DiagramSpec) : List SvgPathCmd :=
       | _, _ => acc) []
   spec.svgPaths ++ edgePaths
 
+/-- Mermaid decision-node outline sized to the node's actual rectangle: the icon mask
+draws its square raster 1:1 and clips it to the content rect, so a wide short decision
+box needs the rhombus to occupy exactly the node-height band of the view box (top apex,
+right/left tips and bottom apex), with the 5.5-unit stroke inset so every tip —
+including the lower one — stays inside the paint and clipping bounds. -/
+def mermaidDiamondOutline (nodeW nodeH : SubPx) : List (List (Int × Int)) :=
+  let tip : Int := 6
+  let band : Int :=
+    min (160 - 2 * tip) (max (2 * tip + 2) (Int.ofNat (160 * nodeH / max 1 nodeW)))
+  let mid := band / 2
+  [[(80, tip), (160 - tip, mid), (80, band - tip), (tip, mid), (80, tip)]]
+
 /-- Build a declarative `WidgetNode` for a single `DiagramNode`. -/
 def buildDiagramNodeBox (theme : Theme) (nodeW nodeH : SubPx) (n : DiagramNode) : WidgetNode :=
   let pal := theme.palette
@@ -147,30 +316,57 @@ def buildDiagramNodeBox (theme : Theme) (nodeW nodeH : SubPx) (n : DiagramNode) 
     | .pill    => nodeH / 2
     | .diamond => theme.radiusSm
   let labelStyle : TextStyle := { (Theme.codeText theme) with weight := 600, color := pal.textPrimary }
+  let label : WidgetNode :=
+    WidgetNode.text
+      (BoxStyle.row 0 |>.withFixedSize (nodeW - pxToSub 20) (pxToSub 18))
+      theme.typo.lineTight
+      [diagramSynthRun labelStyle n.label]
   let rawBox : WidgetNode :=
-    WidgetNode.rrect
-      (BoxStyle.row 0
-        |>.withAlign .center
-        |>.withJustify .center
-        |>.withPadding (Edges.xy (pxToSub 10) (pxToSub 6))
-        |>.withFixedSize nodeW nodeH)
-      pal.surface
-      (CornerRadii.uniform radius)
-      (BorderStyle.uniform (pxToSub 2) borderCol)
-      [WidgetNode.text
-        (BoxStyle.row 0 |>.withFixedSize (nodeW - pxToSub 20) (pxToSub 18))
-        theme.typo.lineTight
-        [diagramSynthRun labelStyle n.label]]
-      n.widgetId
+    match n.shape with
+    | .diamond =>
+      -- Decision parity: a stroked rhombus sized to the node's actual dimensions with
+      -- the label centered inside, the way mermaid.js draws `{decision}` nodes. The
+      -- box carries no padding so the mask destination is the full node rect, which is
+      -- exactly the band the outline occupies in the square raster.
+      let runs := [diagramSynthRun labelStyle n.label]
+      let (_, labelW, _) := wrapInlineRuns (nodeW - pxToSub 20) theme.typo.lineTight runs
+      -- The square raster is drawn 1:1, so the historical 5.5-unit stroke would
+      -- render ~9px on a 136px node. Pick the radius whose rendered weight matches
+      -- the shared 2px widget border instead.
+      let strokeTenths := Text.iconStrokeTenthsForPxWidth (nodeW / subPerPx)
+      WidgetNode.mk none false true
+        (BoxStyle.row 0
+          |>.withAlign .center
+          |>.withJustify .center
+          |>.withFixedSize nodeW nodeH)
+        (.vectorIcon (mermaidDiamondOutline nodeW nodeH) borderCol none strokeTenths)
+        [WidgetNode.text
+          (BoxStyle.row 0 |>.withFixedSize (min (nodeW - pxToSub 20) labelW) (pxToSub 18))
+          theme.typo.lineTight runs]
+    | _ =>
+      WidgetNode.rrect
+        (BoxStyle.row 0
+          |>.withAlign .center
+          |>.withJustify .center
+          |>.withPadding (Edges.xy (pxToSub 10) (pxToSub 6))
+          |>.withFixedSize nodeW nodeH)
+        pal.surface
+        (CornerRadii.uniform radius)
+        (BorderStyle.uniform (pxToSub 2) borderCol)
+        [label]
+        n.widgetId
   match n.widgetId with
   | some wid => WidgetNode.focusable wid rawBox
   | none => rawBox
 
-/-- Build an orthogonal connector segment + arrowhead between two consecutive rank layers. -/
+/-- Build an orthogonal connector segment + arrowhead between two consecutive rank layers.
+The tip is a real directional chevron (round-join polyline pointing into the target
+column) rasterized at the shared 2px stroke weight, and the arrow row anchors to the
+connector's bottom so the caller can bottom-align the stack onto the node centers. -/
 def buildOrthogonalConnectorWidget (theme : Theme) (connW connH : SubPx) (label : String) : WidgetNode :=
   let pal := theme.palette
   let lineCol := pal.textSecondary
-  let arrowHeadW : SubPx := pxToSub 6
+  let arrowHeadW : SubPx := pxToSub 8
   let shaftW : SubPx := connW - arrowHeadW
   let shaft : WidgetNode :=
     WidgetNode.rrect
@@ -178,17 +374,18 @@ def buildOrthogonalConnectorWidget (theme : Theme) (connW connH : SubPx) (label 
       lineCol
       CornerRadii.zero
   let arrowTip : WidgetNode :=
-    WidgetNode.rrect
-      (BoxStyle.row 0 |>.withFixedSize arrowHeadW (pxToSub 6))
-      pal.accent
-      (CornerRadii.uniform (pxToSub 1))
+    WidgetNode.mk none false true
+      (BoxStyle.row 0 |>.withFixedSize arrowHeadW (pxToSub 8))
+      (.vectorIcon [[(28, 24), (132, 80), (28, 136)]] pal.accent none
+        (Text.iconStrokeTenthsForPxWidth 8))
+      []
   let arrowRow : WidgetNode :=
     WidgetNode.box
       (BoxStyle.row 0 |>.withAlign .center |>.withFixedSize connW (pxToSub 10))
       [shaft, arrowTip]
   if label.isEmpty then
     WidgetNode.box
-      (BoxStyle.col 0 |>.withAlign .center |>.withJustify .center |>.withFixedSize connW connH)
+      (BoxStyle.col 0 |>.withJustify .end_ |>.withFixedSize connW connH)
       [arrowRow]
   else
     let lblStyle := Theme.mutedText theme
@@ -198,7 +395,7 @@ def buildOrthogonalConnectorWidget (theme : Theme) (connW connH : SubPx) (label 
         theme.typo.lineTight
         [diagramSynthRun lblStyle label]
     WidgetNode.box
-      (BoxStyle.col (pxToSub 2) |>.withAlign .center |>.withJustify .center |>.withFixedSize connW connH)
+      (BoxStyle.col (pxToSub 2) |>.withJustify .end_ |>.withFixedSize connW connH)
       [lblNode, arrowRow]
 
 /-- Extract sorted distinct ranks present in `nodes`. -/
@@ -206,56 +403,168 @@ def distinctRanks (nodes : List DiagramNode) : List Nat :=
   let maxRank := nodes.foldl (fun acc n => max acc n.rank) 0
   (List.range (maxRank + 1)).filter fun r => nodes.any (fun n => n.rank == r)
 
+/-- Column position of a rank in the sorted distinct rank list (0 when absent). -/
+private def rankPos : List Nat → Nat → Nat
+  | [], _ => 0
+  | r :: rest, target => if r == target then 0 else rankPos rest target + 1
+
+/-- Canvas center x of the rank column at `pos`: the interleaved row is
+`[col, conn, col, ...]` after a 12-SubPx canvas padding. -/
+private def columnCenterX (nodeW rankGap : SubPx) (pos : Nat) : SubPx :=
+  pxToSub 12 + pos * (nodeW + rankGap) + nodeW / 2
+
+/-- Physically connected routing lane for a non-adjacent edge (back edge, skip
+forward, self loop), drawn just below the rank rows: one continuous thin-stroke
+polyline leaves the source column's bottom, runs across the lane and rises into the
+target column's bottom, a directional chevron sits directly on the target stub so
+the route enters the target node from the lane side, and the edge label rides the
+lane just below the run. The stroke radius is chosen so the rendered weight matches
+the shared 2px border, so the return route reads as the same pen as the forward
+connectors. -/
+def buildLaneEdgeWidget (theme : Theme) (laneW laneH : SubPx)
+    (xSource xTarget : SubPx) (label : String) : WidgetNode :=
+  let pal := theme.palette
+  let xMin := min xSource xTarget
+  let xMax := max xSource xTarget
+  let spanPx : Nat := (xMax - xMin) / subPerPx
+  let boxW : SubPx := pxToSub (spanPx + 2)
+  let tipRowH : SubPx := pxToSub 8
+  let runRowH : SubPx := pxToSub 8
+  let lblRowH : SubPx := pxToSub 12
+  -- View-box conversion for the lane raster: it is `spanPx + 2` px square, drawn 1:1
+  -- and clipped to the run row, so the visible vertical band is
+  -- `160 * runRowH / (spanPx + 2)` view units and the horizontal run sits at that
+  -- band's vertical center (half-up rounded so it always lands inside the visible
+  -- row) with both stubs rising to the row's very top (the tip row, then the node
+  -- bottoms above).
+  let band : Int := max 1 (Int.ofNat ((640 + (spanPx + 2) / 2) / max 1 (spanPx + 2)))
+  let uOf (x : SubPx) : Int :=
+    Int.ofNat ((x - xMin + subPerPx) * 160 / max 1 boxW)
+  let xs := uOf xSource
+  let xt := uOf xTarget
+  let strokeTenths := Text.iconStrokeTenthsForPxWidth (spanPx + 2)
+  let path : List (List (Int × Int)) :=
+    [[(xs, 0), (xs, band), (xt, band), (xt, 0)]]
+  let lanePath : WidgetNode :=
+    WidgetNode.mk none false true
+      (BoxStyle.row 0 |>.withFixedSize boxW runRowH)
+      (.vectorIcon path pal.textSecondary none strokeTenths)
+      []
+  -- Directional tip: a chevron pointing up into the target node, centered on the
+  -- target column so it caps the rising stub exactly. The vector box is square
+  -- (8×8, matching the raster) and the polyline reserves the stroke's full extent
+  -- inside it — wings 1.4px from the side edges, ink within 0.2px of top and
+  -- bottom — so neither wing is clipped by the view box.
+  let laneTip : WidgetNode :=
+    WidgetNode.mk none false true
+      (BoxStyle.row 0 |>.withFixedSize (pxToSub 8) tipRowH)
+      (.vectorIcon [[(28, 132), (80, 24), (132, 132)]] pal.accent none
+        (Text.iconStrokeTenthsForPxWidth 8))
+      []
+  let tipRow : WidgetNode :=
+    WidgetNode.box (BoxStyle.row 0 |>.withFixedSize laneW tipRowH)
+      [WidgetNode.box (BoxStyle.row 0 |>.withFixedSize (xTarget - pxToSub 4) tipRowH) [], laneTip]
+  let leadSpacer : WidgetNode :=
+    WidgetNode.box (BoxStyle.row 0 |>.withFixedSize (xMin - subPerPx) runRowH) []
+  let runRow : WidgetNode :=
+    WidgetNode.box (BoxStyle.row 0 |>.withFixedSize laneW runRowH) [leadSpacer, lanePath]
+  let lblRow : WidgetNode :=
+    if label.isEmpty then
+      WidgetNode.box (BoxStyle.row 0 |>.withFixedSize laneW lblRowH) []
+    else
+      let runs := [diagramSynthRun (Theme.mutedText theme) label]
+      let (_, measW, _) := wrapInlineRuns (max 1 (xMax - xMin)) theme.typo.lineTight runs
+      let lblW := max 1 (min measW (max 1 (xMax - xMin)))
+      let midX : SubPx := (xMin + xMax) / 2
+      WidgetNode.box (BoxStyle.row 0 |>.withFixedSize laneW lblRowH)
+        [WidgetNode.box (BoxStyle.row 0 |>.withFixedSize (midX - lblW / 2) lblRowH) [],
+         WidgetNode.text (BoxStyle.row 0 |>.withFixedSize lblW lblRowH) theme.typo.lineTight runs]
+  WidgetNode.box (BoxStyle.col 0 |>.withFixedSize laneW laneH) [tipRow, runRow, lblRow]
+
 /-- Build a complete Mermaid / SVG diagram widget in `SubPx` using Sugiyama rank columns
-and orthogonal connector widgets. -/
+and orthogonal connector widgets. Edges between adjacent rank columns route forward, one
+orthogonal connector per edge with that edge's own label; every other edge (back edge,
+skip forward, self loop) routes through a physically connected lane below the columns so
+no edge or label is ever dropped. Rank columns are bottom-aligned and the canvas keeps
+no bottom padding, so each lane's stubs rise from the shared bottom edge into the node
+rects and the return route is physically attached to both endpoints. -/
 def buildMermaidDiagramWidget (theme : Theme) (availW : SubPx) (spec : DiagramSpec) : WidgetNode :=
   let pal := theme.palette
   let ranks := distinctRanks spec.nodes
   let maxColCount :=
     ranks.foldl (fun acc r => max acc (spec.nodes.filter (fun n => n.rank == r)).length) 1
-  let bodyH : SubPx :=
-    max (spec.nodeHeightSub + pxToSub 24)
-      (maxColCount * spec.nodeHeightSub + (maxColCount - 1) * spec.columnGapSub + pxToSub 24)
+  -- Intrinsic height of the tallest rank column; every column and connector band is
+  -- bottom-aligned within it so lane stubs can rise from the shared bottom edge.
+  let colsH : SubPx :=
+    max spec.nodeHeightSub
+      (maxColCount * spec.nodeHeightSub + (maxColCount - 1) * spec.columnGapSub)
+  -- Distance from the column bottom to a connector's arrow row: the arrow's center
+  -- lands exactly on the (bottom-aligned) node centers.
+  let bandPad : SubPx := spec.nodeHeightSub / 2 - pxToSub 5
+  let canvasH : SubPx := colsH + pxToSub 12
   let headerH : SubPx := if spec.title.isEmpty then 0 else pxToSub 28
-  let totalH : SubPx := headerH + bodyH + pxToSub 16
+  -- Resolve every edge to its endpoints' rank positions; adjacent columns route
+  -- forward, everything else routes through a lane below the rank rows.
+  let resolved : List (DiagramEdge × Nat × Nat) := spec.edges.filterMap fun e => do
+    let s ← spec.nodes.find? (fun n => n.id == e.fromId)
+    let t ← spec.nodes.find? (fun n => n.id == e.toId)
+    some (e, rankPos ranks s.rank, rankPos ranks t.rank)
+  let laneEdges := resolved.filter (fun (_, ps, pt) => pt != ps + 1)
+  let laneH : SubPx := laneEdges.length * pxToSub 28
+  let totalH : SubPx := headerH + canvasH + laneH + pxToSub 8
 
-  let rec buildRankInterleaved : List Nat → List WidgetNode
-    | [] => []
-    | [r] =>
+  let buildConnBand (pos : Nat) : WidgetNode :=
+    match resolved.filter (fun (_, ps, pt) => ps == pos && pt == pos + 1) with
+    | [] => WidgetNode.box
+        (BoxStyle.row 0 |>.withFixedSize spec.rankGapSub colsH) []
+    | edges =>
+      let each :=
+        ((colsH - bandPad) - pxToSub 4 * (edges.length - 1)) / edges.length
+      WidgetNode.box
+        (BoxStyle.col (pxToSub 4) |>.withJustify .end_
+          |>.withPadding { top := 0, right := 0, bottom := bandPad, left := 0 }
+          |>.withFixedSize spec.rankGapSub colsH)
+        (edges.map fun (e, _, _) =>
+          buildOrthogonalConnectorWidget theme spec.rankGapSub each e.label)
+
+  let rec buildRankInterleaved : List Nat → Nat → List WidgetNode
+    | [], _ => []
+    | [r], _pos =>
       let colNodes := spec.nodes.filter (fun n => n.rank == r)
       let colWidgets := colNodes.map (buildDiagramNodeBox theme spec.nodeWidthSub spec.nodeHeightSub)
       [WidgetNode.box
-        (BoxStyle.col spec.columnGapSub |>.withJustify .center |>.withFixedSize spec.nodeWidthSub (bodyH - pxToSub 16))
+        (BoxStyle.col spec.columnGapSub |>.withJustify .end_ |>.withFixedSize spec.nodeWidthSub colsH)
         colWidgets]
-    | r :: rNext :: rest =>
+    | r :: rNext :: rest, pos =>
       let colNodes := spec.nodes.filter (fun n => n.rank == r)
       let colWidgets := colNodes.map (buildDiagramNodeBox theme spec.nodeWidthSub spec.nodeHeightSub)
       let rankCol :=
         WidgetNode.box
-          (BoxStyle.col spec.columnGapSub |>.withJustify .center |>.withFixedSize spec.nodeWidthSub (bodyH - pxToSub 16))
+          (BoxStyle.col spec.columnGapSub |>.withJustify .end_ |>.withFixedSize spec.nodeWidthSub colsH)
           colWidgets
-      let edgeLabel :=
-        match spec.edges.find? (fun e =>
-          colNodes.any (fun n => n.id == e.fromId)) with
-        | some e => e.label
-        | none => ""
-      let connCol :=
-        buildOrthogonalConnectorWidget theme spec.rankGapSub (bodyH - pxToSub 16) edgeLabel
-      rankCol :: connCol :: buildRankInterleaved (rNext :: rest)
+      rankCol :: buildConnBand pos :: buildRankInterleaved (rNext :: rest) (pos + 1)
 
-  let graphColumns := buildRankInterleaved ranks
+  let graphColumns := buildRankInterleaved ranks 0
   let graphCanvas : WidgetNode :=
     WidgetNode.box
       (BoxStyle.row 0
         |>.withAlign .center
-        |>.withPadding (Edges.all (pxToSub 12))
-        |>.withFixedSize (availW - pxToSub 8) bodyH)
+        -- No bottom padding: the columns' bottom edge is the canvas's bottom edge,
+        -- which is exactly where the return lane's stubs begin.
+        |>.withPadding { top := pxToSub 12, right := pxToSub 12, bottom := 0, left := pxToSub 12 }
+        |>.withFixedSize (availW - pxToSub 8) canvasH)
       graphColumns
+  let laneRow : List WidgetNode :=
+    if laneEdges.isEmpty then []
+    else
+      let xOf := columnCenterX spec.nodeWidthSub spec.rankGapSub
+      [WidgetNode.box
+        (BoxStyle.col 0 |>.withFixedSize (availW - pxToSub 8) laneH)
+        (laneEdges.map fun (e, ps, pt) =>
+          buildLaneEdgeWidget theme (availW - pxToSub 8) (pxToSub 28) (xOf ps) (xOf pt) e.label)]
 
   let children : List WidgetNode :=
-    if spec.title.isEmpty then
-      [graphCanvas]
-    else
+    (if spec.title.isEmpty then [graphCanvas] else
       let titleStyle := Theme.secondaryText theme
       let titleBar :=
         WidgetNode.box
@@ -267,7 +576,7 @@ def buildMermaidDiagramWidget (theme : Theme) (availW : SubPx) (spec : DiagramSp
             (BoxStyle.row 0 |>.withFixedSize (availW - pxToSub 32) (pxToSub 18))
             theme.typo.lineTight
             [diagramSynthRun titleStyle spec.title]]
-      [titleBar, graphCanvas]
+      [titleBar, graphCanvas]) ++ laneRow
 
   WidgetNode.rrect
     (BoxStyle.col 0

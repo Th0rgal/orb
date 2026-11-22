@@ -21,6 +21,38 @@ import live_transport as live
 
 QUERY = (PKG.parent / 'OrbCore/OrbCore/current_bubble.sql').read_text()
 
+# Reconstruction (labeled as such in the PR) of the reported live gap: an earlier
+# assistant turn followed by a canonical turn whose content is a fenced Mermaid
+# graph with an S --Approve--> T edge and a Revise branch. Node shapes are varied
+# (rounded/pill/diamond) so the replay can observe them; the driver asserts the
+# rendered labels, shapes and edge directions without assuming any widget ids.
+MERMAID_TURN = ('```mermaid\ngraph LR\n'
+                '  S[Spec] -->|Approve| T(Build)\n'
+                '  T -->|Revise| R{Fix}\n```')
+
+MERMAID_BACKEDGE = ('```mermaid\ngraph LR\n'
+                    '  Draft[Design spec] --> Review[Code review]\n'
+                    '  Review -->|Approve| Deploy[Canary deploy]\n'
+                    '  Deploy --> Verify[Verify release]\n'
+                    '  Review -->|Revise| Draft\n```')
+
+MERMAID_CYCLE = ('```mermaid\ngraph LR\n'
+                 '  A[Alpha] -->|Ship| B[Beta]\n'
+                 '  B[Beta] -->|Return| A[Alpha]\n```')
+
+MD_TURN = ('# Release notes\n'
+           '\n'
+           '**Bold start** and *a soft italic* plus `inline code` here.\n'
+           '\n'
+           '- First bullet\n'
+           '- Second bullet\n'
+           '\n'
+           'Docs at [the guide](https://example.test/guide).\n'
+           '\n'
+           '```python\n'
+           'print("hi")\n'
+           '```\n')
+
 
 def fixture():
     db = sqlite3.connect(':memory:', check_same_thread=False)
@@ -481,8 +513,67 @@ class Delivery(unittest.TestCase):
         self.run_wire('reconnect')
 
     def run_wire(self, mode):
-        paths, tokens = [], []
+        paths, tokens, cold_polls = [], [], []
         db = fixture()
+        if mode == 'mermaid-turn':
+            # Two-turn live case: turn one is already persisted when the client
+            # attaches; the handler stages the follow-up turn across later polls.
+            db.execute("DELETE FROM mission_events WHERE mission_id='a'")
+            db.execute("INSERT INTO mission_events VALUES(NULL,'a',1,1,'user_message',?,'{}','')",
+                       (json.dumps({'content': 'PRIVATE', 'queued': False}),))
+            db.execute("INSERT INTO mission_events VALUES(NULL,'a',2,2,'assistant_message_canonical',?,'{}','')",
+                       (json.dumps({'content': 'Amber blossom'}),))
+        if mode == 'mermaid-backedge':
+            # The controller-reported graph: the Review -> Draft back edge and its
+            # Revise label must render even though it routes backwards across the
+            # rank columns, and Review (two labelled outgoing edges) must show
+            # both Approve and Revise.
+            db.execute("DELETE FROM mission_events WHERE mission_id='a'")
+            db.execute("INSERT INTO mission_events VALUES(NULL,'a',1,1,'assistant_message',?,'{}','')",
+                       (json.dumps({'content': MERMAID_BACKEDGE, 'queued': False}),))
+        if mode == 'mermaid-cycle':
+            # The review's exact two-node bidirectional cycle: both directions must
+            # render as separate actual paths with clear labels and arrowheads at
+            # opposite targets.
+            db.execute("DELETE FROM mission_events WHERE mission_id='a'")
+            db.execute("INSERT INTO mission_events VALUES(NULL,'a',1,1,'assistant_message',?,'{}','')",
+                       (json.dumps({'content': MERMAID_CYCLE, 'queued': False}),))
+        if mode == 'markdown-turn':
+            # A live turn that first streams a single markdown line, then completes
+            # into a multi-line markdown document with lists, links, inline styles
+            # and a non-mermaid code fence. Both stream shapes must render without
+            # their literal markers.
+            db.execute("DELETE FROM mission_events WHERE mission_id='a'")
+            db.execute("INSERT INTO mission_events VALUES(NULL,'a',1,1,'assistant_message',?,'{}','')",
+                       (json.dumps({'content': 'Amber blossom', 'queued': False}),))
+        if mode == 'cold-recover':
+            # Cold open with persisted turns, then a transient unavailable window
+            # (a projection no client can parse), then the same text again. The
+            # client must restore the earlier turns from the persisted timeline
+            # instead of losing them for good after the wipe.
+            db.execute("DELETE FROM mission_events WHERE mission_id='a'")
+            db.execute("UPDATE missions SET status='completed' WHERE id='a'")
+            for seq, kind, content in (
+                    (1, 'user_message', 'PRIVATE'), (2, 'assistant_message', 'Amber blossom'),
+                    (3, 'user_message', 'PRIVATE'), (4, 'assistant_message', 'Cold ember glow')):
+                db.execute("INSERT INTO mission_events VALUES(NULL,'a',?,?,?,?,'{}','')",
+                           (seq, seq, kind, json.dumps({'content': content, 'queued': False})))
+        if mode == 'cold-open':
+            # Completed mission in the real Core persistence shape: delivered user
+            # prompts and assistant turns stored as plain assistant_message, with the
+            # final turn also replaced by its canonical form. The history projection
+            # must cover all three event types, keep one copy of the canonical
+            # replacement and yield the newest turn to the live bubble. A third turn
+            # streams live, but only after the driver has observed and asserted the
+            # cold-open render (marker file).
+            db.execute("DELETE FROM mission_events WHERE mission_id='a'")
+            db.execute("UPDATE missions SET status='completed' WHERE id='a'")
+            for seq, kind, content in (
+                    (1, 'user_message', 'PRIVATE'), (2, 'assistant_message', 'Amber blossom'),
+                    (3, 'user_message', 'PRIVATE'), (4, 'assistant_message', MERMAID_TURN),
+                    (5, 'assistant_message_canonical', MERMAID_TURN)):
+                db.execute("INSERT INTO mission_events VALUES(NULL,'a',?,?,?,?,'{}','')",
+                           (seq, seq, kind, json.dumps({'content': content, 'queued': False})))
         project_started = threading.Event()
         release_project = threading.Event()
         events = '/current-bubble'
@@ -514,7 +605,8 @@ class Delivery(unittest.TestCase):
                     if mode == 'idle-session' and paths.count(path) > 1:
                         self.send_error(401)
                         return
-                    ids = ('a',) if mode == 'idle-share' and paths.count(path) > 2 else ('a','b')
+                    ids = ('a',) if (mode == 'idle-share' and paths.count(path) > 2) or \
+                        (mode == 'share-403' and paths.count(path) > 1) else ('a','b')
                     if mode in ('page-two', 'idle-page-two') and paths.count(path) > 1:
                         ids = ['a'] + [f'new-{i}' for i in range(199)]
                     result = [dict(id=m, title=m, status='active') for m in ids]
@@ -537,19 +629,90 @@ class Delivery(unittest.TestCase):
                     result = []
                 elif path.startswith('/api/control/missions?project=p&') or path == '/api/machines':
                     result = []
+                elif path.split('?')[0] == a + '/open':
+                    # Real Core open bundle: mission detail, first events page and the
+                    # older transcript spine, read from the same mission_events rows
+                    # the bubble reads. The client filters transcript event types.
+                    rows = db.execute(
+                        "SELECT id, COALESCE(NULLIF(seq,0),sequence), event_type, payload, content"
+                        " FROM mission_events WHERE mission_id='a'"
+                        " ORDER BY COALESCE(NULLIF(seq,0),sequence) DESC, id DESC LIMIT 200").fetchall()
+                    events_page = []
+                    for row in reversed(rows):
+                        payload = json.loads(row[3]) if row[3] else {}
+                        content = payload.get('content') if isinstance(payload.get('content'), str) else row[4]
+                        events_page.append(dict(id=row[0], mission_id='a', sequence=row[1],
+                                                event_type=row[2], content=content))
+                    result = dict(protocol=1, mission=dict(id='a'), events=events_page, spine=[],
+                                  queue=[], max_seq=events_page[-1]['sequence'] if events_page else 0,
+                                  has_more=False, spine_has_more=False, spine_next_cursor=None,
+                                  next_cursor=None, page_max_seq=None, reset=False)
                 elif path.split('?')[0] in (a + events, b + events):
                     mid = path.split('/')[-2]
                     presence = path.endswith('?presence=1')
+                    if mid == 'a' and mode == 'cold-recover' and paths.count(path) == 2:
+                        # Core unreachable for one poll: a projection reply that no
+                        # client can parse, exactly like the access-loss window.
+                        self.send_response(200)
+                        self.end_headers()
+                        try:
+                            self.wfile.write(b'{not json')
+                        except (BrokenPipeError, ConnectionResetError):
+                            pass
+                        return
+                    if mid == 'a' and mode == 'markdown-turn' and paths.count(path) == 2:
+                        # Stream the single markdown line first.
+                        db.execute("UPDATE mission_events SET payload=? WHERE mission_id='a' AND seq=1",
+                                   (json.dumps({'content': '**Ember glow**', 'queued': False}),))
+                    elif mid == 'a' and mode == 'markdown-turn' and paths.count(path) >= 4:
+                        # Then complete the turn into the full markdown document.
+                        db.execute("UPDATE mission_events SET payload=? WHERE mission_id='a' AND seq=1",
+                                   (json.dumps({'content': MD_TURN, 'queued': False}),))
+                    if mode == 'access-loss' and mid == 'b' and 2 <= paths.count(path) <= 4:
+                        # Core unreachable: a projection reply that no client can parse.
+                        self.send_response(200)
+                        self.end_headers()
+                        try:
+                            self.wfile.write(b'{not json')
+                        except (BrokenPipeError, ConnectionResetError):
+                            pass
+                        return
                     if mode == 'project-lag' and mid == 'b':
                         project_started.wait(3)
                     if mode == 'selected-session' and mid == 'b' and paths.count(path) > 1:
                         self.send_error(401)
                         return
-                    if mid == 'a' and paths.count(path) > 1:
+                    if mid == 'a' and mode == 'mermaid-turn':
+                        # Stage the follow-up turn one event at a time so the client sees
+                        # the real projection sequence: turn, boundary, new canonical turn.
+                        if paths.count(path) == 2:
+                            db.execute("INSERT INTO mission_events VALUES(NULL,'a',3,3,'user_message',?,'{}','')",
+                                       (json.dumps({'content': 'PRIVATE', 'queued': False}),))
+                        elif paths.count(path) >= 3 and not db.execute(
+                                "SELECT 1 FROM mission_events WHERE mission_id='a' AND seq=4").fetchone():
+                            db.execute("INSERT INTO mission_events VALUES(NULL,'a',4,4,'assistant_message_canonical',?,'{}','')",
+                                       (json.dumps({'content': MERMAID_TURN}),))
+                    elif mid == 'a' and paths.count(path) > 1:
                         db.execute("UPDATE missions SET title='Updated', status='awaiting_user' WHERE id='a'")
                         db.execute("UPDATE mission_events SET payload=json_set(payload,'$.queued',json('false')) WHERE mission_id='a' AND seq=3")
+                    if mid == 'a' and mode == 'cold-open' and (Path(root) / 'cold-open-observed').exists():
+                        # Turn boundary first, then the new canonical turn, so the
+                        # client sees the real projection sequence after cold open.
+                        cold_polls.append(path)
+                        if len(cold_polls) == 1 and not db.execute(
+                                "SELECT 1 FROM mission_events WHERE mission_id='a' AND seq=6").fetchone():
+                            db.execute("INSERT INTO mission_events VALUES(NULL,'a',6,6,'user_message',?,'{}','')",
+                                       (json.dumps({'content': 'PRIVATE', 'queued': False}),))
+                        elif len(cold_polls) >= 3 and not db.execute(
+                                "SELECT 1 FROM mission_events WHERE mission_id='a' AND seq=7").fetchone():
+                            db.execute("INSERT INTO mission_events VALUES(NULL,'a',7,7,'assistant_message_canonical',?,'{}','')",
+                                       (json.dumps({'content': 'Ripened fruit'}),))
                     if mid == 'b' and ((mode == 'revoke' and paths.count(path) > 1) or mode == 'idle-share'):
                         db.execute('DELETE FROM mission_shares')
+                    if mid == 'b' and mode == 'share-403' and paths.count(path) > 1:
+                        # Permission revoked after one successful projection.
+                        self.send_error(403)
+                        return
                     row = db.execute(QUERY, {'1': mid, '2': '0', '3': 'owner', '4': '1' if presence else '0'}).fetchone()
                     if not row:
                         self.send_error(404)
@@ -577,7 +740,11 @@ class Delivery(unittest.TestCase):
                     (Path(root) / filename).write_text(json.dumps(dict(
                         api_url='', apiUrl=f'http://127.0.0.1:{server.server_port}', token=token)))
                 subprocess.run(['lean', '-j', '1', '-M', '1024', '--run', 'tests/LiveDelivery.lean', mode],
-                               cwd=PKG, env={**os.environ, 'ORB_STATE_DIR': root}, check=True, timeout=20)
+                               cwd=PKG, env={**os.environ, 'ORB_STATE_DIR': root,
+                                             'ORB_TEST_MERMAID': MERMAID_TURN,
+                                             'ORB_TEST_BACKEDGE': MERMAID_BACKEDGE,
+                                             'ORB_TEST_CYCLE': MERMAID_CYCLE,
+                                             'ORB_TEST_MARKDOWN': MD_TURN}, check=True, timeout=20)
                 if mode in ('reconnect', 'settings-switch'):
                     first = tokens.index('Bearer changed')
                     self.assertGreater(first, 0)
@@ -590,6 +757,48 @@ class Delivery(unittest.TestCase):
                 if mode in ('idle-share', 'idle-page-two'):
                     self.assertIn(b + events + '?presence=1', paths)
                     self.assertNotIn(b + events, paths)
+                elif mode == 'mermaid-turn':
+                    # The follow-up turn must be staged through at least three polls
+                    # (turn, boundary, canonical) and mission b stays unpolled.
+                    self.assertGreaterEqual(paths.count(a + events), 3)
+                    self.assertNotIn(b + events, paths)
+                elif mode == 'cold-open':
+                    # One bounded /open read populates the cold open; the third
+                    # turn must stage across later polls; mission b stays unpolled.
+                    self.assertEqual(paths.count(a + '/open'), 1)
+                    self.assertGreaterEqual(paths.count(a + events), 3)
+                    self.assertNotIn(b + events, paths)
+                    self.assertFalse(any(p.split('?')[0] == b + '/events' for p in paths))
+                elif mode == 'cold-recover':
+                    # The malformed window passes before the fresh projection and
+                    # the persisted archive is re-read exactly once on recovery.
+                    self.assertEqual(paths.count(a + '/open'), 2)
+                    self.assertGreaterEqual(paths.count(a + events), 3)
+                    self.assertNotIn(b + events, paths)
+                elif mode == 'mermaid-backedge':
+                    # The driver renders and asserts from the first bubble; mission
+                    # b stays unpolled.
+                    self.assertGreaterEqual(paths.count(a + events), 1)
+                    self.assertNotIn(b + events, paths)
+                elif mode == 'mermaid-cycle':
+                    # The driver renders and asserts the bidirectional cycle from
+                    # the first bubble; mission b stays unpolled.
+                    self.assertGreaterEqual(paths.count(a + events), 1)
+                    self.assertNotIn(b + events, paths)
+                elif mode == 'markdown-turn':
+                    # The single line and the completed document stage across later
+                    # polls; mission b stays unpolled.
+                    self.assertGreaterEqual(paths.count(a + events), 4)
+                    self.assertNotIn(b + events, paths)
+                elif mode == 'access-loss':
+                    # The malformed window must pass before the fresh projection; the
+                    # bubble is polled repeatedly and mission a stays unpolled.
+                    self.assertGreaterEqual(paths.count(b + events), 5)
+                    self.assertFalse(any(p.split('?')[0] == a + events for p in paths))
+                elif mode == 'share-403':
+                    # One success, then permission denial: the reader stops there and
+                    # never polls the revoked mission again.
+                    self.assertEqual(paths.count(b + events), 2)
                 elif mode in ('page-two', 'null-retry', 'start-running', 'project-lag'):
                     self.assertIn(b + events, paths)
                 elif mode in ('idle-identity', 'before-open', 'unavailable', 'denied', 'idle-session', 'project-first'):
@@ -616,6 +825,12 @@ class Delivery(unittest.TestCase):
     def test_revocation(self):
         self.run_wire('revoke')
 
+    def test_access_loss_replays_one_visible_copy(self):
+        self.run_wire('access-loss')
+
+    def test_permission_loss_leaves_roster_without_earlier_text(self):
+        self.run_wire('share-403')
+
     def test_idle_share_loss(self):
         self.run_wire('idle-share')
 
@@ -636,6 +851,158 @@ class Delivery(unittest.TestCase):
 
     def test_oversized_bubble_preserves_roster(self):
         self.run_wire('oversize')
+
+    def test_cold_open_history_yields_the_newest_persisted_turn_to_the_live_bubble(self):
+        conn = Mock(binding='bound')
+        conn.get.return_value = dict(
+            protocol=1, mission=dict(id='a'),
+            events=[
+                dict(sequence=4, event_type='assistant_message_canonical', content='graph LR'),
+                dict(sequence=2, event_type='assistant_message_canonical', content='Amber blossom'),
+                dict(sequence=3, event_type='user_message', content='PRIVATE'),
+                dict(sequence=5, event_type='tool_call', content='PRIVATE'),
+                dict(sequence=1, event_type='assistant_message', content='Seed turn'),
+                dict(sequence=7, event_type='assistant_message', content='graph LR'),
+            ],
+            spine=[dict(sequence=6, event_type='assistant_message_canonical', content='Oldest spine page turn')],
+        )
+        # Delivered user prompts render with the You marker, both assistant event
+        # representations appear, and a canonical event with no matching plain turn
+        # is its own distinct turn.
+        self.assertEqual(live.history_turns(conn, 'a', 'graph LR'),
+                         ['Seed turn', 'Amber blossom', 'You: PRIVATE', 'graph LR',
+                          'Oldest spine page turn'])
+        self.assertEqual(conn.get.call_args.args[0], '/api/control/missions/a/open')
+        # The newest persisted turn is the plain form at sequence 7, so only a
+        # bubble text matching it is yielded; an older bubble text keeps everything.
+        self.assertEqual(live.history_turns(conn, 'a', 'Oldest spine page turn'),
+                         ['Seed turn', 'Amber blossom', 'You: PRIVATE', 'graph LR',
+                          'Oldest spine page turn', 'graph LR'])
+        # Canonical replacement of the turn the bubble already shows: the deduped
+        # copy is yielded to the live bubble instead of duplicating it.
+        conn.get.return_value = dict(
+            protocol=1, mission=dict(id='a'),
+            events=[
+                dict(sequence=1, event_type='user_message', content='First prompt'),
+                dict(sequence=2, event_type='assistant_message', content='Ripened'),
+                dict(sequence=3, event_type='assistant_message_canonical', content='Ripened'),
+            ],
+            spine=[])
+        self.assertEqual(live.history_turns(conn, 'a', 'Ripened'), ['You: First prompt'])
+        self.assertEqual(live.history_turns(conn, 'a', ''), ['You: First prompt', 'Ripened'])
+        # Two genuinely distinct turns with identical visible text stay separate;
+        # the canonical event claims the latest unclaimed plain turn only.
+        conn.get.return_value = dict(
+            protocol=1, mission=dict(id='a'),
+            events=[
+                dict(sequence=1, event_type='user_message', content='First prompt'),
+                dict(sequence=2, event_type='assistant_message', content='Ripened'),
+                dict(sequence=3, event_type='assistant_message', content='Ripened'),
+                dict(sequence=4, event_type='assistant_message_canonical', content='Ripened'),
+            ],
+            spine=[])
+        self.assertEqual(live.history_turns(conn, 'a', 'Ripened'),
+                         ['You: First prompt', 'Ripened'])
+        self.assertEqual(live.history_turns(conn, 'a', ''),
+                         ['You: First prompt', 'Ripened', 'Ripened'])
+        # An oversized response or a 5xx degrades to an empty archive, but 401/403
+        # must propagate: the caller's access-revoked path clears prior content
+        # instead of silently keeping a stale transcript.
+        conn.get.side_effect = live.ResponseTooLarge('too large')
+        self.assertEqual(live.history_turns(conn, 'a', ''), [])
+        conn.get.side_effect = live.urllib.error.HTTPError('x', 500, '', {}, None)
+        self.assertEqual(live.history_turns(conn, 'a', ''), [])
+        for code in (401, 403):
+            conn.get.side_effect = live.urllib.error.HTTPError('x', code, '', {}, None)
+            with self.assertRaises(live.urllib.error.HTTPError):
+                live.history_turns(conn, 'a', '')
+        conn.get.side_effect = None
+        for broken in ({'error': 'invalid timeline'}, {'events': 'not a list', 'spine': []},
+                       {'events': [dict(sequence=1, event_type='assistant_message_canonical')], 'spine': []},
+                       [dict(sequence=1, event_type='assistant_message_canonical', content='x')]):
+            conn.get.return_value = broken
+            self.assertEqual(live.history_turns(conn, 'a', ''), [])
+
+    def test_history_pages_the_older_spine_until_complete(self):
+        # The /open bundle bounds the spine (80 rows by default). Long missions
+        # must reach their full history through the same exclusive before-cursor
+        # paging the web client uses, and rows a page repeats dedup so the
+        # archive never duplicates a turn.
+        conn = Mock(binding='bound')
+        conn.get.return_value = dict(
+            protocol=1, mission=dict(id='a'),
+            events=[dict(sequence=9, event_type='assistant_message', content='Newest')],
+            spine=[
+                dict(sequence=8, event_type='assistant_message', content='Spine one'),
+                dict(sequence=7, event_type='assistant_message', content='Spine two'),
+            ],
+            spine_has_more=True, spine_next_cursor=7)
+        conn.get_page.side_effect = [
+            # The older page repeats the spine's oldest row; the duplicate must
+            # not become a second turn.
+            ([dict(sequence=6, event_type='assistant_message', content='Older page one'),
+              dict(sequence=7, event_type='assistant_message', content='Spine two')],
+             {'x-has-more': 'true', 'x-next-cursor': '5'}),
+            ([dict(sequence=5, event_type='user_message', content='Oldest')],
+             {'x-has-more': 'false'}),
+        ]
+        self.assertEqual(live.history_turns(conn, 'a', 'Newest'),
+                         ['You: Oldest', 'Older page one', 'Spine two', 'Spine one'])
+        cursors = [call.args[0] for call in conn.get_page.call_args_list]
+        self.assertEqual(cursors, ['/api/control/missions/a/events?before_seq=7&view=transcript&limit=200',
+                                   '/api/control/missions/a/events?before_seq=5&view=transcript&limit=200'])
+        # A cursor that stops advancing must break the loop instead of spinning:
+        # the second page repeats the row the cursor names, so progress halts.
+        conn.get_page.reset_mock()
+        conn.get_page.side_effect = [
+            ([dict(sequence=6, event_type='assistant_message', content='Older page one')],
+             {'x-has-more': 'true', 'x-next-cursor': '6'}),
+            ([dict(sequence=6, event_type='assistant_message', content='Older page one')],
+             {'x-has-more': 'true', 'x-next-cursor': '6'}),
+        ]
+        conn.get.return_value['spine_next_cursor'] = 7
+        self.assertEqual(live.history_turns(conn, 'a', ''),
+                         ['Older page one', 'Spine two', 'Spine one', 'Newest'])
+        self.assertEqual(conn.get_page.call_count, 2)
+        # A failing page keeps what was read instead of losing the archive.
+        conn.get_page.reset_mock()
+        conn.get_page.side_effect = live.urllib.error.HTTPError('http://localhost', 500, '', {}, None)
+        self.assertEqual(live.history_turns(conn, 'a', ''), ['Spine two', 'Spine one', 'Newest'])
+        # A 401/403 on a page fetch must propagate to the revoked path too.
+        conn.get_page.reset_mock()
+        for code in (401, 403):
+            conn.get_page.side_effect = live.urllib.error.HTTPError('http://localhost', code, '', {}, None)
+            with self.assertRaises(live.urllib.error.HTTPError):
+                live.history_turns(conn, 'a', '')
+        # First paint stays bounded: even with more pages advertised, the
+        # bootstrap waits for at most SPINE_MAX_PAGES older-spine requests.
+        conn.get_page.reset_mock()
+        conn.get.return_value['spine_next_cursor'] = 7
+        conn.get_page.side_effect = [
+            ([dict(sequence=6 - 2 * n, event_type='assistant_message', content='Deep %d' % n)],
+             {'x-has-more': 'true', 'x-next-cursor': str(5 - 2 * n)})
+            for n in range(live.SPINE_MAX_PAGES + 2)]
+        self.assertEqual(live.history_turns(conn, 'a', ''),
+                         ['Deep 2', 'Deep 1', 'Deep 0', 'Spine two', 'Spine one', 'Newest'])
+        self.assertEqual(conn.get_page.call_count, live.SPINE_MAX_PAGES)
+
+    def test_two_turn_live_keeps_history_and_renders_mermaid(self):
+        self.run_wire('mermaid-turn')
+
+    def test_cold_open_repopulates_persisted_history_and_streams_onward(self):
+        self.run_wire('cold-open')
+
+    def test_unavailable_window_keeps_the_persisted_archive(self):
+        self.run_wire('cold-recover')
+
+    def test_back_edge_and_both_labels_render(self):
+        self.run_wire('mermaid-backedge')
+
+    def test_two_node_cycle_renders_opposite_arrowheads(self):
+        self.run_wire('mermaid-cycle')
+
+    def test_markdown_renders_without_literal_markers(self):
+        self.run_wire('markdown-turn')
 
     def test_credential_rotation(self):
         self.run_wire('identity')

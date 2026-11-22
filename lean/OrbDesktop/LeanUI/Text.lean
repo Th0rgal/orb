@@ -212,17 +212,24 @@ structure ShapeCacheEntry where
   glyphs : Array ShapedGlyph
 
 /-- Supersampled round-cap/round-join SVG strokes, shared by desktop chrome icons.
-The source view box is 16px; path coordinates are tenths of a logical pixel. -/
-def rasterizeIconReference (paths : List (List (Int × Int))) (size : Nat) : RasterizedGlyph := Id.run do
+The source view box is 16px; path coordinates are tenths of a logical pixel.
+`strokeTenths` is the stroke radius in tenths of a view unit (55 → the historical
+5.5-unit radius); edge routing and decision outlines pass a thinner radius so their
+rendered stroke matches the 2px widget borders instead of stretching with the raster. -/
+def rasterizeIconReference (paths : List (List (Int × Int))) (size : Nat)
+    (strokeTenths : Nat := 55) : RasterizedGlyph := Id.run do
+  let radius := strokeTenths.toFloat / 10
+  let r2 := radius * radius
+  let cull := radius + 0.5
   let segments := (paths.flatMap fun ps => ps.zip (ps.drop 1)).map fun ((ax, ay), (bx, by_)) =>
     let dx := (bx - ax).toFloat
     let dy := (by_ - ay).toFloat
     (ax.toFloat, ay.toFloat, dx, dy, dx * dx + dy * dy,
-      (min ay by_ - 6).toFloat, (max ay by_ + 6).toFloat)
+      (min ay by_).toFloat - cull, (max ay by_).toFloat + cull)
   let mut pixels := ByteArray.empty
   for y in [0:size] do
-    -- Coverage radius is 5.5 view units. Exclude segments outside this
-    -- scanline's expanded interval before running the 16 sample tests.
+    -- Exclude segments outside this scanline's expanded interval before running
+    -- the 16 sample tests.
     let lo := y.toFloat * 160 / size.toFloat
     let hi := (y + 1).toFloat * 160 / size.toFloat
     let active := segments.filter fun (_, _, _, _, _, ymin, ymax) => ymin ≤ hi && ymax ≥ lo
@@ -238,24 +245,33 @@ def rasterizeIconReference (paths : List (List (Int × Int))) (size : Nat) : Ras
             let t := if len == 0 then 0 else max 0 (min 1 ((vx * dx + vy * dy) / len))
             let ex := vx - t * dx
             let ey := vy - t * dy
-            ex * ex + ey * ey <= 30.25
+            ex * ex + ey * ey <= r2
           if hit then coverage := coverage + 1
       pixels := pixels.push ((coverage * 255 + 8) / 16).toUInt8
   return { width := size, height := size, bearingX := 0, bearingY := 0,
            format := 1, isColor := false, pixels := pixels }
 
-def rasterizeIcon (paths : List (List (Int × Int))) (size : Nat) : RasterizedGlyph := Id.run do
-  if size > 1024 then return rasterizeIconReference paths size
-  let mut segments := ByteArray.empty
-  for path in paths do
-    for ((ax,ay),(bx,by_)) in path.zip (path.drop 1) do
-      for coord in [ax,ay,bx,by_] do
-        if coord < -128 || coord > 255 then return rasterizeIconReference paths size
-        -- Store signed coordinates losslessly in two little-endian bytes.
-        let biased := (coord + 128).toNat
-        segments := segments.push biased.toUInt8 |>.push (biased / 256).toUInt8
-  return { width := size, height := size, bearingX := 0, bearingY := 0,
-           format := 1, isColor := false, pixels := FFI.iconMask segments size.toUSize }
+/-- Stroke radius (tenths of a view unit) whose rendered stroke on a raster drawn 1:1
+at `strokePx` device px across a `rasterW`-px-wide raster matches the shared 2px
+widget border weight. Clamped so thin rasters keep anti-aliasable coverage. -/
+def iconStrokeTenthsForPxWidth (rasterW : Nat) : Nat :=
+  max 4 ((1600 + rasterW / 2) / max 1 rasterW)
+
+def rasterizeIcon (paths : List (List (Int × Int))) (size : Nat)
+    (strokeTenths : Nat := 55) : RasterizedGlyph :=
+  if strokeTenths == 55 then Id.run do
+    if size > 1024 then return rasterizeIconReference paths size
+    let mut segments := ByteArray.empty
+    for path in paths do
+      for ((ax,ay),(bx,by_)) in path.zip (path.drop 1) do
+        for coord in [ax,ay,bx,by_] do
+          if coord < -128 || coord > 255 then return rasterizeIconReference paths size
+          -- Store signed coordinates losslessly in two little-endian bytes.
+          let biased := (coord + 128).toNat
+          segments := segments.push biased.toUInt8 |>.push (biased / 256).toUInt8
+    return { width := size, height := size, bearingX := 0, bearingY := 0,
+             format := 1, isColor := false, pixels := FFI.iconMask segments size.toUSize }
+  else rasterizeIconReference paths size strokeTenths
 
 /-- Short label with atlas-resolved glyph positions, scoped to the owning atlas. -/
 structure ResolvedRun where

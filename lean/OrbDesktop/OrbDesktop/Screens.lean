@@ -290,6 +290,236 @@ def conversationStatusLabel (status : String) : String :=
 #guard conversationStatusLabel "awaiting_user" == "Ready for a follow-up"
 #guard conversationStatusLabel "waiting_background" == "Waiting for background work"
 
+/-! ## Live transcript turns
+
+`applyLiveText` keeps completed turns in `st.liveTurns` (oldest first); the current turn is
+`streamedText st`. A fenced ```mermaid block renders as a native diagram widget; every other
+segment renders as wrapped prose. Diagram nodes draw widget ids from the reserved live band
+below so keyboard focus and pointer hit-testing reach the rendered graph. -/
+
+/-- First widget id of the reserved live-diagram band (16 ids per diagram). -/
+private def liveDiagramBandBase : Nat := 9311
+/-- Number of widget ids reserved per rendered diagram. -/
+private def liveDiagramStride : Nat := 16
+
+/-- Split live text into `(isMermaidFence, content)` segments in source order. An unclosed
+fence stays prose until its closing line arrives, matching the current plain-text behavior. -/
+private def splitMermaidFences (src : String) : List (Bool × String) := Id.run do
+  let mut segs : List (Bool × String) := []
+  let mut inFence := false
+  let mut fenceBuf : Array String := #[]
+  let mut proseBuf : Array String := #[]
+  for line in src.splitOn "\n" do
+    let t := mermaidTrim line
+    if !inFence && t.startsWith "```mermaid" then
+      if !proseBuf.isEmpty then
+        segs := segs ++ [(false, String.intercalate "\n" proseBuf.toList)]
+        proseBuf := #[]
+      inFence := true
+      fenceBuf := #[]
+    else if inFence && t == "```" then
+      segs := segs ++ [(true, String.intercalate "\n" fenceBuf.toList)]
+      inFence := false
+      fenceBuf := #[]
+    else if inFence then
+      fenceBuf := fenceBuf.push line
+    else
+      proseBuf := proseBuf.push line
+  if inFence then
+    proseBuf := proseBuf ++ ["```mermaid"] ++ fenceBuf
+  if !proseBuf.isEmpty then
+    segs := segs ++ [(false, String.intercalate "\n" proseBuf.toList)]
+  return segs
+
+/-! ## Markdown-lite inline spans
+
+Transcript prose renders bold, italic, inline code, links, unordered list markers and
+non-mermaid code fences instead of their literal markers. Unterminated markers stay
+literal; `_italic_` is deliberately not recognized so snake_case survives. -/
+
+/-- Markdown-lite inline span kinds. -/
+private inductive MdKind where
+  | plain | bold | italic | code | link
+
+/-- Style for one markdown-lite span: emphasis without a dedicated italic face uses the
+secondary tone, links use the accent, code uses the mono face. -/
+private def mdKindStyle (theme : Theme) : MdKind → TextStyle
+  | .plain => { (Theme.bodyText theme) with color := theme.palette.textPrimary }
+  | .bold => { (Theme.bodyText theme) with color := theme.palette.textPrimary, weight := 700 }
+  | .italic => { (Theme.bodyText theme) with color := theme.palette.textSecondary, weight := 500 }
+  | .code => { (Theme.codeText theme) with color := theme.palette.textPrimary }
+  | .link => { (Theme.bodyText theme) with color := theme.palette.accent, weight := 500 }
+
+/-- First index of `c` at or after `n` in `xs`. -/
+private partial def mdFindFrom (c : Char) (n : Nat) : List Char → Option Nat
+  | [] => none
+  | x :: rest => if x == c then some n else mdFindFrom c (n + 1) rest
+
+/-- First index at or after `n` where the pair `a b` occurs in `xs`. -/
+private partial def mdFindSeq (a b : Char) (n : Nat) : List Char → Option Nat
+  | x :: y :: rest =>
+    if x == a && y == b then some n else mdFindSeq a b (n + 1) (y :: rest)
+  | _ => none
+
+private def mdFlush (acc : List (String × MdKind)) (buf : List Char) (k : MdKind) :
+    List (String × MdKind) :=
+  if buf.isEmpty then acc else acc ++ [(String.ofList buf.reverse, k)]
+
+/-- Scanner for `mdSpans`: `buf` holds the pending plain-text characters in reverse. -/
+private partial def mdScan (acc : List (String × MdKind)) (buf : List Char) :
+    List Char → List (String × MdKind)
+  | [] => mdFlush acc buf .plain
+  | c :: rest =>
+    if c == '`' then
+      match mdFindFrom '`' 0 rest with
+      | some i =>
+        let span := mdFlush (mdFlush acc buf .plain) (rest.take i).reverse .code
+        mdScan span [] (rest.drop (i + 1))
+      | none => mdScan acc ('`' :: buf) rest
+    else if c == '*' && rest.head? == some '*' then
+      match mdFindSeq '*' '*' 0 (rest.drop 1) with
+      | some i =>
+        let span := mdFlush (mdFlush acc buf .plain) ((rest.drop 1).take i).reverse .bold
+        mdScan span [] (rest.drop (i + 3))
+      | none => mdScan acc ('*' :: buf) rest
+    else if c == '*' then
+      match mdFindFrom '*' 0 rest with
+      | some i =>
+        let span := mdFlush (mdFlush acc buf .plain) (rest.take i).reverse .italic
+        mdScan span [] (rest.drop (i + 1))
+      | none => mdScan acc ('*' :: buf) rest
+    else if c == '[' then
+      match mdFindSeq ']' '(' 0 rest with
+      | some j =>
+        let after := rest.drop (j + 2)
+        match mdFindFrom ')' 0 after with
+        | some k =>
+          let url := String.ofList (after.take k)
+          let span := mdFlush (mdFlush acc buf .plain) (rest.take j).reverse .link
+          let span := mdFlush span ((" (" ++ url ++ ")").toList.reverse) .plain
+          mdScan span [] (after.drop (k + 1))
+        | none => mdScan acc ('[' :: buf) rest
+      | none => mdScan acc ('[' :: buf) rest
+    else mdScan acc (c :: buf) rest
+
+/-- Split one line into markdown-lite spans: `**bold**`, `*italic*`, `` `code` `` and
+`[text](url)` links (the url keeps rendering in parentheses). Unterminated markers stay
+literal. -/
+private def mdSpans (line : String) : List (String × MdKind) :=
+  mdScan [] [] line.toList
+
+/-- True when a single line needs the markdown-lite pipeline: a heading or bullet
+prefix, or any inline marker character (`*`, backtick, `[`). Plain lines keep the
+pre-shaped fast path so stream frames paint their already-shaped runs as-is. -/
+private def needsMarkdownLite (line : String) : Bool :=
+  let l := mermaidTrim line
+  l.startsWith "# " || l.startsWith "- " || l.startsWith "* " ||
+  l.any (fun c => c == '*' || c == '`' || c == '[')
+
+/-- One markdown-lite line of the live transcript, synthesized from plain text; the runtime
+`shapeWidgetTree` pass re-shapes synth runs with HarfBuzz on real displays. Blank lines
+produce no row, `#{1,6} ` headings reuse the rich-text heading recipe, unordered list
+markers become bullets, and every other line renders as wrapped body prose with inline
+markdown spans. -/
+private def liveProseLine (theme : Theme) (colW width : SubPx) (line0 : String) :
+    Option WidgetNode :=
+  let line := mermaidTrim line0
+  let hashes := (line.toList.takeWhile (· == '#')).length
+  let rest := line.toList.drop hashes
+  if line.isEmpty then none
+  else if hashes >= 1 && hashes <= 6 && rest.length > 1 && rest.head? == some ' ' then
+    let heading := mermaidTrim (String.ofList (rest.drop 1))
+    let hSize := if hashes <= 1 then theme.typo.xl else if hashes == 2 then theme.typo.lg else theme.typo.md
+    let lh := if hashes <= 2 then theme.typo.lineHeading else theme.typo.lineRelaxed
+    let hStyle : TextStyle := { Theme.headingText theme with sizeSub := hSize, lineHeightSub := lh, weight := 700 }
+    let runs := [synthInlineRun { hStyle with color := theme.palette.textPrimary } heading]
+    let (_, _, height) := wrapInlineRuns width lh runs
+    some (WidgetNode.box
+      (BoxStyle.row 0
+        |>.withPadding (Edges.xy (pxToSub 20) (pxToSub 4))
+        |>.withFixedSize colW (height + pxToSub 8))
+      [WidgetNode.text
+        (BoxStyle.row 0 |>.withFixedSize width height)
+        lh runs])
+  else
+    let listed := line.startsWith "- " || line.startsWith "* "
+    let body := if listed then "• " ++ line.drop 2 else line
+    let runs := (mdSpans body).filterMap fun (txt, k) =>
+      if txt.isEmpty then none else some (synthInlineRun (mdKindStyle theme k) txt)
+    let (_, _, height) := wrapInlineRuns width theme.typo.lineBase runs
+    some (WidgetNode.box
+      (BoxStyle.row 0
+        |>.withPadding (Edges.xy (pxToSub 20) (pxToSub 6))
+        |>.withFixedSize colW (height + pxToSub 12))
+      [WidgetNode.text
+        (BoxStyle.row 0 |>.withFixedSize width height)
+        theme.typo.lineBase runs])
+
+/-- One monospace code row of a non-mermaid fence; blank fence lines become thin spacers. -/
+private def liveCodeRow (theme : Theme) (colW width : SubPx) (line : String) : WidgetNode :=
+  let runs := if line.isEmpty then []
+    else [synthInlineRun { (Theme.codeText theme) with color := theme.palette.textPrimary } line]
+  let (_, _, height) := wrapInlineRuns width theme.typo.lineBase runs
+  WidgetNode.box
+    (BoxStyle.row 0
+      |>.withPadding (Edges.xy (pxToSub 20) (pxToSub 2))
+      |>.withFixedSize colW (height + pxToSub 4))
+    [WidgetNode.text
+      (BoxStyle.row 0 |>.withFixedSize width height)
+      theme.typo.lineBase runs]
+
+/-- Render prose text line by line: blank lines produce nothing (a literal newline
+character never reaches the glyph atlas, where it would rasterize as a missing glyph),
+markdown headings render with the heading style, and non-mermaid ``` fences render as
+monospace code rows without their fence markers. -/
+private def liveProseLines (theme : Theme) (colW width : SubPx) (text : String) : List WidgetNode :=
+  Id.run do
+    let mut rows : List WidgetNode := []
+    let mut inFence := false
+    for line in text.splitOn "\n" do
+      let t := mermaidTrim line
+      if t.startsWith "```" then
+        inFence := !inFence
+      else if inFence then
+        rows := rows ++ [liveCodeRow theme colW width line]
+      else
+        match liveProseLine theme colW width line with
+        | some row => rows := rows ++ [row]
+        | none => pure ()
+    return rows
+
+/-- Render one turn's text: mermaid fences become diagram widgets (node widget ids from
+`base`, one stride per diagram); everything else becomes markdown-lite prose rows. Returns the nodes and
+the next free widget-id base for the following turn. -/
+private def buildOneLiveTurn (theme : Theme) (colW width : SubPx) (base : Nat) (text : String) :
+    List WidgetNode × Nat := Id.run do
+  let mut rows : List WidgetNode := []
+  let mut next := base
+  for (isFence, seg) in splitMermaidFences text do
+    if isFence then
+      match parseMermaidFlowchart seg with
+      | some spec0 =>
+        let spec := { spec0 with nodes := spec0.nodes.mapIdx fun i n =>
+          { n with widgetId := some (next + i) } }
+        rows := rows ++ [buildMermaidDiagramWidget theme colW spec]
+        next := next + liveDiagramStride
+      | none => rows := rows ++ liveProseLines theme colW width seg
+    else
+      rows := rows ++ liveProseLines theme colW width seg
+  return (rows, next)
+
+/-- Render the completed live turns oldest first, returning the nodes and the next free
+widget-id base so the live turn's diagrams never collide with them. -/
+private def buildLiveTurnsNodes (theme : Theme) (colW width : SubPx) (turns : List String) :
+    List WidgetNode × Nat := Id.run do
+  let mut rows : List WidgetNode := []
+  let mut base := liveDiagramBandBase
+  for turn in turns do
+    let (r, b) := buildOneLiveTurn theme colW width base turn
+    rows := rows ++ r
+    base := b
+  return (rows, base)
+
 /-- Build the Mission Transcript body (`03_mission_transcript`) matching the SolidJS transcript column. -/
 def buildMissionTranscriptBody (st : DesktopState) (mainW bodyH : SubPx)
     (_runs : ShapedScreenRuns) : WidgetNode :=
@@ -307,20 +537,40 @@ def buildMissionTranscriptBody (st : DesktopState) (mainW bodyH : SubPx)
       [ screenTextLine theme (pxToSub 200) (pxToSub 21) (pxToSub 12) (pxToSub 21) pal.textMuted "Working on selected machine…"
       , screenTextLine theme (pxToSub 60) (pxToSub 21) (pxToSub 13) (pxToSub 21) pal.textFaint "11 h 50"
       ]
+  let width := transcriptTextWidth mainW
+  let (priorRows, nextBand) := buildLiveTurnsNodes theme colW width st.liveTurns
+  let currentText := streamedText st
   let liveStreamRow : List WidgetNode :=
-    if _runs.streamRuns.isEmpty then []
-    else Id.run do
-      let width := transcriptTextWidth mainW
-      let (_, _, height) := wrapInlineRuns width theme.typo.lineBase _runs.streamRuns
-      return [WidgetNode.box
-      (BoxStyle.row 0
-        |>.withPadding (Edges.xy (pxToSub 20) (pxToSub 6))
-        |>.withFixedSize colW (height + pxToSub 12))
-      [WidgetNode.text
-        (BoxStyle.row 0 |>.withFixedSize width height)
-        theme.typo.lineBase _runs.streamRuns (some 900)]]
+    if (splitMermaidFences currentText).any (·.1) then
+      (buildOneLiveTurn theme colW width nextBand currentText).1
+    else if _runs.streamRuns.isEmpty then []
+    else if currentText.contains "\n" then
+      -- Multi-line stream text shares the completed-turn rendering so newline
+      -- characters and markdown headings never rasterize as literal missing glyphs.
+      liveProseLines theme colW width currentText
+    else if needsMarkdownLite currentText then
+      -- Single-line stream text with markdown markers shares the markdown-lite
+      -- prose pipeline, so a one-line `# Title` or `**bold**` never shows its
+      -- literal markers.
+      match liveProseLine theme colW width currentText with
+      | some row => [row]
+      | none => []
+    else
+      -- Plain single-line stream text keeps the pre-shaped fast path: the runs
+      -- arrive already shaped with the stream frame, so the renderer paints them
+      -- as-is instead of re-synthesizing from raw text (the viewport regression
+      -- pins the last atlas glyph's paint position on exactly this path).
+      Id.run do
+        let (_, _, height) := wrapInlineRuns width theme.typo.lineBase _runs.streamRuns
+        return [WidgetNode.box
+        (BoxStyle.row 0
+          |>.withPadding (Edges.xy (pxToSub 20) (pxToSub 6))
+          |>.withFixedSize colW (height + pxToSub 12))
+        [WidgetNode.text
+          (BoxStyle.row 0 |>.withFixedSize width height)
+          theme.typo.lineBase _runs.streamRuns (some 900)]]
 
-  let liveRows := liveStreamRow ++ (st.selectedCard.toList.map fun c =>
+  let liveRows := priorRows ++ liveStreamRow ++ (st.selectedCard.toList.map fun c =>
     screenTextLine theme colW (pxToSub 21) (pxToSub 12) (pxToSub 21) pal.textMuted (conversationStatusLabel c.status))
   Id.run do
     let rows := if st.liveData then liveRows else [turn58, turn59] ++ liveStreamRow ++ [workingRow]

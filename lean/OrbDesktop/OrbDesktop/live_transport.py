@@ -16,6 +16,10 @@ import uuid
 
 CURRENT_MISSION_LIMIT = 200
 ARCHIVED_MISSION_LIMIT = 100
+# Older-spine pages fetched during the bootstrap (each 200 transcript rows on top
+# of the /open bundle). First paint must not wait for dozens of history requests
+# on large missions, so the archive is deliberately a bounded, deduplicated slice.
+SPINE_MAX_PAGES = 3
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -69,8 +73,35 @@ class Connection:
         if credentials() != self.creds:
             raise ValueError('connection changed')
 
-    def get(self, path, cap=4 << 20, *, deadline=6):
-        return self.request(path, cap, deadline=deadline)
+    def get(self, path, cap=4 << 20, *, deadline=6, headers_out=False):
+        """The one bounded GET implementation every read goes through. With
+        ``headers_out`` it returns ``(json, lowercased headers)`` so event pages can
+        read the ``X-Has-More`` / ``X-Next-Cursor`` continuation headers the same way
+        the web client drives its older-spine paging."""
+        self.check()
+        base, token = self.creds
+        req = urllib.request.Request(base + path, headers={'Authorization': 'Bearer ' + token,
+                                                           'Accept': 'application/json', 'Cache-Control': 'no-cache'})
+        previous = signal.signal(signal.SIGALRM, request_timeout)
+        signal.setitimer(signal.ITIMER_REAL, deadline)
+        try:
+            with self.opener.open(req, timeout=deadline if deadline > 6 else 4) as response:
+                if response.status == 206 and (path == INBOX_PATH or path.startswith('/api/control/missions?')
+                                               or path.endswith('?include_history=false')):
+                    raise ValueError('incomplete Core summary response')
+                data = response.read(cap + 1)
+                page_headers = {name.lower(): value for name, value in response.headers.items()}
+        finally:
+            signal.alarm(0)
+            signal.signal(signal.SIGALRM, previous)
+        self.check()
+        if len(data) > cap:
+            raise ResponseTooLarge('response too large')
+        body = json.loads(data) if data else None
+        return (body, page_headers) if headers_out else body
+
+    def get_page(self, path, cap=4 << 20, deadline=6):
+        return self.get(path, cap, deadline=deadline, headers_out=True)
 
     def request(self, path, cap=4 << 20, body=None, key=None, method=None, deadline=6):
         self.check()
@@ -1107,15 +1138,155 @@ def projection(c, mid, presence=False):
     return [label(obj['title']), label(obj['status']), ''.join(ch for ch in obj['text'] if ch in '\n\t' or ch.isprintable())]
 
 
+def history_turns(c, mid, first_text):
+    """Completed turns from the real /open bundle (the same endpoint other
+    clients use to open a mission: first events page plus the older transcript spine),
+    ascending. Core persists assistant turns either as assistant_message or, once
+    finalized, as assistant_message_canonical, and delivered user prompts as
+    user_message; all three belong to the transcript. A canonical event is the
+    finalized form of an earlier plain turn with identical content and claims it
+    (latest unclaimed match) so the archive keeps one copy; plain turns that repeat
+    an earlier text are genuinely distinct and stay separate. User prompts render
+    with a visible "You: " marker. The live bubble owns the current turn; when the
+    newest persisted turn is exactly the text the bubble already shows, the bubble
+    keeps owning it (history owns completed turns, the stream owns the turn in
+    flight).
+
+    Bounded on purpose: the bootstrap runs before first paint, so it waits for at
+    most SPINE_MAX_PAGES older-spine requests instead of walking a large mission's
+    whole history. Auth failures are not degradation: 401/403 re-raise so the
+    caller's access-revoked path (which clears prior content) still runs."""
+    try:
+        bundle = c.get('/api/control/missions/' + mid + '/open', 8 << 20)
+    except urllib.error.HTTPError as error:
+        if error.code in (401, 403):
+            raise
+        error.close()
+        return []
+    except (urllib.error.URLError, TimeoutError, ValueError, KeyError, TypeError):
+        return []
+    if not isinstance(bundle, dict):
+        return []
+    rows = []
+    for key in ('events', 'spine'):
+        page = bundle.get(key)
+        if not isinstance(page, list):
+            return []
+        rows.extend(page)
+    # The spine page is bounded by Core (80 rows by default). Page the older
+    # transcript spine with the same exclusive before-cursor the web client uses
+    # (X-Has-More / X-Next-Cursor on the /events page) so long missions reach a
+    # bounded, deduplicated slice of their history. A failing page keeps what was
+    # read so far — except 401/403, which must reach the revoked path above.
+    cursor = bundle.get('spine_next_cursor')
+    pages = 0
+    while bundle.get('spine_has_more') is True and isinstance(cursor, int) and pages < SPINE_MAX_PAGES:
+        pages += 1
+        requested = cursor
+        try:
+            page, headers = c.get_page('/api/control/missions/' + mid +
+                '/events?before_seq=' + str(cursor) + '&view=transcript&limit=200')
+        except urllib.error.HTTPError as error:
+            if error.code in (401, 403):
+                raise
+            error.close()
+            break
+        except (urllib.error.URLError, TimeoutError, ValueError, KeyError, TypeError):
+            break
+        page_rows = page.get('events') if isinstance(page, dict) else page
+        if not isinstance(page_rows, list):
+            break
+        rows.extend(page_rows)
+        nxt = headers.get('x-next-cursor')
+        more = headers.get('x-has-more') == 'true' and isinstance(nxt, str) and nxt.lstrip('-').isdigit()
+        cursor = int(nxt) if more else None
+        # Exclusive before-cursor semantics: a healthy page returns rows older
+        # than the cursor it was asked with. A page whose oldest row sits at or
+        # after the requested cursor would page the same rows forever, so stop.
+        if not more or (page_rows and (page_rows[0].get('sequence') or 0) >= requested):
+            break
+    # Pages may overlap under either cursor convention; keep the first copy of
+    # each row (newest source wins) so the archive never duplicates a turn.
+    seen = set()
+    unique_rows = []
+    for r in rows:
+        if not isinstance(r, dict):
+            continue
+        key = (r.get('sequence'), r.get('event_type'), r.get('content'))
+        if key in seen:
+            continue
+        seen.add(key)
+        unique_rows.append(r)
+    rows = unique_rows
+    turns = []
+    for r in rows:
+        if not isinstance(r, dict):
+            continue
+        kind = r.get('event_type')
+        content = r.get('content')
+        if kind not in ('user_message', 'assistant_message', 'assistant_message_canonical') \
+                or not isinstance(content, str) or not content:
+            continue
+        content = ''.join(ch for ch in content if ch in '\n\t' or ch.isprintable())
+        if content:
+            turns.append((r.get('sequence') or 0, kind, content))
+    turns.sort(key=lambda pair: pair[0])
+    texts = []
+    unclaimed = []
+    for _, kind, content in turns:
+        if kind == 'user_message':
+            texts.append('You: ' + content)
+            continue
+        if kind == 'assistant_message':
+            unclaimed.append(len(texts))
+            texts.append(content)
+            continue
+        # Canonical replacement: the finalized form of an earlier plain turn with
+        # identical content claims that plain turn (latest unclaimed match) so the
+        # archive keeps one copy at the turn's original position. Plain turns that
+        # merely repeat an earlier text are genuinely distinct and stay separate.
+        claim = next((i for i in reversed(unclaimed) if texts[i] == content), None)
+        if claim is not None:
+            unclaimed.remove(claim)
+            continue
+        texts.append(content)
+    if texts and texts[-1] == first_text:
+        texts.pop()
+    return texts
+
+
 def poll_bubble(mid, binding):
     c = Connection()
     if c.binding != binding or not re.fullmatch(r'[A-Za-z0-9_-]{1,128}', mid):
         return
     previous = None
+    pending_history = True
+    degraded = False
     while True:
         c.check()
         try:
             title, status, text = projection(c, mid)
+            if pending_history or degraded:
+                # One bounded atomic bootstrap message: the client applies the whole
+                # persisted archive once per selection instead of racing per-line.
+                # After a degraded window (unavailable or network failure) the
+                # bootstrap repeats once on recovery, so a client that cleared its
+                # transcript on the unavailable frame re-reads the persisted
+                # timeline from Core instead of losing the archive for good.
+                pending_history = False
+                degraded = False
+                turns = history_turns(c, mid, text)
+                if turns:
+                    newest = []
+                    total = 0
+                    for turn in reversed(turns):
+                        packed = turn.replace('\n', '\x1e').replace('\t', '\x1f')
+                        total += len(packed) + 1
+                        if total > (1 << 20) and newest:
+                            break
+                        newest.append(packed)
+                    newest.reverse()
+                    print('HS\t' + '\x1d'.join(newest), flush=True)
             fields = ('B', title, status, text.replace('\n', '\x1e').replace('\t', '\x1f'))
         except urllib.error.HTTPError as error:
             if error.code in (403, 404):
@@ -1123,10 +1294,13 @@ def poll_bubble(mid, binding):
                 return
             if error.code == 401:
                 raise
+            degraded = True
             fields = None
         except (ValueError, KeyError, TypeError):
+            degraded = True
             fields = ('X',)
         except (urllib.error.URLError, TimeoutError):
+            degraded = True
             fields = None
         c.check()
         if fields is not None and fields != previous:

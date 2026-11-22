@@ -40,6 +40,17 @@ private def hydratedHistory : DesktopState := { hierarchyFixture with
 #guard (({ hydratedHistory with openMission := some "m" } : DesktopState).visibleProjectRows.map (·.rowId)) ==
   ["project:now", "mission:m"]
 
+-- Cold open: the persisted Core timeline populates completed turns; foreign, empty
+-- and identical batches are no-ops that never erase or redraw.
+private def coldFixture : DesktopState :=
+  { hierarchyFixture with screen := .missionTranscript, openMission := some "m", liveData := true }
+#guard (applyHistoryTurns 120 vp coldFixture "m" ["one"]).1.liveTurns == ["one"]
+#guard (applyHistoryTurns 120 vp coldFixture "m" ["one"]).2.isSome
+#guard (applyHistoryTurns 120 vp coldFixture "other" ["one"]).2.isNone
+#guard (applyHistoryTurns 120 vp coldFixture "m" []).2.isNone
+#guard (applyHistoryTurns 120 vp { coldFixture with liveTurns := ["one"] } "m" ["one"]).2.isNone
+#guard (applyHistoryTurns 120 vp { coldFixture with liveTurns := ["old"] } "m" ["one", "two"]).1.liveTurns == ["one", "two"]
+
 private def treeRow (depth : Nat) (selected := false) : ChromeSidebarRow :=
   { widgetId := 1001, rowId := "row", kind := "mission", title := "Row", depth, selected }
 private def treeGeometry (rows : List ChromeSidebarRow) :=
@@ -187,6 +198,28 @@ private def openedProject := (stepDesktopEvent 120 vp unsentDraft (.activate 100
 #guard (stepDesktopEvent 120 vp hierarchyFixture (.key 0x33 8 .pressed)).1.screen == .machinesFleet
 #guard (stepDesktopEvent 120 vp hierarchyFixture (.key 0x33 0 .pressed)).1.screen != .machinesFleet
 
+-- The wire driver renders without font files, so every synthesized run stores its
+-- Unicode codepoint in `glyphId`; decoding the laid-out boxes recovers the text.
+private def decodeBoxLines (box : ComputedBox) : String :=
+  box.lines.foldl (fun acc line =>
+    line.glyphs.foldl (fun acc pg => acc ++ String.singleton (Char.ofNat pg.glyph.glyphId)) acc) ""
+
+-- Traversals are depth-bounded `partial` so they elaborate identically in any
+-- environment (no termination proof for the harness to fail on).
+private partial def renderedBoxText : ComputedBox → Nat → String
+  | _box, 0 => ""
+  | box, depth + 1 =>
+    box.children.foldl (fun acc child => acc ++ renderedBoxText child depth) (decodeBoxLines box)
+
+private def renderedBoxRoot (box : ComputedBox) : String := renderedBoxText box 24
+
+/-- Observed text boxes: decoded text plus its absolute sub-pixel and device rects. -/
+private partial def collectObserved : ComputedBox → Nat → List (String × Rect × Rect)
+  | _box, 0 => []
+  | box, depth + 1 =>
+    let self := if box.lines.isEmpty then [] else [(decodeBoxLines box, box.rectSub, box.rectDev)]
+    box.children.foldl (fun acc child => acc ++ collectObserved child depth) self
+
 /-- Use the live screen with a populated header run, as in a shaped window.
 Obtain the target from the lowered scene, never by injecting an activate event. -/
 private def clickMission (st : DesktopState) (card : MissionSummaryCard) : IO DesktopState := do
@@ -227,6 +260,216 @@ private def awaitState (slot : IO.Ref (Option LiveSubscription)) (st : DesktopSt
     current := next
     IO.sleep 10
   throw (IO.userError "poll timed out")
+
+/-- Lower `.vectorIcon` payloads the way Main.lean's shaping pass does, so driver scenes
+carry the icon-mask prims (the diamond outline) without the glyph atlas. The raster is a
+square of `style.minWidth` exactly like production (no floor: small arrowhead boxes must
+rasterize at their true size so the mask geometry matches the real renderer). Driver
+assertions only inspect the destination. -/
+private partial def lowerVectorIcons : WidgetNode → WidgetNode
+  | .mk id focusable hit style payload children =>
+    let payload := match payload with
+      | .vectorIcon _paths color badgeBg _stroke =>
+        let size := if badgeBg.isSome then pxToSub 10 else style.minWidth
+        .iconMask 0 { x := 0, y := 0, w := size, h := size } color badgeBg
+      | p => p
+    .mk id focusable hit style payload (children.map lowerVectorIcons)
+
+/-- Render the live transcript the way Main.lean's window does, with the current
+stream text synthesized for the no-font driver. -/
+private def renderScreen (st : DesktopState) (streamText : String) : ComputedBox × SceneOutput :=
+  let stream := Widgets.synthInlineRun (Theme.bodyText st.theme) streamText
+  renderWidgetTree 120 (pxToSub 800) (pxToSub 600) st.initialFocusState st.theme
+    (lowerVectorIcons (buildDesktopScreen st (pxToSub 800) (pxToSub 600) { streamRuns := [stream] } true))
+
+/-- Pure shape check for a decision node: its label center (device rect) is covered by an
+icon-mask prim (the rhombus stroke rendered through the vector-icon pipeline) that covers
+no other observed node's center, the label sits centered in the contour, and the label's
+extent fits inside the rhombus half-width at the label's rows. -/
+private def diamondObserved (scene : SceneOutput)
+    (observed : List (String × Rect × Rect)) (self : String) (others : List String) : Bool :=
+  match observed.filter (fun p => p.1 == self) with
+  | [(_, _, fix)] =>
+    let centers := (others.filterMap fun t =>
+      (observed.filter (fun p => p.1 == t)).head?.map (fun p =>
+        (p.2.2.x + p.2.2.w / 2, p.2.2.y + p.2.2.h / 2)))
+    let fx := fix.x + fix.w / 2
+    let fy := fix.y + fix.h / 2
+    scene.prims.toList.any fun p => match p with
+      | .mask _ _ dst _ =>
+        let covers (cx cy : Int) :=
+          dst.x ≤ cx && cx ≤ dst.x + dst.w && dst.y ≤ cy && cy ≤ dst.y + dst.h
+        covers fx fy && !(centers.any fun (cx, cy) => covers cx cy) &&
+        -- The visible label is centered in the contour and fits inside the rhombus
+        -- half-width at the label's rows (the outline insets the tips by 6 of 160
+        -- view units, so the contour half-width shrinks linearly from the middle).
+        let cx := dst.x + dst.w / 2
+        let cy := dst.y + dst.h / 2
+        let lcx := fix.x + fix.w / 2
+        let lcy := fix.y + fix.h / 2
+        let tipInset := dst.w * 6 / 160
+        let dy := if lcy ≥ cy then lcy - cy else cy - lcy
+        let halfRow := (dst.w / 2 - tipInset) * (dst.h / 2 - dy) / max 1 (dst.h / 2)
+        (lcx - cx).natAbs ≤ 8 && dy < dst.h / 2 && fix.w / 2 ≤ halfRow
+      | _ => false
+  | _ => false
+
+/-- Semantic diagram assertions shared by the live-turn and cold-open cases: node and
+edge labels are observed exactly once, edges are directed (each label sits strictly
+between its source and target columns), the requested node shapes are observable, the
+nodes are separately hit-testable, and no fence source leaks into the render. -/
+private def assertDiagram (scene : SceneOutput) (observed : List (String × Rect × Rect))
+    (rendered : String) : IO Unit := do
+  let exactlyOne (t what : String) : IO Rect := do
+    match observed.filter (fun p => p.1 == t) with
+    | [(_, sub, _)] => pure sub
+    | hits =>
+      let labels := observed.map (·.1) |> String.intercalate ","
+      throw (IO.userError ("rendered diagram " ++ what ++ " was not observed exactly once: " ++ t ++
+        s!" (hits: {hits.length}; labels: {labels})"))
+  let spec ← exactlyOne "Spec" "node label"
+  let build ← exactlyOne "Build" "node label"
+  let fix ← exactlyOne "Fix" "node label"
+  let approve ← exactlyOne "Approve" "edge label"
+  let revise ← exactlyOne "Revise" "edge label"
+  unless spec.x < approve.x && approve.x < build.x do
+    throw (IO.userError "Approve edge is not directed Spec -> Build")
+  unless build.x < revise.x && revise.x < fix.x do
+    throw (IO.userError "Revise edge is not directed Build -> Fix")
+  -- Each orthogonal connector ends in a small accent chevron (a real directional
+  -- tip rasterized as an ~8 device-px icon mask, distinct from the flat 2 device-px
+  -- shaft), one per directed edge. Scene prim rects are device pixels (the driver
+  -- renders at scale 120).
+  let arrowheads := scene.prims.toList.filter fun p => match p with
+    | .mask _ _ dst _ => dst.w ≤ 8 && dst.h ≤ 8
+    | _ => false
+  unless arrowheads.length ≥ 2 do
+    let small := scene.prims.toList.filterMap fun p => match p with
+      | .mask _ _ dst _ =>
+        if dst.w ≤ 12 && dst.h ≤ 12 then some s!"({dst.x},{dst.y},{dst.w},{dst.h})" else none
+      | _ => none
+    throw (IO.userError ("rendered diagram edges have no arrowheads; small masks: " ++
+      String.intercalate " | " small))
+  let devRectOf (t : String) : Option Rect :=
+    (observed.filter (fun p => p.1 == t)).head?.map (fun p => p.2.2)
+  let observedRadius (t : String) : IO Nat := do
+    let some dev := devRectOf t | throw (IO.userError ("missing device rect for " ++ t))
+    let cx := dev.x + dev.w / 2
+    let cy := dev.y + dev.h / 2
+    let nearest := scene.prims.toList.foldl (fun best p => match p with
+      | .rrect r _ (tl, _, _, _) _ _ =>
+        if r.x ≤ cx && cx ≤ r.x + r.w && r.y ≤ cy && cy ≤ r.y + r.h then
+          let area := r.w * r.h
+          match best with
+          | some (ba, _) => if area < ba then some (area, tl) else best
+          | none => some (area, tl)
+        else best
+      | _ => best) none
+    match nearest with
+    | some (_, radius) => pure radius
+    | none => throw (IO.userError ("no scene rect observed around " ++ t))
+  let specR ← observedRadius "Spec"
+  let buildR ← observedRadius "Build"
+  unless buildR > specR do
+    throw (IO.userError "rendered node shapes did not observe pill > rounded")
+  unless diamondObserved scene observed "Fix" ["Spec", "Build"] do
+    throw (IO.userError "decision node is not rendered as a diamond outline")
+  let covering (sub : Rect) : List Rect :=
+    (scene.hitRegionsSub.filter fun r =>
+      let cx := sub.x + sub.w / 2
+      let cy := sub.y + sub.h / 2
+      r.2.x ≤ cx && cx ≤ r.2.x + r.2.w && r.2.y ≤ cy && cy ≤ r.2.y + r.2.h).map (·.2)
+  let coversCenter (r : Rect) (other : Rect) : Bool :=
+    let ox := other.x + other.w / 2
+    let oy := other.y + other.h / 2
+    r.x ≤ ox && ox ≤ r.x + r.w && r.y ≤ oy && oy ≤ r.y + r.h
+  let hasOwnRegion (self a b : Rect) : Bool :=
+    (covering self).any (fun r => !coversCenter r a && !coversCenter r b)
+  unless hasOwnRegion spec build fix && hasOwnRegion build spec fix &&
+      hasOwnRegion fix spec build do
+    throw (IO.userError "rendered diagram nodes are not separately hit-testable")
+  unless !rendered.contains "```" && !rendered.contains "mermaid" do
+    throw (IO.userError "Mermaid source was rendered as literal text")
+
+/-- Render persisted turns as a cold transcript would show them. -/
+private def renderedTurns (turns : List String) :
+    List (String × Rect × Rect) × SceneOutput × String :=
+  let st := { coldFixture with liveTurns := turns }
+  let (rootBox, scene) := renderScreen st ""
+  (collectObserved rootBox 24, scene, renderedBoxRoot rootBox)
+
+private def observedOnce (observed : List (String × Rect × Rect)) (t : String) : Option Rect :=
+  match observed.filter (fun p => p.1 == t) with
+  | [(_, sub, _)] => some sub
+  | _ => none
+
+-- Chained statements link each target to its preceding node, so A --> B --> C
+-- renders two forward steps instead of a shortcut from A to C.
+private def chainTurn : String := "```mermaid\ngraph LR\n  A --> B --> C\n```"
+private def chainObserved := (renderedTurns [chainTurn]).1
+#guard [observedOnce chainObserved "A", observedOnce chainObserved "B",
+  observedOnce chainObserved "C"].all (·.isSome)
+#guard match (observedOnce chainObserved "A", observedOnce chainObserved "B",
+    observedOnce chainObserved "C") with
+  | (some a, some b, some c) => a.x < b.x && b.x < c.x
+  | _ => false
+#guard !((renderedTurns [chainTurn]).2.2.contains "```")
+
+-- A cycle must not inflate ranks on every pass: the layout stays stable with
+-- coordinates bounded by the rendered transcript instead of walking off screen.
+private def cycleTurn : String := "```mermaid\ngraph LR\n  P --> Q --> P\n```"
+private def cycleObserved := (renderedTurns [cycleTurn]).1
+#guard [observedOnce cycleObserved "P", observedOnce cycleObserved "Q"].all (·.isSome)
+#guard match (observedOnce cycleObserved "P", observedOnce cycleObserved "Q") with
+  | (some p, some q) => p.x < q.x && q.x + q.w <= pxToSub 800 && q.y + q.h <= pxToSub 600
+  | _ => false
+
+-- Physical parity for the m2air evidence flow: a four-node graph with two labeled
+-- edges and a decision node keeps every node and both edge labels visible in source
+-- order, and the decision node renders as a rhombus (icon mask), not a rect fill.
+private def flowTurn : String :=
+  "```mermaid\ngraph LR\n  A[Spec] -->|Approve| B(Build)\n  B -->|Revise| C{Review}\n  C --> D[Done]\n```"
+private def flowObserved := (renderedTurns [flowTurn]).1
+#guard [observedOnce flowObserved "Spec", observedOnce flowObserved "Build",
+  observedOnce flowObserved "Review", observedOnce flowObserved "Done",
+  observedOnce flowObserved "Approve", observedOnce flowObserved "Revise"].all (·.isSome)
+#guard match (observedOnce flowObserved "Spec", observedOnce flowObserved "Build",
+    observedOnce flowObserved "Review", observedOnce flowObserved "Done",
+    observedOnce flowObserved "Approve", observedOnce flowObserved "Revise") with
+  | (some a, some b, some c, some d, some ap, some rv) =>
+    a.x < b.x && b.x < c.x && c.x < d.x &&
+    a.x < ap.x && ap.x < b.x && b.x < rv.x && rv.x < c.x
+  | _ => false
+#guard diamondObserved (renderedTurns [flowTurn]).2.1 flowObserved "Review" ["Spec", "Build", "Done"]
+#guard !((renderedTurns [flowTurn]).2.2.contains "```")
+
+-- The decision outline rasterizes as a closed rhombus on the node's actual rectangle:
+-- scanning the rasterized contour row by row, the width is near zero at the upper tip,
+-- widens to the middle, then narrows symmetrically to a lower tip that still carries
+-- paint inside the clip bounds (both lower sides present). Rows are sampled in the
+-- raster of a 136x40 node (nodeW pixels; the rhombus band is exactly nodeH pixels tall).
+private def diamondRowSpan (g : LeanUI.Text.RasterizedGlyph) (y : Nat) : Nat := Id.run do
+  let mut lo := g.width
+  let mut hi := 0
+  for x in [0:g.width] do
+    if g.pixels.get! (y * g.width + x) > 0 then
+      if x < lo then lo := x
+      if x + 1 > hi then hi := x + 1
+  if hi ≤ lo then 0 else hi - lo
+
+private def diamondSpans : List Nat :=
+  -- Rasterized with the pure reference rasterizer at the node width so the scan
+  -- needs no atlas FFI (the segment fast path has no interpreter symbol in the
+  -- harness) and stays cheap to elaborate; the contour shape is scale-invariant
+  -- in the 160-unit view box, so the band maps to band/160 * size pixels.
+  let g := LeanUI.Text.rasterizeIconReference (LeanUI.Widgets.mermaidDiamondOutline (pxToSub 136) (pxToSub 40)) 136
+  [2, 10, 19, 29, 37].map (diamondRowSpan g)
+#guard match diamondSpans with
+  | [top, inner, mid, innerBot, bot] =>
+    top > 0 && bot > 0 && top ≤ inner && inner ≤ mid && mid ≥ innerBot && innerBot ≥ bot &&
+    mid > top && mid > bot && (top + 8 ≥ bot) && (bot + 8 ≥ top) &&
+    (inner + 8 ≥ innerBot) && (innerBot + 8 ≥ inner)
+  | _ => false
 
 def main (args : List String) : IO Unit := do
   for dark in [true, false] do
@@ -346,6 +589,258 @@ def main (args : List String) : IO Unit := do
   unless st.expandedProjects == ["p"] do throw (IO.userError "single project was collapsed at launch")
   let slot ← IO.mkRef (none : Option LiveSubscription)
   try
+    if args == ["cold-open"] then
+      -- Cold open of a previously completed mission in the real Core persistence
+      -- shape: user prompts and plain assistant_message turns, with the final turn
+      -- also present as its canonical replacement. The client must repopulate the
+      -- earlier turns from the persisted timeline (in-memory liveTurns alone cannot
+      -- reconstruct them), cover delivered user prompts, keep one copy of the
+      -- canonical replacement, yield the newest turn to the live bubble, and then
+      -- let a third turn stream live.
+      let some source ← IO.getEnv "ORB_TEST_MERMAID" | throw (IO.userError "missing ORB_TEST_MERMAID")
+      let st ← clickMission st a
+      -- The earlier turns can only come from the persisted timeline: the live bubble
+      -- shows the newest turn, which the transport yields to the stream.
+      let st ← awaitState slot st
+        (fun s => s.liveTurns == ["You: PRIVATE", "Amber blossom", "You: PRIVATE"] && streamedText s == source)
+      let (rootBox, scene) := renderScreen st source
+      let rendered := renderedBoxRoot rootBox
+      let observed := collectObserved rootBox 24
+      unless rendered.contains "Amber blossom" && (rendered.splitOn "You: PRIVATE").length == 3 do
+        throw (IO.userError "cold open did not repopulate the persisted turns and user prompts")
+      assertDiagram scene observed rendered
+      -- Let the fixture stage the next turn only after the cold-open render passed.
+      let root := (← IO.getEnv "ORB_STATE_DIR").getD ""
+      IO.FS.writeFile (System.FilePath.mk root / "cold-open-observed") "1"
+      let st ← awaitState slot st (fun s => streamedText s == "Ripened fruit")
+      let (rootBox, scene) := renderScreen st "Ripened fruit"
+      let rendered := renderedBoxRoot rootBox
+      let observed := collectObserved rootBox 24
+      unless rendered.contains "Amber blossom" && (rendered.splitOn "You: PRIVATE").length == 3 &&
+          rendered.contains "Ripened fruit" do
+        throw (IO.userError "continuing live stream lost the persisted earlier turns")
+      assertDiagram scene observed rendered
+      return
+    if args == ["mermaid-backedge"] then
+      -- The controller-reported graph: all four edges render, including the
+      -- Review -> Draft back edge, both edge labels are visible, and Review
+      -- (two labelled outgoing edges) shows Approve and Revise on opposite
+      -- sides. The back edge routes through a lane below the rank rows with its
+      -- arrowhead at the Draft (target) end.
+      let some backedge ← IO.getEnv "ORB_TEST_BACKEDGE" | throw (IO.userError "missing ORB_TEST_BACKEDGE")
+      let st ← clickMission st a
+      let st ← awaitState slot st (fun s => streamedText s == backedge)
+      let (rootBox, scene) := renderScreen st backedge
+      let rendered := renderedBoxRoot rootBox
+      let observed := collectObserved rootBox 24
+      let exactlyOne (t what : String) : IO Rect := do
+        match observed.filter (fun p => p.1 == t) with
+        | [(_, sub, _)] => pure sub
+        | hits =>
+          let labels := observed.map (·.1) |> String.intercalate ","
+          throw (IO.userError ("rendered diagram " ++ what ++ " was not observed exactly once: " ++ t ++
+            s!" (hits: {hits.length}; labels: {labels})"))
+      let draft ← exactlyOne "Design spec" "node label"
+      let review ← exactlyOne "Code review" "node label"
+      let deploy ← exactlyOne "Canary deploy" "node label"
+      let _verify ← exactlyOne "Verify release" "node label"
+      let approve ← exactlyOne "Approve" "edge label"
+      let revise ← exactlyOne "Revise" "edge label"
+      unless review.x < approve.x && approve.x < deploy.x do
+        throw (IO.userError "Approve edge is not directed Review -> Deploy")
+      unless draft.x < revise.x && revise.x < review.x do
+        throw (IO.userError "Revise back edge label is not between Draft (target) and Review (source)")
+      unless review.y < revise.y && deploy.y < revise.y do
+        throw (IO.userError "Revise back edge is not routed below the rank rows")
+      unless approve.x > review.x && revise.x < review.x do
+        throw (IO.userError "Review does not show two labelled outgoing edges on opposite sides")
+      let arrowheads := scene.prims.toList.filter fun p => match p with
+        | .mask _ _ dst _ => dst.w ≤ 8 && dst.h ≤ 8
+        | _ => false
+      unless arrowheads.length ≥ 4 do
+        throw (IO.userError s!"rendered diagram edges have {arrowheads.length} arrowheads, expected 4")
+      let some (_, _, draftDev) := observed.filter (fun p => p.1 == "Design spec") |>.head? |
+        throw (IO.userError "missing device rect for Design spec")
+      let some (_, _, reviewDev) := observed.filter (fun p => p.1 == "Code review") |>.head? |
+        throw (IO.userError "missing device rect for Code review")
+      let some (_, _, verifyDev) := observed.filter (fun p => p.1 == "Verify release") |>.head? |
+        throw (IO.userError "missing device rect for Verify release")
+      let draftCx := draftDev.x + draftDev.w / 2
+      let reviewCx := reviewDev.x + reviewDev.w / 2
+      -- The lane tip: a chevron at the Draft (target) column, below the rank rows,
+      -- with the lane's continuous path directly under it spanning both columns.
+      let laneTips := arrowheads.filterMap fun p => match p with
+        | .mask _ _ dst _ =>
+          if (dst.x + dst.w / 2 - draftCx).natAbs ≤ 16 && dst.y > verifyDev.y then some dst else none
+        | _ => none
+      unless laneTips.length == 1 do
+        throw (IO.userError s!"the back edge needs exactly one chevron at the Draft end below the rows, got {laneTips.length}")
+      let some (laneTip) := laneTips.head? | throw (IO.userError "unreachable")
+      let lanePaths := scene.prims.toList.filterMap fun p => match p with
+        | .mask _ _ dst _ =>
+          if dst.w ≥ 100 && dst.y > verifyDev.y &&
+              dst.x ≤ reviewCx && reviewCx < dst.x + dst.w then some dst else none
+        | _ => none
+      unless lanePaths.length == 1 do
+        throw (IO.userError s!"the back edge needs one continuous lane path spanning Review and Draft, got {lanePaths.length}")
+      let some (lanePath) := lanePaths.head? | throw (IO.userError "unreachable")
+      -- Physically connected: the chevron sits directly on the path's row (adjacent
+      -- lane rows, no gap), and the path spans both column centers end to end.
+      unless (lanePath.y - (laneTip.y + laneTip.h)).natAbs ≤ 1 do
+        throw (IO.userError "the lane chevron is not attached to the lane path row")
+      unless (lanePath.x - min reviewCx draftCx).natAbs ≤ 2 &&
+          (lanePath.x + lanePath.w - max reviewCx draftCx).natAbs ≤ 2 do
+        throw (IO.userError "the lane path does not span the Review and Draft columns exactly")
+      unless rendered.contains "Design spec" && rendered.contains "Verify release" do
+        throw (IO.userError "reported graph nodes missing from the render")
+      return
+    if args == ["mermaid-cycle"] then
+      -- The review's exact contract for a two-node bidirectional cycle: both
+      -- directions render as separate actual paths with clear labels and
+      -- arrowheads at opposite targets.
+      let some cycleSrc ← IO.getEnv "ORB_TEST_CYCLE" | throw (IO.userError "missing ORB_TEST_CYCLE")
+      let st ← clickMission st a
+      let st ← awaitState slot st (fun s => streamedText s == cycleSrc)
+      let (rootBox, scene) := renderScreen st cycleSrc
+      let rendered := renderedBoxRoot rootBox
+      let observed := collectObserved rootBox 24
+      let exactlyOne (t what : String) : IO Rect := do
+        match observed.filter (fun p => p.1 == t) with
+        | [(_, sub, _)] => pure sub
+        | hits =>
+          let labels := observed.map (·.1) |> String.intercalate ","
+          throw (IO.userError ("rendered diagram " ++ what ++ " was not observed exactly once: " ++ t ++
+            s!" (hits: {hits.length}; labels: {labels})"))
+      let alpha ← exactlyOne "Alpha" "node label"
+      let beta ← exactlyOne "Beta" "node label"
+      let ship ← exactlyOne "Ship" "edge label"
+      let ret ← exactlyOne "Return" "edge label"
+      unless alpha.x < ship.x && ship.x < beta.x do
+        throw (IO.userError "Ship edge is not directed Alpha -> Beta")
+      unless alpha.x < ret.x && ret.x < beta.x do
+        throw (IO.userError "Return label is not between the two columns")
+      unless ret.y > alpha.y && ret.y > beta.y do
+        throw (IO.userError "Return back edge is not routed below the rank rows")
+      let some (_, _, alphaDev) := observed.filter (fun p => p.1 == "Alpha") |>.head? |
+        throw (IO.userError "missing device rect for Alpha")
+      let some (_, _, betaDev) := observed.filter (fun p => p.1 == "Beta") |>.head? |
+        throw (IO.userError "missing device rect for Beta")
+      let alphaCx := alphaDev.x + alphaDev.w / 2
+      let betaCx := betaDev.x + betaDev.w / 2
+      let alphaCy := alphaDev.y + alphaDev.h / 2
+      let betaCy := betaDev.y + betaDev.h / 2
+      let smallMasks := scene.prims.toList.filterMap fun p => match p with
+        | .mask _ _ dst _ => if dst.w ≤ 8 && dst.h ≤ 8 then some dst else none
+        | _ => none
+      -- Arrowheads at opposite targets: the forward tip touches the Beta node's
+      -- left edge at node height, the return tip is centered on the Alpha column
+      -- below the rank rows. Both tips must be full 8×8 masks — a clipped remnant
+      -- (shorter row or cropped wing) fails the extent reservation.
+      unless smallMasks.any fun dst =>
+          dst.w == 8 && dst.h == 8 &&
+          (dst.x + dst.w - (betaDev.x - 12)).natAbs ≤ 16 &&
+          (dst.y + dst.h / 2 - betaCy).natAbs ≤ 10 do
+        throw (IO.userError "the forward edge has no full-extent arrowhead at the Beta (target) column at node height")
+      unless smallMasks.any fun dst =>
+          dst.w == 8 && dst.h == 8 &&
+          (dst.x + dst.w / 2 - alphaCx).natAbs ≤ 16 && dst.y > betaDev.y + betaDev.h do
+        throw (IO.userError "the return edge has no full-extent arrowhead at the Alpha (target) column below the rows")
+      -- Separate actual paths: the return lane is one wide continuous mask below the
+      -- rows spanning both columns, while the forward shaft is a thin rect at node
+      -- height between the columns.
+      let lanePaths := scene.prims.toList.filterMap fun p => match p with
+        | .mask _ _ dst _ => if dst.w ≥ 60 && dst.y > betaDev.y + betaDev.h then some dst else none
+        | _ => none
+      unless lanePaths.length == 1 do
+        throw (IO.userError s!"the return edge needs one lane path below the rows, got {lanePaths.length}")
+      let some (lanePath) := lanePaths.head? | throw (IO.userError "unreachable")
+      unless (lanePath.x - min alphaCx betaCx).natAbs ≤ 2 &&
+          (lanePath.x + lanePath.w - max alphaCx betaCx).natAbs ≤ 2 do
+        throw (IO.userError "the lane path does not span the Alpha and Beta columns exactly")
+      let shafts := scene.prims.toList.filterMap fun p => match p with
+        | .rrect r _ _ _ _ =>
+          if r.h ≤ 3 && r.w ≥ 20 &&
+              (r.y + r.h / 2 - alphaCy).natAbs ≤ 10 &&
+              r.x ≥ alphaDev.x && r.x + r.w ≤ betaDev.x + betaDev.w then some r else none
+        | _ => none
+      unless shafts.length ≥ 1 do
+        throw (IO.userError "the forward edge has no shaft at node height between the columns")
+      let some (shaft) := shafts.head? | throw (IO.userError "unreachable")
+      -- Distinct screen-space strokes: the return lane's stroke band sits strictly
+      -- below the forward shaft's band (the two directions never overlap), and the
+      -- Return label rides clear below the lane run.
+      unless lanePath.y ≥ shaft.y + shaft.h do
+        throw (IO.userError "the return lane overlaps the forward shaft's stroke band")
+      unless ret.y ≥ lanePath.y + lanePath.h - 1 do
+        throw (IO.userError "the Return label is not clear below the lane run")
+      unless !rendered.contains "```" && !rendered.contains "mermaid" do
+        throw (IO.userError "Mermaid source was rendered as literal text")
+      return
+    if args == ["cold-recover"] then
+      -- Cold open with persisted turns, then a transient unavailable window,
+      -- then the same text: the wipe must not cost the persisted archive for
+      -- good, and the replayed current turn shows exactly one visible copy.
+      let st ← clickMission st a
+      let st ← awaitState slot st
+        (fun s => s.liveTurns == ["You: PRIVATE", "Amber blossom", "You: PRIVATE"] &&
+          streamedText s == "Cold ember glow")
+      let st ← awaitState slot st (fun s => s.liveTurns.isEmpty && (streamedText s).isEmpty)
+      let st ← awaitState slot st
+        (fun s => s.liveTurns == ["You: PRIVATE", "Amber blossom", "You: PRIVATE"] &&
+          streamedText s == "Cold ember glow")
+      let (rootBox, _) := renderScreen st "Cold ember glow"
+      let rendered := renderedBoxRoot rootBox
+      unless rendered.contains "Amber blossom" && (rendered.splitOn "You: PRIVATE").length == 3 &&
+          (rendered.splitOn "Cold ember glow").length == 2 do
+        throw (IO.userError "unavailable window lost the persisted archive or duplicated the current turn")
+      return
+    if args == ["markdown-turn"] then
+      -- Both stream shapes render markdown-lite: a one-line stream must not show
+      -- its literal bold markers, and the completed multi-line document renders
+      -- headings, bullets, links, inline styles and a non-mermaid code fence.
+      let some md ← IO.getEnv "ORB_TEST_MARKDOWN" | throw (IO.userError "missing ORB_TEST_MARKDOWN")
+      let st ← clickMission st a
+      let st ← awaitState slot st (fun s => streamedText s == "Amber blossom")
+      let st ← awaitState slot st (fun s => streamedText s == "**Ember glow**")
+      let (rootBox, _) := renderScreen st "**Ember glow**"
+      let rendered := renderedBoxRoot rootBox
+      unless rendered.contains "Ember glow" && !rendered.contains "**" do
+        throw (IO.userError ("single-line stream kept literal markdown markers: " ++ rendered.take 300))
+      let st ← awaitState slot st (fun s => streamedText s == md)
+      let (rootBox, _) := renderScreen st md
+      let rendered := renderedBoxRoot rootBox
+      unless rendered.contains "Release notes" && rendered.contains "• First bullet" &&
+          rendered.contains "• Second bullet" &&
+          rendered.contains "the guide (https://example.test/guide)" &&
+          rendered.contains "a soft italic" && rendered.contains "inline code" &&
+          rendered.contains "print(\"hi\")" do
+        throw (IO.userError ("multi-line markdown lost a rendered span: " ++ rendered.take 600))
+      let markerContext (m : String) : String :=
+        match rendered.splitOn m with
+        | before :: after :: _ =>
+          let i := before.length
+          "…" ++ before.drop (if i > 40 then i - 40 else 0) ++ "⟪" ++ m ++ "⟫" ++ after.take 40 ++ "…"
+        | _ => ""
+      for m in ["#", "**", "](", "```", "`", "- First"] do
+        if rendered.contains m then
+          throw (IO.userError ("multi-line markdown kept literal marker " ++ m ++ ": " ++
+            markerContext m))
+      return
+    if args == ["mermaid-turn"] then
+      -- Two-turn live case: the earlier assistant turn must survive the follow-up
+      -- turn, whose canonical Mermaid fence renders as an actual diagram.
+      let some source ← IO.getEnv "ORB_TEST_MERMAID" | throw (IO.userError "missing ORB_TEST_MERMAID")
+      let st ← clickMission st a
+      let st ← awaitState slot st (fun s => streamedText s == "Amber blossom")
+      let st ← awaitState slot st (fun s => streamedText s == source)
+      let (rootBox, scene) := renderScreen st source
+      let rendered := renderedBoxRoot rootBox
+      let observed := collectObserved rootBox 24
+      unless rendered.contains "Amber blossom" do
+        throw (IO.userError ("earlier assistant turn was dropped from the live transcript; liveTurns: " ++
+          String.intercalate " | " st.liveTurns ++ "; rendered: " ++ rendered.take 400))
+      assertDiagram scene observed rendered
+      return
     if args == ["start-running"] then
       let st ← clickMission st b
       if st.composer.isRunning then throw (IO.userError "pending mission offered Stop")
@@ -401,6 +896,33 @@ def main (args : List String) : IO Unit := do
       let st ← awaitState slot st (!·.hasLiveConnection)
       unless st.missionCards.isEmpty && st.accountUsername.isEmpty && st.accountEndpoint.isEmpty && (← slot.get).isNone do throw (IO.userError "roster outlived identity")
       return
+    if args == ["access-loss"] then
+      -- Transient access loss is not a turn boundary: the output clears without
+      -- archiving, and the replayed identical text shows exactly one visible copy.
+      let st ← clickMission st b
+      let st ← awaitState slot st (fun s => streamedText s == "second\n\tλ🙂\n")
+      let st ← awaitState slot st (fun s => s.liveTurns.isEmpty && (streamedText s).isEmpty)
+      let st ← awaitState slot st (fun s => streamedText s == "second\n\tλ🙂\n")
+      let (rootBox, _) := renderScreen st "second\n\tλ🙂\n"
+      unless st.liveTurns.isEmpty && ((renderedBoxRoot rootBox).splitOn "λ🙂").length == 2 do
+        throw (IO.userError "replayed turn was archived or rendered more than once")
+      return
+    if args == ["share-403"] then
+      -- Permission denial leaves the mission: the roster keeps only accessible
+      -- missions and no earlier text survives from late frames.
+      let st ← clickMission st b
+      let st ← awaitState slot st (fun s => streamedText s == "second\n\tλ🙂\n")
+      let next ← awaitState slot st (·.openMission.isNone)
+      unless next.hasLiveConnection && (streamedText next).isEmpty && next.liveTurns.isEmpty &&
+          next.missionCards.length == 1 &&
+          !next.sidebarRows.any (·.widgetId == b.widgetId) do
+        throw (IO.userError "permission loss retained earlier text or roster entry")
+      let st ← clickMission next a
+      let st ← awaitState slot st (fun s => streamedText s == "canonical")
+      let (rootBox, _) := renderScreen st "canonical"
+      unless !((renderedBoxRoot rootBox).contains "second") do
+        throw (IO.userError "revoked mission text leaked into the new conversation")
+      return
     let st ← clickMission st a
     let st ← awaitState slot st (fun s => streamedText s == "canonical")
     let (stopped, damage) := stepDesktopEvent 120 vp st (.activate 2)
@@ -420,7 +942,9 @@ def main (args : List String) : IO Unit := do
     let st ← awaitState slot st (fun s => streamedText s == "second\n\tλ🙂\n")
     if args == ["revoke"] then
       let next ← awaitState slot st (·.openMission.isNone)
-      unless next.hasLiveConnection && (streamedText next).isEmpty && next.missionCards.length == 1 &&
+      -- The late racing reply is not a turn boundary: nothing it showed is archived.
+      unless next.hasLiveConnection && (streamedText next).isEmpty && next.liveTurns.isEmpty &&
+          next.missionCards.length == 1 &&
           !next.sidebarRows.any (·.widgetId == b.widgetId) && next.missionCards.head?.any (·.missionId == a.missionId) do
         throw (IO.userError "mission revocation lost unrelated roster or retained selected data")
       return

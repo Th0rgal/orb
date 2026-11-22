@@ -185,13 +185,17 @@ partial def shapeWidgetTree (ac : Text.GlyphAtlasCache) (font mono bold medium s
     let mut curAc := ac
     let newPayload ←
       match payload with
-      | .vectorIcon paths color badgeBg =>
+      | .vectorIcon paths color badgeBg strokeTenths =>
         let size := scaleSubPx scale120 (if badgeBg.isSome then pxToSub 10 else style.minWidth)
-        let key : GlyphKey := { font := 0xFFFF, glyph := hash paths |>.toNat, sizeSub := size, subpx := 0 }
+        -- The stroke radius participates in the atlas key: two icons with the same
+        -- paths but different weights must rasterize into distinct entries.
+        let key : GlyphKey :=
+          { font := 0xFFFF, glyph := mixHash (hash paths) (hash strokeTenths) |>.toNat,
+            sizeSub := size, subpx := 0 }
         let (ac', entry) :=
           match curAc.cache.lookup Text.hashGlyphKey key with
           | some entry => ({ curAc with hits := curAc.hits + 1 }, entry)
-          | none => curAc.insertRasterized key (Text.rasterizeIcon paths size)
+          | none => curAc.insertRasterized key (Text.rasterizeIcon paths size strokeTenths)
         curAc := ac'
         pure (WidgetPayload.iconMask entry.page entry.uv color badgeBg)
       | .text lineHeightSub runs =>

@@ -261,7 +261,7 @@ inductive BubbleUpdate where
   | revoked
 
 inductive LiveUpdate where
-  | sample (roster : Option (List String)) (bubble : Option BubbleUpdate)
+  | sample (roster : Option (List String)) (bubble : Option BubbleUpdate) (history : List String)
   | invalid
 
 structure LiveSubscription where
@@ -277,11 +277,17 @@ private def readSample (line : String) : Option LiveUpdate := do
   | ["R", keys] =>
     guard (keys.startsWith "+")
     let encoded := (keys.drop 1).toString
-    return .sample (some (if encoded.isEmpty then [] else encoded.splitOn "\x1f")) none
+    return .sample (some (if encoded.isEmpty then [] else encoded.splitOn "\x1f")) none []
   | ["B", title, status, text] =>
-    return .sample none (some (.text title status ((text.replace "\x1e" "\n").replace "\x1f" "\t")))
-  | ["X"] => return .sample none (some .unavailable)
-  | ["D"] => return .sample none (some .revoked)
+    return .sample none (some (.text title status ((text.replace "\x1e" "\n").replace "\x1f" "\t"))) []
+  -- One bounded atomic bootstrap message, oldest first (cold-open history).
+  | ["HS", packed] =>
+    let turns := (packed.splitOn "\x1d").filterMap fun raw =>
+      let turn := (raw.replace "\x1e" "\n").replace "\x1f" "\t"
+      if turn.isEmpty then none else some turn
+    return .sample none none turns
+  | ["X"] => return .sample none (some .unavailable) []
+  | ["D"] => return .sample none (some .revoked) []
   | _ => none
 
 /-- Each process owns its HTTP deadlines. A pending roster and a pending bubble
@@ -299,14 +305,15 @@ private def liveReader (args : Array String) (input : String)
     try
       repeat
         let line ← child.stdout.getLine
-        let some (.sample rows bubble) := readSample (line.dropEnd 1).toString | break
+        let some (.sample rows bubble history) := readSample (line.dropEnd 1).toString | break
         if !line.endsWith "\n" then break
         latest.atomically (modify fun previous => match previous with
           | some .invalid => previous
-          | some (.sample _ (some .revoked)) => previous
-          | some (.sample oldRows oldBubble) =>
-            some (.sample (rows.orElse fun _ => oldRows) (bubble.orElse fun _ => oldBubble))
-          | none => some (.sample rows bubble))
+          | some (.sample _ (some .revoked) _) => previous
+          | some (.sample oldRows oldBubble oldHistory) =>
+            some (.sample (rows.orElse fun _ => oldRows) (bubble.orElse fun _ => oldBubble)
+              (oldHistory ++ history))
+          | none => some (.sample rows bubble history))
         notify
         if let some .revoked := bubble then return
     catch _ => pure ()
@@ -546,7 +553,7 @@ def readLiveFrame (slot : IO.Ref (Option LiveSubscription)) (scale : Nat) (viewp
   let some update ← sub.latest.atomically (modifyGet (fun v => (v, none))) | return (st, none)
   match update with
   | .invalid => closeLiveSubscription slot; return invalidate
-  | .sample roster bubble =>
+  | .sample roster bubble history =>
     -- The roster can finish after a newer transcript read. Keep the selected
     -- conversation's title, status and text together across that arrival.
     if bubble.isSome then sub.lastBubble.set bubble
@@ -568,6 +575,9 @@ def readLiveFrame (slot : IO.Ref (Option LiveSubscription)) (scale : Nat) (viewp
       closeLiveSubscription slot
       let (st, _) := stepDesktopEvent scale viewport st (.activate 101)
       return (st, some viewport)
+    -- Cold open: the persisted timeline populates completed turns before the
+    -- bubble frame is applied to the same state.
+    let (st, histDamage) := applyHistoryTurns scale viewport st sub.mission history
     if let some .revoked := bubble then
       closeLiveSubscription slot
       let next := { st with
@@ -575,12 +585,18 @@ def readLiveFrame (slot : IO.Ref (Option LiveSubscription)) (scale : Nat) (viewp
         sidebarRows := rows.filter (·.rowId != "mission:" ++ sub.mission) }
       return ((stepDesktopEvent scale viewport next (.activate 101)).1, some viewport)
     if let some .unavailable := bubble then
-      let (next, damage) := applyLiveText scale viewport st sub.mission ""
-      return (next, if changed then some viewport else damage)
-    let some (.text title status text) := bubble | return (st, if changed then some viewport else none)
+      -- Drop the retained reply so later roster frames cannot resurrect cleared
+      -- output, and clear instead of archiving: access loss is not a boundary.
+      sub.lastBubble.set none
+      let (next, damage) :=
+        if st.liveTurns.isEmpty && (streamedText st).isEmpty then (st, none)
+        else (clearLiveTranscript st, some (transcriptDamageRect scale viewport st.sidebarWidth))
+      return (next, histDamage.orElse (fun _ => if changed then some viewport else damage))
+    let some (.text title status text) := bubble | return (st, histDamage.orElse (fun _ => if changed then some viewport else none))
     let (next, damage) := applyLiveText scale viewport st sub.mission text
     let some card := next.selectedCard | return invalidate
-    if title == card.title && status == card.status then return (next, if changed then some viewport else damage)
+    if title == card.title && status == card.status then
+      return (next, histDamage.orElse (fun _ => if changed then some viewport else damage))
     return ({ next with
       composer := { next.composer with isRunning := ({ card with status } : MissionSummaryCard).isRunning }
       missionCards := next.missionCards.map fun m => if m.missionId == sub.mission then { m with title, status } else m
