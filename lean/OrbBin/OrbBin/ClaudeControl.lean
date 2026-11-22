@@ -1726,8 +1726,12 @@ def parseOneShotHarnessEvent (harness : String) (rawLine : String) : OneShotLine
       let item := jv.fieldOrNull "item"
       let itemTy := (item.fieldStr? "type").getD ""
       if ty == "item.completed" && itemTy == "agent_message" then
-        return { sessionId? := sid?, textDelta := (item.fieldStr? "text").getD "", wholeMessage := harness == "codex",
-          messageId? := item.fieldStr? "id" }
+        return {
+          sessionId? := sid?
+          textDelta := (item.fieldStr? "text").getD ""
+          wholeMessage := harness == "codex"
+          messageId? := item.fieldStr? "id"
+        }
       else if itemTy == "command_execution" then
         let aid := (item.fieldStr? "id").getD "cmd"
         let cmdStr := (item.fieldStr? "command").getD "command"
