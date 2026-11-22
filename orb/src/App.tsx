@@ -326,9 +326,6 @@ export default function App() {
   );
   // Pending renames show in every view before the next project list arrives.
   const liveProjects = createMemo(() => withRenamedTitles("project", rawLiveProjects(), project => project.slug));
-  const effectiveNewProject = createMemo(() => isConnected()
-    ? (liveProjects().find(p => p.slug === newProject())?.slug ?? DEFAULT_PROJECT.slug)
-    : newProject());
   const [createError, setCreateError] = createSignal<string | null>(null);
   const [creating, setCreating] = createSignal(false);
   const [newAgentRevision, setNewAgentRevision] = createSignal<{ text: string; append?: boolean } | undefined>();
@@ -378,7 +375,7 @@ export default function App() {
     if (safeId === "local") void refreshLocalAgents(false);
   };
   const [workingDirectory, setWorkingDirectory] = createSignal("");
-  const directoryKey = () => `orb.directory:${getApiUrl()}:${effectiveNewProject()}:${newMachine()}`;
+  const directoryKey = () => `orb.directory:${getApiUrl()}:${newProject()}:${newMachine()}`;
   createEffect(() => {
     const key = directoryKey();
     setWorkingDirectory(readString(key) ?? "");
@@ -1324,7 +1321,7 @@ export default function App() {
       if (!launchPreview() || !launchViewKey()) setLaunchViewKey(crypto.randomUUID());
       const activeViewKey = launchViewKey();
       const receipt = {messageKey:launchPreview()?.messageKey ?? `initial:${activeViewKey}`,prompt,images,nodeId:machine,destination:nodeLabel(machine)};
-      const projectSlug = effectiveNewProject();
+      const projectSlug = newProject();
       const pick = effectivePick(machine);
       const selectedCyber = draftCyber();
       setCreating(true); setCreateError(null); setCreateRefusal(null); setLaunchPreview(receipt);
@@ -1336,6 +1333,13 @@ export default function App() {
           if (connectionVersion() !== version) throw new Error("The backend changed. Try again; your draft is kept.");
           setLiveProjects(current => [...current.filter(item => item.slug !== projectSlug), { ...DEFAULT_PROJECT, ...project } as ProjectSummary]);
           bumpProjects();
+        } else if (projectSlug !== DEFAULT_PROJECT.slug) {
+          const version = connectionVersion();
+          const projects = await listProjects(true, false);
+          if (connectionVersion() !== version) throw new Error("The backend changed. Try again; your draft is kept.");
+          if (!projects.some(project => project.slug === projectSlug)) {
+            throw new Error(`Project “${projectSlug}” is unavailable. Choose another project or retry. Your draft is kept.`);
+          }
         }
         if (machine === "local") {
           await launchLocal(text, prompt, title, projectSlug, pick, images, launchNavigation);
@@ -1772,7 +1776,7 @@ export default function App() {
 
   return (
     <div class={`app ${onSettings() ? "settings-view" : ""} ${(nativeChromeActive || !sidebar()) ? "sb-hidden" : ""}`} data-native-chrome={nativeChromeActive ? "true" : undefined} data-native-sb-open={nativeChromeActive ? (sidebar() ? "true" : "false") : undefined} data-pane={currentMissionId() ? "mission" : (currentProjectFile() || currentProjectSettings()) ? "project" : "page"} style={{ "--sb-w": `${onSettings() ? 220 : sbWidth()}px` }}>
-      <MentionProjectContext.Provider value={()=>openMission()?.project??currentProjectSettings()??effectiveNewProject()}>
+      <MentionProjectContext.Provider value={()=>openMission()?.project??currentProjectSettings()??newProject()}>
       <FilePanelProvider missionOpen={currentMissionId()} scope={{ mission: fileScopeMission() ?? undefined, project: currentProjectSettings() ?? undefined }} sidebar={sidebar} onSetSidebar={setSidebarWithNative}>
       <Show when={!nativeChromeActive}>
       <button class="sidebar-backdrop" aria-label="Close sidebar" onClick={() => setSidebar(false)} tabIndex={-1} />
@@ -1986,14 +1990,14 @@ export default function App() {
                   <div class="na-drop" onPointerDown={(e) => e.stopPropagation()}>
                     <button class="na-drop-btn" aria-label="Choose project" aria-haspopup="dialog" aria-expanded={envOpen() === "project"} onClick={(event) => { event.currentTarget.focus(); setEnvOpen(envOpen() === "project" ? null : "project"); }}>
                       {isConnected()
-                        ? (liveProjects().find((p) => p.slug === effectiveNewProject())?.title ?? (effectiveNewProject() === DEFAULT_PROJECT.slug ? DEFAULT_PROJECT.title : effectiveNewProject()) ?? "No project")
+                        ? (liveProjects().find((p) => p.slug === newProject())?.title ?? (newProject() === DEFAULT_PROJECT.slug ? DEFAULT_PROJECT.title : newProject()) ?? "No project")
                         : undefined}
-                      <Show when={newFolder()?.project === effectiveNewProject()}><span class="new-agent-folder">/ {newFolder()?.path}</span></Show>
+                      <Show when={newFolder()?.project === newProject()}><span class="new-agent-folder">/ {newFolder()?.path}</span></Show>
                       <Ic.ChevronDown size={12} />
                     </button>
                     <Show when={envOpen() === "project"}>
                       <ProjectPicker projects={isConnected() ? projectChoices(liveProjects()) : []}
-                        selected={effectiveNewProject() ?? ""} canCreate={isConnected()}
+                        selected={newProject() ?? ""} canCreate={isConnected()}
                         onSelect={(id) => { setNewFolder(null); setNewProject(id); setEnvOpen(null); }}
                         onClose={() => setEnvOpen(null)}
                         onCreate={() => { setProjectCreationAnchor(undefined); setEnvOpen(null); setNewProjectDraft(true); }}
@@ -2310,7 +2314,7 @@ export default function App() {
                   goalUnavailable={newMachine() !== "local" && newMachine() !== "core" && !remoteGoalSupport(remoteLaunch().capability, effectivePick(newMachine())?.backend) ? REMOTE_GOAL_UNSUPPORTED : undefined}
                   remoteSupport={remoteSupport}
                   harnessIds={newMachine() === "local" ? installedIds() : undefined}
-                  projectSlug={liveProjects().some(project => project.slug === effectiveNewProject()) ? effectiveNewProject() : undefined}
+                  projectSlug={liveProjects().some(project => project.slug === newProject()) ? newProject() : undefined}
                   localCwd={newMachine() === "local" ? workingDirectory() : undefined}
                   onAttachments={setAttachChips}
                 />
@@ -2408,7 +2412,7 @@ export default function App() {
             </Match>
             <Match when={selected() === "cloud-agent"}>
             <Suspense>
-              <CloudAgentPage project={effectiveNewProject() ?? ""} path={newFolder()?.project === effectiveNewProject() ? newFolder()?.path : undefined}
+              <CloudAgentPage project={newProject() ?? ""} path={newFolder()?.project === newProject() ? newFolder()?.path : undefined}
                 projects={projectChoices(liveProjects())} onProject={id => { setNewProject(id); setNewFolder(null); }}
                 onCreateProject={isConnected() ? () => { setProjectCreationAnchor(undefined); setNewProjectDraft(true); } : undefined}
                 onPending={seed => setCloudLaunchTitle(seed?.prompt.trim() || null)}

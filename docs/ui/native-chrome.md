@@ -112,6 +112,9 @@ routes through the verified unboxed kernel functions in `Orb.Kernel`:
   button does not select or expand its row. Buttons carry row identities rather than row
   indices: after insertion, removal or retargeting, activation resolves the current row;
   a button for a removed row does nothing. Labels and badges reserve the button's space.
+  The composer retains the chosen project slug and folder while the WebView refreshes its
+  project list. Send verifies the explicit project against the current backend. An unavailable
+  project leaves the draft open for retry or a new selection.
 - Multi-selection: Ctrl/Super-click toggles a mission, project, folder or file row, Shift-click
   extends from the anchor, a plain click or Escape clears it. Right-click inside a selection of
   more than one shows only bulk actions: for missions Move N to ▸, Archive/Restore N and Delete N…
