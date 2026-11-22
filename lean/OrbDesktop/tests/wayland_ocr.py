@@ -14,4 +14,4 @@ def read_words(image, geometry, full_frame=False, binarize=False):
     ox, oy = map(int, geometry.split(' ')[0].split(','))
     return [(r['text'].strip('.,:|…').lower(), ox+(int(r['left'])+int(r['width'])//2)//3,
              oy+(int(r['top'])+int(r['height'])//2)//3) for r in
-            csv.DictReader(result.decode().splitlines(), delimiter='\t') if r['text'].strip()]
+            csv.DictReader(result.decode().splitlines(), delimiter='\t', quoting=csv.QUOTE_NONE) if r['text'].strip()]
