@@ -189,14 +189,23 @@ private def openedProject := (stepDesktopEvent 120 vp unsentDraft (.activate 100
 
 -- The wire driver renders without font files, so every synthesized run stores its
 -- Unicode codepoint in `glyphId`; decoding the laid-out boxes recovers the text.
+private def decodeBoxLines (box : ComputedBox) : String :=
+  box.lines.foldl (fun acc line =>
+    line.glyphs.foldl (fun acc pg => acc ++ String.singleton (Char.ofNat pg.glyph.glyphId)) acc) ""
+
 private def renderedBoxText : ComputedBox → Nat → String
   | _box, 0 => ""
   | box, depth + 1 =>
-    let self := box.lines.foldl (fun acc line =>
-      line.glyphs.foldl (fun acc pg => acc ++ String.singleton (Char.ofNat pg.glyph.glyphId)) acc) ""
-    box.children.foldl (fun acc child => acc ++ renderedBoxText child depth) self
+    box.children.foldl (fun acc child => acc ++ renderedBoxText child depth) (decodeBoxLines box)
 
 private def renderedBoxRoot (box : ComputedBox) : String := renderedBoxText box 24
+
+/-- Observed text boxes: decoded text plus its absolute sub-pixel and device rects. -/
+private def collectObserved : ComputedBox → Nat → List (String × Rect × Rect)
+  | _box, 0 => []
+  | box, depth + 1 =>
+    let self := if box.lines.isEmpty then [] else [(decodeBoxLines box, box.rectSub, box.rectDev)]
+    box.children.foldl (fun acc child => acc ++ collectObserved child depth) self
 
 /-- Use the live screen with a populated header run, as in a shaped window.
 Obtain the target from the lowered scene, never by injecting an activate event. -/
@@ -369,13 +378,62 @@ def main (args : List String) : IO Unit := do
       let (rootBox, scene) := renderWidgetTree 120 (pxToSub 800) (pxToSub 600) st.initialFocusState st.theme
         (buildDesktopScreen st (pxToSub 800) (pxToSub 600) { streamRuns := [stream] } true)
       let rendered := renderedBoxRoot rootBox
+      let observed := collectObserved rootBox 24
       unless rendered.contains "Amber blossom" do
         throw (IO.userError "earlier assistant turn was dropped from the live transcript")
-      -- Live diagram nodes own the reserved widget-id band 9310 + (index + 1).
-      unless [9311, 9312, 9313].all (fun wid => scene.hitRegionsSub.any (fun r => r.1 == wid)) do
-        throw (IO.userError "live Mermaid fence rendered without diagram nodes")
-      unless rendered.contains "Approve" && rendered.contains "Revise" do
-        throw (IO.userError "rendered transcript is missing diagram edge labels")
+      -- Observe the graph from the rendered boxes; no widget ids are assumed, so a
+      -- correctly rendered graph with any ids passes.
+      let exactlyOne (t what : String) : IO Rect := do
+        match observed.filter (fun p => p.1 == t) with
+        | [(_, sub, _)] => pure sub
+        | _ => throw (IO.userError ("rendered diagram " ++ what ++ " was not observed exactly once: " ++ t))
+      let spec ← exactlyOne "Spec" "node label"
+      let build ← exactlyOne "Build" "node label"
+      let fix ← exactlyOne "Fix" "node label"
+      let approve ← exactlyOne "Approve" "edge label"
+      let revise ← exactlyOne "Revise" "edge label"
+      -- Directed connections: in the LR chain each edge label sits strictly between
+      -- its source and target columns.
+      unless spec.x < approve.x && approve.x < build.x do
+        throw (IO.userError "Approve edge is not directed Spec -> Build")
+      unless build.x < revise.x && revise.x < fix.x do
+        throw (IO.userError "Revise edge is not directed Build -> Fix")
+      -- Node shapes are observable in the scene prims: the pill (Build) has the
+      -- largest corner radius, the rounded node (Spec) the middle and the diamond
+      -- (Fix) the smallest.
+      let devRectOf (t : String) : Option Rect :=
+        (observed.filter (fun p => p.1 == t)).head?.map (fun p => p.2.2)
+      let observedRadius (t : String) : IO Nat := do
+        let some dev := devRectOf t | throw (IO.userError ("missing device rect for " ++ t))
+        let cx := dev.x + dev.w / 2
+        let cy := dev.y + dev.h / 2
+        let nearest := scene.prims.toList.foldl (fun best p => match p with
+          | .rrect r _ (tl, _, _, _) _ _ =>
+            if r.x ≤ cx && cx ≤ r.x + r.w && r.y ≤ cy && cy ≤ r.y + r.h then
+              let area := r.w * r.h
+              match best with
+              | some (ba, _) => if area < ba then some (area, tl) else best
+              | none => some (area, tl)
+            else best
+          | _ => best) none
+        match nearest with
+        | some (_, radius) => pure radius
+        | none => throw (IO.userError ("no scene rect observed around " ++ t))
+      let specR ← observedRadius "Spec"
+      let buildR ← observedRadius "Build"
+      let fixR ← observedRadius "Fix"
+      unless buildR > specR && specR > fixR do
+        throw (IO.userError "rendered node shapes did not observe pill > rounded > diamond")
+      -- The three nodes are separately interactive: distinct hit regions cover their
+      -- label centers, whatever widget ids the renderer assigned.
+      let covering (sub : Rect) : List WidgetId :=
+        (scene.hitRegionsSub.filter fun r =>
+          let cx := sub.x + sub.w / 2
+          let cy := sub.y + sub.h / 2
+          r.2.x ≤ cx && cx ≤ r.2.x + r.2.w && r.2.y ≤ cy && cy ≤ r.2.y + r.2.h).map (·.1)
+      let nodeIds := covering spec ++ covering build ++ covering fix
+      unless nodeIds.eraseDups.length >= 3 do
+        throw (IO.userError "rendered diagram nodes are not separately interactive")
       unless !rendered.contains "```" && !rendered.contains "mermaid" do
         throw (IO.userError "Mermaid source was rendered as literal text")
       return

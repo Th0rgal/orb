@@ -23,11 +23,12 @@ QUERY = (PKG.parent / 'OrbCore/OrbCore/current_bubble.sql').read_text()
 
 # Reconstruction (labeled as such in the PR) of the reported live gap: an earlier
 # assistant turn followed by a canonical turn whose content is a fenced Mermaid
-# graph with an S --Approve--> T edge and a Revise branch. The native renderer must
-# expose live diagram nodes in the reserved widget-id band 9310 + (index + 1).
+# graph with an S --Approve--> T edge and a Revise branch. Node shapes are varied
+# (rounded/pill/diamond) so the replay can observe them; the driver asserts the
+# rendered labels, shapes and edge directions without assuming any widget ids.
 MERMAID_TURN = ('```mermaid\ngraph LR\n'
-                '  S[Spec] -->|Approve| T[Build]\n'
-                '  T -->|Revise| R[Fix]\n```')
+                '  S[Spec] -->|Approve| T(Build)\n'
+                '  T -->|Revise| R{Fix}\n```')
 
 
 def fixture():
