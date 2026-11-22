@@ -113,3 +113,7 @@ refresh replaces the row. Toggling leaves the open conversation selected.
 
 The Linux sidebar draws a one-pixel focus border when the keyboard is used.
 Pointer activation keeps the control quiet while preserving keyboard focus.
+
+When the desktop WebView omits clipboard reading or denies a read, keyboard
+paste uses the current in-app cut or copy. A refused project file move still
+shows the same actionable error as a move made through the menu.

@@ -21,13 +21,13 @@ const missions = [
   { id: DONE_ID, title: "Earlier report", status: "completed", history: [], created_at: "", updated_at: "" },
 ];
 
-type Options = { clipboard?: "ok" | "broken"; entries?: Array<{ name: string; kind: string }>; capAt?: { active: number; cap: number } };
+type Options = { clipboard?: "ok" | "broken" | "write-only"; entries?: Array<{ name: string; kind: string }>; capAt?: { active: number; cap: number } };
 
 async function setup(page: Page, options: Options = {}) {
   const posts: any[] = [];
   const writes: any[] = [];
   const grants: any[] = [];
-  await page.addInitScript((broken: boolean) => {
+  await page.addInitScript((mode) => {
     localStorage.setItem("orb.apiUrl", location.origin);
     localStorage.setItem("orb.jwt", "test");
     localStorage.setItem("orb-theme", "dark");
@@ -36,13 +36,14 @@ async function setup(page: Page, options: Options = {}) {
     Object.defineProperty(navigator, "clipboard", {
       configurable: true,
       value: {
+        ...(mode !== "write-only" && { readText: async () => (window as any).__copied.at(-1) ?? "" }),
         writeText: async (text: string) => {
-          if (broken) throw new Error("NotAllowedError");
+          if (mode === "broken") throw new Error("NotAllowedError");
           (window as any).__copied.push(text);
         },
       },
     });
-  }, options.clipboard === "broken");
+  }, options.clipboard ?? "ok");
 
   await page.route("**/api/**", async (route) => {
     const request = route.request();
@@ -476,12 +477,6 @@ test("folder rename changes the real path, carries its agents via server cascade
 
 test("file actions rename, cut/paste, copy/paste, move and delete actual paths", async ({ page }) => {
   await setup(page);
-  await page.evaluate(() => {
-    let text = '';
-    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: {
-      writeText: async (value: string) => { text = value; }, readText: async () => text,
-    } });
-  });
   const files = new Map([['context.md', 'Important content']]);
   const transfers: any[] = [];
   await page.route('**/api/projects/test/**', async route => {
@@ -576,11 +571,7 @@ test('folder deletion requires confirmation and agent badges overlap their icon'
 });
 
 test('a refused sidebar action explains itself in a dialog, not inside the project list', async ({page}) => {
-  await setup(page);
-  await page.evaluate(() => {
-    let text = '';
-    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText: async (value: string) => { text = value; }, readText: async () => text } });
-  });
+  await setup(page, { clipboard: "write-only" });
   await page.route('**/api/projects/test/file/transfer', route => route.fulfill({status:400,body:'This folder contains files that are not part of the project context; move or delete them first'}));
   await expandProject(page);
   const shortcut = process.platform === 'darwin' ? 'Meta' : 'Control';
