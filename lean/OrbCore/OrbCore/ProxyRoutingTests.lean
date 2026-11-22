@@ -1327,6 +1327,215 @@ def run : IO Unit := do
            (errTextNq.splitOn "acct-secret").length == 1 &&
            (errTextNq.splitOn "alice@example.test").length == 1)
       s!"(3) non-quota cooldown must set terminal_reason=provider_unavailable and say provider is unavailable: status={stNq} reason={trNq} errs={errsNq.size} text={errTextNq}"
+
+    -- Post-forward `503 model_cooldown`, uncapped `Retry-After` clamping, shared `cliproxyapi:*`
+    -- sibling-model eligibility, and R33 transient `503` preservation:
+    let headerVal := fun (resp : CoreHttpResponse) (k : String) =>
+      ((resp.extraHdrs.find? (fun h => h.1.toLower == k.toLower)).map (·.2)).getD ""
+    let astraChain : RoutingChain := {
+      id := "gpt-6.2-astra", name := "Astra",
+      targets := #[{
+        accountId := "cliproxyapi:openai",
+        provider := "openai",
+        baseUrl := "http://127.0.0.1:1",
+        apiKey := "sk-super-secret-key-999",
+        modelId := "gpt-6.2-astra"
+      }]
+    }
+    let siblingChain : RoutingChain := {
+      id := "gpt-5.4", name := "GPT 5.4",
+      targets := #[{
+        accountId := "cliproxyapi:openai",
+        provider := "openai",
+        baseUrl := "http://127.0.0.1:1",
+        apiKey := "sk-super-secret-key-999",
+        modelId := "gpt-5.4"
+      }]
+    }
+    let r33TransientChain : RoutingChain := {
+      id := "r33-transient-503", name := "R33 Transient 503",
+      targets := #[{
+        accountId := "acct-r33-503",
+        provider := "openai",
+        baseUrl := "http://127.0.0.1:1",
+        apiKey := "sk-super-secret-key-999",
+        modelId := "r33-transient-503"
+      }]
+    }
+    let auth503LongChain : RoutingChain := {
+      id := "auth-503-long", name := "Auth 503 Long",
+      targets := #[{
+        accountId := "acct-auth-503",
+        provider := "openai",
+        baseUrl := "http://127.0.0.1:1",
+        apiKey := "sk-super-secret-key-999",
+        modelId := "auth-503-long"
+      }]
+    }
+    let quotaPostChain : RoutingChain := {
+      id := "quota-429-post", name := "Quota 429 Post",
+      targets := #[{
+        accountId := "acct-post-quota",
+        provider := "openai",
+        baseUrl := "http://127.0.0.1:1",
+        apiKey := "sk-super-secret-key-999",
+        modelId := "quota-429-post"
+      }]
+    }
+    chainsRef.modify fun cs =>
+      ((((cs.push astraChain).push siblingChain).push r33TransientChain).push auth503LongChain).push quotaPostChain
+    let mcMock : ProviderTarget → IO (Except String HttpsResponse) := fun target => do
+      if target.modelId == "gpt-6.2-astra" then
+        return .ok {
+          status := 503
+          headers := #[("Content-Type", "application/json"), ("Retry-After", "101648")]
+          body := "{\"error\":{\"type\":\"model_cooldown\",\"message\":\"All credentials for model gpt-6.2-astra are cooling down (acct-secret-alice@example.test)\"}}".toUTF8
+        }
+      else if target.modelId == "r33-transient-503" then
+        return .ok {
+          status := 503
+          headers := #[("Content-Type", "application/json"), ("Retry-After", "101648")]
+          body := "{\"error\":{\"type\":\"server_error\",\"message\":\"upstream overloaded\"}}".toUTF8
+        }
+      else if target.modelId == "auth-503-long" then
+        return .ok {
+          status := 503
+          headers := #[("Content-Type", "application/json"), ("Retry-After", "120")]
+          body := "{\"error\":{\"type\":\"auth_unavailable\",\"message\":\"account acct-secret-alice@example.test: no auth\"}}".toUTF8
+        }
+      else if target.modelId == "quota-429-post" then
+        return .ok {
+          status := 429
+          headers := #[("Content-Type", "application/json")]
+          body := "{\"error\":{\"type\":\"insufficient_quota\",\"message\":\"quota exceeded\"}}".toUTF8
+        }
+      else
+        return .ok {
+          status := 200
+          headers := #[("Content-Type", "application/json")]
+          body := "{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"sibling ok\"},\"finish_reason\":\"stop\"}]}".toUTF8
+        }
+    let runPostForwardSuite := fun (label : String) (testApp : CoreAppState) => do
+      cooldowns.set #[]
+      let postWithApp := fun (bearer model : String) => do
+        let body := renderCompact (.obj #[("model", .str model), ("messages", .arr #[])])
+        let raw := s!"POST /v1/chat/completions HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {bearer}\r\nContent-Length: {body.utf8ByteSize}\r\n\r\n{body}"
+        let .ok req := parseRequest raw.toUTF8 none
+          | throw (IO.userError "post-forward request parse failed")
+        let .ok response ← dispatchCoreRequest testApp req nowT
+          | throw (IO.userError "unexpected post-forward websocket upgrade")
+        return response
+      let mAstraId := s!"m-astra-{label}"
+      let tokAstra ← seedRunningMissionWithModel mAstraId "" "gpt-6.2-astra"
+      let rAstra ← postWithApp tokAstra "gpt-6.2-astra"
+      let raHdr := headerVal rAstra "Retry-After"
+      let raNum := raHdr.toNat?.getD 0
+      check (rAstra.status == 503 && raNum > 0 && raNum ≤ 3600 && raHdr == "3600")
+        s!"[{label}] (1) Retry-After: 101648 must be clamped <= 3600 (got {raHdr}, status={rAstra.status})"
+      let (stA, trA, genA, liveA, errsA) ← readMissionState mAstraId
+      let errTextA := errsA[0]?.getD ""
+      check (stA == "interrupted" && trA == "remote_quota" && genA == 2 && liveA == 0 && errsA.size == 1 &&
+             (errTextA.splitOn "cliproxyapi:openai").length == 1 &&
+             (errTextA.splitOn "acct-secret").length == 1 &&
+             (errTextA.splitOn "alice@example.test").length == 1 &&
+             (errTextA.splitOn "sk-super-secret").length == 1)
+        s!"[{label}] (2) 503 model_cooldown + Retry-After: 101648 must interrupt mission with remote_quota and zero leaked identifiers: status={stA} reason={trA} gen={genA} live={liveA} errs={errsA.size} text={errTextA}"
+      -- Repeat 503 model_cooldown hit to confirm healthTracker transientStreak never parks `cliproxyapi:openai` globally
+      let tokAstra2 ← seedRunningMissionWithModel s!"m-astra2-{label}" "" "gpt-6.2-astra"
+      let rAstra2 ← postWithApp tokAstra2 "gpt-6.2-astra"
+      check (rAstra2.status == 503) s!"[{label}] second 503 model_cooldown status: {rAstra2.status}"
+      let mSiblingId := s!"m-sib-{label}"
+      let tokSibling ← seedRunningMissionWithModel mSiblingId "" "gpt-5.4"
+      let rSibling ← postWithApp tokSibling "gpt-5.4"
+      check (rSibling.status == 200)
+        s!"[{label}] (3) sibling model gpt-5.4 on shared cliproxyapi:openai must stay eligible and dispatch (got {rSibling.status})"
+      let mR33Id := s!"m-r33-503-{label}"
+      let tokR33 ← seedRunningMissionWithModel mR33Id "" "r33-transient-503"
+      let rR33 ← postWithApp tokR33 "r33-transient-503"
+      let (stR33, trR33, genR33, liveR33, errsR33) ← readMissionState mR33Id
+      check (rR33.status == 503 && stR33 == "active" && trR33 == "" && genR33 == 1 && liveR33 == 1 && errsR33.isEmpty)
+        s!"[{label}] (4) plain transient 503 (R33) must not stop running turn: http={rR33.status} status={stR33} reason={trR33} errs={errsR33.size}"
+      let mAuthId := s!"m-auth-503-{label}"
+      let tokAuth ← seedRunningMissionWithModel mAuthId "" "auth-503-long"
+      let rAuth ← postWithApp tokAuth "auth-503-long"
+      let (stAuth, trAuth, genAuth, liveAuth, errsAuth) ← readMissionState mAuthId
+      let errTextAuth := errsAuth[0]?.getD ""
+      check (rAuth.status == 503 && stAuth == "interrupted" && trAuth == "provider_unavailable" &&
+             genAuth == 2 && liveAuth == 0 && errsAuth.size == 1 &&
+             (errTextAuth.splitOn "acct-secret").length == 1 &&
+             (errTextAuth.splitOn "alice@example.test").length == 1)
+        s!"[{label}] post-forward auth_unavailable + Retry-After > 60 must stop with provider_unavailable and zero leaked identifiers: status={stAuth} reason={trAuth} text={errTextAuth}"
+      let mQuotaId := s!"m-quota-429-{label}"
+      let tokQuota ← seedRunningMissionWithModel mQuotaId "" "quota-429-post"
+      let rQuota ← postWithApp tokQuota "quota-429-post"
+      let (stQ, trQ, genQ, liveQ, errsQ) ← readMissionState mQuotaId
+      check (rQuota.status == 429 && stQ == "interrupted" && trQ == "remote_quota" &&
+             genQ == 2 && liveQ == 0 && errsQ.size == 1)
+        s!"[{label}] post-forward non-shared 429 quota exhaustion (a) must stop with remote_quota: http={rQuota.status} status={stQ} reason={trQ}"
+    runPostForwardSuite "ref" { app with proxyMockTransport? := some mcMock }
+    let mcHealthTracker ← newProviderHealthTracker 1 2
+    runPostForwardSuite "health" { app with proxyMockTransport? := some mcMock, healthTracker? := some mcHealthTracker }
+
+    -- Dedicated 3-segment `fileAccountId` (`cliproxyapi:<provider>:<sha256>`) is NOT a shared
+    -- wildcard: `model_cooldown` records a cooldown so failover chains route around it.
+    let hashA := "cliproxyapi:openai:29b740ffb1b48a3f2b5c3b0b12564542c77b2d8ff73c0c9def17d338a58e0819"
+    let hashB := "cliproxyapi:openai:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    check (isSharedCliProxyAccount "cliproxyapi:openai" == true)
+      "2-segment cliproxyapi:openai is a shared sidecar wildcard"
+    check (isSharedCliProxyAccount hashA == false)
+      "3-segment cliproxyapi:openai:<sha256> is a dedicated per-account ID, not a shared wildcard"
+    check (isSharedCliProxyAccount "cliproxyapi:antigravity" == false)
+      "cliproxyapi:antigravity is not treated as a shared wildcard"
+    let hashCooldown := cooldownForOutcome {
+      status := 503
+      headers := #[("Retry-After", "101648")]
+      body := "{\"error\":{\"type\":\"model_cooldown\",\"message\":\"cooling down\"}}".toUTF8
+      selectedAccount := hashA
+      attemptsUsed := 1
+    } nowT
+    check (match hashCooldown with
+           | some c => c.accountId == hashA && c.reason == .usageLimit && c.untilEpoch == nowT + 3600
+           | none => false)
+      "3-segment cliproxyapi:openai:<sha256> records clamped 3600s .usageLimit cooldown on 503 model_cooldown"
+    let hashChain : RoutingChain := {
+      id := "hash-failover", name := "Hash Failover",
+      targets := #[
+        { accountId := hashA, provider := "openai", baseUrl := "http://127.0.0.1:1", apiKey := "k-a", modelId := "gpt-6.2-astra" },
+        { accountId := hashB, provider := "openai", baseUrl := "http://127.0.0.1:1", apiKey := "k-b", modelId := "gpt-6.2-astra" }
+      ]
+    }
+    let hashHtr ← newProviderHealthTracker 1 2
+    let hashAttempts ← IO.mkRef (#[] : Array String)
+    let hashMock : ProviderTarget → IO (Except String HttpsResponse) := fun target => do
+      hashAttempts.modify (·.push target.accountId)
+      if target.accountId == hashA then
+        return .ok {
+          status := 503
+          headers := #[("Content-Type", "application/json"), ("Retry-After", "101648")]
+          body := "{\"error\":{\"type\":\"model_cooldown\",\"message\":\"All credentials for model gpt-6.2-astra are cooling down\"}}".toUTF8
+        }
+      else
+        return .ok {
+          status := 200
+          headers := #[("Content-Type", "application/json")]
+          body := "{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"hashB ok\"},\"finish_reason\":\"stop\"}]}".toUTF8
+        }
+    let hOut1 ← forwardProxyChain hashChain "POST" "/v1/chat/completions" #[]
+      "{\"model\":\"gpt-6.2-astra\",\"messages\":[]}".toUTF8
+      (mockTransport? := some hashMock) (healthTracker? := some hashHtr) (nowEpoch? := some nowT)
+    check (hOut1.status == 200 && hOut1.selectedAccount == hashB && (← hashAttempts.get) == #[hashA, hashB])
+      s!"failover chain hashA -> hashB must route around hashA on 503 model_cooldown: status={hOut1.status} sel={hOut1.selectedAccount} attempts={← hashAttempts.get}"
+    let hashARec ← lookupAccountHealthRecord hashHtr hashA
+    check (match hashARec.cooldown? with
+           | some c => c.reason == .usageLimit && c.untilEpoch == nowT + 3600
+           | none => false)
+      "hashA must have a 3600s .usageLimit cooldown recorded in ProviderHealthTracker"
+    hashAttempts.set #[]
+    let hOut2 ← forwardProxyChain hashChain "POST" "/v1/chat/completions" #[]
+      "{\"model\":\"gpt-6.2-astra\",\"messages\":[]}".toUTF8
+      (mockTransport? := some hashMock) (healthTracker? := some hashHtr) (nowEpoch? := some (nowT + 10))
+    check (hOut2.status == 200 && hOut2.selectedAccount == hashB && (← hashAttempts.get) == #[hashB])
+      s!"subsequent request in hashA -> hashB chain must skip cooling hashA directly to hashB: status={hOut2.status} attempts={← hashAttempts.get}"
   finally
     closeCoreStore store
     IO.FS.removeDirAll root

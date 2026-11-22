@@ -7,6 +7,7 @@ import LeanSys.Auth
 import OrbBin.PosixExt
 import OrbBin.Json
 import OrbBin.GitWorkspace
+import OrbBin.ClaudeControl
 import OrbNode.Spec
 import OrbNode.Posix
 import OrbNode.Lease
@@ -541,38 +542,6 @@ def scanSoftwareInventory : IO JVal := do
     ("jobs", .arr #[])
   ]
 
-/-- Group Carbon (`gemini-4-carbon-{low,medium,high}` / legacy `agy-model-{low,medium,high}`) and
-    Argon (`gemini-4-argon-{low,medium,high}` / legacy `agy-demo-{low,medium,high}`) variants
-    into single base `(id, label)` pairs matching `OrbBin.ClaudeControl.groupAntigravityModels`. -/
-def groupAntigravityModels (raw : Array (String × String)) : Array (String × String) := Id.run do
-  let mut seen : Std.HashSet String := {}
-  let mut out : Array (String × String) := #[]
-  for (rawId, rawLabel) in raw do
-    let grouped? : Option (String × String) :=
-      if rawId.startsWith "gemini-4-carbon-" then
-        let lvl := (rawId.drop 16).toString
-        if lvl == "low" || lvl == "medium" || lvl == "high" then some ("gemini-4-carbon", lvl) else none
-      else if rawId.startsWith "agy-model-" then
-        let lvl := (rawId.drop 10).toString
-        if lvl == "low" || lvl == "medium" || lvl == "high" then some ("gemini-4-carbon", lvl) else none
-      else if rawId.startsWith "gemini-4-argon-" then
-        let lvl := (rawId.drop 15).toString
-        if lvl == "low" || lvl == "medium" || lvl == "high" then some ("gemini-4-argon", lvl) else none
-      else if rawId.startsWith "agy-demo-" then
-        let lvl := (rawId.drop 9).toString
-        if lvl == "low" || lvl == "medium" || lvl == "high" then some ("gemini-4-argon", lvl) else none
-      else none
-    let (id, label) := match grouped? with
-      | some (base, lvl) =>
-        let suf := if lvl == "low" then " (Low)" else if lvl == "medium" then " (Medium)" else " (High)"
-        let stripped := if rawLabel.endsWith suf then (rawLabel.dropEnd suf.length).toString else rawLabel
-        (base, stripped)
-      | none => (rawId, rawLabel)
-    if !seen.contains id then
-      seen := seen.insert id
-      out := out.push (id, label)
-  return out
-
 private def discoverAntigravityModels (ma : ManagedAuthConfig) (slot? : Option String) : IO (Except (Nat × String) JVal) := do
   let cleanSlot? := slot?.map (·.trimAscii.toString) |>.filter (fun s => !s.isEmpty)
   let profile ← match cleanSlot? with
@@ -614,7 +583,7 @@ private def discoverAntigravityModels (ma : ManagedAuthConfig) (slot? : Option S
           let label := String.intercalate "\t" cols.tail!
           if !id.isEmpty && !label.isEmpty then
             pairs := pairs.push (id, label)
-      let grouped := groupAntigravityModels pairs
+      let grouped := OrbBin.ClaudeControl.groupAntigravityModels pairs
       if grouped.isEmpty then
         return .error (503, "No Antigravity models are available for this account")
       return .ok (.arr (grouped.map fun (i, l) => .arr #[.str i, .str l]))

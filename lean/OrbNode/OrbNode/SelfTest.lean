@@ -6,6 +6,7 @@ import OrbBin.PosixExt
 import OrbBin.Json
 import OrbBin.PrivdMain
 import OrbBin.GitWorkspace
+import OrbBin.ClaudeControl
 import OrbNode.Spec
 import OrbNode.MutantSuite
 import OrbNode.Posix
@@ -1280,15 +1281,17 @@ private def runRound3RegressionTests
      | .ok _ => false)
 
   -- Round 6 regression checks: Antigravity model grouping, `.lost` log termination, turbo-lean quarantine, base_tree_sha
-  let groupedModels := groupAntigravityModels #[
+  let groupedModels := OrbBin.ClaudeControl.groupAntigravityModels #[
     ("gemini-4-carbon-low", "Carbon (Low)"),
     ("agy-model-high", "Carbon (High)"),
     ("gemini-4-argon-high", "Argon (High)"),
     ("agy-demo-medium", "Argon (Medium)"),
+    ("gemini-4-neon-low", "Neon (Low)"),
+    ("gemini-4-neon-high", "Neon (High)"),
     ("custom-v1", "Custom Model")
   ]
-  check "groupAntigravityModels deduplicates Carbon/Argon effort tiers and upgrades legacy agy IDs"
-    (groupedModels == #[("gemini-4-carbon", "Carbon"), ("gemini-4-argon", "Argon"), ("custom-v1", "Custom Model")])
+  check "groupAntigravityModels deduplicates Carbon/Argon/Neon effort tiers and upgrades legacy agy IDs"
+    (groupedModels == #[("gemini-4-carbon", "Carbon"), ("gemini-4-argon", "Argon"), ("gemini-4-neon", "Neon"), ("custom-v1", "Custom Model")])
   check "JobState.lost does not prematurely confirm process termination until scope stop succeeds"
     (!JobState.lost.confirmsTermination && !JobState.lost.isTerminal && JobState.cancelled.confirmsTermination)
   let lostFenceJid := "00000000-0000-0000-0000-000000000099"

@@ -4837,9 +4837,13 @@ private def runMultiUserCoreTests (prodValid : CoreConfig) : IO UInt32 := do
   let agyGrouped := OrbBin.ClaudeControl.groupAntigravityModels #[
     ("gemini-4-carbon-high", "Carbon (High)"),
     ("agy-model-low", "Carbon (Low)"),
-    ("gemini-4-argon-medium", "Argon (Medium)")
+    ("gemini-4-argon-medium", "Argon (Medium)"),
+    ("gemini-4-neon-low", "Neon (Low)"),
+    ("gemini-4-neon-high", "Neon (High)")
   ]
   let (agyCliMdl, agyCliEff) := OrbBin.ClaudeControl.normalizeAntigravityCliModel "agy-model" (some "medium")
+  let (neonCliMdl, neonCliEff) := OrbBin.ClaudeControl.normalizeAntigravityCliModel "gemini-4-neon" (some "low")
+  let (neonEapMdl, neonEapEff) := OrbBin.ClaudeControl.normalizeAntigravityCliModel "gemini-4-neon-eap" none
   if custAddSt != 201 || chainAddSt != 201 || custDelSt != 200 || alDisableCustSt != 200 ||
      bmSt != 200 || alBmSt != 200 || firstCcVal != "claude-opus-5-5" ||
      (bmBody.splitOn "claude-fable-5-2").length < 2 ||
@@ -4867,8 +4871,14 @@ private def runMultiUserCoreTests (prodValid : CoreConfig) : IO UInt32 := do
      (museTargets[0]?).map (·.baseUrl) != some "https://api.meta.ai" ||
      (agyTargets[0]?).map (·.modelId) != some "gemini-4-carbon-high" ||
      (agyTargets[1]?).map (·.modelId) != some "gemini-4-argon-low" ||
-     agyGrouped != #[("gemini-4-carbon", "Carbon"), ("gemini-4-argon", "Argon")] ||
-     agyCliMdl != "gemini-4-carbon-medium" || agyCliEff != none then
+     agyGrouped != #[("gemini-4-carbon", "Carbon"), ("gemini-4-argon", "Argon"), ("gemini-4-neon", "Neon")] ||
+     agyCliMdl != "gemini-4-carbon-medium" || agyCliEff != none ||
+     neonCliMdl != "gemini-4-neon-low" || neonCliEff != none ||
+     neonEapMdl != "gemini-4-neon-high" || neonEapEff != none ||
+     canonicalAntigravityProxyModelId "gemini-4-neon" != "gemini-4-neon-high" ||
+     canonicalAntigravityProxyModelId "gemini-4-neon-eap" != "gemini-4-neon-high" ||
+     canonicalAntigravityProxyModelId "gemini-4-neon-medium" != "gemini-4-neon-medium" ||
+     canonicalAntigravityProxyModelId "gemini-4-neon-low" != "gemini-4-neon-low" then
     return (← fail s!"backend-models / catalog / chain redaction check failed: firstCc={firstCcVal} bmSt={bmSt} catSt={catSt} alCat={alCatBody} alChains={alChainsBody} alRes={alResolveSt}")
 
   -- Last-active-admin protection: disable/demote `opsadmin` first (so `admin` is sole active admin), then verify `admin` cannot be disabled/demoted/deleted!
