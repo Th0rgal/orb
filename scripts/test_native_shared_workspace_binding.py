@@ -8,7 +8,7 @@ def run():
     db = sqlite3.connect(":memory:")
     db.executescript("""
         CREATE TABLE native_antigravity_grants(token_sha256,job_id,account_id,model);
-        CREATE TABLE native_shared_workspace_bindings(token_sha256,node_id,route_generation);
+        CREATE TABLE native_shared_workspace_bindings(token_sha256,node_id,route_generation,route_kind);
         CREATE TABLE mission_proxy_tokens(token_sha256,mission_id,owner_user_id,expires_at_epoch,revoked);
         CREATE TABLE remote_node_jobs(job_id,node_id,mission_id,state);
         CREATE TABLE missions(id,owner_user_id,status,placement_job_id,backend,authority_mode,run_generation,owner_epoch,placement_revision);
@@ -16,7 +16,7 @@ def run():
         CREATE TABLE account_vpn_routes(account_id,country,generation);
         CREATE TABLE user_provider_prefs(user_id,provider_id,enabled);
         INSERT INTO native_antigravity_grants VALUES ('digest','job','shared','carbon');
-        INSERT INTO native_shared_workspace_bindings VALUES ('digest','worker',9);
+        INSERT INTO native_shared_workspace_bindings VALUES ('digest','worker',9,'vpn');
         INSERT INTO mission_proxy_tokens VALUES ('digest','mission','ben',900,0);
         INSERT INTO remote_node_jobs VALUES ('job','worker','mission','running');
         INSERT INTO missions VALUES ('mission','ben','active','job','antigravity','writer',1,1,8);
@@ -52,11 +52,30 @@ def run():
         assert not matches(), query
         db.execute("ROLLBACK TO replay")
         db.execute("RELEASE replay")
+    # A saved Direct decision must be bound to this job. A missing row cannot
+    # implicitly authorize egress, nor can a VPN grant become Direct.
+    db.execute("UPDATE account_vpn_routes SET country='',generation=10")
+    assert not matches()
+    db.execute("UPDATE native_shared_workspace_bindings SET route_generation=10")
+    assert not matches()
+    db.execute("UPDATE native_shared_workspace_bindings SET route_kind='direct'")
+    assert matches()[0][-3:] == ('',10,900)
+    for query in (
+        "UPDATE account_vpn_routes SET country='NL'",
+        "UPDATE account_vpn_routes SET generation=11",
+        "DELETE FROM account_vpn_routes",
+        "INSERT INTO user_provider_prefs VALUES ('ben','shared',0)",
+    ):
+        db.execute("SAVEPOINT direct")
+        db.execute(query)
+        assert not matches(), query
+        db.execute("ROLLBACK TO direct")
+        db.execute("RELEASE direct")
     for index in range(4):
         original, args[index] = args[index], "different"
         assert not matches()
         args[index] = original
-    print("Shared account accepted for eligible member; 21 authority mismatches rejected.")
+    print("Eligible member and matching Direct/VPN job bindings accepted; stale routes and authority mismatches rejected.")
 
 
 if __name__ == "__main__":

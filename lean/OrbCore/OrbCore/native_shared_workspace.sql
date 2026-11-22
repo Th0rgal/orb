@@ -15,4 +15,5 @@ WHERE b.node_id = j.node_id AND b.route_generation = v.generation
   AND j.state = 'running' AND m.status = 'active' AND m.backend = 'antigravity'
   AND m.authority_mode IN ('writer', 'readonly')
   AND u.disabled = 0 AND u.role IN ('member', 'admin') AND length(u.unix_username) > 0
-  AND COALESCE(f.enabled, 1) = 1 AND v.generation > 0 AND v.country GLOB '[A-Z][A-Z]';
+  AND COALESCE(f.enabled, 1) = 1 AND v.generation > 0
+  AND ((b.route_kind='vpn' AND v.country GLOB '[A-Z][A-Z]') OR (b.route_kind='direct' AND v.country=''));

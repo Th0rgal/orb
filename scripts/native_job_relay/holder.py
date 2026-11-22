@@ -110,7 +110,7 @@ def run(runtime, profile_uid, profile_gid, packet, lifetime, emit):
             raise RuntimeError("native isolation unavailable")
         connected, failed = stack.enter_context(workspace_socket(tmp, profile_uid, profile_gid, bwrap, files,
                                 checkout, uid, gid, readonly=packet["readonly"]))
-        namespace, port = stack.enter_context(profile_transport(packet["port"]))
+        namespace, port = stack.enter_context(profile_transport(packet["port"], direct=packet.get("direct", False)))
         child = start_profile(nsenter, bwrap, image, home, ipc, namespace, port, profile_uid, profile_gid,
                               packet["access_token"], packet["model"], packet.get("conversation"))
         stop = threading.Event()

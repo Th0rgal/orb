@@ -217,30 +217,35 @@ async def node_connection(reader, writer, context, host, port, claim):
         writer.transport.abort()
 
 
-async def local_profile_connection(reader, writer, verified_port, account=None, password=None):
-    """The listener is inside the Core profile namespace. Upstream is a Core-selected tunnel."""
+async def local_profile_connection(reader, writer, verified_port, account=None, password=None, *, direct=False):
+    """The listener is inside the Core profile namespace. Core binds the permitted Direct or VPN transport to the job."""
     upstream = None
     try:
         async with asyncio.timeout(5):
             destination = await socks_destination(reader, writer)
-            remote, upstream = await asyncio.open_connection("127.0.0.1", verified_port)
-            if account is not None:
-                await socks_connect(remote, upstream, destination, account, password)
+            if direct:
+                if verified_port is not None or account is not None or password is not None:
+                    raise ValueError("invalid Direct profile")
+                remote, upstream = await asyncio.open_connection(destination.value, 443)
             else:
-                upstream.write(b"\x05\x01\x00")
-                if await remote.readexactly(2) != b"\x05\x00":
-                    raise PermissionError("account tunnel unavailable")
-                host = destination.value.encode("ascii")
-                upstream.write(bytes([5, 1, 0, 3, len(host)]) + host + b"\x01\xbb")
-                header = await remote.readexactly(4)
-                if header[:3] != bytes([5, 0, 0]):
-                    raise ConnectionError("account tunnel unavailable")
-                length = {1: 4, 4: 16}.get(header[3])
-                if header[3] == 3:
-                    length = (await remote.readexactly(1))[0]
-                if not length:
-                    raise ValueError("invalid bound address")
-                await remote.readexactly(length + 2)
+                remote, upstream = await asyncio.open_connection("127.0.0.1", verified_port)
+                if account is not None:
+                    await socks_connect(remote, upstream, destination, account, password)
+                else:
+                    upstream.write(b"\x05\x01\x00")
+                    if await remote.readexactly(2) != b"\x05\x00":
+                        raise PermissionError("account tunnel unavailable")
+                    host = destination.value.encode("ascii")
+                    upstream.write(bytes([5, 1, 0, 3, len(host)]) + host + b"\x01\xbb")
+                    header = await remote.readexactly(4)
+                    if header[:3] != bytes([5, 0, 0]):
+                        raise ConnectionError("account tunnel unavailable")
+                    length = {1: 4, 4: 16}.get(header[3])
+                    if header[3] == 3:
+                        length = (await remote.readexactly(1))[0]
+                    if not length:
+                        raise ValueError("invalid bound address")
+                    await remote.readexactly(length + 2)
             writer.write(bytes([5, 0, 0, 1]) + bytes(6))
             await writer.drain()
             hello = await client_hello(reader, destination)
@@ -278,7 +283,8 @@ async def main(args):
             handlers.add(task)
             try:
                 if args.role == "profile":
-                    await local_profile_connection(r, w, cfg["verified_port"], cfg.get("account"), cfg.get("password"))
+                    await local_profile_connection(r, w, cfg.get("verified_port"), cfg.get("account"), cfg.get("password"),
+                                                   direct=cfg.get("direct") is True)
                 else:
                     await node_connection(r, w, ctx, cfg["host"], cfg["port"], cfg["claim"])
             finally:

@@ -212,7 +212,7 @@ def missionsSchemaSql : String :=
   "CREATE INDEX IF NOT EXISTS idx_mission_proxy_tokens_mission ON mission_proxy_tokens(mission_id);" ++
   "CREATE TABLE IF NOT EXISTS native_owner_enrollments (node_id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, account_id TEXT NOT NULL, revision INTEGER NOT NULL CHECK(revision>0));" ++
   "CREATE TABLE IF NOT EXISTS native_antigravity_grants (token_sha256 TEXT PRIMARY KEY REFERENCES mission_proxy_tokens(token_sha256) ON DELETE CASCADE, job_id TEXT NOT NULL, account_id TEXT NOT NULL, model TEXT NOT NULL);" ++
-  "CREATE TABLE IF NOT EXISTS native_shared_workspace_bindings (token_sha256 TEXT PRIMARY KEY REFERENCES native_antigravity_grants(token_sha256) ON DELETE CASCADE, node_id TEXT NOT NULL, route_generation INTEGER NOT NULL);" ++
+  "CREATE TABLE IF NOT EXISTS native_shared_workspace_bindings (token_sha256 TEXT PRIMARY KEY REFERENCES native_antigravity_grants(token_sha256) ON DELETE CASCADE, node_id TEXT NOT NULL, route_generation INTEGER NOT NULL, route_kind TEXT NOT NULL DEFAULT 'vpn');" ++
   "CREATE TABLE IF NOT EXISTS native_shared_workspace_claims (job_id TEXT PRIMARY KEY, token_sha256 TEXT NOT NULL REFERENCES native_antigravity_grants(token_sha256) ON DELETE CASCADE);" ++
   "CREATE TABLE IF NOT EXISTS native_job_relay_bindings (token_sha256 TEXT PRIMARY KEY REFERENCES native_antigravity_grants(token_sha256) ON DELETE CASCADE, node_id TEXT NOT NULL, enrollment_revision INTEGER NOT NULL, route_generation INTEGER NOT NULL);" ++
   "CREATE TABLE IF NOT EXISTS workspaces (id TEXT PRIMARY KEY, name TEXT NOT NULL DEFAULT '', path TEXT NOT NULL DEFAULT '', kind TEXT NOT NULL DEFAULT 'host', owner_user_id TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL DEFAULT '');" ++
@@ -356,6 +356,7 @@ def missionsAdditiveAlters : Array String := #[
   "ALTER TABLE model_routing_chains ADD COLUMN created_at TEXT;",
   "ALTER TABLE proxy_usage ADD COLUMN requested_model TEXT;",
   "ALTER TABLE proxy_outcomes ADD COLUMN requested_model TEXT;",
+  "ALTER TABLE native_shared_workspace_bindings ADD COLUMN route_kind TEXT NOT NULL DEFAULT 'vpn';",
   "ALTER TABLE missions ADD COLUMN project TEXT NOT NULL DEFAULT '';",
   "ALTER TABLE missions ADD COLUMN folder TEXT NOT NULL DEFAULT '';",
   "ALTER TABLE missions ADD COLUMN placement_revision INTEGER NOT NULL DEFAULT 0;",
@@ -4409,8 +4410,9 @@ private def issueProxyToken (st : CoreStore) (tokenPrefix mission owner : String
         -- A Core-held profile may use a shared subscription. Keep the route
         -- revision and intended workspace node immutable for this specific job.
         let shared ← execParamQueryUnlocked st.missionsDb
-          ("INSERT INTO native_shared_workspace_bindings SELECT ?1,?2,v.generation " ++
-           "FROM account_vpn_routes v WHERE v.account_id=?3 AND v.country GLOB '[A-Z][A-Z]' AND v.generation>0;")
+          ("INSERT INTO native_shared_workspace_bindings(token_sha256,node_id,route_generation,route_kind) " ++
+           "SELECT ?1,?2,v.generation,CASE WHEN v.country='' THEN 'direct' ELSE 'vpn' END FROM account_vpn_routes v " ++
+           "WHERE v.account_id=?3 AND (v.country='' OR v.country GLOB '[A-Z][A-Z]') AND v.generation>0;")
           #[digest,node,account]
         if let .error err := shared then return .error err
         let bound ← execParamQueryUnlocked st.missionsDb

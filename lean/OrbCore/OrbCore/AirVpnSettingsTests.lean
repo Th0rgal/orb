@@ -20,6 +20,8 @@ private def routeStorage (root : String) : IO Unit := do
     check ((← AccountVpnRoutes.resolve db "a" blocked).toOption == some none) "legacy Direct route"
     check (← AccountVpnRoutes.set db "a" none).isOk "explicit Direct on legacy account"
     check (← AccountVpnRoutes.checkGeneration db "a" 0).isOk "unchanged legacy Direct exchange remains valid"
+    check (← AccountVpnRoutes.set db "a" none).isOk "retry explicit Direct"
+    check (← AccountVpnRoutes.checkGeneration db "a" 1).isOk "saved Direct choice is idempotent"
     check (← AccountVpnRoutes.set db "a" (some "NL")).isOk "enable VPN for one account"
     let some first := (← AccountVpnRoutes.read db "a").toOption.join | throw (IO.userError "vpn preference missing")
     check (!(← AccountVpnRoutes.checkGeneration db "a" 0).isOk &&

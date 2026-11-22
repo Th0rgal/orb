@@ -36,11 +36,11 @@ def placement? (store : CoreStore) (grant job node owner : String) (now : UInt64
     return ⟨mission, user, unixUser, jobId, nodeId, account, model, mode == "readonly",
       ← runGen.toNat?, ← epoch.toNat?, ← revision.toNat?, country, ← routeGen.toNat?, ← expires.toNat?⟩
 
-/-- Resolve a verified VPN and uniquely bound shared subscription inside Core.
+/-- Resolve the saved route and uniquely bound shared subscription inside Core.
     A concurrent revoke, move or route change invalidates the snapshot before
     Core can start a profile or return a successful admission. -/
 def withVerifiedProfile {α : Type} (store : CoreStore) (hub : ProviderRuntimeHub) (workingDir grant job node owner : String)
-    (consume : Placement → String → UInt16 → IO (Except String α)) : IO (Except String α) := do
+    (consume : Placement → String → Option UInt16 → IO (Except String α)) : IO (Except String α) := do
   let denied := Except.error "native_shared_workspace_denied"
   let some before ← placement? store grant job node owner (← coreEpochSec) | return denied
   let accounts ← loadHydratedProviders store workingDir
@@ -48,10 +48,10 @@ def withVerifiedProfile {α : Type} (store : CoreStore) (hub : ProviderRuntimeHu
   unless hp.providerType == "antigravity" && hp.enabled && hp.hasOAuth && !hp.oauthToken.isEmpty &&
       !((accountRoutingFile accounts hp).isEmpty) do return denied
   let some resolve := hub.resolveTransport? | return denied
-  let .ok (some port) ← resolve hp.providerType hp.id | return denied
-  if port == 0 then return denied
+  let .ok port? ← resolve hp.providerType hp.id | return denied
+  if before.country.isEmpty != port?.isNone || port? == some 0 then return denied
   unless (← placement? store grant job node owner (← coreEpochSec)) == some before do return denied
-  consume before hp.oauthToken port
+  consume before hp.oauthToken port?
 
 /-- Admission reports only the current placement to the requesting node. -/
 def authorize (store : CoreStore) (hub : ProviderRuntimeHub) (workingDir grant job node owner : String) :
@@ -88,7 +88,8 @@ def pumpTurn (store : CoreStore) (hub : ProviderRuntimeHub) (working grant job n
     unless ← claim store grant p.job do return .error "native_turn_already_claimed"
     let packet := JVal.obj #[("unix_user", .str p.unixUser), ("owner", .str p.owner),
       ("mission", .str p.mission), ("account", .str p.account), ("model", .str p.model), ("exec_uid", .nat expectedUid),
-      ("access_token", .str token), ("port", .nat port.toNat), ("readonly", .bool p.readonly),
+      ("access_token", .str token), ("direct", .bool p.country.isEmpty),
+      ("port", (port.map (fun n => JVal.nat n.toNat)).getD .null), ("readonly", .bool p.readonly),
       ("prompt", .str prompt), ("conversation", (conversation.map JVal.str).getD .null)]
     let .ok child ← (IO.Process.spawn {
       cmd := "/usr/bin/python3", args := #["-I", config.runtime ++ "/native_job_relay/main.py",

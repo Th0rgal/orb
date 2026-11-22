@@ -70,10 +70,14 @@ def node_transport(config):
     return _private_transport("node", config)
 
 
-def profile_transport(verified_port, *, relay_account=None, relay_password=None):
+def profile_transport(verified_port, *, direct=False, relay_account=None, relay_password=None):
     """The caller holds an admitted placement and closes this context on revocation."""
-    if type(verified_port) is not int or not 0 < verified_port <= 65535:
-        raise ValueError("verified account VPN required")
+    if direct is True:
+        if verified_port is not None or relay_account is not None or relay_password is not None:
+            raise ValueError("Direct cannot use a tunnel or relay credential")
+        return _private_transport("profile", {"direct": True})
+    if direct is not False or type(verified_port) is not int or not 0 < verified_port <= 65535:
+        raise ValueError("a verified account tunnel is required")
     config = {"verified_port": verified_port}
     if relay_account is not None or relay_password is not None:
         if not isinstance(relay_account, str) or not relay_account or not isinstance(relay_password, str) or not relay_password:

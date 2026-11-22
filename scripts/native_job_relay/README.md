@@ -112,3 +112,7 @@ checks the original TLS ClientHello before passing it to the tunnel. The
 placement owner must close the context on expiry, revocation or worker loss.
 `python3 scripts/test_native_profile_transport.py` checks each permitted host and
 denial of other hosts, cleartext ports and mismatched TLS names.
+
+The shared-workspace profile binds both the kind and generation of the saved account route at job admission. Saving Direct explicitly allows the holder's private SOCKS listener to open port 443 to an allowed Google endpoint. It checks the TLS server name before sending application bytes. A VPN job requires its verified tunnel throughout execution. Changing the account route invalidates an existing binding. An account with no saved preference remains ineligible for the shared holder.
+
+The node-wide relay and the read-only qualification tools continue to require their own configured transports. Release validation needs the native workspace and parent delegation receipts for the same live route.
