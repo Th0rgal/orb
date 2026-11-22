@@ -17,8 +17,15 @@ static int number(JSCValue *row, const char *name) {
     return n;
 }
 static gboolean press(GtkWidget *btn, GdkEventButton *event, OrbSidebar *s) {
-    if (event->button == GDK_BUTTON_SECONDARY)
-        return orb_gtk_row_context_menu(s->wv, s->overlay, btn, (GdkEvent *)event);
+    if (event->button == GDK_BUTTON_SECONDARY) {
+        GtkWidget *row = btn;
+        if (g_strcmp0(g_object_get_data(G_OBJECT(btn), "orb-action"), "expand") == 0) {
+            const char *parent = g_object_get_data(G_OBJECT(btn), "orb-parent-id");
+            g_autofree char *key = g_strdup_printf("row/%s", parent);
+            row = g_hash_table_lookup(s->buttons, key);
+        }
+        return row && orb_gtk_row_context_menu(s->wv, s->overlay, row, (GdkEvent *)event);
+    }
     if (event->button != GDK_BUTTON_PRIMARY) return FALSE;
     if (event->state & (GDK_CONTROL_MASK | GDK_SUPER_MASK | GDK_SHIFT_MASK))
         return orb_sel_click(s->overlay, btn, (event->state & GDK_SHIFT_MASK) != 0);

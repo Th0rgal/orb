@@ -253,9 +253,9 @@ def run():
                 check('selected first mission', lambda: (row('copper') or {}).get('selected'))
                 # Toggle twice after the server projection replaces the parent row.
                 _, parent_y = check('Copper label', lambda: words('copper').get('copper'))
-                # Opening at different positions on one mission must move the menu.
+                # The right-hand click lands on the child disclosure in hybrid.
                 anchors = []
-                for x in (55, 160):
+                for x in (55, 190):
                     pointer.click(x, parent_y, 'button3')
                     menu_x, _ = check('mission menu', lambda: words('rename').get('rename'))
                     anchors.append(menu_x)
