@@ -1074,7 +1074,7 @@ private def checkRetiredGroupIdentity : IO Unit := do
     discard <| waitpidBlock other.pid
   assertTrue "delayed Stop preserves the process that reused a reaped PGID" stillRunning
 
-def runAllTests : IO UInt32 := do
+private def runCompanionTests : IO UInt32 := do
   runCodexMessageBoundaryTests
   let prompt := "--model is part of this prompt\nwith 'quotes' and a trailing newline\n"
   assertEq "Antigravity delivers a flag-shaped prompt verbatim alongside model, effort and resume"
@@ -1695,8 +1695,6 @@ def runAllTests : IO UInt32 := do
   assertEq "Warm Claude turn 2 output" st2.text "Warm turn 2!"
   stopHarnessRun warmMgr "m-warm-1"
 
-  checkRetiredGroupIdentity
-
   -- Verify hidden git checkpoints (`refs/orb/checkpoints/...`), diffing, and atomic rollback!
   let cpsRes ← listCheckpoints repoDir.toString "m-warm-1"
   let cps := cpsRes.toOption.getD #[]
@@ -1767,5 +1765,9 @@ def runAllTests : IO UInt32 := do
   try IO.FS.removeDirAll tmpDir catch _ => pure ()
   IO.println "=== ALL ORB-BIN WAVE 1 SELF-TESTS PASSED ==="
   return 0
+
+def runAllTests : IO UInt32 := do
+  checkRetiredGroupIdentity
+  runCompanionTests
 
 end OrbBin.SelfTest
