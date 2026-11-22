@@ -86,6 +86,11 @@ def exercise(root, tmp, api, graphical, click, process, wait, stack, client_kind
         wait('visible open mission in project', reveal)
     def action_menu(expected, choose, target_region=sidebar, target=None):
         x, y = see(target or fixture['contextMission'], target_region)
+        def sidebar_pixels():
+            # Raw 8-bit channels from a stable compositor frame, excluding the cursor.
+            image = subprocess.check_output(['grim', '-t', 'ppm', '-g', '0,0 320x700', '-'], env=graphical)
+            return subprocess.check_output(['magick', '-', '-depth', '8', 'rgb:-'], input=image)
+        closed = sidebar_pixels() if choose == 'dismiss' else None
         click(x, y, 'button3')
         if client_kind == 'leanui':
             regions = [f'{x+20},{min(y,535)} 165x175']
@@ -120,8 +125,20 @@ def exercise(root, tmp, api, graphical, click, process, wait, stack, client_kind
         except TimeoutError as error:
             raise AssertionError(f'{choose} for {target or fixture["contextMission"]} at {(x, y)}: {capture_failure()}') from error
         if choose == 'dismiss':
+            opened = sidebar_pixels()
+            # Observe the pixels changed by the popover around its five action labels.
+            # An incomplete OCR read of a still-open menu cannot satisfy this check.
+            indices = [3 * (320 * cy + cx) + channel for px, py in hits.values()
+                       for cy in range(py - 4, py + 5) for cx in range(px - 12, px + 13)
+                       for channel in range(3)]
+            changed = [i for i in indices if abs(opened[i] - closed[i]) > 16]
+            assert len(changed) >= 100, 'popover did not change the sampled area'
             subprocess.run(['wtype', '-k', 'Escape'], env=graphical, check=True)
-            wait('context menu dismissed', lambda: rows() is None)
+            def restored():
+                current = sidebar_pixels()
+                return sum(abs(current[i] - closed[i]) < abs(current[i] - opened[i])
+                           for i in changed) >= .9 * len(changed)
+            wait('context menu dismissed and underlying pixels restored', restored)
         elif client_kind != 'leanui' and choose == 'rename':
             # Rename receives focus when the GTK menu opens.
             subprocess.run(['wtype', '-k', 'Return'], env=graphical, check=True)
