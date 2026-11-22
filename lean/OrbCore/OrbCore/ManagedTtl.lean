@@ -140,6 +140,26 @@ private def eventOnce (store : CoreStore) (m : ManagedMachine) (kind message : S
   | .ok _ => return .ok ()
   | .error e => return .error e
 
+/-- A lost in-place resume response can leave the stopped boot waiting forever for
+    its successor. Only release the intent after both leases and readiness have
+    elapsed and the provider confirms the exact in-place VM is permanently gone. -/
+private def reconcileExpiredResume (mc : ManagedComputeStore) (m : ManagedMachine)
+    (resolve : Resolver) (now : UInt64) : IO Unit := do
+  let .ok rows ← execParamQuery mc.db
+      ("SELECT id FROM managed_resume_intents WHERE machine_id=?1 AND expected_boot=?2 " ++
+       "AND state IN ('pending','aborting') AND old_provider_id=?3 AND old_provider_id<>'' " ++
+       "AND (new_provider_id='' OR new_provider_id=old_provider_id) AND deadline_sec<=?4 " ++
+       "AND old_expiry<=?4 AND new_expiry<=?4;")
+      #[m.id,s!"{m.nodeBootEpoch + 1}",m.providerId,s!"{now}"] | return
+  if rows.size != 2 then return
+  let .ok provider ← resolve m.provider | return
+  if !provider.resumeInPlace then return
+  let gone ← match ← provider.get m.providerId with
+    | .ok remote => pure (remote.providerId == m.providerId &&
+        #["reaped", "deleted", "destroyed"].contains (safeState remote.state))
+    | .error e => pure (e.status == 404 || e.status == 410)
+  if gone then discard <| abortManagedResume mc (cell rows[1]! 0) (some m.providerId)
+
 /-- TTL is an explicit hard boundary, including busy guests. Provider errors keep
     cleanup pending; an expiry never becomes successful just because polls stop.
     Already nonbilling archived disks are retained rather than deleting recoverable work. -/
@@ -177,6 +197,7 @@ def tick (mc : ManagedComputeStore) (store : CoreStore) (defaults : ManagedFleet
         s!"Expired VM {m.sandboxName}: provider cleanup was verified and its compute lease is closed." nowEpoch (cell prior[1]! 0)
       continue
     if m.status == "destroyed" then continue
+    if m.status == "provisioning" then reconcileExpiredResume mc m resolve nowEpoch
     let .ok claimed ← claimManagedExpiry mc m.id nowEpoch | continue
     -- Only a machine that was still serving work loses something at expiry; a
     -- machine stopped earlier gets the quieter cleanup notice alone.

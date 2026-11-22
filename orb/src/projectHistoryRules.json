@@ -1,0 +1,7 @@
+{
+  "pageSize": 200,
+  "openLimit": 1000,
+  "live": ["active", "running", "pending", "queued", "awaiting_user", "resuming", "starting", "waiting_background"],
+  "recent": ["interrupted", "failed", "paused", "blocked"],
+  "recentDays": 7
+}

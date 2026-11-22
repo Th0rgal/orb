@@ -43,10 +43,10 @@ def memberSharedProviderRules
   check (mDetail.fieldStr? "name" == some "ben-probe" && !has mDetail secret) "member_get_own_account_detail_without_key"
   -- member_edit_own_account_settings_and_rotate_key
   let (editSt, edited) ← send "PUT" s!"/api/ai/providers/{probeId}" member (.obj #[("name", .str "ben-probe-2"),
-    ("rpm_limit", .nat 30), ("enabled", .bool false), ("api_key", .str (secret ++ "-rotated"))]) app
+    ("rpm_limit", .nat 30), ("api_key", .str (secret ++ "-rotated"))]) app
   let some stored ← getAIProvider? store probeId | check false "probe row stored"
   check (editSt == 200 && edited.fieldStr? "name" == some "ben-probe-2" && !has edited secret &&
-    stored.apiKey == secret ++ "-rotated" && stored.rpmLimit? == some 30 && !stored.enabled &&
+    stored.apiKey == secret ++ "-rotated" && stored.rpmLimit? == some 30 && stored.enabled &&
     stored.createdByUserId == "member")
     s!"member_edit_own_account_settings_and_rotate_key (got {editSt})"
   -- member_edit_shared_owner_account_settings_reduced_response

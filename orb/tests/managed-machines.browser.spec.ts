@@ -136,6 +136,33 @@ const openMachines = async (page: Page) => { await page.goto("/"); await page.ge
 const section = (page: Page) => page.locator(".managed-list").first();
 const row = (page: Page, name: string) => section(page).locator(".managed-row", { hasText: name });
 
+for (const status of [200, 503]) test(`local and remote machines render while the provider catalog is pending and after HTTP ${status}`, async ({ page }) => {
+  await mock(page, { withProviders: true });
+  let release!: () => void;
+  const pending = new Promise<void>(resolve => { release = resolve; });
+  await page.route("**/api/managed-machines/providers", async route => {
+    await pending;
+    await route.fulfill({ status, json: status === 200
+      ? { providers: [{ provider: "hetzner", configured: true, enabled: true }] }
+      : { error: "unavailable" } });
+  });
+  const requested = page.waitForRequest("**/api/managed-machines/providers");
+  const replied = page.waitForResponse("**/api/managed-machines/providers");
+  try {
+    await openMachines(page);
+    await requested;
+    await expect(page.getByRole("heading", { name: "Local", exact: true })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Remote", exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: /spark online/i })).toBeVisible();
+    await expect(page.locator('.fleet-provider-group[data-provider="hetzner"]')).toHaveCount(0);
+  } finally {
+    release();
+  }
+  await replied;
+  await expect(page.getByRole("button", { name: /spark online/i })).toBeVisible();
+  await expect(page.locator('.fleet-provider-group[data-provider="hetzner"]')).toHaveCount(status === 200 ? 1 : 0);
+});
+
 for (const theme of ["dark", "light"] as const) test.describe(theme, () => {
   test("rows show names, starting, destroying and errors", async ({ page }) => {
     const api = await mock(page, { theme, holdDelete: true });

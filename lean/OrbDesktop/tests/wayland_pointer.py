@@ -61,6 +61,22 @@ class Pointer:
             self.send(5, 4)  # frame
             time.sleep(.08)
 
+    def move(self, x, y):
+        ms = int(time.monotonic() * 1000) & 0xffffffff
+        self.send(5, 1, struct.pack('=IIIII', ms, x, y, 1000, 700))
+        self.send(5, 4)
+
+    def drag(self, start, end):
+        self.move(*start)
+        for state in (1, 0):
+            ms = int(time.monotonic() * 1000) & 0xffffffff
+            self.send(5, 2, struct.pack('=III', ms, 272, state))
+            self.send(5, 4)
+            time.sleep(.12)
+            if state:
+                self.move(*end)
+                time.sleep(.12)
+
     def scroll(self, x, y, distance):
         ms = int(time.monotonic() * 1000) & 0xffffffff
         self.send(5, 1, struct.pack('=IIIII', ms, x, y, 1000, 700))

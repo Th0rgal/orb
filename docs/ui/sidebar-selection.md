@@ -76,6 +76,8 @@ in `lean/Orb/Kernel.lean`, proved in `lean/Orb/Spec.lean`):
   multi-selection back to the committed item and highlights only the right-clicked
   row for the lifetime of the menu.
 
+In a GTK mission menu, Return and keypad Enter activate the focused row. On “Move to” this opens the destination list. Activating a destination applies the move to the existing selection.
+
 In both Linux renderers, Ctrl-clicking A and C followed by right-clicking B clears A and C from the command targets. Escape dismisses B’s menu and leaves the previously opened conversation in place. Right-clicking C directly after selecting A and C retains both targets.
 
 Archive admission is checked in the same Core transaction as the status update. If B starts a turn after the client reads B as idle, Archive returns HTTP 409 and preserves B’s status even before its run record exists. The client reports the refusal and keeps A open.
@@ -93,3 +95,10 @@ When a live mission list arrives before its project folders, the sidebar shows e
   highlights B only while the menu is open and restores selection to A once closed.
 
 A delegated mission follows its visible controller when a move or partial update leaves the child with an older project slug. The controller keeps its descendant count while collapsed. Expanding it reveals the child once, beneath that controller.
+
+In LeanUI, visiting Inference or Machines while composing a new agent keeps the
+committed draft text and its project. Each page shows its own title. Returning
+to New Agent restores the project title and draft. Composer shortcuts are inactive
+on the intervening pages. Text entered for an existing mission stays scoped to it.
+
+Project, roster and conversation reads belong to the connection that started them. A connection change cancels the pending read even when a local journal snapshot is available. Within the same connection, an offline read can still return locally journaled work.

@@ -11,7 +11,7 @@ const node={id:"dgx-spark",status:"online",cordoned:false};
 // backend that supports native Grok remote launches says so.
 type Capability={typed?:boolean;harnesses?:string[];goal_harnesses?:string[];raw_command?:boolean;proxy_url_configured?:boolean;requires_proxy_harnesses?:string[]};
 const typedCapability:Capability={typed:true,harnesses:["claudecode","opencode"],goal_harnesses:["opencode"],raw_command:true,proxy_url_configured:true};
-async function setup(page:Page, options:{cyberRefusal?:boolean;reject?:boolean;legacy?:boolean;remoteSuccess?:boolean;missing?:boolean;failed?:boolean;remoteJob?:{phase:string;node_state?:string};emptyStatus?:string;capability?:Capability|null;fleetFailAfterFirst?:boolean;files?:{name:string;kind:string}[];emptyContext?:boolean}={}){
+async function setup(page:Page, options:{memberFleetGate?:Promise<void>;cyberRefusal?:boolean;reject?:boolean;legacy?:boolean;remoteSuccess?:boolean;missing?:boolean;failed?:boolean;remoteJob?:{phase:string;node_state?:string};emptyStatus?:string;capability?:Capability|null;fleetFailAfterFirst?:boolean;files?:{name:string;kind:string}[];emptyContext?:boolean}={}){
  let attachmentReads:string[]=[];
  let posts:any[]=[], releasePost!:()=>void,releaseHistory!:()=>void, stops=0;
  const postGate=new Promise<void>(resolve=>releasePost=resolve),historyGate=new Promise<void>(resolve=>releaseHistory=resolve);
@@ -54,8 +54,14 @@ async function setup(page:Page, options:{cyberRefusal?:boolean;reject?:boolean;l
     Object.assign(m,{status:stopped.status,terminal_reason:stopped.reason,state_revision:3});
     return route.fulfill({json:{ok:true}});
    }
+  if(path==="/api/auth/me" && options.memberFleetGate)
+    return route.fulfill({json:{authenticated:true,auth_mode:"multi_user",user:{id:"test-member",username:"Ben",role:"member"}}});
   if(path==="/api/remote-nodes"){
    fleetReads++;
+   if (options.memberFleetGate) {
+     await options.memberFleetGate;
+     return route.fulfill({json:{enabled:true,nodes:[node,{...node,id:"ashur"}],remote_launch:capability}});
+   }
    if(options.fleetFailAfterFirst&&fleetChanged)return route.fulfill({status:503,body:"fleet monitor unavailable"});
    return route.fulfill({json:{enabled:true,nodes:options.missing&&fleetChanged?[]:[node],...(capability?{remote_launch:capability}:{})}});
   }
@@ -99,17 +105,85 @@ test("an existing remote harness does not offer or send Goal follow-ups",async({
  page.on("request",req=>{if(req.method()==="POST" && req.url().endsWith("/api/control/message"))followups.push(req.postData()??"");});
  await page.getByRole("button",{name:"Test",exact:true}).click();
  await page.getByRole("button",{name:/Remote task/}).click();
+ await page.setViewportSize({width:640,height:768});
  const input=page.getByPlaceholder("Send follow-up");
  await input.fill("/g");
  await expect(page.getByRole("option",{name:"Goal",exact:true})).toHaveCount(0);
- await input.fill(prompt);
+ const draft = `/goal ${(objective + " ").repeat(120).trim()}`;
+ await input.fill(draft);
  await expect(page.getByText("Start a new Goal-capable mission to use /goal, or send a standard follow-up.", {exact:true})).toBeVisible();
- await expect(page.locator(".composer + .composer-warning")).toBeVisible();
+ const warning = page.locator(".composer + .composer-warning");
+ await expect(warning).toBeInViewport({ratio:1});
+ const composer = page.locator(".composer").filter({has:input});
+ const composerBox = await composer.boundingBox();
+ const warningBox = await warning.boundingBox();
+ expect(warningBox!.y).toBeGreaterThanOrEqual(composerBox!.y + composerBox!.height);
+ expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(640);
  await expect(page.locator(".composer .send").last()).toBeDisabled();
  await input.press("Enter");
- await expect(input).toHaveValue(prompt);
+ await expect(input).toHaveValue(draft);
+ await input.fill(plainPrompt);
+ await expect(warning).toHaveCount(0);
+ await expect(composer.locator(".send")).toBeEnabled();
  expect(followups).toEqual([]);
  expect(posts).toEqual([]);
+});
+
+async function setupColdMemberFleet(page: Page) {
+  await page.setViewportSize({ width: 1100, height: 800 });
+  await page.addInitScript(() => localStorage.setItem("orb.machine", "ashur"));
+  let releaseFleet!: () => void;
+  const memberFleetGate = new Promise<void>(resolve => { releaseFleet = resolve; });
+  const state = await setup(page, {
+    memberFleetGate,
+    capability: { ...typedCapability, harnesses: ["grok"] },
+    remoteSuccess: true,
+  });
+  const machine = page.locator(".na-meta > .na-drop").nth(1).locator(":scope > button");
+  await expect(machine).toHaveText(/ashur/i);
+  const showFleet = async () => {
+    releaseFleet();
+    await machine.click();
+    await expect(page.locator(".machine-node-option", { hasText: "dgx-spark" })).toBeVisible();
+    await page.keyboard.press("Escape");
+  };
+  return { ...state, machine, input: composerInput(page), releaseFleet, showFleet };
+}
+
+test.describe("new agent destination during member fleet hydration", () => {
+  for (const order of ["fleet before send", "send before fleet"] as const) {
+    test(order, async ({ page }) => {
+      const state = await setupColdMemberFleet(page);
+      await state.input.fill(plainPrompt);
+      if (order === "fleet before send") await state.showFleet();
+      await state.input.press("Enter");
+      state.releaseFleet();
+      await expect.poll(() => state.posts.map(post => post.remote_node_id)).toEqual(["ashur"]);
+      state.releasePost();
+      state.releaseHistory();
+    });
+  }
+
+  test("explicit local selection survives fleet discovery", async ({ page }) => {
+    const state = await setupColdMemberFleet(page);
+    await state.input.fill(plainPrompt);
+    await state.machine.click();
+    await page.getByRole("button", { name: "This computer", exact: true }).click();
+    await state.showFleet();
+    await expect(state.machine).toHaveText("This computer");
+    await state.input.press("Enter");
+    await expect(state.input).toHaveValue(plainPrompt);
+    expect(state.posts).toEqual([]);
+  });
+
+  test("clearing the draft restores automatic placement", async ({ page }) => {
+    const state = await setupColdMemberFleet(page);
+    await state.input.fill(plainPrompt);
+    await state.showFleet();
+    await expect(state.machine).toHaveText(/ashur/i);
+    await state.input.fill("");
+    await expect(state.machine).toHaveText("DGX Spark");
+  });
 });
 
 /** A `/goal` turn renders as a Goal tag plus the exact objective, never the raw slash command. */

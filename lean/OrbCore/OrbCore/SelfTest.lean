@@ -6890,6 +6890,17 @@ private def runProdParityAndMissionMoveTests (_baseCfg : CoreConfig) : IO UInt32
      (paReqRes.fieldStr? "allowed_unit") != some "sandboxed-sh-dev.service" then
     return (← fail s!"MCP request_privileged_access failed: {paReqSt} {paReqBody}")
 
+  let brokerFile := System.FilePath.mk s!"{dataRoot}/secret_broker.json"
+  let previousBroker ← IO.FS.readFile brokerFile
+  let secretRows := OrbBin.Json.JVal.arr #[
+    .obj #[("id", .str "expired-read"), ("status", .str "pending"), ("expires_at_epoch", .uint64 nowSec)],
+    .obj #[("id", .str "legacy-read"), ("state", .str "pending")]]
+  IO.FS.writeFile brokerFile (OrbBin.Json.renderCompact (.obj #[("requests", secretRows)]))
+  let (brokerSt, brokerBody) ← sendJson "GET" "/api/bitwarden/broker" hsJwt ""
+  let rows := ((OrbBin.Json.parse brokerBody).toOption.bind (·.fieldArr? "requests")).getD #[]
+  let rowStatus (id : String) := (rows.find? (fun row => row.fieldStr? "id" == some id)).bind (·.fieldStr? "status")
+  if brokerSt != 200 || rowStatus "expired-read" != some "expired" || rowStatus "legacy-read" != some "pending" then
+    return (← fail "secret request expiry missing from broker history")
   let (paGetSt, paGetBody) ← sendJson "GET" "/api/privilege-access" hsJwt ""
   let (aqGetSt, aqGetBody) ← sendJson "GET" "/api/approvals/queue" hsJwt ""
   if paGetSt != 200 || (paGetBody.splitOn "\"state\":\"pending\"").length < 2 ||
@@ -6898,6 +6909,9 @@ private def runProdParityAndMissionMoveTests (_baseCfg : CoreConfig) : IO UInt32
      aqGetSt != 200 || (aqGetBody.splitOn "\"kind\":\"privilege\"").length < 2 ||
      (aqGetBody.splitOn "\"risk\":\"elevated\"").length < 2 then
     return (← fail s!"GET /api/privilege-access or /api/approvals/queue mismatch: pa={paGetSt}:{paGetBody} aq={aqGetSt}:{aqGetBody}")
+
+  if aqGetBody.contains "expired-read" || !aqGetBody.contains "legacy-read" then
+    return (← fail "secret request expiry differs between queue and broker history")
 
   let (approvalPublicKey, approvalSign) ← OrbCore.ApprovalSignatureTests.makeSigner (store.rootDir ++ "/parity-signer")
   discard <| IO.FS.writeFile (store.rootDir ++ "/approval_enrollment_code") "parity-enrollment-code\n"
@@ -6910,6 +6924,12 @@ private def runProdParityAndMissionMoveTests (_baseCfg : CoreConfig) : IO UInt32
     let .ok req := parseRequest wire.toUTF8 none | throw (IO.userError "signed parity request")
     let .ok res ← dispatchCoreRequest appSt req nowSec | throw (IO.userError "signed parity dispatch")
     return (res.status, (String.fromUTF8? res.body).getD "")
+  let (expiredSt, _) ← sendSigned "/api/bitwarden/requests/expired-read/approve" "{}"
+  let (expiredBatchSt, _) ← sendSigned "/api/approvals/approve-all"
+    "{\"items\":[{\"kind\":\"secret\",\"id\":\"expired-read\"}]}"
+  IO.FS.writeFile brokerFile previousBroker
+  if expiredSt != 409 || expiredBatchSt != 409 then
+    return (← fail "expired read request must be refreshed before approval")
   let (paAppSt, paAppBody) ← sendSigned s!"/api/privilege-access/{paReqId}/approve"
     "{\"ttl_minutes\":60,\"session_scoped\":true}"
   if paAppSt != 200 || (paAppBody.splitOn "\"state\":\"approved\"").length < 2 ||
@@ -8035,6 +8055,29 @@ def runSuite (emitLogPath? : Option String) : IO UInt32 := do
     | do closeCoreStore store; return 1
   let .ok _ ← execParamQuery store.missionsDb
       "DELETE FROM missions WHERE id LIKE 'count-%';" #[]
+    | do closeCoreStore store; return 1
+  -- The page contains two siblings. Their shared ancestor is outside the page
+  -- and the next private link must hide even an independently owned ancestor.
+  for (id, parent, owner, updated) in #[
+      ("tree-a", "tree-shared", "tree-member", "5"), ("tree-b", "tree-shared", "tree-member", "4"),
+      ("tree-shared", "tree-private", "tree-owner", "3"), ("tree-private", "tree-root", "tree-owner", "2"),
+      ("tree-root", "", "tree-member", "1")] do
+    let .ok () ← upsertMission store { m1 with id, parentMissionId := parent, ownerUserId := owner, updatedAt := updated }
+      | do closeCoreStore store; return 1
+  let .ok _ ← execParamQuery store.missionsDb
+      "INSERT INTO mission_shares(mission_id,user_id) VALUES ('tree-shared','tree-member');" #[]
+    | do closeCoreStore store; return 1
+  for (ancestors, expected) in #[(false, #["tree-a","tree-b"]), (true, #["tree-a","tree-b","tree-shared"])] do
+    let .ok body ← listMissionsJson store none (some "tree-member") { limit? := some 2, includeAncestors := ancestors }
+      | do closeCoreStore store; return 1
+    let .ok (.arr rows) := OrbBin.Json.parse body | do closeCoreStore store; return 1
+    if rows.filterMap (·.fieldStr? "id") != expected then
+      closeCoreStore store
+      IO.eprintln "[orb-core-test] FAIL: paged sidebar lost its shared parent or traversed a private mission"
+      return 1
+  let .ok _ ← execParamQuery store.missionsDb "DELETE FROM mission_shares WHERE mission_id='tree-shared';" #[]
+    | do closeCoreStore store; return 1
+  let .ok _ ← execParamQuery store.missionsDb "DELETE FROM missions WHERE id LIKE 'tree-%';" #[]
     | do closeCoreStore store; return 1
   let txReq : TransferRecord := {
     id := "tx-1", missionId := "m-alpha", requestKey := "rk-1", revision := 0,

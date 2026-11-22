@@ -35,6 +35,9 @@ inductive ScreenId where
   | missionTranscript   -- `03_mission_transcript` (`/?screen=mission&id=m-active`)
   | missionSplitDiff    -- `04_mission_split_diff` (`/?screen=mission&id=m-diff&mode=split`)
   | machinesFleet       -- `05_machines_fleet` (`/?screen=machines`)
+  | cloud
+  | resources
+  | inbox               -- authenticated unread responses
   | inference           -- authenticated provider accounts
   | settingsGeneral     -- `06_settings_general` (`/?screen=settings&tab=general`)
   | searchDialog        -- `07_search_dialog` (`/?screen=control&modal=search`)
@@ -64,6 +67,9 @@ def fileStem : ScreenId → String
   | .missionTranscript  => "03_mission_transcript"
   | .missionSplitDiff   => "04_mission_split_diff"
   | .machinesFleet      => "05_machines_fleet"
+  | .inbox              => "live-inbox"
+  | .cloud              => "cloud-agent"
+  | .resources          => "resources"
   | .inference          => "inference"
   | .settingsGeneral    => "06_settings_general"
   | .searchDialog       => "07_search_dialog"
@@ -77,6 +83,9 @@ def w0Alias : ScreenId → String
   | .missionTranscript  => "transcript"
   | .missionSplitDiff   => "diff"
   | .machinesFleet      => "streaming"
+  | .inbox              => "live-inbox"
+  | .cloud              => "cloud-agent"
+  | .resources          => "resources"
   | .inference          => "providers"
   | .settingsGeneral    => "settings"
   | .searchDialog       => "search"
@@ -90,6 +99,9 @@ def routeQuery : ScreenId → String
   | .missionTranscript  => "/?screen=mission&id=m-active"
   | .missionSplitDiff   => "/?screen=mission&id=m-diff&mode=split"
   | .machinesFleet      => "/?screen=machines"
+  | .inbox              => "/?screen=inbox"
+  | .cloud              => "/?screen=cloud-agent"
+  | .resources          => "/?screen=resources"
   | .inference          => "/?screen=inference"
   | .settingsGeneral    => "/?screen=settings&tab=general"
   | .searchDialog       => "/?screen=control&modal=search"
@@ -103,6 +115,9 @@ def headerTitle : ScreenId → String
   | .missionTranscript  => "Long mission"
   | .missionSplitDiff   => "Long mission"
   | .machinesFleet      => "Machines"
+  | .inbox              => "Inbox"
+  | .cloud              => "Cloud agent"
+  | .resources          => "Resources"
   | .inference          => "Inference"
   | .settingsGeneral    => "Settings"
   | .searchDialog       => "New Agent"
@@ -112,6 +127,8 @@ def headerTitle : ScreenId → String
 /-- Parse a screen identifier or route query into a `ScreenId`. -/
 def parse? (s : String) : Option ScreenId :=
   match s with
+  | "cloud-agent" | "/?screen=cloud-agent" => some .cloud
+  | "resources" | "/?screen=resources" => some .resources
   | "01_control_empty"       | "control_empty"       | "inbox"         | "/?screen=control" => some .controlEmpty
   | "02_control_populated"   | "control_populated"   | "approvals"     | "/?screen=control&fixture=populated" => some .controlPopulated
   | "03_mission_transcript"  | "mission_transcript"  | "transcript"    | "/?screen=mission&id=m-active" => some .missionTranscript
@@ -222,6 +239,7 @@ structure ChromeSidebarRow where
   subtitle : String := ""
   iconColor : Option Color := none
   status : String := "" -- `"running"`, `"completed"`, `"attention"`, `""`
+  archiveOnly : Bool := false
   shortcut : String := ""
   badge : Nat := 0
   selected : Bool := false
@@ -248,6 +266,7 @@ structure MissionSummaryCard where
   callbackParentMissionId : String := ""
   forkSource : String := ""
   supersededBy : String := ""
+  archiveTag : Bool := false
   deriving DecidableEq, Repr, Inhabited
 
 /-- Managed VM or static compute node entry for `05_machines_fleet`. -/
@@ -299,11 +318,51 @@ structure ProviderAccount where
   category : String
   userEnabled : Bool
   globallyEnabled : Bool
+  providerType : String := ""
   deriving BEq, Repr, Inhabited
 
 def providerWidgetId (index : Nat) : WidgetId := 6000000 + index
 
+def providerSettingsId (index : Nat) : WidgetId := 7000000 + index
+def providerRouteId (index : Nat) : WidgetId := 8000000 + index
+def providersBackId : WidgetId := 5999998
+def providersRetryId : WidgetId := 5999999
+
+structure AccountRouteOption where
+  action : String
+  value : String
+  title : String
+  detail : String
+  deriving BEq, Repr, Inhabited
+
+structure AccountRoutePage where
+  account : ProviderAccount
+  previousTop : SubPx := 0
+  options : Option (List AccountRouteOption) := none
+  pending : Option AccountRouteOption := none
+  failed : Bool := false
+  deriving BEq, Repr, Inhabited
+
+def resourceRanges := ["30m", "1h", "6h", "24h", "7d"]
+
+structure ResourceRow where
+  mission : String
+  title : String
+  usage : String
+  deriving BEq, Repr, Inhabited
+
+structure InboxItem where
+  mission : String
+  stamp : Nat
+  version : Nat
+  card : MissionSummaryCard := default
+  deriving BEq, Repr, Inhabited
+
 inductive LiveWrite where
+  | cloudCreate (provider account project prompt attempt : String)
+  | cloudSend (mission text attempt : String)
+  | cloudCancel (mission : String)
+  | inboxRead (item : InboxItem) (openItem : Bool)
   | providerPreference (account : String) (enabled : Bool)
   | create
   | send (mission text : String)
@@ -318,7 +377,7 @@ inductive LiveWrite where
   deriving Repr, Inhabited, BEq
 
 inductive MissionMenuPage where
-  | actions | destinations | rename | settings | confirmDelete | picker (field : SettingField)
+  | actions | destinations | draftProject | draftDirectory | rename | settings | confirmDelete | picker (field : SettingField)
   deriving BEq, Repr, Inhabited
 
 structure MissionMenu where
@@ -328,14 +387,56 @@ structure MissionMenu where
   trigger : Nat := 0
   targets : List String := []
   mixed : Bool := false
+  nativeCatalogResult : Option Bool := none
   page : MissionMenuPage := .actions
   first : Nat := 0
   highlighted : Nat := 0
   draft : ComposerBuffer := {}
+  browsePath : String := ""
+  directoryRows : Option (List (String × String)) := none
+  listingFailed : Bool := false
   deriving Repr, Inhabited
+
+inductive VoicePhase where
+  | idle | recording | finishing | choosing
+  deriving BEq, Repr, Inhabited
+
+def voiceLanguageId : Nat := 747
+def voiceButtonId : Nat := 745
+def voiceCancelId : Nat := 746
+
+inductive ConnectionIssue where
+  | unavailable | missing | signin | denied | invalid
+  deriving BEq, Repr, Inhabited
+
+def ConnectionIssue.code : ConnectionIssue → String
+  | .unavailable => "unavailable"
+  | .missing => "missing"
+  | .signin => "signin"
+  | .denied => "denied"
+  | .invalid => "invalid"
+
+def ConnectionIssue.title : ConnectionIssue → String
+  | .unavailable => "Core unavailable"
+  | .missing => "Connect to Core"
+  | .signin => "Sign in to Core"
+  | .denied => "Access denied"
+  | .invalid => "Invalid saved connection"
+
+def ConnectionIssue.hint : ConnectionIssue → String
+  | .unavailable => "Retrying the connection to Core…"
+  | .missing => "Open Orb Settings → Account to connect."
+  | .signin | .invalid => "Reconnect in Orb Settings → Account."
+  | .denied => "Check your account’s access to this Core."
 
 /-- Complete single-owner pure state of the Orb Desktop shell. -/
 structure DesktopState where
+  voiceLanguage : String := ""
+  voicePicker : Bool := false
+  voiceAvailable : Bool := false
+  voiceBinding : String := ""
+  voiceGeneration : Nat := 0
+  voicePhase : VoicePhase := .idle
   screen : ScreenId := .missionTranscript
   theme : Theme := orbDarkTheme
   scale120 : Nat := 120
@@ -346,6 +447,10 @@ structure DesktopState where
   stream : StreamCoalescer := Orb.Stream.Coalescer.empty
   liveData : Bool := false
   initialRosterPending : Bool := false
+  connectionIssue : ConnectionIssue := .unavailable
+  accountEndpoint : String := ""
+  accountUsername : String := ""
+  openAccountForm : Bool := false
   connectionBinding : String := ""
   writeRequest : Option LiveWrite := none
   /-- Key and exact submitted draft until Core confirms it, scoped to this selection. -/
@@ -354,11 +459,16 @@ structure DesktopState where
   missionMenu : Option MissionMenu := none
   draftSettings : LaunchSettings := {}
   draftProject : String := ""
+  nativeHarnessAvailable : Bool := false
+  nativeCatalog : Option (String × List CatalogModel) := none
+  draftDirectory : String := ""
   catalog : List CatalogModel := []
   catalogLoading : Bool := false
   catalogRevision : Nat := 0
   providers : Option (List ProviderAccount) := none
   providerReadFailed : Bool := false
+  accountRoutePage : Option AccountRoutePage := none
+  projectMemberships : List (String × List String) := []
   expandedProjects : List String := []
   expandedMissions : List String := []
   archivesOpen : Bool := false
@@ -369,8 +479,28 @@ structure DesktopState where
   syncCursor : SyncCursorState := {}
   badgePhase : Nat := 0
   sidebarRows : List ChromeSidebarRow := []
+  cloudMission : String := ""
+  cloudLines : Option (List String) := none
+  cloudAccounts : List (String × String × String) := []
+  cloudAccountIndex : Nat := 0
+  cloudProject : String := ""
+  cloudActions : List String := []
+  cloudDraft : ComposerBuffer := {}
+  cloudAttempt : String := ""
+  cloudFailed : Bool := false
+  cloudPage : Nat := 0
+  resourceRows : Option (List ResourceRow) := none
+  resourceFailed : Bool := false
+  resourcePage : Nat := 0
+  resourceRange : String := "6h"
+  inboxItems : List InboxItem := []
+  inboxAvailable : Bool := false
+  inboxEnabled : Bool := true
+  inboxIndex : Nat := 0
   missionCards : List MissionSummaryCard := []
   fleetMachines : List FleetMachineCard := []
+  launchMachines : Option (List (String × String)) := none
+  launchMachinesFailed : Bool := false
   toasts : List ToastSpec := []
   modal : ActiveModal := .none
   composer : ComposerBuffer := {}
@@ -382,9 +512,14 @@ structure DesktopState where
   sidePanelOpen : Bool := false
   deriving Repr, Inhabited
 
+def settingsFooter : ChromeSidebarRow :=
+  { widgetId := 103, rowId := "nav:settings", kind := "footer", title := "Settings" }
+
+def accountFormId : Nat := 972
+
 /-- A failed bootstrap or invalidated identity must not fall back to golden fixtures. -/
 def DesktopState.liveUnavailable (isDark := true) (scale120 := 120) : DesktopState :=
-  { liveData := true, screen := .controlEmpty, theme := if isDark then orbDarkTheme else orbLightTheme
+  { liveData := true, sidebarRows := [settingsFooter], screen := .controlEmpty, theme := if isDark then orbDarkTheme else orbLightTheme
     scale120, syncCursor := { epoch := 0, seq := 0 } }
 
 def DesktopState.selectedCard (st : DesktopState) : Option MissionSummaryCard :=
@@ -392,20 +527,40 @@ def DesktopState.selectedCard (st : DesktopState) : Option MissionSummaryCard :=
 
 def DesktopState.hasLiveConnection (st : DesktopState) : Bool := st.liveData && !st.connectionBinding.isEmpty
 
+def DesktopState.currentInboxItem (st : DesktopState) : Option InboxItem :=
+  st.inboxItems[min st.inboxIndex (st.inboxItems.length - 1)]?
+
 def DesktopState.headerTitle (st : DesktopState) : String :=
   if st.initialRosterPending then "Connecting to Core…"
-  else if st.liveData && !st.hasLiveConnection then "Core unavailable"
-  else if st.openMission.isNone && !st.draftProject.isEmpty then
+  else if st.liveData && !st.hasLiveConnection then st.connectionIssue.title
+  else if (st.screen == .controlEmpty || st.screen == .controlPopulated) && st.openMission.isNone && !st.draftProject.isEmpty then
     ((st.sidebarRows.find? (·.rowId == "project:" ++ st.draftProject)).map (·.title)).getD st.draftProject
   else (st.selectedCard.map (·.title)).getD st.screen.headerTitle
+
+def MissionSummaryCard.isArchived (card : MissionSummaryCard) : Bool :=
+  card.archiveTag || card.status == "acknowledged"
+
+def restoredExecutionStatus (status : String) : String :=
+  if status == "acknowledged" then "paused" else status
 
 def MissionSummaryCard.isRunning (card : MissionSummaryCard) : Bool :=
   card.status == "active" || card.status == "running"
 
+def DesktopState.openCloud (st : DesktopState) (mission : String) : DesktopState :=
+  { st with screen := .cloud, cloudMission := mission, cloudLines := none, cloudFailed := false,
+            cloudPage := 0, cloudActions := [], cloudDraft := {}, cloudAttempt := "", cloudProject := "", writeError := "" }
+
+def DesktopState.voiceDraft (st : DesktopState) : Bool :=
+  st.hasLiveConnection && st.openMission.isNone && st.writeRequest.isNone &&
+    (st.screen == .controlEmpty || st.screen == .controlPopulated)
+
 def resetSelection (st : DesktopState) (card : Option MissionSummaryCard) : DesktopState :=
-  let mid := card.map (·.missionId)
+  let cloud := card.filter fun c => st.screen == .missionTranscript && c.backend.startsWith "cloud_"
+  let st := cloud.elim st fun c => st.openCloud c.missionId
+  let mid := if cloud.isSome then none else card.map (·.missionId)
   { st with
-    openMission := mid, missionMenu := none, unconfirmedSend := none, writeError := "", stream := { shown := [], pending := [], renders := 1 }, scroll := {}
+    unconfirmedSend := none, writeError := ""
+    voicePhase := .idle, voiceGeneration := st.voiceGeneration + 1, openMission := mid, missionMenu := none, stream := { shown := [], pending := [], renders := 1 }, scroll := {}
     composer := { isRunning := card.any (·.isRunning) }
     messageSent := false, missionStopped := false, missionArchived := false, sidePanelOpen := false
     sidebarRows := st.sidebarRows.map fun row => { row with selected := row.widgetId == (card.map (·.widgetId)).getD 101 } }
@@ -704,12 +859,40 @@ def currentSettings (st : DesktopState) (mid : String) : LaunchSettings :=
                 permission := if c.permissionMode.isEmpty then "supervised" else c.permissionMode }
   | none => st.draftSettings
 
+def catalogDestination (st : DesktopState) (mid : String) : String :=
+  let machine := (currentSettings st mid).machine
+  if machine.isEmpty && st.fleetMachines.any (·.machineId == "core") then "core" else machine
+
+def destinationCatalog (st : DesktopState) (mid : String) : List CatalogModel :=
+  let native := match st.nativeCatalog with
+    | some (machine, rows) => if machine == catalogDestination st mid then rows else []
+    | none => []
+  st.catalog ++ native
+
+/-- A successful destination refresh can invalidate a new draft's explicit choice.
+    Existing mission settings remain Core-owned. -/
+def applyNativeCatalog (st : DesktopState) (machine : String) (rows : List CatalogModel) : DesktopState :=
+  let draft := st.draftSettings
+  let missing := st.missionMenu.any (·.mission.isEmpty) && catalogDestination st "" == machine &&
+    draft.backend == "antigravity" && !draft.model.isEmpty && !rows.any (·.model == draft.model)
+  { st with nativeCatalog := some (machine, rows), draftSettings := if missing then { draft with model := "" } else draft }
+
+def nativeCatalogRequest (st : DesktopState) : Option String := do
+  let menu ← st.missionMenu
+  guard (st.nativeHarnessAvailable && menu.nativeCatalogResult.isNone && (menu.page == .picker .backend ||
+    (menu.page == .picker .model && (currentSettings st menu.mission).backend == "antigravity")))
+  let machine := catalogDestination st menu.mission
+  guard (!machine.isEmpty)
+  return machine
+
 def settingChoices (st : DesktopState) (mid : String) (field : SettingField) : List (String × String) :=
   let values := currentSettings st mid
   match field with
-  | .machine => [("", "Default machine")] ++ st.fleetMachines.map fun m => (m.machineId, m.name)
-  | .backend => (st.catalog.map fun c => (c.backend, c.harnessName)).eraseDups
-  | .model => (st.catalog.filter (·.backend == values.backend)).map fun c => (c.model, c.modelName)
+  | .machine =>
+    let localMachines := st.fleetMachines.filter (·.machineId == "core")
+    (if localMachines.isEmpty then [] else [("", "Default machine")]) ++ (localMachines.map fun m => (m.machineId, m.name)) ++ st.launchMachines.getD []
+  | .backend => ((destinationCatalog st mid).map fun c => (c.backend, c.harnessName)).eraseDups
+  | .model => ((destinationCatalog st mid).filter (·.backend == values.backend)).map fun c => (c.model, c.modelName)
   | .effort =>
     let levels := if values.backend == "antigravity" then ["low", "medium", "high"]
       else if ["claudecode", "codex"].contains values.backend then ["low", "medium", "high", "xhigh", "max"] else []
@@ -724,19 +907,24 @@ def settingTrigger (id : Nat) : Option SettingField :=
 private def chooseSetting (st : DesktopState) (mid : String) (field : SettingField) (value : String) : DesktopState :=
   let prev := currentSettings st mid
   let next := match field with
-    | .machine => { prev with machine := value }
+    | .machine => { prev with machine := value, model := if prev.backend == "antigravity" && prev.machine != value then "" else prev.model }
     | .backend =>
-      let model := ((st.catalog.find? (·.backend == value)).map (·.model)).getD ""
+      let model := (((destinationCatalog st mid).find? (·.backend == value)).map (·.model)).getD ""
       { prev with backend := value, effort := "", permission := "supervised", model }
     | .model => { prev with model := value }
     | .effort => { prev with effort := value }
     | .permission => { prev with permission := value }
-  if mid.isEmpty then { st with missionMenu := none, draftSettings := next }
+  if mid.isEmpty then
+    { st with missionMenu := none, draftSettings := next,
+              draftDirectory := if prev.machine == next.machine then st.draftDirectory else "" }
   else { st with missionMenu := none, writeRequest := some (.settings mid field next) }
 
 private def selectableRow (r : ChromeSidebarRow) := r.kind == "mission" || r.kind == "project"
 
 def missionDisclosureId (widgetId : Nat) : Nat := 4000000 + widgetId
+
+def draftProjectPickerId : Nat := 738
+def draftDirectoryPickerId : Nat := 739
 
 def projectNewAgentId (widgetId : Nat) : Nat := 5000000 + widgetId
 
@@ -749,11 +937,39 @@ def DesktopState.sidebarHoverRow (st : DesktopState) (hit : Option WidgetId) : O
   let row ← st.sidebarRows.find? (·.widgetId == rowId)
   if ["nav", "project", "mission", "footer"].contains row.kind then some rowId else none
 
+def DesktopState.cloudProjects (st : DesktopState) : List ChromeSidebarRow :=
+  st.sidebarRows.filter (·.kind == "project")
+
+def DesktopState.cloudSelectedProject (st : DesktopState) : Option ChromeSidebarRow :=
+  if st.cloudProject.isEmpty then st.cloudProjects.head?
+  else st.cloudProjects.find? (·.rowId == st.cloudProject)
+
+def DesktopState.cloudCanCreate (st : DesktopState) : Bool :=
+  st.screen == .cloud && st.cloudMission.isEmpty && st.cloudLines.isSome &&
+    !st.cloudAccounts.isEmpty && st.cloudSelectedProject.isSome
+
+def DesktopState.cloudAllows (st : DesktopState) (action : String) : Bool :=
+  st.screen == .cloud && !st.cloudMission.isEmpty && st.cloudLines.isSome && st.cloudActions.contains action
+
+/-- Empty mission ID denotes a passive account, status or conversation line. -/
+def DesktopState.cloudItems (st : DesktopState) : List (String × String) := Id.run do
+  let inventory := (st.cloudLines.getD []).map fun t => ("", t)
+  if !st.cloudMission.isEmpty then return inventory
+  let conversations := st.missionCards.filter (·.backend.startsWith "cloud_")
+  return inventory ++ conversations.map fun c => (c.missionId, "Open · " ++ c.title)
+
+def DesktopState.hoverTarget (st : DesktopState) (hit : Option WidgetId) : Option WidgetId := do
+  if hit == some voiceLanguageId || hit == some voiceButtonId || hit == some voiceCancelId then return ← hit
+  let id ← hit
+  if st.screen == .cloud && id >= 960 && id < 972 then some id
+  else if st.screen == .resources && id >= 945 && id < 960 then some id
+  else if st.screen == .inference && id >= providersBackId then some id else st.sidebarHoverRow hit
+
 def DesktopState.sidebarHoverDamage (st : DesktopState) (regions : List (WidgetId × Rect)) (scale : Nat)
     (previous next : Option WidgetId) : Damage := Id.run do
   if previous == next then return none
-  let a := st.sidebarHoverRow previous
-  let b := st.sidebarHoverRow next
+  let a := st.hoverTarget previous
+  let b := st.hoverTarget next
   if a == b then return none
   let mut damage : Damage := none
   for id in [a, b] do
@@ -808,6 +1024,11 @@ private def missionBranchRows (rows : Array ChromeSidebarRow)
   let mut visible := []
   for (row, parent, depth, shown) in bottomUp do
     let launched := totals.getD row.rowId 0
+    let card := cards.get? row.widgetId
+    let archived := row.status == "acknowledged" || card.any (·.archiveTag)
+    if archived && launched == 0 then
+      visible := { row with archiveOnly := true } :: visible
+      continue
     if !parent.isEmpty then
       totals := totals.insert parent (totals.getD parent 0 + launched + 1)
     if shown then
@@ -824,22 +1045,35 @@ def DesktopState.visibleProjectRows (st : DesktopState) : List ChromeSidebarRow 
   let projectOf := fun id => ((cards.get? id).map (·.project)).getD ""
   let mut active := #[]
   let mut archived := #[]
+  let memberships := Std.HashMap.ofList (st.projectMemberships.map fun (slug, ids) => (slug, Std.HashSet.ofList ids))
   for row in st.sidebarRows do
     if row.kind == "mission" then
-      if row.status == "acknowledged" then archived := archived.push row
-      else active := active.push row
+      let project := projectOf row.widgetId
+      let membership := memberships.get? (if project.isEmpty then "default" else project)
+      let mid := (row.rowId.drop 8).toString
+      if st.openMission == some mid || membership.all (·.contains mid) then active := active.push row
+      else if row.status == "acknowledged" || (cards.get? row.widgetId).any (·.archiveTag) then
+        archived := archived.push { row with archiveOnly := true }
   let mut grouped : Std.HashMap String (Array ChromeSidebarRow) := {}
   let projectKeys := Std.HashSet.ofList (projects.map (fun row => (row.rowId.drop 8).toString))
   let mut unassigned := #[]
   let mut slug := ""
   for row in missionBranchRows active cards st.expandedMissions do
-    if row.depth == 0 then slug := projectOf row.widgetId
+    if row.archiveOnly then
+      archived := archived.push row
+      continue
+    if row.depth == 0 then
+      let project := projectOf row.widgetId
+      slug := if project.isEmpty then "default" else project
     if projectKeys.contains slug then
       grouped := grouped.insert slug ((grouped.getD slug #[]).push { row with depth := row.depth + 1 })
     else
       unassigned := unassigned.push row
-  let mut visible := (st.sidebarRows.filter (fun row =>
-    row.kind != "project" && row.kind != "mission" && row.rowId != "section:missions")).toArray
+  let mut visible := (st.sidebarRows.filterMap fun row =>
+    if row.rowId == "nav:inbox" then
+      if st.inboxEnabled then some { row with badge := st.inboxItems.length } else none
+    else if row.kind == "project" || row.kind == "mission" || row.rowId == "section:missions" then none
+    else some row).toArray
   for project in projects do
     let key := (project.rowId.drop 8).toString
     visible := visible.push project
@@ -848,8 +1082,28 @@ def DesktopState.visibleProjectRows (st : DesktopState) : List ChromeSidebarRow 
   visible := visible ++ unassigned
   return (visible ++ archived).toList
 
+/-- Connector geometry follows visible preorder, independently of the selected row. -/
+def sidebarTreeBranches (rows : List ChromeSidebarRow) :
+    List (ChromeSidebarRow × Bool × Bool × List Nat) := Id.run do
+  let mut siblings : List Nat := []
+  let mut nextDepth := 0
+  let mut marked := []
+  for row in rows.reverse do
+    let depth := row.depth
+    siblings := siblings.filter (· ≤ depth)
+    marked := (row, !siblings.contains depth, decide (nextDepth > depth)) :: marked
+    if !siblings.contains depth then siblings := depth :: siblings
+    nextDepth := depth
+  let mut rails : List Nat := []
+  let mut result := #[]
+  for (row, last, children) in marked do
+    rails := rails.filter (· < row.depth)
+    result := result.push (row, last, children, rails.map (row.depth - ·))
+    if row.depth > 0 && !last then rails := row.depth :: rails
+  return result.toList
+
 def toggleSelection (st : DesktopState) (row : ChromeSidebarRow) (extend : Bool) : DesktopState := Id.run do
-  let ids := (st.visibleProjectRows.filter (fun r => selectableRow r && (st.archivesOpen || r.status != "acknowledged"))).map (·.rowId)
+  let ids := (st.visibleProjectRows.filter (fun r => selectableRow r && (st.archivesOpen || !r.archiveOnly))).map (·.rowId)
   if extend then
     if let some anchor := st.selectionAnchor then
       let a := ids.idxOf anchor
@@ -866,12 +1120,32 @@ def contextSelection (st : DesktopState) (rowId : String) : DesktopState :=
   else { st with multiRows := [], selectionAnchor := none }
 
 def missionMenuRows (st : DesktopState) (menu : MissionMenu) : List MissionMenuRow := Id.run do
+  if menu.page == .draftDirectory then
+    let path := menu.draft.text ++ menu.draft.imePreeditText
+    let valid := path.isEmpty || path.startsWith "/"
+    let children : List MissionMenuRow := (menu.directoryRows.getD []).mapIdx fun i (full, name) =>
+      { id := 2000000 + i, label := name, value := full, icon := "folder" }
+    let notice : List MissionMenuRow := if menu.listingFailed then
+      [{ id := 729, label := "Folder listing unavailable", icon := "folder" }] else []
+    return [{ id := 1, label := if path.isEmpty then "Absolute folder path" else path, icon := "folder" },
+      { id := if valid then 716 else 729, label := if path.isEmpty then "Use default folder" else if valid then "Use this folder" else "Enter an absolute path", icon := "check" }] ++ children ++ notice
+  if menu.page == .draftProject then
+    return (st.sidebarRows.filter (·.kind == "project")).mapIdx fun i p =>
+      { id := 2000000 + i, label := p.title, value := (p.rowId.drop 8).toString,
+        icon := if p.rowId == "project:" ++ st.draftProject then "check" else "folder" }
   if let .picker field := menu.page then
     let choices := settingChoices st menu.mission field
     if st.catalogLoading && (field == .backend || field == .model) then
       return [{ id := 729, label := "Loading choices…", icon := "list" }]
-    if choices.isEmpty then return [{ id := 719, label := "No available choices", icon := "list" }]
-    return choices.mapIdx fun i (value, label) => { id := 2000000 + i, label, icon := "list", value }
+    let rows : List MissionMenuRow := choices.mapIdx fun i (value, label) => { id := 2000000 + i, label, icon := "list", value }
+    if field == .machine && st.launchMachines.isNone then
+      return rows ++ [{ id := 729, label := if st.launchMachinesFailed then "Could not load remote machines. Reopen to retry." else "Loading remote machines…", icon := "list" }]
+    if (nativeCatalogRequest st).isSome then
+      return rows ++ [{ id := 729, label := "Checking Antigravity models…", icon := "list" }]
+    if menu.nativeCatalogResult == some false then
+      return rows ++ [{ id := 729, label := "Antigravity unavailable. Reopen to retry.", icon := "list" }]
+    if rows.isEmpty then return [{ id := 719, label := "No available choices", icon := "list" }]
+    return rows
   let clear : MissionMenuRow := { id := 727, label := "Clear selection", icon := "close", separatorBefore := true }
   if menu.mixed then return [{ id := 729, label := "No shared actions", icon := "list" }, clear]
   if menu.targets.length > 1 then
@@ -881,7 +1155,7 @@ def missionMenuRows (st : DesktopState) (menu : MissionMenu) : List MissionMenuR
     if menu.page == .destinations then
       return [{ id := 715, label := "Move to", icon := "back" }] ++ (st.sidebarRows.filter (·.kind == "project")).mapIdx fun i p =>
         { id := 2000000 + i, label := p.title, icon := "folder", action := some (.bulk "move" menu.targets (p.rowId.drop 8).toString) }
-    let archived := st.missionCards.filter fun c => menu.targets.contains c.missionId && c.status == "acknowledged"
+    let archived := st.missionCards.filter fun c => menu.targets.contains c.missionId && c.isArchived
     let restore := archived.map (·.missionId)
     let archive := menu.targets.filter fun id => !restore.contains id
     let move : List MissionMenuRow := if st.sidebarRows.any (·.kind == "project") then
@@ -891,15 +1165,30 @@ def missionMenuRows (st : DesktopState) (menu : MissionMenu) : List MissionMenuR
       action := some (.bulk "archive" archive "") }]) ++ (if restore.isEmpty then [] else
       [{ id := 725, label := s!"Restore {restore.length} conversations", icon := "archive", action := some (.bulk "restore" restore "") }]) ++
       [{ id := 726, label := s!"Delete {menu.targets.length} agents…", icon := "close", separatorBefore := true }, clear]
-  let some card := st.missionCards.find? (·.missionId == menu.mission) | return []
-  let projects := st.sidebarRows.filter fun r => r.kind == "project" && r.rowId != "project:" ++ card.project
+  let card? := st.missionCards.find? (·.missionId == menu.mission)
+  let currentProject := (card?.map (·.project)).getD ""
+  let projects := st.sidebarRows.filter fun r => r.kind == "project" && r.rowId != "project:" ++ currentProject
+  if menu.page == .settings then
+    let v := currentSettings st menu.mission
+    let navigation : List MissionMenuRow := if menu.trigger == 714 then [] else [{ id := 715, label := "Mission settings", icon := "back" }]
+    let machine : List MissionMenuRow := if menu.mission.isEmpty then
+      [{ id := 720, label := "Machine · " ++ (if v.machine.isEmpty then "Choose machine" else v.machine), icon := "nav:machines" }] else []
+    return navigation ++ machine ++ [
+      { id := 721, label := "Harness · " ++ v.backend, icon := "list" },
+      { id := 722, label := "Model · " ++ (if v.model.isEmpty then "Default" else v.model), icon := "s:models" }] ++
+      (if ["codex", "antigravity", "claudecode"].contains v.backend then
+        [{ id := 723, label := "Effort · " ++ (if v.effort.isEmpty then "Default" else v.effort), icon := "list" }] else []) ++
+      (if v.backend == "claudecode" then
+        [{ id := 724, label := "Permissions · " ++ v.permission, icon := "nav:settings" }] else []) ++
+      (if menu.trigger == 714 || projects.isEmpty then [] else [{ id := 711, label := "Move to", icon := "folder", separatorBefore := true }])
+  let some card := card? | return []
   match menu.page with
-  | .picker _ | .confirmDelete => return []
+  | .picker _ | .confirmDelete | .draftProject | .draftDirectory => return []
   | .actions =>
     return [{ id := 710, label := "Rename…", icon := "rename" }] ++
       (if projects.isEmpty then [] else [{ id := 711, label := "Move to", icon := "folder" }]) ++
-      [{ id := 712, label := if card.status == "acknowledged" then "Restore" else "Archive", icon := "archive",
-         action := some (if card.status == "acknowledged" then .restore card.missionId else .archive card.missionId) },
+      [{ id := 712, label := if card.isArchived then "Restore" else "Archive", icon := "archive",
+         action := some (if card.isArchived then .restore card.missionId else .archive card.missionId) },
        { id := 713, label := "Copy mission ID", icon := "copy", action := some (.copyId card.missionId), separatorBefore := true },
        { id := 714, label := "Mission settings", icon := "nav:settings" }]
   | .destinations =>
@@ -909,28 +1198,34 @@ def missionMenuRows (st : DesktopState) (menu : MissionMenu) : List MissionMenuR
   | .rename =>
     return [{ id := 1, label := menu.draft.text ++ menu.draft.imePreeditText, icon := "rename" },
       { id := 716, label := "Save", icon := "check", action := some (.rename card.missionId menu.draft.text) }]
-  | .settings =>
-    return [{ id := 715, label := "Mission settings", icon := "back" },
-      { id := 721, label := "Harness · " ++ card.backend, icon := "list" },
-      { id := 722, label := "Model · " ++ (if card.model.isEmpty then "Default" else card.model), icon := "s:models" }] ++
-      (if ["codex", "antigravity", "claudecode"].contains card.backend then
-        [{ id := 723, label := "Effort · " ++ (if card.effort.isEmpty then "Default" else card.effort), icon := "list" }] else []) ++
-      (if card.backend == "claudecode" then
-        [{ id := 724, label := "Permissions · " ++ (currentSettings st menu.mission).permission, icon := "nav:settings" }] else []) ++
-      (if projects.isEmpty then [] else [{ id := 711, label := "Move to", icon := "folder", separatorBefore := true }])
+  | .settings => return []
 
 def menuFocusChange (before after : DesktopState) : Option Nat :=
   match before.missionMenu, after.missionMenu with
   | some old, none => some old.trigger
   | old, some menu =>
-    if before.catalogLoading == after.catalogLoading && old.any (fun m => m.page == menu.page && m.highlighted == menu.highlighted && m.trigger == menu.trigger) then none
+    let fleetLoaded := menu.page == .picker .machine && before.launchMachines.isNone && after.launchMachines.isSome
+    if !fleetLoaded && old.all (·.nativeCatalogResult == menu.nativeCatalogResult) && before.catalogLoading == after.catalogLoading && old.any (fun m => m.page == menu.page && m.highlighted == menu.highlighted && m.trigger == menu.trigger) then none
     else ((missionMenuRows after menu)[menu.highlighted]?).map (·.id)
   | _, _ => none
 
 /-- Opening a live draft gives the editor keyboard focus even when New Agent
     was invoked while the empty draft screen was already visible. -/
 def desktopFocusChange (before after : DesktopState) (ev : Event) : Option Nat :=
-  if let some target := menuFocusChange before after then some target
+  if before.voicePhase != .idle && before.voicePhase != after.voicePhase && after.voiceDraft then some 1
+  else if let some target := menuFocusChange before after then some target
+  else if before.screen == .inference && after.screen == .inference then
+    match before.accountRoutePage, after.accountRoutePage with
+    | none, some _ => some providersBackId
+    | some page, none => ((after.providers.getD []).findIdx? (·.id == page.account.id)).map providerSettingsId
+    | _, _ => none
+  else if after.screen == .settingsGeneral && before.screen != after.screen then some accountFormId
+  else if after.screen == .cloud && before.screen != .cloud then some 111
+  else if after.screen == .cloud && before.cloudMission != after.cloudMission then some (if after.cloudMission.isEmpty then 111 else 963)
+  else if after.screen == .resources && before.screen != .resources then some 114
+  else if after.screen == .resources && after.resourceRows.isSome && before.resourcePage != after.resourcePage then
+    some (if before.resourcePage < after.resourcePage then 947 else 946)
+  else if after.screen == .inbox && before.screen != .inbox then some (if after.inboxItems.isEmpty then 102 else 940)
   else if after.hasLiveConnection && after.missionMenu.isNone && after.screen == .controlEmpty then
     let shortcut := match ev with
       | .key key mods .pressed => (key == 0x6e || key == 0x4e) && mods &&& 0x0a != 0
@@ -956,7 +1251,6 @@ private def stepMissionMenu (st : DesktopState) (menu : MissionMenu) (ev : Event
     if key == 0xff51 && menu.page == .destinations then return update { menu with page := .actions, first := 0, highlighted := 1 }
     if key == 0xff53 && menu.page == .actions && (items[menu.highlighted]?.map (·.id)) == some 711 then
       return update { menu with page := .destinations, first := 0, highlighted := 0 }
-    if key == 0xff08 && menu.page == .rename then return update { menu with draft := menu.draft.deleteAroundCursor 1 0 }
     return (st, none)
   | .windowFocus false => return close
   | .activate 729 => return (st, none)
@@ -971,15 +1265,24 @@ private def stepMissionMenu (st : DesktopState) (menu : MissionMenu) (ev : Event
   | .activate 715 => return update { menu with page := .actions, first := 0, highlighted := 0 }
   | .activate id =>
     let some row := (missionMenuRows st menu).find? (·.id == id) | return (st, none)
+    if menu.page == .draftDirectory && id >= 2000000 then
+      return update { menu with browsePath := row.value, first := 0, highlighted := 1, directoryRows := none,
+                                draft := { text := row.value, cursorOffset := row.value.length } }
+    if menu.page == .draftDirectory && id == 716 && menu.draft.imePreeditText.isEmpty then
+      return ({ st with draftDirectory := menu.draft.text, missionMenu := none, voicePhase := .idle }, some viewport)
+    if menu.page == .draftProject then
+      return ({ st with draftProject := row.value, missionMenu := none, voicePhase := .idle }, some viewport)
     if menu.page == .settings then
       if let some field := settingTrigger id then
-        return update { menu with page := .picker field, first := 0, highlighted := 0 }
+        let next := { menu with page := .picker field, first := 0, highlighted := 0 }
+        if field == .machine then return ({ st with missionMenu := some next, launchMachines := none, launchMachinesFailed := false }, some viewport)
+        return update next
     if let .picker field := menu.page then return (chooseSetting st menu.mission field row.value, some viewport)
     let some action := row.action | return (st, none)
     if menu.page == .rename && (menu.draft.text.trimAscii.isEmpty || !menu.draft.imePreeditText.isEmpty) then return (st, none)
     return ({ st with missionMenu := none, writeRequest := some action }, some viewport)
   | _ =>
-    if menu.page != .rename then return (st, none)
+    if menu.page != .rename && menu.page != .draftDirectory then return (st, none)
     let draft := match ev with
       | .text text => menu.draft.insertText text
       | .imeBatch db da text preedit _ _ => menu.draft.applyImeBatch db da text preedit
@@ -991,12 +1294,39 @@ private def stepMissionMenu (st : DesktopState) (menu : MissionMenu) (ev : Event
 def stepDesktopEvent (scale120 : Nat) (viewport : Rect) (st : DesktopState) (ev : Event) :
     DesktopState × Damage := Id.run do
   if st.liveData then
+    if st.voiceDraft && st.voiceAvailable && st.missionMenu.isNone then
+      if let .activate id := ev then
+        if id == voiceCancelId && st.voicePhase != .idle then
+          return ({ st with voicePhase := .idle }, some viewport)
+        if id == voiceLanguageId && st.voicePicker && st.voicePhase == .idle then
+          return ({ st with voicePhase := .choosing, voiceBinding := st.connectionBinding, voiceGeneration := st.voiceGeneration + 1 }, some viewport)
+        if id == voiceButtonId then
+          match st.voicePhase with
+          | .idle => return ({ st with voicePhase := .recording, voiceBinding := st.connectionBinding, voiceGeneration := st.voiceGeneration + 1 }, some viewport)
+          | .recording => return ({ st with voicePhase := .finishing }, some viewport)
+          | .choosing => return (st, none)
+          | .finishing => return ({ st with voicePhase := .idle }, some viewport)
+      if let .key 0xff1b _ .pressed := ev then
+        if st.voicePhase != .idle then return ({ st with voicePhase := .idle }, some viewport)
     let toggle := match ev with
       | .activate id => id == sidebarToggleId
       | .key 0x62 mods .pressed => mods == 2 || mods == 8
       | _ => false
     if toggle && st.missionMenu.isNone then
       return ({ st with sidebarHidden := !st.sidebarHidden }, some viewport)
+    let settings := match ev with
+      | .activate 103 => true
+      | .key 0x2c mods .pressed => mods == 2 || mods == 8
+      | _ => false
+    if settings then
+      let next := resetSelection { st with screen := .settingsGeneral, modal := .none, multiRows := [], writeError := "" } none
+      return ({ next with sidebarRows := next.sidebarRows.map fun r => { r with selected := r.widgetId == 103 } }, some viewport)
+    if st.screen == .settingsGeneral then
+      match ev with
+      | .text _ | .preedit .. | .imeBatch .. | .composerReturn .. => return (st, none)
+      | _ => pure ()
+      if let .activate id := ev then
+        if id == accountFormId then return ({ st with openAccountForm := true }, some viewport)
     if !st.hasLiveConnection || st.writeRequest.isSome then return (st, none)
     if let .key key _ state := ev then
       if [0xffe1,0xffe2,0xffe3,0xffe4,0xffeb,0xffec].contains key then
@@ -1007,6 +1337,17 @@ def stepDesktopEvent (scale120 : Nat) (viewport : Rect) (st : DesktopState) (ev 
     if let .windowFocus false := ev then
       return ({ st with missionMenu := none, heldSelectionKeys := [] }, if st.missionMenu.isSome then some viewport else none)
     if let some menu := st.missionMenu then return stepMissionMenu st menu ev viewport
+    if st.cloudCanCreate || st.cloudAllows "send" then
+      let draft := match ev with
+        | .text text => st.cloudDraft.insertText text
+        | .imeBatch db da text preedit _ _ => st.cloudDraft.applyImeBatch db da text preedit
+        | .preedit text _ _ => st.cloudDraft.setPreedit text
+        | .composerReturn true => st.cloudDraft.insertText "\n"
+        | _ => st.cloudDraft
+      if draft != st.cloudDraft then
+        return ({ st with
+                  cloudDraft := draft, cloudAttempt := if draft.text == st.cloudDraft.text then st.cloudAttempt else "",
+                  cloudProject := (st.cloudSelectedProject.map (·.rowId)).getD "" }, some viewport)
     match ev with
     | .text _ | .preedit .. | .imeBatch .. =>
       if st.selectedCard.isNone && st.screen != .controlEmpty && st.screen != .controlPopulated then return (st, none)
@@ -1016,23 +1357,108 @@ def stepDesktopEvent (scale120 : Nat) (viewport : Rect) (st : DesktopState) (ev 
       | .key key mods .pressed =>
         -- XKB reports modifiers even when the key was held before this window gained focus.
         if mods &&& 0x0a == 0 then 0
+        else if key == 0x69 || key == 0x49 then 102
+        else if key == 0x32 then 111
+        else if key == 0x36 then 114
         else if key == 0x34 then 113
         else if key == 0x33 then 112
         else if key == 0x6e || key == 0x4e then 101 else 0
       | _ => 0
-    if navId == 113 then
-      let next := resetSelection { st with
-        screen := .inference, providers := none, providerReadFailed := false, fleetTopSub := 0, writeError := "" } none
+    if navId == 102 && !st.inboxEnabled then return (st, none)
+    if [101, 102, 111, 112, 113, 114].contains navId then
+      let screen := if navId == 111 then ScreenId.cloud else if navId == 114 then .resources else if navId == 102 then .inbox else if navId == 113 then .inference else if navId == 112 then .machinesFleet else .controlEmpty
+      let next := resetSelection { st with screen, fleetTopSub := 0, writeError := "", accountRoutePage := none } none
+      -- These pages share the New Agent draft. A mission follow-up belongs only to its transcript.
+      let next := if st.openMission.isNone then
+          { next with composer := { st.composer with imePreeditText := "" } }
+        else { next with draftProject := "" }
+      let next := if navId == 111 then next.openCloud "" else next
+      let next := if navId == 114 then { next with resourceRows := none, resourceFailed := false, resourcePage := 0 } else next
+      let next := if navId == 113 then { next with providers := none, providerReadFailed := false } else next
       return ({ next with sidebarRows := next.sidebarRows.map fun row => { row with selected := row.widgetId == navId } }, some viewport)
-    if st.screen == .inference && navId >= providerWidgetId 0 then
+    if st.screen == .inference then
+      if let some page := st.accountRoutePage then
+        if navId == providersBackId || (ev matches .key 0xff1b _ .pressed) then
+          return ({ st with accountRoutePage := none, fleetTopSub := page.previousTop, writeError := "" }, some viewport)
+        if navId == providersRetryId && page.failed then
+          return ({ st with accountRoutePage := some { page with options := none, pending := none, failed := false }, writeError := "" }, some viewport)
+        if navId >= providerRouteId 0 && !page.failed && page.pending.isNone then
+          if let some row := (page.options.getD [])[navId - providerRouteId 0]? then
+            if row.action == "refresh" then
+              return ({ st with accountRoutePage := some { page with options := none }, writeError := "" }, some viewport)
+            if row.action == "vpn" || row.action == "routers" then
+              return ({ st with accountRoutePage := some { page with pending := some row }, writeError := "" }, some viewport)
+      else if navId >= providerSettingsId 0 then
+        if let some account := (st.providers.getD [])[navId - providerSettingsId 0]? then
+          return ({ st with accountRoutePage := some { account, previousTop := st.fleetTopSub }, fleetTopSub := 0, writeError := "" }, some viewport)
+    if st.screen == .cloud then
+      if st.cloudCanCreate then
+        let projects := st.cloudProjects
+        if navId == 970 then
+          return ({ st with cloudAccountIndex := (st.cloudAccountIndex + 1) % st.cloudAccounts.length, cloudAttempt := "" }, some viewport)
+        if navId == 971 then
+          let index := projects.findIdx (·.rowId == (st.cloudSelectedProject.map (·.rowId)).getD "")
+          let some next := projects[(index + 1) % projects.length]? | return (st, none)
+          return ({ st with cloudProject := next.rowId, cloudAttempt := "" }, some viewport)
+        if navId == 968 || (ev matches .composerReturn false) then
+          let some (provider, account, _) := st.cloudAccounts[st.cloudAccountIndex]? | return (st, none)
+          let some project := st.cloudSelectedProject | return (st, none)
+          let prompt := st.cloudDraft.text.trimAscii.toString
+          if prompt.isEmpty || !st.cloudDraft.imePreeditText.isEmpty then return (st, none)
+          return ({ st with writeRequest := some (.cloudCreate provider account (project.rowId.drop 8).toString prompt st.cloudAttempt) }, none)
+      if st.cloudAllows "send" && (navId == 968 || (ev matches .composerReturn false)) &&
+          !st.cloudDraft.text.trimAscii.isEmpty && st.cloudDraft.imePreeditText.isEmpty then
+        return ({ st with writeRequest := some (.cloudSend st.cloudMission st.cloudDraft.text st.cloudAttempt) }, none)
+      if st.cloudAllows "cancel" && navId == 969 then
+        return ({ st with writeRequest := some (.cloudCancel st.cloudMission) }, none)
+      let items := st.cloudItems
+      if navId == 960 && (st.cloudLines.isSome || st.cloudFailed) then
+        return ({ st with cloudLines := none, cloudFailed := false, cloudPage := 0 }, some viewport)
+      if !st.cloudMission.isEmpty && (navId == 963 || (ev matches .key 0xff1b 0 .pressed)) then
+        return (st.openCloud "", some viewport)
+      if navId == 961 || (ev matches .key 0xff55 0 .pressed) then
+        return ({ st with cloudPage := st.cloudPage - 1 }, some viewport)
+      if navId == 962 || (ev matches .key 0xff56 0 .pressed) then
+        return ({ st with cloudPage := min ((items.length - 1) / 4) (st.cloudPage + 1) }, some viewport)
+      if navId >= 964 && navId < 968 then
+        if let some (mission, _) := items[4 * st.cloudPage + navId - 964]? then
+          if !mission.isEmpty then
+            return (st.openCloud mission, some viewport)
+      if ev matches .composerReturn .. then return (st, none)
+    if st.screen == .resources then
+      if navId == 945 then
+        return ({ st with resourceRows := none, resourceFailed := false, resourcePage := 0 }, some viewport)
+      if navId >= 955 && navId < 960 then
+        let range := resourceRanges.getD (navId - 955) "6h"
+        return ({ st with resourceRange := range, resourceRows := none, resourceFailed := false, resourcePage := 0 }, some viewport)
+      let rows := st.resourceRows.getD []
+      if navId == 946 || (ev matches .key 0xff55 0 .pressed) then
+        return ({ st with resourcePage := st.resourcePage - 1 }, some viewport)
+      if navId == 947 || (ev matches .key 0xff56 0 .pressed) then
+        return ({ st with resourcePage := min ((rows.length - 1) / 4) (st.resourcePage + 1) }, some viewport)
+      if navId >= 950 && navId < 954 then
+        if let some row := rows[4 * st.resourcePage + navId - 950]? then
+          if let some card := st.missionCards.find? (fun c => !row.mission.isEmpty && c.missionId == row.mission) then
+            return (resetSelection { st with screen := .missionTranscript } (some card), some viewport)
+      if ev matches .composerReturn .. then return (st, none)
+    if st.screen == .inbox then
+      let index := min st.inboxIndex (st.inboxItems.length - 1)
+      if navId == 942 || (ev matches .key 0xff52 _ .pressed) then
+        return ({ st with inboxIndex := index - 1 }, some viewport)
+      if navId == 943 || (ev matches .key 0xff54 _ .pressed) then
+        return ({ st with inboxIndex := min (index + 1) (st.inboxItems.length - 1) }, some viewport)
+      if navId == 940 || navId == 941 then
+        if !st.inboxAvailable then return (st, none)
+        let some item := st.currentInboxItem | return (st, none)
+        return ({ st with writeRequest := some (.inboxRead item (navId == 940)) }, none)
+      match ev with
+      | .text _ | .imeBatch .. | .preedit .. | .composerReturn .. => return (st, none)
+      | _ => pure ()
+    if st.screen == .inference && st.accountRoutePage.isNone && navId >= providerWidgetId 0 then
       if let some account := (st.providers.getD [])[navId - providerWidgetId 0]? then
         return ({ st with writeRequest := some (.providerPreference account.id (!account.userEnabled)) }, none)
-    if navId == 112 then
-      let next := resetSelection { st with screen := .machinesFleet, fleetTopSub := 0, draftProject := "", writeError := "" } none
-      return ({ next with sidebarRows := next.sidebarRows.map fun row => { row with selected := row.widgetId == navId } }, some viewport)
-    if navId == 101 then
-      return (resetSelection { st with screen := .controlEmpty, draftProject := "", writeError := "" } none, some viewport)
     if let .composerReturn shift := ev then
+      if st.screen == .inference || st.screen == .machinesFleet then return (st, none)
       if !st.composer.imePreeditText.isEmpty then return (st, none)
       if shift then return stepDesktopInput scale120 viewport st (.text "\n")
       if st.composer.isRunning then return (st, none)
@@ -1062,7 +1488,9 @@ def stepDesktopEvent (scale120 : Nat) (viewport : Rect) (st : DesktopState) (ev 
       if id == 2 && st.selectedCard.isNone then
         if (st.screen == .controlEmpty || st.screen == .controlPopulated) &&
             !st.composer.text.trimAscii.isEmpty && st.composer.imePreeditText.isEmpty then
-          return ({ st with writeRequest := some .create }, none)
+          if st.draftSettings.backend == "antigravity" && st.draftSettings.model.isEmpty then
+            return ({ st with writeError := "Choose an Antigravity model for this machine." }, some viewport)
+          return ({ st with voicePhase := .idle, writeRequest := some .create }, none)
         return (st, none)
       if id == 2 || id == 106 then
         let some card := st.selectedCard | return (st, none)

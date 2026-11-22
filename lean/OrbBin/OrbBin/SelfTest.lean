@@ -1026,7 +1026,39 @@ def runOpenCodeAcpTests : IO Unit := do
   assertEq "ACP model unknown to the agent" (resolveAcpModel "nope/zzz" #["orbrouter/builtin/smart"]) none
   IO.FS.removeDirAll tmpDir
 
+open OrbBin.ClaudeControl in
+private def runCodexMessageBoundaryTests : IO Unit := do
+  -- Codex emits complete assistant items on either side of a tool call.
+  let mut codexText := ""
+  for line in #[
+    "{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"id\":\"a\",\"text\":\"Checking.\"}}",
+    "{\"type\":\"item.started\",\"item\":{\"type\":\"command_execution\",\"id\":\"tool\"}}",
+    "{\"type\":\"item.completed\",\"item\":{\"type\":\"command_execution\",\"id\":\"tool\"}}",
+    "{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"id\":\"b\",\"text\":\"abc123\"}}"
+  ] do
+    let parsed := parseOneShotHarnessEvent "codex" line
+    if !parsed.textDelta.isEmpty then
+      codexText := codexText ++ (joinHarnessText "codex" codexText none parsed).1
+  assertEq "Codex tool commentary and final item retain a paragraph boundary" codexText "Checking.\n\nabc123"
+  let codexChunk := parseOneShotHarnessEvent "codex" "{\"type\":\"text\",\"text\":\"lo\"}"
+  assertEq "Codex partial text frames stay contiguous" (joinHarnessText "codex" "Hel" none codexChunk).1 "lo"
+
+private def testAntigravityProviderDenial : IO Unit := do
+  let agEvent := OrbBin.ClaudeControl.parseOneShotHarnessEvent "antigravity"
+  let denied := "HTTP 403 PERMISSION_DENIED: terms of service (private-fixture.invalid)"
+  let refusal := some "Google denied this Antigravity request and cited its terms of service. Review the account status with Google."
+  assertEq "Provider terms refusal takes priority over a subsequent sign-in link"
+    (agEvent (denied ++ " " ++ "Authentication required. Please visit https://accounts.google.com/o/oauth2/auth?state=test-marker")).errorMsg? refusal
+  let structured := agEvent (renderCompact (.obj #[("event", .str "result"), ("result",
+    .obj #[("status", .str "ERROR"), ("error", .obj #[("status", .str "PERMISSION_DENIED"),
+      ("message", .str denied)])])]))
+  assertEq "Structured provider refusal omits identifiers" structured.errorMsg? refusal
+  assertEq "Other provider denials do not imply a terms violation" (agEvent "HTTP 403 forbidden").errorMsg?
+    (some "Google denied this Antigravity request. Check the account’s access to the selected model.")
+  assertEq "A terms reference alone does not classify a denial" (agEvent "terms of service").errorMsg? none
+
 def runAllTests : IO UInt32 := do
+  runCodexMessageBoundaryTests
   let prompt := "--model is part of this prompt\nwith 'quotes' and a trailing newline\n"
   assertEq "Antigravity delivers a flag-shaped prompt verbatim alongside model, effort and resume"
     (OrbBin.ClaudeControl.buildOneShotHarnessArgs "antigravity" prompt (some "custom-model") (some "high") (some "session"))
@@ -1060,6 +1092,7 @@ def runAllTests : IO UInt32 := do
   let authFailure := agEvent (renderCompact (.obj #[("event", .str "result"),
     ("result", .obj #[("status", .str "ERROR"), ("error", .str authLine)])]))
   assertEq "Structured Antigravity login failures use the same diagnostic" authFailure.errorMsg? authMessage
+  testAntigravityProviderDenial
   runOpenCodeAcpTests
   IO.println "=== OrbBin Wave 1 Companion Binaries Self-Test ==="
 

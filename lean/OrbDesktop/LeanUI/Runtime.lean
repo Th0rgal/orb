@@ -71,6 +71,8 @@ structure ScrollRegion where
   id : EntityId
   bounds : Rect
   limitY : SubPx
+  offsetY : SubPx := 0
+  textLines : List WrappedLine := []
   deriving Inhabited
 
 abbrev FrameView := Text.GlyphAtlasCache × Color × Scene × List (EntityId × Rect) × List EntityId
@@ -202,7 +204,7 @@ def stepEvent (rt : RuntimeState σ) (onEvent : σ → Event → σ × Damage) (
           match rt.focus.owner with
           | some id =>
             let editorReturn := id == 1 && keysym != 0x20
-            if editorReturn && state == .repeated then rt else
+            if (editorReturn || id != 1) && state == .repeated then rt else
             let action := if editorReturn then
                 Event.composerReturn (mods &&& 1 != 0)
               else Event.activate id

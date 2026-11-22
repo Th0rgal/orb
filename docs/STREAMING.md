@@ -80,6 +80,11 @@ Listed with the backends that emit them.
 
 ## Continuation rule (the "NoNo newNo new CI…" bug)
 
+For Codex, a completed `agent_message` item begins a new paragraph in the
+cumulative transcript when adjacent text has no newline. This includes the
+first answer after tool activity. Partial text frames within a message
+remain contiguous. Both local and remote turns use this rule.
+
 Both `text_delta` and `thinking` are **cumulative** — every event
 re-sends the entire buffer. Consolidation rule:
 

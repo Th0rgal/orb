@@ -122,6 +122,7 @@ for i in range(300):
             pointer = Pointer(graphical)
             stack.callback(pointer.close)
             click = pointer.click
+        stack.enter_context(process(['wtype', '-k', 'Shift_L', '-s', '120000'], graphical, tmp))
         if menu_client is not None:
             from linux_sidebar_menu import exercise
             return exercise(ROOT, tmp, api, graphical, click, process, wait, stack, menu_client)
@@ -131,7 +132,6 @@ for i in range(300):
             client.append('--leanui')
         desktop = stack.enter_context(process(client, graphical, ROOT))
         wait('native window', lambda: b'"orb-desktop"' in sway('-t', 'get_tree'), 300)
-        stack.enter_context(process(['wtype', '-k', 'Shift_L', '-s', '120000'], graphical, tmp))
         time.sleep(.5)
         def keys(*args):
             subprocess.run(['wtype', '-s', '200', *args], check=True, env=graphical)
@@ -181,10 +181,19 @@ for i in range(300):
             click(315, 388)  # Machine, then the local Core
             click(326, 447)
             click(353, 388)  # Harness, then Codex below the default choice
-            click(394, 447)
+            choices = '305,396 450x210'
+            click(*wait('Codex harness', lambda: widget('codex', choices)))
+            # Click the name at the right end of a provider-qualified model row.
+            # Previously this visible suffix lay outside the popup hit region.
+            click(410, 388)
+            models = '320,396 590x213'
+            click(*wait('visible Astra model suffix', lambda: widget('astra', models)))
             click(540, 347)
             keys(typed)
             edit([("日本猫", 0, 0), ("語", len("猫".encode()), 0)])
+            # Undo the IME replacement; the next replacement must still see 猫 at the caret.
+            keys('-M', 'ctrl', '-k', 'z', '-m', 'ctrl')
+            edit([("語", len("猫".encode()), 0)])
             click(944, 347)
         else:
             roster = '10,110 195x180'
@@ -211,6 +220,7 @@ for i in range(300):
         if mouse:
             mission = api(path)
             assert mission['project'] == 'source' and mission['backend'] == 'codex', mission['id']
+            assert mission['model_override'] == 'gpt-6.2-astra', mission['model_override']
             assert not mission.get('remote_job') and not any(t.startswith('remote-node:') for t in mission['tags'])
             assert api('/api/machines')[0]['id'] == 'core'
         def observed():

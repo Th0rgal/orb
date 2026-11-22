@@ -30,7 +30,7 @@ def exercise(root, tmp, api, graphical, click, process, wait, stack, client_kind
         return api('/api/control/missions/' + mid)['status']
     binary = os.environ['ORB_LEANUI_TEST_BINARY' if client_kind == 'leanui' else 'ORB_WEBKIT_TEST_BINARY']
     cmd = [str(Path(binary).resolve(strict=True))]
-    if client_kind == 'leanui' and Path(binary).name == 'orb-desktop':
+    if client_kind == 'leanui' and Path(binary).name in ('orb', 'orb-desktop'):
         cmd.append('--leanui')
     home = tmp / 'home'
     graphical.update(HOME=str(home), XDG_DATA_HOME=str(home/'data'), XDG_CONFIG_HOME=str(home/'config'),
@@ -101,9 +101,16 @@ def exercise(root, tmp, api, graphical, click, process, wait, stack, client_kind
         def rows():
             return next((hits for region in regions if (hits := actions_in(region))), None)
         hits = wait('ordered context actions ' + ', '.join(expected), rows)
-        click(*hits[choose])
+        if client_kind == 'webkit' and choose == 'rename':
+            # Rename receives focus when the GTK menu opens.
+            subprocess.run(['wtype', '-k', 'Return'], env=graphical, check=True)
+        else:
+            click(*hits[choose])
     if client_kind == "leanui":
-        see("unavailable", header)
+        def needs_connection():
+            labels = {word for word, _, _ in words('0,0 1000x700')}
+            return 'unavailable' in labels or {'sign', 'core'} <= labels
+        wait('visible disconnected state', needs_connection)
         replacement = tmp / "reconnected.json"
         replacement.write_text(json.dumps(config))
         replacement.replace(config_path)
@@ -118,6 +125,20 @@ def exercise(root, tmp, api, graphical, click, process, wait, stack, client_kind
         subprocess.run(['wtype', '-M', 'ctrl', '-k', 'b', '-m', 'ctrl'], env=graphical, check=True)
         see(fixture['openMission'], header)
         see(fixture['contextMission'], sidebar)
+    if client_kind == 'webkit':
+        action_menu(fixture['activeActions'], 'rename')
+        def rename_open():
+            tree = json.loads(subprocess.check_output(['swaymsg', '-t', 'get_tree'], env=graphical))
+            def includes_dialog(node):
+                return node.get('name') == 'Rename conversation' or any(
+                    includes_dialog(child) for child in node.get('nodes', []) + node.get('floating_nodes', []))
+            return includes_dialog(tree)
+        wait('rename dialog opened', rename_open)
+        subprocess.run(['wtype', '-M', 'ctrl', '-k', 'a', '-m', 'ctrl', 'Draft'], env=graphical, check=True)
+        subprocess.run(['wtype', '-k', 'Escape'], env=graphical, check=True)
+        wait('rename dialog dismissed', lambda: not rename_open())
+        see(fixture['openMission'], header)
+        assert api('/api/control/missions/' + b)['title'] == fixture['contextMission']
     # The client has already read B as idle when its Archive POST reaches
     # the relay. Activate B directly through Core before forwarding that POST.
     db_path, = tmp.rglob('missions.db')

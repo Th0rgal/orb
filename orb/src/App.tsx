@@ -174,13 +174,14 @@ const UsageTelemetrySettings = lazy(() => import("./UsageTelemetrySettings").the
 const BitwardenSettings = lazy(() => import("./BitwardenSettings").then(module => ({ default: module.BitwardenSettings })));
 const InboxPage = lazy(() => import("./Inbox").then(module => ({ default: module.InboxPage })));
 import { requestInboxDigest } from "./inboxDigest";
-import { countUnreadInboxMissions, listUnreadInboxCandidates } from "./inboxUnread";
-import { inboxConfig } from "./inboxSettings";
+import { inboxMissionUnion, listUnreadInboxCandidates } from "./inboxUnread";
+import { readInboxState } from "./inboxState";
+import { applySharedInboxPreferences, inboxConfig } from "./inboxSettings";
 const InboxSettings = lazy(() => import("./InboxSettingsPanels").then(module => ({ default: module.InboxSettings })));
 const InboxSummariesSettings = lazy(() => import("./InboxSettingsPanels").then(module => ({ default: module.InboxSummariesSettings })));
 import { shouldRequestInboxDigest } from "./inboxPolicy";
 import { pendingMissionInteraction } from "./missionAttention";
-import { markMissionRead, unreadVersion } from "./missionUnread";
+import { applySharedInboxSeen, markMissionRead, unreadVersion } from "./missionUnread";
 
 import { harnessChoices, harnessPick, effectivePick, refreshHarnessChoices, refreshNodeAntigravityModels, type HarnessPick } from "./harnessPick";
 import { Composer } from "./composer/Composer";
@@ -330,6 +331,7 @@ export default function App() {
   };
   let launchAttempt: { signature: string; key: string } | undefined;
   const MACHINE_KEY = "orb.machine";
+  const [newAgentHasDraft, setNewAgentHasDraft] = createSignal(false);
   const [explicitMachine, setExplicitMachine] = createSignal(false);
   const initialStoredMachine = readString(MACHINE_KEY);
   const [newMachine, setNewMachine] = createSignal(
@@ -578,13 +580,13 @@ export default function App() {
   });
   const listMisses: Misses = new Map();
   let missionRefreshRevision = 0, missionAppliedRevision = 0;
-  let initialFullMissionSyncDone = false;
-  createEffect(on(connectionVersion, () => { initialFullMissionSyncDone = false; }, { defer: true }));
+  const [fullMissionVersion, setFullMissionVersion] = createSignal<number>();
+  const [projectWindowsVersion, setProjectWindowsVersion] = createSignal<number>();
   const refreshMissions = async (forceFull = false) => {
     const revision = ++missionRefreshRevision, connection = connectionVersion();
     try {
       const prev = missions().filter(m => !isMissionDeleting(m.id));
-      const syncCursor = !forceFull && initialFullMissionSyncDone ? readMissionSyncCursor() : null;
+      const syncCursor = !forceFull && fullMissionVersion() === connection ? readMissionSyncCursor() : null;
       const useDelta = Boolean(syncCursor && syncCursor.polls < 20 && Date.now() - syncCursor.syncedAt < 10 * 60_000);
       const [rawFresh, rawCompleted] = await Promise.all([
         listMissions(200, useDelta ? { updatedSince: syncCursor!.cursor } : undefined),
@@ -592,7 +594,6 @@ export default function App() {
       ]);
       if (revision < missionAppliedRevision || connection !== connectionVersion()) return;
       missionAppliedRevision = revision;
-      if (!useDelta) initialFullMissionSyncDone = true;
       const partial = isPartialList(rawFresh);
       const fresh = rawFresh.filter(m => !isMissionDeleting(m.id));
       // No answer keeps the completed list on screen; it never empties it.
@@ -602,6 +603,7 @@ export default function App() {
       // Reconcile, never replace: a short answer during a restart keeps what is on screen.
       const nextMissions = applyPendingMoves(mergeById(missions(), reconcileMissionList(missions().filter(m => !isMissionDeleting(m.id)), fresh, listMisses, partial)));
       setMissions(nextMissions);
+      if (!useDelta && !partial && rawCompleted !== null) setFullMissionVersion(connection);
       const liveIds = selectLivePrefetchIds(nextMissions, isLive);
       noteLiveMissionIds(liveIds);
       for (const id of liveIds) prefetchTranscript(id);
@@ -616,6 +618,7 @@ export default function App() {
         for (const slug of slugs) {
           void listProjectMissions(slug, { background: true })
             .then(rows => {
+              if (connection !== connectionVersion()) return;
               const clean = rows.filter(m => !isMissionDeleting(m.id));
               setProjectMissions(cur => ({ ...cur, [slug]: clean }));
             })
@@ -625,7 +628,7 @@ export default function App() {
           if (!m.project?.trim()) {
             void getMission(m.id, { includeHistory: false })
               .then(updated => {
-                if (isMissionDeleting(updated.id) || isBtwMission(updated)) return;
+                if (connection !== connectionVersion() || isMissionDeleting(updated.id) || isBtwMission(updated)) return;
                 const slug = updated.project?.trim() || DEFAULT_PROJECT.slug;
                 setProjectMissions(cur => {
                   const existing = cur[slug] ?? [];
@@ -695,36 +698,7 @@ export default function App() {
   }, { defer: true }));
   let prevInboxMissions: Mission[] = [];
   const inboxMissions = createMemo(() => {
-    const byId = new Map<string, Mission>();
-    const put = (m: Mission) => {
-      if (!m?.id || isMissionDeleting(m.id)) return;
-      const prev = byId.get(m.id);
-      if (!prev) {
-        byId.set(m.id, m);
-        return;
-      }
-      const prevTs = Date.parse(prev.updated_at || prev.created_at || "") || 0;
-      const nextTs = Date.parse(m.updated_at || m.created_at || "") || 0;
-      if (nextTs >= prevTs) {
-        if (!prev.history?.length || m.history?.length) {
-          byId.set(m.id, m);
-        } else {
-          byId.set(m.id, { ...prev, ...m, history: prev.history });
-        }
-      } else {
-        if (!m.history?.length || prev.history?.length) {
-          byId.set(m.id, prev);
-        } else {
-          byId.set(m.id, { ...m, ...prev, history: m.history });
-        }
-      }
-    };
-    for (const rows of Object.values(projectMissions())) {
-      for (const m of rows) put(m);
-    }
-    for (const m of completedMissions()) put(m);
-    for (const m of missions()) put(m);
-    prevInboxMissions = mergeById(prevInboxMissions, Array.from(byId.values()));
+    prevInboxMissions = mergeById(prevInboxMissions, inboxMissionUnion(projectMissions(), completedMissions(), missions(), isMissionDeleting));
     return withMovedMissions(withRenamedTitles("mission", prevInboxMissions, m => m.id));
   });
   const currentMissionId = createMemo(() => {
@@ -750,19 +724,54 @@ export default function App() {
     const found = findKnownMission(id);
     return found ?? (previous?.id === id ? previous : null);
   }, null);
-  const inboxCount = createMemo(() => {
+  const [inboxStateVersion, setInboxStateVersion] = createSignal<number>();
+  createEffect(on([isConnected, connectionVersion], ([connected, version]) => {
+    if (!connected) return;
+    let active = true;
+    let reading = false;
+    const refresh = async () => {
+      if (reading || !active) return;
+      reading = true;
+      try {
+        const state = await readInboxState();
+        if (!active || connectionVersion() !== version) return;
+        batch(() => {
+          if (state) {
+            applySharedInboxSeen(state);
+            applySharedInboxPreferences(state.preferences);
+            setInboxStateVersion(version);
+          }
+        });
+      } finally {
+        reading = false;
+      }
+    };
+    void refresh();
+    const stop = pollWhileVisible(refresh, 10_000, "inbox.sharedState");
+    onCleanup(() => { active = false; stop(); });
+  }));
+  const inboxBadgeIds = createMemo(() => {
     transcriptVersion();
     unreadVersion();
     const cfg = inboxConfig();
-    if (!cfg.inboxEnabled || !isConnected()) return 0;
-    return countUnreadInboxMissions(
+    const version = connectionVersion();
+    if (!cfg.inboxEnabled || !isConnected() || inboxStateVersion() !== version ||
+        fullMissionVersion() !== version || projectWindowsVersion() !== version) return [];
+    return listUnreadInboxCandidates(
       inboxMissions(),
       liveProjects(),
       (id) => peekReadyTranscript(id)?.items,
       pendingMissionInteraction,
       currentMissionId(),
       cfg,
-    );
+    ).map(item => item.id);
+  });
+  const inboxCount = () => inboxBadgeIds().length;
+  onMount(() => {
+    // Web Inspector can read the actual badge inputs without opening a mission or fetching a transcript.
+    const inspector = window as Window & { orbInboxBadgeIds?: () => string[] };
+    inspector.orbInboxBadgeIds = () => [...inboxBadgeIds()];
+    onCleanup(() => { delete inspector.orbInboxBadgeIds; });
   });
   createEffect(() => {
     if (!inboxConfig().inboxEnabled && selected() === "inbox") open(null);
@@ -840,7 +849,7 @@ export default function App() {
     const next = resolveDefaultComposerMachine({
       isAdmin: isAdminUser(),
       current: newMachine(),
-      explicit: explicitMachine(),
+      explicit: explicitMachine() || newAgentHasDraft(),
       firstNodeId: firstNodeId(),
       remoteReady: remoteLaunch().state === "ready",
       fleetNodes: fleetNodes(),
@@ -897,6 +906,7 @@ export default function App() {
       });
       listProjects()
         .then((projects) => {
+          if (ver !== connectionVersion()) return;
           setLiveProjects(projects);
           scheduleSavePersistedSidebar(historyScope(), {
             missions: rawMissions(),
@@ -1003,9 +1013,7 @@ export default function App() {
     if (id === "inbox" && !inboxConfig().inboxEnabled) id = null;
     if(id===null){
       setLaunchPreview(null);setLaunchViewKey('');
-      setExplicitMachine(false);
-      const first = firstNodeId();
-      if (first) setNewMachine(first);
+      if (!newAgentHasDraft()) setExplicitMachine(false);
     }
     if (id) id = settingsPageId(id);
     if (selected() === "routing" && id !== "routing" && !confirmLeaveRouting(() => open(id, push))) return false;
@@ -1137,6 +1145,7 @@ export default function App() {
     const disposeHandlers = installNativeChromeWindowHandlers({
       open: (target) => open(target),
       leaveSettings,
+      openSearch,
       navHistory: (delta) => nav(delta),
       getSidebarOpen: () => sidebar(),
       setSidebarOpen: setSidebarWithNative,
@@ -1687,6 +1696,10 @@ export default function App() {
   const renderLiveProjectsSection = (headless: boolean) => (
     <LiveProjectsSection
       headless={headless}
+      onInitialProjectWindows={projects => batch(() => {
+        setLiveProjects(projects);
+        setProjectWindowsVersion(connectionVersion());
+      })}
       active={() => !onSettings()}
       deleteRequest={deleteMissionRequest()}
       archiveRequests={archiveRequests()}
@@ -2271,7 +2284,10 @@ export default function App() {
                   onSend={create}
                   onPending={prepareLaunch}
                   onSendError={setCreateError}
-                  onDraft={(text) => { if (createError() === EMPTY_GOAL_ERROR && goalDraft(text).kind !== "empty") setCreateError(null); }}
+                  onDraft={(text, hasAttachments) => {
+                    setNewAgentHasDraft(Boolean(text) || hasAttachments);
+                    if (createError() === EMPTY_GOAL_ERROR && goalDraft(text).kind !== "empty") setCreateError(null);
+                  }}
                   autofocus
                   tall
                   scope="new-agent"

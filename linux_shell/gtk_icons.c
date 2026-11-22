@@ -50,6 +50,13 @@ void orb_spinner_stop(OrbIconSpinner *sp) {
     if (sp->spinning) { g_ptr_array_free(sp->spinning, TRUE); sp->spinning = NULL; }
 }
 int orb_icons_light = 0;
+static const char ORB_CHROME_CSS[] = ".orb-paned,.orb-sb scrolledwindow,.orb-sb viewport{background:transparent;background-image:none;border:none;box-shadow:none;}.orb-sb undershoot,.orb-sb overshoot,.orb-sb scrollbar,.orb-sb scrollbar contents,.orb-sb scrollbar trough,.orb-sb scrollbar slider,.orb-sb scrollbar button{opacity:0;min-width:0;min-height:0;margin:0;padding:0;background:transparent;background-image:none;border:none;box-shadow:none;}.orb-paned>separator{min-width:1px;min-height:1px;padding:0;margin:0;background-color:#2c2c2c;background-image:none;border:none;box-shadow:none;}.orb-sb{background-color:rgba(18,19,19,0.78);background-image:none;color:#d8d8d7;font-size:13px;}.orb-tb{padding:0 8px;}.orb-tb-btn{min-width:24px;min-height:24px;padding:0;margin:0;border-radius:6px;border:1px solid transparent;background:transparent;background-image:none;color:#8a8a8a;box-shadow:none;outline:none;}.orb-tb-btn:hover:not(:disabled){background-color:rgba(216,216,215,0.075);color:#d8d8d7;}.orb-tb-btn:disabled{opacity:0.42;}.orb-sb list{background:transparent;color:#d8d8d7;}.orb-sb row{min-height:30px;padding:0;margin:0 6px 1px 6px;border:1px solid transparent;border-radius:6px;background:transparent;color:#d8d8d7;outline:none;box-shadow:none;}.orb-sb row:hover:not(.orb-selected):not(.orb-sec):not(.orb-note){background-color:rgba(216,216,215,0.045);}.orb-sb row.orb-selected,.orb-multi{background-color:rgba(216,216,215,0.075);color:#e6e6e5;}.orb-sb row.orb-sec{min-height:20px;margin:13px 8px 4px 10px;color:#8a8a8a;font-size:11px;}.orb-sb row.orb-sec-toggle:hover{color:#b1b1b1;}.orb-sb row.orb-sec .orb-chev{color:inherit;font-size:11px;}.orb-sb row.orb-note{min-height:26px;margin:2px 8px 2px 10px;color:#8a8a8a;font-size:12px;}.orb-ico{color:rgba(216,216,215,0.62);}.orb-tb-btn .orb-ico{color:inherit;}.orb-sb row.orb-selected .orb-ico,.orb-foot button.orb-selected .orb-ico{color:#e6e6e5;}.orb-proj{color:#b1b1b1;}.orb-sb row:hover .orb-proj{color:#d8d8d7;}.orb-sub,.orb-sub-live{min-height:20px;min-width:0;padding:0 5px;border-radius:4px;border:1px solid transparent;background:transparent;background-image:none;color:#6c6c6b;font-size:11px;font-family:monospace;box-shadow:none;outline:none;}.orb-sub-live{color:#b1b1b1;}.orb-sub:hover,.orb-sub-live:hover{background-color:rgba(216,216,215,0.09);color:#e6e6e5;}.orb-add{min-width:18px;min-height:18px;border-radius:4px;}.orb-sb row.orb-sec .orb-add{color:#5c5c5c;}.orb-sb row:not(.orb-sec) .orb-add{opacity:0;}.orb-sb row:hover .orb-add,.orb-sb row:focus .orb-add,.orb-sb row .orb-add:focus{opacity:1;}.orb-sb row .orb-add:hover{color:#d8d8d7;}.orb-kbd{color:#5c5c5c;font-size:11px;}.orb-attn{color:#c9a227;font-size:12px;}.orb-badge{min-width:16px;min-height:16px;padding:0 5px;border-radius:999px;background-color:rgba(216,216,215,0.075);color:#8a8a8a;font-size:11px;}.orb-foot{padding:6px;border-top:1px solid #2c2c2c;}.orb-foot button{min-height:32px;padding:0 8px;border-radius:8px;border:1px solid transparent;background:transparent;background-image:none;color:#b1b1b1;box-shadow:none;outline:none;}.orb-foot button:hover:not(.orb-selected){background-color:rgba(216,216,215,0.045);color:#d8d8d7;}.orb-foot button.orb-selected{color:#d8d8d7;font-weight:500;}.orb-sb row:focus-visible,.orb-tb-btn:focus-visible,.orb-sub:focus-visible,.orb-sub-live:focus-visible,.orb-foot button:focus-visible{border-color:#5b5b5a;outline:none;box-shadow:none;}";
+/* Light theme: the same sheet with each dark token swapped for its `styles.css` light value. */
+void orb_gtk_apply_theme(GtkCssProvider *css, gboolean light) {
+    static const char *m[][2] = { {"#d8d8d7", "#242423"}, {"#e6e6e5", "#101010"}, {"#b1b1b1", "#535250"}, {"#8a8a8a", "#7b7a76"}, {"#6c6c6b", "#939290"}, {"#5c5c5c", "#a9a8a2"}, {"#5b5b5a", "#a9a8a2"}, {"#2c2c2c", "#e8e7e2"}, {"rgba(18,19,19,0.78)", "rgba(246,246,244,0.72)"}, {"216,216,215", "36,36,35"} };
+    char *s = g_strdup(ORB_CHROME_CSS); for (size_t i = 0; light && i < G_N_ELEMENTS(m); i++) { char **parts = g_strsplit(s, m[i][0], -1); g_free(s); s = g_strjoinv(m[i][1], parts); g_strfreev(parts); }
+    gtk_css_provider_load_from_data(css, s, -1, NULL); g_free(s); orb_icons_light = light;
+}
 static void draw_status_badge(cairo_t *cr, int bk, int step) {
     const double cx = 13.8, cy = 13.8;
     cairo_save(cr); if (orb_icons_light) { cairo_set_source_rgba(cr, 0.965, 0.965, 0.957, 1.0); } else { cairo_set_source_rgba(cr, 0.078, 0.078, 0.078, 1.0); } cairo_arc(cr, cx, cy, 5.4, 0, 6.2832); cairo_fill(cr);
@@ -94,10 +101,19 @@ static gboolean on_draw_icon(GtkWidget *w, cairo_t *cr, gpointer ud) {
     if (bk > 0) { draw_status_badge(cr, bk, sp ? sp->step : 0); }
     return FALSE;
 }
+static gboolean activate_menu_row(GtkWidget *row, GdkEventKey *event, gpointer data) {
+    (void)data;
+    if ((event->keyval != GDK_KEY_Return && event->keyval != GDK_KEY_KP_Enter) ||
+        (event->state & gtk_accelerator_get_default_mod_mask())) return FALSE;
+    gtk_button_clicked(GTK_BUTTON(row));
+    return TRUE;
+}
+
 /* A model button normally chooses between its text and icon. Keep the
  * native submenu indicator and add the leading glyph beside its label. */
 GtkWidget *orb_menu_row(GtkWidget *page, const char *label, const char *icon) {
     GtkWidget *button = gtk_model_button_new();
+    g_signal_connect(button, "key-press-event", G_CALLBACK(activate_menu_row), NULL);
     g_object_set(button, "text", label, NULL);
     if (icon) { orb_add_menu_icon(button, icon); }
     gtk_box_pack_start(GTK_BOX(page), button, FALSE, FALSE, 0);

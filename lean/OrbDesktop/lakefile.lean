@@ -8,7 +8,7 @@ package «orb-desktop-native» where
 require «orb-spec» from ".."
 
 lean_lib «LeanUI» where
-  roots := #[`LeanUI, `OrbDesktop.State, `OrbDesktop.Core, `OrbDesktop.Chrome, `OrbDesktop.Screens]
+  roots := #[`LeanUI, `OrbDesktop.State, `OrbDesktop.Core, `OrbDesktop.Voice, `OrbDesktop.Chrome, `OrbDesktop.Screens]
   precompileModules := false
 
 /-- Proof shards and replayed-event checks. Built by `scripts/build_orb_bins.sh` with the binary. -/
@@ -17,7 +17,7 @@ lean_lib «LeanUISpec» where
   precompileModules := false
 
 lean_lib «LeanUIRuntime» where
-  roots := #[`LeanUI.FFI, `LeanUI.Wayland, `LeanUI.Text, `LeanUI.Vulkan, `LeanUI.Runtime, `LeanUI.Canary, `OrbDesktop.Core, `OrbDesktop.RepaintCheck, `OrbDesktop.Main]
+  roots := #[`LeanUI.FFI, `LeanUI.Wayland, `LeanUI.Text, `LeanUI.Vulkan, `LeanUI.Runtime, `LeanUI.Canary, `OrbDesktop.EmbeddedSidebar, `OrbDesktop.Core, `OrbDesktop.RepaintCheck, `OrbDesktop.Main]
   precompileModules := false
 
 target lean_ui_wayland_o pkg : FilePath := do
@@ -47,11 +47,19 @@ target lean_ui_vulkan_o pkg : FilePath := do
   let cDir := pkg.dir / "c"
   buildO oFile srcJob #["-I", leanIncludeDir.toString, "-I", cDir.toString] #["-std=c11", "-O2", "-fPIC"] ((← IO.getEnv "LEAN_CC").getD "cc")
 
+target lean_ui_sidebar_o pkg : FilePath := do
+  let oFile := pkg.buildDir / "c" / "lean_ui_sidebar.o"
+  let srcJob ← inputTextFile <| pkg.dir / "c" / "lean_ui_sidebar.c"
+  let leanIncludeDir ← getLeanIncludeDir
+  let cDir := pkg.dir / "c"
+  buildO oFile srcJob #["-I", leanIncludeDir.toString, "-I", cDir.toString] #["-std=c11", "-O2", "-fPIC"] ((← IO.getEnv "LEAN_CC").getD "cc")
+
 extern_lib liblean_ui_c pkg := do
   let wlO ← lean_ui_wayland_o.fetch
   let txO ← lean_ui_text_o.fetch
   let vkO ← lean_ui_vulkan_o.fetch
-  buildStaticLib (pkg.staticLibDir / nameToStaticLib "lean_ui_c") #[wlO, txO, vkO]
+  let sidebarO ← lean_ui_sidebar_o.fetch
+  buildStaticLib (pkg.staticLibDir / nameToStaticLib "lean_ui_c") #[wlO, txO, vkO, sidebarO]
 
 lean_exe «orb-desktop-native» where
   root := `OrbDesktop.Main
