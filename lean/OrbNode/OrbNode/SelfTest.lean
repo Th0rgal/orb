@@ -41,21 +41,21 @@ private def assertTrue (label : String) (cond : Bool) : IO Unit := do
 
 private def testNativeFileAdmission : IO Unit := do
   let grant := "orb-agy-v1_private-fixture"
-  let rec : JobRecord := { jobId := "job", missionId := "m", ownerUserId := "u", execUnixUser := "orb-u",
+  let job : JobRecord := { jobId := "job", missionId := "m", ownerUserId := "u", execUnixUser := "orb-u",
     execUid := 2500, createdAt := "", state := .running,
     payloadJson := renderCompact (.obj #[("env", .obj #[("ORB_NATIVE_ANTIGRAVITY_TOKEN", .str grant)])]) }
   let file := JVal.obj #[("action", .str "write_file")]
   let j := JVal.obj #[("uid", .nat 2500), ("unix_user", .str "orb-u"), ("owner", .str "u"), ("mission", .str "m"),
     ("grant_sha256", .str (bytesToHexLower (sha256Bytes grant.toUTF8))), ("file", file)]
-  assertTrue "native job writer" ((admittedNativeFile? rec j).isSome)
+  assertTrue "native job writer" ((admittedNativeFile? job j).isSome)
   for key in #["uid", "unix_user", "owner", "mission", "grant_sha256"] do
-    assertTrue "foreign or mismatched placement" ((admittedNativeFile? rec (j.setField key (.str "different"))).isNone)
-  let readonly := { rec with authorityMode := "readonly" }
+    assertTrue "foreign or mismatched placement" ((admittedNativeFile? job (j.setField key (.str "different"))).isNone)
+  let readonly := { job with authorityMode := "readonly" }
   assertTrue "native job readonly denies write" ((admittedNativeFile? readonly j).isNone)
   assertTrue "native job readonly permits read" ((admittedNativeFile? readonly
     (j.setField "file" (file.setField "action" (.str "read_file")))).isSome)
-  assertTrue "native job stopped" ((admittedNativeFile? {rec with state := .cancelled} j).isNone)
-  assertTrue "native grant absent" ((admittedNativeFile? {rec with payloadJson := "{}"} j).isNone)
+  assertTrue "native job stopped" ((admittedNativeFile? {job with state := .cancelled} j).isNone)
+  assertTrue "native grant absent" ((admittedNativeFile? {job with payloadJson := "{}"} j).isNone)
 
 private def responseBodyPrefix (body : ByteArray) : String :=
   ((String.fromUTF8? body).getD "").take 300 |>.toString
