@@ -279,6 +279,17 @@ def buildReferenceTurnWidget (theme : Theme) (colW : SubPx) (stepNum : Nat) : Wi
 
 def transcriptTextWidth (mainW : SubPx) := min (pxToSub 748) (mainW - pxToSub 48) - pxToSub 40
 
+/-- Human-readable label for Core's persisted conversation status. -/
+def conversationStatusLabel (status : String) : String :=
+  match status with
+  | "awaiting_user" | "waiting_user" | "acknowledged" => "Ready for a follow-up"
+  | "blocked" => "Waiting for input"
+  | "waiting_background" => "Waiting for background work"
+  | _ => (status.replace "_" " ").capitalize
+
+#guard conversationStatusLabel "awaiting_user" == "Ready for a follow-up"
+#guard conversationStatusLabel "waiting_background" == "Waiting for background work"
+
 /-- Build the Mission Transcript body (`03_mission_transcript`) matching the SolidJS transcript column. -/
 def buildMissionTranscriptBody (st : DesktopState) (mainW bodyH : SubPx)
     (_runs : ShapedScreenRuns) : WidgetNode :=
@@ -310,7 +321,7 @@ def buildMissionTranscriptBody (st : DesktopState) (mainW bodyH : SubPx)
         theme.typo.lineBase _runs.streamRuns (some 900)]]
 
   let liveRows := liveStreamRow ++ (st.selectedCard.toList.map fun c =>
-    screenTextLine theme colW (pxToSub 21) (pxToSub 12) (pxToSub 21) pal.textMuted c.status)
+    screenTextLine theme colW (pxToSub 21) (pxToSub 12) (pxToSub 21) pal.textMuted (conversationStatusLabel c.status))
   Id.run do
     let rows := if st.liveData then liveRows else [turn58, turn59] ++ liveStreamRow ++ [workingRow]
     let column := WidgetNode.box { BoxStyle.col (pxToSub 23) with minWidth := colW, maxWidth := colW } rows

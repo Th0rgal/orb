@@ -1,5 +1,9 @@
 # Live native mission writes
 
+The native conversation displays “Ready for a follow-up” for a mission waiting
+for the user. Core's status value remains available to the sidebar and to
+mission actions. Rendering the conversation must preserve its transcript.
+
 * Leaving the composer or losing text-input focus cancels preedit. Committed text stays in the draft. Activating Send after blur must not require another text edit.
 * An unconfirmed Send retains its submission ID for a retry of the same draft on the same mission. Even if the mission is now running, that activation retries Send rather than stopping the turn. Core authorizes the caller before replaying a receipt; it must not append or dispatch the same submission again.
 * Stop on a Core-local turn must tear down its harness process. An `interrupted` database row alone is insufficient evidence. Archive must persist across a Core restart.
