@@ -240,3 +240,12 @@ reload. Credential owners and administrators control the account-wide exclusion.
 When an older Core reports the requested settings endpoint missing, the row
 explains the version requirement and offers Retry. A failed read leaves the
 route and permission unconfirmed.
+
+### Reconnecting a Direct Codex subscription
+
+Reconnect updates the credential file uniquely bound to the selected Orb account.
+The sidecar must acknowledge that file before Core opens consent, and Core waits
+for a changed credential at that binding before it reports completion. Another
+file with the same email cannot complete the session. A legacy account with a
+missing or ambiguous file is reported in Inference before the browser opens.
+The user can return to Subscriptions and use a connected account or add one.
