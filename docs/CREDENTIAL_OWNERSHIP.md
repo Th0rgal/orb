@@ -106,10 +106,18 @@ management catalog. Requests retain `antigravity/<model>` all the way to the
 proxy, so a Claude model selected through Google cannot consume a Claude
 subscription by accident. No Google refresh token is exported to a workspace.
 
-The native `agy` agent remains a machine-local harness, with installation and
-login controls under Orb Settings. Connecting a proxy subscription enables
-model inference through the backend; it does not replace the native agent's
-session protocol or sign it in on other machines.
+For remote native missions, the worker runs `agy` in the mission workspace.
+Core discovers models on each enabled subscription using that account’s configured
+route. The first turn binds the mission to an account. On subsequent turns Core
+checks that account’s availability and the mission owner’s preference again.
+
+The worker gives the CLI a loopback credential. Its relay forwards native
+requests to Core using a grant scoped to the active job, mission, account and
+model. Core attaches the Google access token and uses the configured Direct
+or VPN transport. The native conversation stays in its private workspace
+across turns. Separate provider settings control whether alternative routers
+can also use the subscription. When no Antigravity subscription is configured,
+the bootstrap administrator can still use the node’s own native login.
 
 After rollout, reconnect any account marked as needing authentication. A
 rejected refresh token requires fresh browser consent; importing it again

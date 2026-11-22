@@ -738,13 +738,14 @@ fun OrbConversationPage(
     }
     val remoteGoalTarget = selectedWorkspaceId.isEmpty() && selectedNodeId.isNotEmpty() && selectedNodeId != "core" &&
         selectedBackend !in setOf("cursor_cloud", "grok_bot", "hermes")
-    var remoteGoalAvailable by remember(selectedBackend, remoteGoalTarget, missionId) { mutableStateOf(false) }
-    LaunchedEffect(selectedBackend, remoteGoalTarget, missionId) {
-        if (remoteGoalTarget && missionId == null) {
-            remoteGoalAvailable = runCatching { OrbRemoteGoal.supports(core.fetchDict("/api/remote-nodes"), selectedBackend) }.getOrDefault(false)
-        }
+    val defaultOpenCodeOnCore = selectedBackend == "opencode" && selectedModel.isBlank() && !nodePinnedByUser
+    val draftRemoteNode = selectedNodeId.takeIf { remoteGoalTarget && missionId == null && !defaultOpenCodeOnCore }
+    var launchFleet by remember(draftRemoteNode) { mutableStateOf<OrbDict>(emptyMap()) }
+    LaunchedEffect(draftRemoteNode) {
+        if (draftRemoteNode != null) launchFleet = runCatching { core.fetchDict("/api/remote-nodes") }.getOrDefault(emptyMap())
     }
-    val offersGoal = !remoteGoalTarget || remoteGoalAvailable
+    val nativeLaunchWarning = draftRemoteNode?.let { OrbNativeLaunch.warning(launchFleet, it) }
+    val offersGoal = !remoteGoalTarget || (missionId == null && defaultOpenCodeOnCore) || (missionId == null && OrbRemoteGoal.supports(launchFleet, selectedBackend))
     var allow24hCommitment by remember(currentMission?.id) { mutableStateOf(false) }
     var managedCatalog by remember { mutableStateOf<ManagedMachinesResponse?>(null) }
     LaunchedEffect(showAgentPicker, currentMission?.id) {
@@ -2017,9 +2018,11 @@ fun OrbConversationPage(
         isSending = true
         scope.launch {
             try {
-                if (remoteGoalTarget && (composeMode == OrbComposeMode.Goal || Regex("^/goal(?:\\s|$)", RegexOption.IGNORE_CASE).containsMatchIn(text))) {
-                    if (missionId != null || !OrbRemoteGoal.supports(core.fetchDict("/api/remote-nodes"), selectedBackend))
-                        throw OrbError(OrbRemoteGoal.UNSUPPORTED)
+                if (remoteGoalTarget && (missionId != null || !defaultOpenCodeOnCore)) {
+                    val goal = composeMode == OrbComposeMode.Goal || Regex("^/goal(?:\\s|$)", RegexOption.IGNORE_CASE).containsMatchIn(text)
+                    if (missionId == null) {
+                        OrbNativeLaunch.require(selectedNodeId, selectedBackend.takeIf { goal }) { core.fetchDict("/api/remote-nodes") }
+                    } else if (goal) throw OrbError(OrbRemoteGoal.UNSUPPORTED)
                 }
                 validateComposerSkills(composeMode.wrapPrompt(text))?.let { err ->
                     errorMessage = err
@@ -2047,7 +2050,7 @@ fun OrbConversationPage(
                 val remote = (selectedWorkspaceId.isEmpty() &&
                     selectedNodeId.isNotEmpty() && selectedNodeId != "core" &&
                     selectedBackend !in setOf("cursor_cloud", "grok_bot", "hermes") &&
-                    !(selectedBackend == "opencode" && selectedModel.isBlank() && !nodePinnedByUser))
+                    !defaultOpenCodeOnCore)
                 OrbCyberAccess.requireSupport(model, selection, remote,
                     OrbCyberAccess.nativeGoal(backend, composeMode.wrapPrompt(text))) { path ->
                     OrbJSON.dict(core.request(path)) ?: emptyMap()
@@ -3085,6 +3088,9 @@ fun OrbConversationPage(
                 .padding(horizontal = 14.dp, vertical = 8.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
+            if (nativeLaunchWarning != null) {
+                Text(nativeLaunchWarning, color = OrbStyle.textSecondary, fontSize = 12.sp)
+            }
             // @ context file mention popup
             if (matchingContextFiles.isNotEmpty()) {
                 OrbContextFilesPopup(
@@ -3507,7 +3513,7 @@ fun OrbConversationPage(
                             }
                         }
 
-                        val canSend = inputText.trim().isNotEmpty() || pendingAttachments.isNotEmpty()
+                        val canSend = nativeLaunchWarning == null && (inputText.trim().isNotEmpty() || pendingAttachments.isNotEmpty())
                         Box(
                             modifier = Modifier
                                 .size(44.dp)

@@ -492,7 +492,7 @@ extension OrbConversation {
     }
 
     var canSend: Bool {
-        (!busy || canDeferSend) && !cloudBlocked && modeQuery == nil && !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        (!busy || canDeferSend) && !cloudBlocked && nativeLaunchWarning == nil && modeQuery == nil && !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     var composer: some View {
@@ -525,7 +525,9 @@ extension OrbConversation {
                 Text(OrbRemoteGoal.label(remoteGoalPhase, iteration: Int(mission["goal_iteration"].doubleValue ?? 0)))
                     .font(.caption).foregroundStyle(OrbStyle.textSecondary)
             }
-            if !offersGoal && (mode == "Goal" || text == "/" || text.lowercased().hasPrefix("/g")) {
+            if let reason = nativeLaunchWarning {
+                Text(reason).font(.caption).foregroundStyle(OrbStyle.textSecondary)
+            } else if !offersGoal && (mode == "Goal" || text == "/" || text.lowercased().hasPrefix("/g")) {
                 Text(OrbRemoteGoal.unsupported).font(.caption).foregroundStyle(OrbStyle.textSecondary)
             }
             if !attachments.isEmpty { OrbAttachments(files: $attachments, error: $error, canAdd: false) }
@@ -668,10 +670,10 @@ extension OrbConversation {
             .accessibilityLabel("Agent and model: \(selection.label)")
             .accessibilityIdentifier("agent-selection")
         }
-        .task(id: remoteGoalTarget) {
-            guard remoteGoalTarget, id == nil else { return }
-            if let fleet = try? await api.call("/api/remote-nodes") {
-                remoteGoalHarnesses = Set(fleet["remote_launch"]["goal_harnesses"].items.map(\.text))
+        .task(id: draftRemoteNode) {
+            guard draftRemoteNode != nil else { return }
+            if let fleet = try? await api.call("/api/remote-nodes"), !Task.isCancelled {
+                launchFleet = fleet
             }
         }
     }

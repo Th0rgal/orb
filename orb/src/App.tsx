@@ -59,7 +59,7 @@ import { ErrorToast, SlotActiveContext, notify } from "./toast";
 import { copyText } from "./clipboard";
 import type { ApprovalConfirmationPrompt } from "./tree/moves";
 const ApprovalTransferDialog = lazy(() => import("./ApprovalTransferDialog"));
-import { rememberLaunch, recalledLaunch, missionDestination, launchRefusal, isAdministrationNode, remoteLaunchPreflight, remoteGoalPreflight, remoteHarnessSupport, remoteLaunchUnconfirmed, missionGoal, type LaunchReceipt, type LaunchRefusal, type RemoteSupport } from "./missionLaunch";
+import { rememberLaunch, recalledLaunch, missionDestination, nativeLaunchWarning, launchRefusal, isAdministrationNode, remoteLaunchPreflight, remoteGoalPreflight, remoteHarnessSupport, remoteLaunchUnconfirmed, missionGoal, type LaunchReceipt, type LaunchRefusal, type RemoteSupport } from "./missionLaunch";
 import { goalDraft, goalPrompt, planObjective, missionTitle, displayTitle, EMPTY_GOAL_ERROR, remoteGoalSupport, REMOTE_GOAL_UNSUPPORTED } from "./goal";
 import { chipToAttachment, type AttachChip } from "./attach";
 import { DEFAULT_PROJECT, ensureDefaultProject, projectChoices, requireLaunchProject } from "./defaultProject";
@@ -515,8 +515,9 @@ export default function App() {
    * until the first answer; "error" keeps the last capability but says so. */
   const [remoteLaunch, setRemoteLaunch] = createSignal<{ state: "loading" | "ready" | "error"; capability: RemoteLaunchCapability | null }>({ state: "loading", capability: null });
   const acceptFleet = (fleet: RemoteNodesResponse) => {
+    if (!Array.isArray(fleet?.nodes)) throw new Error("Invalid remote node list");
     setFleetNodes(fleet.nodes);
-    if (Array.isArray(fleet.nodes)) cachePut("machines:nodes", fleet.nodes);
+    cachePut("machines:nodes", fleet.nodes);
     recordFleet(fleet.nodes);
     setRemoteLaunch({ state: "ready", capability: fleet.remote_launch ?? null });
   };
@@ -2306,6 +2307,7 @@ export default function App() {
                   tall
                   scope="new-agent"
                   uploadTarget={newMachine()}
+                  launchUnavailable={nativeLaunchWarning(fleetNodes().find(n => n.id === newMachine())?.launch_block)}
                   goalUnavailable={newMachine() !== "local" && newMachine() !== "core" && !remoteGoalSupport(remoteLaunch().capability, effectivePick(newMachine())?.backend) ? REMOTE_GOAL_UNSUPPORTED : undefined}
                   remoteSupport={remoteSupport}
                   harnessIds={newMachine() === "local" ? installedIds() : undefined}

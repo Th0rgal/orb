@@ -175,7 +175,8 @@ object OrbQuestionExtractor {
         val input = OrbJSON.dict(params["input"])
         val detail = OrbJSON.str(params, "plan") ?: OrbJSON.str(input, "description")
         val opts = if (method == "permission") {
-            listOf("Allow once", "Allow for session", "Decline")
+            if (OrbJSON.bool(input, "once_only") == true) listOf("Allow once", "Decline")
+            else listOf("Allow once", "Allow for session", "Decline")
         } else {
             listOf("Approve", "Decline")
         }

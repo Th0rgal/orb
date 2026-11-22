@@ -68,17 +68,27 @@ static lean_object *mk_sql_err(sqlite3 *db, const char *fallback) {
     return lean_io_result_mk_ok(ctor);
 }
 
-LEAN_EXPORT lean_obj_res orb_sqlite_open(b_lean_obj_arg path_obj, lean_obj_arg w) {
-    (void)w;
+static lean_obj_res open_database(b_lean_obj_arg path_obj, int flags, int readonly) {
     if (!ensure_sqlite()) return lean_io_result_mk_ok(lean_box_uint64(0));
     sqlite3 *db = NULL;
-    if (sq.open_v2(lean_string_cstr(path_obj), &db, SQLITE_OPEN_FLAGS, NULL) != SQLITE_OK) {
+    if (sq.open_v2(lean_string_cstr(path_obj), &db, flags, NULL) != SQLITE_OK) {
         if (db != NULL) sq.close_v2(db);
         return lean_io_result_mk_ok(lean_box_uint64(0));
     }
     if (sq.busy_timeout) sq.busy_timeout(db, 5000);
-    (void)sq.exec(db, "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA foreign_keys=ON;", NULL, NULL, NULL);
+    if (!readonly) (void)sq.exec(db, "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA foreign_keys=ON;", NULL, NULL, NULL);
     return lean_io_result_mk_ok(lean_box_uint64((uint64_t)(uintptr_t)db));
+}
+
+LEAN_EXPORT lean_obj_res orb_sqlite_open(b_lean_obj_arg path_obj, lean_obj_arg w) {
+    (void)w;
+    return open_database(path_obj, SQLITE_OPEN_FLAGS, 0);
+}
+
+LEAN_EXPORT lean_obj_res orb_sqlite_open_readonly(b_lean_obj_arg path_obj, lean_obj_arg w) {
+    (void)w;
+    /* SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX; no schema or pragmas are written. */
+    return open_database(path_obj, 0x00000001 | 0x00010000, 1);
 }
 
 LEAN_EXPORT lean_obj_res orb_sqlite_close(uint64_t handle, lean_obj_arg w) {

@@ -87,7 +87,7 @@ def candidates (store : CoreStore) (nodes : Array StaticRemoteNode) : IO (Array 
     load := (rows.extract 1 rows.size).map fun row => (normalize (cell row 0), ((cell row 1).toNat?).getD 0)
   return nodes.map fun node => {
     id := node.id
-    reserved := reserved node
+    reserved := node.dedicatedOwner?.isSome || reserved node
     cordoned := cordons.contains (normalize node.id)
     activeJobs := ((load.find? (·.1 == normalize node.id)).map (·.2)).getD 0
   }

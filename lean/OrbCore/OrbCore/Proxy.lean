@@ -2405,7 +2405,12 @@ def proxyUsageOfObject (u : JVal) : ProxyUsage :=
     cacheRead := Nat.max cachedInPrompt anthropicCacheRead
     reasoning := Nat.max (detail "completion_tokens_details" "reasoning_tokens") (detail "output_tokens_details" "reasoning_tokens") }
 
-private def proxyUsageOfEvent (jv : JVal) : ProxyUsage :=
+private def proxyUsageOfEvent (jv : JVal) : ProxyUsage := Id.run do
+  if let some usageMeta := (jv.fieldOrNull "response").field? "usageMetadata" then
+    let cached := (usageMeta.fieldNat? "cachedContentTokenCount").getD 0
+    let thought := (usageMeta.fieldNat? "thoughtsTokenCount").getD 0
+    return { input := (usageMeta.fieldNat? "promptTokenCount").getD 0 - cached, cacheRead := cached
+             reasoning := thought, output := (usageMeta.fieldNat? "candidatesTokenCount").getD 0 + thought }
   let fromField (holder : JVal) : ProxyUsage := ((holder.field? "usage").map proxyUsageOfObject).getD {}
   let merge (a b : ProxyUsage) : ProxyUsage :=
     { input := Nat.max a.input b.input, output := Nat.max a.output b.output

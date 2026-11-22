@@ -218,7 +218,7 @@ export default function NativeInteractionPrompt(p: {
                 >
                   {r().method === "plan" ? "Request changes" : "Decline"}
                 </button>
-                <Show when={r().method === "permission"}>
+                <Show when={r().method === "permission" && !r().params.input?.once_only}>
                   <button
                     class="s-btn native-secondary"
                     disabled={sending()}

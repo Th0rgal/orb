@@ -604,6 +604,22 @@ def probeClaudeModels (binPath : String) : IO (Except String (Array (String × S
     if waitedMs >= 8000 then return .error "Claude Code model discovery timed out"
     else return .error "Sign in with claude on this computer"
 
+def parseAntigravityModelList (output : String) : Except String (Array (String × String)) := do
+  let mut pairs : Array (String × String) := #[]
+  for line in output.splitOn "\n" do
+    let clean := (line.dropEndWhile (· == '\r')).toString
+    let cols := clean.splitOn "\t"
+    if h : cols.length >= 2 then
+      let id := cols[0].trimAscii.toString
+      let label := (String.intercalate "\t" cols.tail!).trimAscii.toString
+      if !id.isEmpty && !label.isEmpty then
+        pairs := pairs.push (id, label)
+  let grouped := groupAntigravityModels pairs
+  if grouped.isEmpty then
+    throw "No Antigravity models are available for this account"
+  return grouped
+
+
 /-- Discover Antigravity (`agy`) models via `agy models`. -/
 def probeAntigravityModels (binPath : String) : IO (Except String (Array (String × String))) := do
   if binPath.trimAscii.toString.isEmpty || !(← System.FilePath.pathExists binPath) then
@@ -617,19 +633,7 @@ def probeAntigravityModels (binPath : String) : IO (Except String (Array (String
   | .ok out =>
     if out.exitCode != 0 then
       return .error "Sign in with agy on this computer"
-    let mut pairs : Array (String × String) := #[]
-    for line in out.stdout.splitOn "\n" do
-      let clean := (line.dropEndWhile (· == '\r')).toString
-      let cols := clean.splitOn "\t"
-      if h : cols.length >= 2 then
-        let id := cols[0].trimAscii.toString
-        let label := (String.intercalate "\t" cols.tail!).trimAscii.toString
-        if !id.isEmpty && !label.isEmpty then
-          pairs := pairs.push (id, label)
-    let grouped := groupAntigravityModels pairs
-    if grouped.isEmpty then
-      return .error "No Antigravity models are available for this account"
-    return .ok grouped
+    return parseAntigravityModelList out.stdout
 
 /-- Capitalize well-known provider/vendor slugs for human-readable OpenCode model labels. -/
 private def formatOpenCodeVendorName (slug : String) : String :=

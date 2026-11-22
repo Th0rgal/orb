@@ -4,6 +4,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Test
 import java.io.File
+import kotlinx.coroutines.runBlocking
 
 class OrbRemoteGoalTest {
     @Test
@@ -35,6 +36,27 @@ class OrbRemoteGoalTest {
             val phase = OrbRemoteGoal.phase(fixture["status"] as String, fixture["reason"] as String)
             assertEquals(name, fixture["phase"], phase)
             assertEquals(name, fixture["label"], OrbRemoteGoal.label(phase, (fixture["iteration"] as Number).toInt()))
+        }
+    }
+
+    @Test
+    fun nativeLaunchChecksFreshFleetBeforeSubmitting() = runBlocking {
+        val fleet = OrbSpec.dict("fixtures/native-launch-preflight.json")
+        for (raw in fleet["cases"] as List<*>) {
+            val row = requireNotNull(OrbJSON.dict(raw))
+            val node = row["node"] as String
+            var reads = 0
+            val error = try {
+                OrbNativeLaunch.require(node, row["goal_backend"] as? String) {
+                    reads += 1
+                    fleet
+                }
+                null
+            } catch (error: OrbError) {
+                error.message
+            }
+            assertEquals(node, row["error"], error)
+            assertEquals(node, (row["reads"] as Number).toInt(), reads)
         }
     }
 

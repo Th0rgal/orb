@@ -1,0 +1,70 @@
+{
+  "nodes": [
+    {
+      "id": "ordinary"
+    },
+    {
+      "id": "dedicated",
+      "launch_block": "native_owner_executor_unavailable"
+    },
+    {
+      "id": "unenrolled",
+      "launch_block": "native_owner_enrollment_required"
+    }
+  ],
+  "remote_launch": {
+    "goal_harnesses": [
+      "opencode"
+    ]
+  },
+  "cases": [
+    {
+      "node": "core",
+      "goal_backend": null,
+      "error": null,
+      "reads": 0
+    },
+    {
+      "node": "auto-managed:boat",
+      "goal_backend": null,
+      "error": null,
+      "reads": 0
+    },
+    {
+      "node": "ordinary",
+      "goal_backend": null,
+      "error": null,
+      "reads": 1
+    },
+    {
+      "node": "ordinary",
+      "goal_backend": "opencode",
+      "error": null,
+      "reads": 1
+    },
+    {
+      "node": "ordinary",
+      "goal_backend": "antigravity",
+      "error": "Goal mode is unavailable for this remote harness because it cannot continue the objective safely. Choose OpenCode or send a standard turn.",
+      "reads": 1
+    },
+    {
+      "node": "dedicated",
+      "goal_backend": null,
+      "error": "The isolated workspace executor for this enrolled Antigravity account is unavailable. Choose another machine to start a mission.",
+      "reads": 1
+    },
+    {
+      "node": "dedicated",
+      "goal_backend": "antigravity",
+      "error": "The isolated workspace executor for this enrolled Antigravity account is unavailable. Choose another machine to start a mission.",
+      "reads": 1
+    },
+    {
+      "node": "unenrolled",
+      "goal_backend": null,
+      "error": "This node needs an enabled Antigravity account. Check its enrollment in provider settings or choose another machine.",
+      "reads": 1
+    }
+  ]
+}

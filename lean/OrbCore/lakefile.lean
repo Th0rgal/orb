@@ -46,6 +46,12 @@ lean_exe «orb-core-test» where
   root := `OrbCore.SelfTest
   supportInterpreter := false
 
+/-- Explicit private dev qualification; excluded from defaults, packages and service startup. -/
+lean_exe «orb-native-read-probe» where
+  moreLinkArgs := if System.Platform.isOSX then #["-lssl", "-lcrypto"] else #["-lssl", "-lcrypto", "-lutil", "-ldl"]
+  root := `OrbCore.NativeReadProbeMain
+  supportInterpreter := false
+
 /-- Credential-owner integration fixture for scripts/test_airvpn_sidecar.py. -/
 lean_exe «orb-airvpn-sidecar-test» where
   moreLinkArgs := if System.Platform.isOSX then #["-lssl", "-lcrypto"] else #["-lssl", "-lcrypto", "-lutil", "-ldl"]

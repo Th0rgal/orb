@@ -7455,6 +7455,11 @@ private def runRemoteDispatchWakeupAndBtwTests (_baseCfg : CoreConfig) : IO UInt
   if sseUsage != { input := 40, output := 25, cacheCreate := 60, cacheRead := 900 } then
     return (← fail s!"SSE usage was not merged across events: {repr sseUsage}")
 
+  let nativeUsage := extractProxyUsage
+    "data: {\"response\":{\"usageMetadata\":{\"promptTokenCount\":12,\"cachedContentTokenCount\":3,\"candidatesTokenCount\":4,\"thoughtsTokenCount\":2}}}\n\n".toUTF8
+  if nativeUsage != { input := 9, cacheRead := 3, output := 6, reasoning := 2 } then
+    return (← fail s!"Native Antigravity usage buckets differ: {repr nativeUsage}")
+
   -- 6. Remote node job cancellation reconciliation:
   --    (a) Core-initiated stop (`POST /api/control/missions/:id/stop`) cancels the node job and reconciles
   --        both `remote_node_jobs` and `projects.remote_jobs` to `'cancelled'` (so `activeJobsByNode` drops to 0).

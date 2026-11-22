@@ -20,6 +20,8 @@ private def routeStorage (root : String) : IO Unit := do
     check ((← AccountVpnRoutes.resolve db "a" blocked).toOption == some none) "legacy Direct route"
     check (← AccountVpnRoutes.set db "a" none).isOk "explicit Direct on legacy account"
     check (← AccountVpnRoutes.checkGeneration db "a" 0).isOk "unchanged legacy Direct exchange remains valid"
+    check (← AccountVpnRoutes.set db "a" none).isOk "retry explicit Direct"
+    check (← AccountVpnRoutes.checkGeneration db "a" 1).isOk "saved Direct choice is idempotent"
     check (← AccountVpnRoutes.set db "a" (some "NL")).isOk "enable VPN for one account"
     let some first := (← AccountVpnRoutes.read db "a").toOption.join | throw (IO.userError "vpn preference missing")
     check (!(← AccountVpnRoutes.checkGeneration db "a" 0).isOk &&
@@ -134,11 +136,11 @@ def run (root : String) : IO Unit := do
     "compressed and expanded IPv6 match"
   check ((parseIp "fe80::1%eth0").isNone && (parseIp "1.2.3.4\x00ignored").isNone)
     "zone and NUL reject"
-  let sessions := #[JVal.obj #[("server_name", .str "West"), ("server_country_code", .str "NL"),
+  let sessions := #[JVal.obj #[("server_name", .str "West"), ("server_country_code", .str "nl"),
     ("exit_ip", .str "1.2.3.4")]]
   let observed := AirVpnObservation.verifyObservation?
   check ((observed "west" "NL" sessions v4 (some v6)).any (fun t => t.exits == [v4, v6]))
-    "active server matches independent receiver"
+    "AirVPN lowercase country matches requested country and independent receiver"
   check ((observed "west" "US" sessions v4 none).isNone &&
       (observed "east" "NL" sessions v4 none).isNone &&
       (observed "west" "NL" sessions (.v4 123) none).isNone &&

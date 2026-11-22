@@ -45,6 +45,11 @@ A route change can require another authenticated exchange. -/
 def checkGeneration (db : SqliteDb) (account : String) (expected : Nat) : IO (Except String Unit) := do
   match ← snapshot db account with
   | .error e => return .error e
+  | .ok (.direct 1) =>
+    -- Persisting an already Direct account for the first time does not change
+    -- the egress of an OAuth exchange started on its implicit generation zero.
+    if expected ≤ 1 then return .ok ()
+    return .error "vpn_route_changed"
   | .ok current =>
     if current.generation == expected then return .ok ()
     return .error "vpn_route_changed"
@@ -53,8 +58,7 @@ def checkGeneration (db : SqliteDb) (account : String) (expected : Nat) : IO (Ex
 off and on again cannot accidentally reuse an older admission generation. -/
 def set (db : SqliteDb) (account : String) (country? : Option String) : IO (Except String Unit) := do
   if account.isEmpty || country?.any (fun c => !validCountry c) then return .error "invalid_vpn_preference"
-  let sql := "INSERT INTO account_vpn_routes(account_id,country) SELECT ?1,?2 " ++
-    "WHERE ?2<>'' OR EXISTS (SELECT 1 FROM account_vpn_routes WHERE account_id=?1) " ++
+  let sql := "INSERT INTO account_vpn_routes(account_id,country) VALUES (?1,?2) " ++
     "ON CONFLICT(account_id) DO UPDATE SET country=excluded.country, generation=generation+1, preferred_server='' " ++
     "WHERE account_vpn_routes.country<>excluded.country;"
   let r ← execParamQuery db sql #[account, country?.getD ""]

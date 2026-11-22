@@ -107,6 +107,13 @@ export function withInitialPrompt(items: StreamItem[], mission: Mission | null, 
   return (receipt || prompt) ? items.map((item,index) => index === first ? {...item,key,...(item.kind === "user" && !item.at && initialAt ? { at: initialAt } : {}),...(receipt?.replacement && item.kind === "user" ? {text:receipt.prompt} : {})} : item) : items;
 }
 export const TYPED_LAUNCH_UNSUPPORTED = "This backend does not support structured remote launches. Update the connected backend to enable them. Your draft and selection are kept; no mission was submitted.";
+export function nativeLaunchWarning(reason?: string): string | undefined {
+  if (reason === "native_owner_executor_unavailable")
+    return "The isolated workspace executor for this enrolled Antigravity account is unavailable. Choose another machine to start a mission.";
+  if (reason === "native_owner_enrollment_required")
+    return "This node needs an enabled Antigravity account. Check its enrollment in provider settings or choose another machine.";
+}
+
 export type RemoteSupport = "supported" | "unsupported" | "unknown";
 /** Whether the server has confirmed typed remote launches for a harness id. Nothing is assumed until it does. */
 export function remoteHarnessSupport(capability: RemoteLaunchCapability | null | undefined, backend: string): RemoteSupport {
@@ -145,6 +152,8 @@ export function remoteLaunchPreflight(fleet: RemoteNodesResponse, nodeId: string
     return null;
   }
   const node = fleet.nodes?.find(n => n.id === nodeId);
+  const blocked = nativeLaunchWarning(node?.launch_block);
+  if (blocked) return blocked;
   if (!fleet.enabled || !node || (node.cordoned && !isAdministrationNode(node)) || !["online","degraded"].includes(node.status)) return `${destination} is unavailable. Choose an available machine; your draft is kept.`;
   if (node.quarantined_harnesses?.includes(pick.backend)) {
     return `${harnessName(pick.backend)} is temporarily unavailable on ${destination} after a provider region or egress rejection. Choose Core or another machine; your draft is kept.`;
