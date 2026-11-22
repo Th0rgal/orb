@@ -13,8 +13,7 @@
 #include <unistd.h>
 #if defined(ORB_HAS_WEBKITGTK)
 #include "gtk_leanui.h"
-#endif
-#if defined(ORB_HAS_WEBKITGTK)
+#include "gtk_disclosure.h"
 typedef struct { GtkWidget *win, *wv, *paned, *sb_box, *sb_list, *back_btn, *fwd_btn, *foot_btn, *foot_badge; OrbIconSpinner spin; JSCContext *jsc; GIOChannel *sse_ch; guint sse_src, retry_src; GString *sse_buf; GtkCssProvider *css; unsigned port; char token[128], *sb_scope; guint64 sb_req_gen, sb_scope_gen, sb_min_gen, sb_rev; int sb_inflight, sb_dirty, closed; } OrbGtkChrome;
 typedef struct { OrbGtkChrome *c; unsigned port; char token[128], *body, *resp; int kind; guint64 gen; } RpcJob;
 static int accept_sb_resp(char **cur_sc, guint64 *sc_gen, guint64 min_gen, guint64 *cur_rv, guint64 rg, const char *sc, double rv) {
@@ -105,7 +104,8 @@ static GtkWidget *make_row_widget(OrbGtkChrome *c, JSCValue *it, int pal, char *
     if (add) { GtkWidget *ab = make_tb_btn(c, "plus", add[4] == 'p' ? "New project" : "New agent", G_CALLBACK(on_add_clicked)); gtk_style_context_add_class(gtk_widget_get_style_context(ab), "orb-add"); g_object_set_data_full(G_OBJECT(ab), "orb-add", add, g_free); gtk_box_pack_end(GTK_BOX(hb), ab, FALSE, FALSE, 0); }
     if (!pal && exp && strcmp(kind, "mission") == 0) {
         char ct[36]; if (cc > 0 && lcc > 0) { snprintf(ct, sizeof(ct), "%d/%d %s", (int)lcc, (int)cc, open ? "\xE2\x8C\x84" : "\xE2\x80\xBA"); } else if (cc > 0) { snprintf(ct, sizeof(ct), "%d %s", (int)cc, open ? "\xE2\x8C\x84" : "\xE2\x80\xBA"); } else { snprintf(ct, sizeof(ct), "%s", open ? "\xE2\x8C\x84" : "\xE2\x80\xBA"); }
-        GtkWidget *sb = gtk_button_new_with_label(ct); gtk_button_set_relief(GTK_BUTTON(sb), GTK_RELIEF_NONE); gtk_widget_set_focus_on_click(sb, FALSE); gtk_widget_set_valign(sb, GTK_ALIGN_CENTER); gtk_style_context_add_class(gtk_widget_get_style_context(sb), lcc > 0 ? "orb-sub-live" : "orb-sub"); orb_gtk_bind_pointer_cursor(sb);
+        GtkWidget *sb = gtk_button_new_with_label(ct); gtk_button_set_relief(GTK_BUTTON(sb), GTK_RELIEF_NONE); gtk_widget_set_valign(sb, GTK_ALIGN_CENTER); gtk_style_context_add_class(gtk_widget_get_style_context(sb), lcc > 0 ? "orb-sub-live" : "orb-sub"); orb_gtk_bind_pointer_cursor(sb);
+        orb_disclosure_bind(row, sb);
         g_object_set_data_full(G_OBJECT(sb), "orb-row-id", g_strdup(rid), g_free); g_signal_connect(sb, "clicked", G_CALLBACK(on_sub_btn_clicked), c); gtk_box_pack_end(GTK_BOX(hb), sb, FALSE, FALSE, 0);
     }
     if (badge > 0) { char bs[24]; snprintf(bs, sizeof(bs), "%d", (int)badge); GtkWidget *bl = gtk_label_new(bs); gtk_widget_set_valign(bl, GTK_ALIGN_CENTER); gtk_style_context_add_class(gtk_widget_get_style_context(bl), "orb-badge"); gtk_box_pack_end(GTK_BOX(hb), bl, FALSE, FALSE, 0); }
@@ -115,6 +115,7 @@ static GtkWidget *make_row_widget(OrbGtkChrome *c, JSCValue *it, int pal, char *
 }
 static void populate_from_array(OrbGtkChrome *c, GtkWidget *lb, JSCValue *arr, int pal) {
     const char *idk = pal ? "id" : "row_id"; gint32 len = (arr && jsc_value_is_array(arr)) ? jv_int(arr, "length") : 0, out = 0; if (len < 0) { len = 0; }
+    g_autofree char *focused_id = pal ? NULL : orb_disclosure_focused(c->win, lb);
     GHashTable *keep = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
     for (gint32 i = 0; i < len; ++i) { JSCValue *it = jsc_value_object_get_property_at_index(arr, (guint)i); if (it && jsc_value_is_object(it)) { char *id = jv_str(it, idk); if (*id) { g_hash_table_add(keep, id); } else { g_free(id); } } if (it) { g_object_unref(it); } }
     GList *ch = gtk_container_get_children(GTK_CONTAINER(lb)); for (GList *l = ch; l; l = l->next) { const char *id = g_object_get_data(G_OBJECT(l->data), "orb-row-id"); if (!id || !*id || !g_hash_table_contains(keep, id)) { gtk_widget_destroy(GTK_WIDGET(l->data)); } }
@@ -129,6 +130,7 @@ static void populate_from_array(OrbGtkChrome *c, GtkWidget *lb, JSCValue *arr, i
             for (gint32 j = out + 1; *rid && (lat = gtk_list_box_get_row_at_index(GTK_LIST_BOX(lb), j)) != NULL; ++j) { const char *lid = g_object_get_data(G_OBJECT(lat), "orb-row-id"); if (lid && strcmp(lid, rid) == 0) { gtk_widget_destroy(GTK_WIDGET(lat)); break; } }
             gtk_list_box_insert(GTK_LIST_BOX(lb), make_row_widget(c, it, pal, sig), out);
         }
+        if (focused_id && !strcmp(rid, focused_id)) orb_disclosure_refocus(lb, out);
         g_free(rid); g_object_unref(it); ++out;
     }
     GtkListBoxRow *tail; while ((tail = gtk_list_box_get_row_at_index(GTK_LIST_BOX(lb), out)) != NULL) { gtk_widget_destroy(GTK_WIDGET(tail)); }

@@ -25,7 +25,8 @@ from wayland_pointer import Pointer
 
 MISSIONS = [dict(id=f'aaaaaaaa-0000-4000-8000-00000000000{i}', title=title, project='orchard',
                  backend='codex', status=status, history=[], created_at='2026-10-01T10:00:00Z',
-                 updated_at='2026-10-01T11:00:00Z') for i, (title, status) in enumerate([('Copper', 'awaiting_user'), ('Plum', 'completed')])]
+                 updated_at='2026-10-01T11:00:00Z') for i, (title, status) in enumerate([('Copper', 'awaiting_user'), ('Plum', 'completed'), ('Maple', 'completed')])]
+MISSIONS[2]['parent_mission_id'] = MISSIONS[0]['id']
 PROVIDER = dict(provider='boat', display_name='Indigo Fleet', configured=True, enabled=True,
                 user_enabled=True, sizes=[], effective_enabled=True)
 TOKEN = 'fixture-member'
@@ -250,6 +251,15 @@ def run():
                 see('earlier')
                 see('latest')
                 check('selected first mission', lambda: (row('copper') or {}).get('selected'))
+                # Toggle twice after the server projection replaces the parent row.
+                _, parent_y = check('Copper label', lambda: words('copper').get('copper'))
+                was_open = row('copper')['expanded']
+                pointer.click(195, parent_y)
+                check('pointer toggles disclosure', lambda: row('copper')['expanded'] != was_open)
+                for expected in (was_open, not was_open):
+                    subprocess.run(['wtype', '-k', 'Return'], env=env, check=True)
+                    check('keyboard toggles disclosure', lambda: row('copper')['expanded'] == expected)
+                    assert row('copper')['selected']
                 click('plum')
                 see('plum')
                 check('selected second mission', lambda: (row('plum') or {}).get('selected'))

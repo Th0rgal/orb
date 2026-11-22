@@ -106,3 +106,7 @@ to New Agent restores the project title and draft. Composer shortcuts are inacti
 on the intervening pages. Text entered for an existing mission stays scoped to it.
 
 Project, roster and conversation reads belong to the connection that started them. A connection change cancels the pending read even when a local journal snapshot is available. Within the same connection, an offline read can still return locally journaled work.
+
+In both Linux sidebars, clicking a mission disclosure gives it keyboard focus.
+Return toggles the same mission on subsequent presses, including after a projection
+refresh replaces the row. Toggling leaves the open conversation selected.
