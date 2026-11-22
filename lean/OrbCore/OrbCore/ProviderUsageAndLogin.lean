@@ -298,6 +298,8 @@ def scanCliProxyAuthFiles : IO (Array CliAuthFileInfo) := do
                   prefixId := pfx
                   disabled := dis
                   mtimeSec := st.mtime
+                  nativeOnly := inferredType == "antigravity" &&
+                    ((AccountVpnSidecar.credentialModelExclusions? jv).map (·.contains "*")).getD true
                   fingerprint := hash raw
                   deviceToken := deviceTok
                 }
@@ -370,6 +372,7 @@ structure HydratedProvider where
   hasOAuth        : Bool
   oauthToken      : String
   oauthFile       : String
+  nativeOnly      : Bool := false
   /-- A credential matched to this account independently of legacy display fallbacks. -/
   boundOauthFile  : String := ""
   accountEmail    : String
@@ -503,6 +506,7 @@ def loadHydratedProviders (store : CoreStore) (workingDir : String) : IO (Array 
       hasOAuth := hasOAuth
       oauthToken := effOauthTok
       oauthFile := effOauthFile
+      nativeOnly := matchedAuth?.any (·.nativeOnly)
       boundOauthFile := (boundAuth?.map (·.fileName)).getD ""
       modelPrefix := (matchedAuth?.map uniquePrefix).getD ""
       accountEmail := effEmail
@@ -554,6 +558,7 @@ def loadHydratedProviders (store : CoreStore) (workingDir : String) : IO (Array 
         hasOAuth := hasOa
         oauthToken := (matchedAuth?.map (·.accessToken)).getD effLegTok
         oauthFile := (matchedAuth?.map (·.fileName)).getD refFile
+        nativeOnly := matchedAuth?.any (·.nativeOnly)
         boundOauthFile := (matchedAuth?.map (·.fileName)).getD ""
         modelPrefix := (matchedAuth?.map uniquePrefix).getD ""
         accountEmail := if !email.isEmpty then email else (matchedAuth?.map (·.email)).getD ""
@@ -586,6 +591,7 @@ def loadHydratedProviders (store : CoreStore) (workingDir : String) : IO (Array 
         hasOAuth := true
         oauthToken := af.accessToken
         oauthFile := af.fileName
+        nativeOnly := af.nativeOnly
         boundOauthFile := af.fileName
         modelPrefix := uniquePrefix af
         accountEmail := af.email
@@ -710,7 +716,7 @@ def renderHydratedProviderJv (hp : HydratedProvider) (userEnabled? : Option Bool
     ("uses_oauth", .bool metaInfo.usesOAuth),
     ("env_var", match metaInfo.envVar? with | some ev => .str ev | none => .null),
     ("account_email", if hp.accountEmail.isEmpty then .null else .str hp.accountEmail),
-    ("use_for_backends", .arr (hp.useForBackends.map JVal.str)),
+    ("use_for_backends", .arr ((if hp.nativeOnly then #["antigravity"] else hp.useForBackends).map JVal.str)),
     ("custom_models", .arr hp.customModels),
     ("priority", JVal.nat hp.priority),
     ("status", statusObj),
@@ -3347,18 +3353,25 @@ def dispatchProviderAndAiRoute
           let .ok route ← AccountVpnRoutes.snapshot store.missionsDb account
             | return some (jsonErr 503 "VPN route storage unavailable")
           routeGeneration := route.generation
-          if let .vpn _ := route then
+          let usesVpn := match route with
+            | .vpn _ => true
+            | .direct _ => false
+          -- A Direct Antigravity login still owns its per-file router exclusions.
+          if usesVpn || authType == "antigravity" then
             let accounts ← loadHydratedProviders store workingDir
             let some hp := accounts.find? (fun p => p.id == account)
-              | return some (jsonErr 409 "VPN credential unavailable")
-            let some url := hub.accountRelayUrl?.bind (fun sign => sign hp.providerType hp.id)
-              | return some (jsonErr 503 "VPN relay unavailable")
+              | return some (jsonErr 409 "Selected credential unavailable")
             let file := accountRoutingFile accounts hp
             unless providerTypeMatchesAuthType hp.providerType authType && !file.isEmpty &&
                 AccountVpnSidecar.validManagement mgmtBase &&
                 (effAdmin || (!callerUserId.isEmpty && hp.createdByUserId == callerUserId)) do
-              return some (jsonErr 403 "VPN credential ownership could not be verified")
-            routedRequest? := some (.obj #[("provider", .str authType), ("name", .str file), ("proxy_url", .str url)])
+              return some (jsonErr 403 "Credential ownership could not be verified")
+            let mut request := JVal.obj #[("provider", .str authType), ("name", .str file)]
+            if usesVpn then
+              let some url := hub.accountRelayUrl?.bind (fun sign => sign hp.providerType hp.id)
+                | return some (jsonErr 503 "VPN relay unavailable")
+              request := request.setField "proxy_url" (.str url)
+            routedRequest? := some request
         let login ← match routedRequest? with
           | some data => sendJsonRequest "POST" s!"{mgmtBase}/v8/management/oauth/auth-url" (some mgmtKey) (some data) #[] 15000 262144
           | none => sendJsonRequest "GET" s!"{mgmtBase}/v0/management/{slug}-auth-url" (some mgmtKey) none #[] 15000 262144
@@ -3395,11 +3408,12 @@ def dispatchProviderAndAiRoute
               ("flow", .str flow),
               ("instructions", .str instr)
             ]))
-          else
-            if routedRequest?.isSome then
-              return some (jsonErr 502 "Sidecar could not start a VPN-bound OAuth exchange. A sidecar with per-login OAuth proxy support is required.")
+          else if routedRequest?.isNone then
             return some (jsonErr 502 s!"CLIProxy auth-url failed: {rawTxt}")
-        | _ => return some (jsonErr 502 "Failed reaching CLIProxy management endpoint")
+        | _ => pure ()
+        if routedRequest?.isSome then
+          return some (jsonErr 502 "The router could not reconnect this account with its saved settings. Check that the sidecar supports targeted OAuth reconnects.")
+        return some (jsonErr 502 "Failed reaching CLIProxy management endpoint")
 
       if segs.length == 5 then
         let sid := segs[4]!

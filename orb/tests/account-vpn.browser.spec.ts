@@ -3,9 +3,11 @@ import { expect, test } from "@playwright/test";
 for (const theme of ["light", "dark"]) test(`account VPN retry and Direct selection in ${theme} mode`, async ({ page }) => {
   const changes: Array<[string, unknown]> = [];
   const accounts = ["a", "b"].map(id => ({
-    id, name: "ChatGPT " + id, provider_type: "openai", account_email: id + "@example.invalid",
+    id, name: "ChatGPT " + id, provider_type: "antigravity", account_email: id + "@example.invalid",
     added_by_me: id === "b", uses_oauth: true, has_oauth: true, credential_owner: "cli_proxy", status: { type: "connected" },
   }));
+  let routersAllowed = true;
+  const routerWrites: string[] = [];
   const direct = { mode: "direct", status: "direct", countries: ["NL", "US"], can_configure: true };
   await page.addInitScript(theme => {
     localStorage.setItem("orb.apiUrl", location.origin);
@@ -17,6 +19,13 @@ for (const theme of ["light", "dark"]) test(`account VPN retry and Direct select
     if (path === "/api/auth/me") return route.fulfill({ json: { auth_mode: "multi_user",
       user: { id: "member", username: "member", role: "member" } } });
     if (path === "/api/ai/providers") return route.fulfill({ json: accounts });
+    if (path.endsWith("/alternative-routers")) {
+      if (route.request().method() === "PUT") {
+        routerWrites.push(path);
+        routersAllowed = route.request().postDataJSON().allowed;
+      }
+      return route.fulfill({ json: { allowed: routersAllowed } });
+    }
     if (path.endsWith("/vpn")) {
       if (route.request().method() === "GET") return route.fulfill({ json: direct });
       const body = route.request().postDataJSON();
@@ -36,6 +45,21 @@ for (const theme of ["light", "dark"]) test(`account VPN retry and Direct select
   await expect(group).toHaveCount(1);
   if (await group.getAttribute("aria-expanded") === "false") await group.click();
   const shared = page.locator(".p-acc-btn").filter({ hasText: "a@example.invalid" });
+  await shared.click();
+  const routerToggle = page.getByRole("switch", { name: "Allow alternative routers" });
+  await expect(routerToggle).toHaveCount(0);
+  await expect(page.getByLabel("Account connection", { exact: true })).toBeVisible();
+  await shared.click();
+  await page.locator(".p-acc-btn").filter({ hasText: "b@example.invalid" }).click();
+  await expect(routerToggle).toBeChecked();
+  await routerToggle.click();
+  await expect(routerToggle).not.toBeChecked();
+  const own = page.locator(".p-acc-btn").filter({ hasText: "b@example.invalid" });
+  await own.click();
+  await own.click();
+  await expect(routerToggle).not.toBeChecked();
+  expect(routerWrites).toEqual(["/api/ai/providers/b/alternative-routers"]);
+  await own.click();
   await shared.click();
   const select = page.getByLabel("Account connection", { exact: true });
   await expect(select).toHaveValue("");
