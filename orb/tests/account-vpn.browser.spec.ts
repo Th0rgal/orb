@@ -6,6 +6,7 @@ for (const theme of ["light", "dark"]) test(`account VPN retry and Direct select
     id, name: "ChatGPT " + id, provider_type: "antigravity", account_email: id + "@example.invalid",
     added_by_me: id === "b", uses_oauth: true, has_oauth: true, credential_owner: "cli_proxy", status: { type: "connected" },
   }));
+  let verifying = false;
   let routersAllowed = true;
   let refuseFirstChange = true;
   const routerWrites: string[] = [];
@@ -32,13 +33,18 @@ for (const theme of ["light", "dark"]) test(`account VPN retry and Direct select
       return route.fulfill({ json: { allowed: routersAllowed } });
     }
     if (path.endsWith("/vpn")) {
-      if (route.request().method() === "GET") return route.fulfill({ json: direct });
+      if (route.request().method() === "GET") {
+        const verified = verifying && path === "/api/ai/providers/a/vpn";
+        return route.fulfill({ json: verified ? { ...direct, mode: "vpn", country: "NL",
+          status: "verified", server: "west", exits: ["192.0.2.35"] } : direct });
+      }
       const body = route.request().postDataJSON();
       changes.push([path, body]);
       const vpn = { ...direct, mode: "vpn", country: "NL" };
+      verifying = body.mode === "vpn" && changes.length === 2;
       const result = body.mode === "direct" ? direct : changes.length === 1
         ? { ...vpn, status: "blocked", message: "All five AirVPN sessions are in use." }
-        : { ...vpn, status: "verified", server: "west", exits: ["192.0.2.35"] };
+        : { ...vpn, status: "blocked", reason: "vpn_awaiting_verification", message: "Waiting for exit verification." };
       return route.fulfill({ json: result });
     }
     return route.fulfill({ json: path === "/api/projects" ? { projects: [] } : [] });
@@ -75,7 +81,8 @@ for (const theme of ["light", "dark"]) test(`account VPN retry and Direct select
   await expect(page.getByText("All five AirVPN sessions are in use.")).toBeVisible();
   await page.getByRole("button", { name: "Retry verification" }).click();
   const verified = page.getByText("Verified exit · west · 192.0.2.35");
-  await expect(verified).toBeVisible();
+  await expect(page.getByText("Waiting for exit verification.")).toBeVisible();
+  await expect(verified).toBeVisible({ timeout: 10000 });
   await select.selectOption("");
   await expect(verified).toHaveCount(0);
   const path = "/api/ai/providers/a/vpn";

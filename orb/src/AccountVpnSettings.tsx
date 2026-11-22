@@ -1,5 +1,6 @@
-import { Show, createResource, createSignal } from "solid-js";
+import { Show, createEffect, createResource, createSignal, onCleanup } from "solid-js";
 import { api, connectionVersion } from "./api";
+import { pollWhileVisible } from "./poll";
 import { SettingsRow } from "./SettingsCard";
 
 interface Route {
@@ -9,6 +10,7 @@ interface Route {
   can_configure: boolean;
   configuration_message?: string;
   status: "direct" | "verified" | "blocked";
+  reason?: string;
   server?: string;
   exits?: string[];
   message?: string;
@@ -26,6 +28,19 @@ export function AccountVpnSettings(p: { account: string }) {
   const [route, { mutate, refetch }] = createResource(source, ([, id]) => readRoute(id));
   const [busy, setBusy] = createSignal(false);
   const [error, setError] = createSignal("");
+  createEffect(() => {
+    if (busy() || route.state !== "ready" || route().reason !== "vpn_awaiting_verification") return;
+    const [, id] = source();
+    let active = true;
+    const stop = pollWhileVisible(async () => {
+      const next = await readRoute(id);
+      if (active) mutate(next);
+    }, 5000, "account-vpn");
+    onCleanup(() => {
+      active = false;
+      stop();
+    });
+  });
   const save = async (value: string) => {
     const [version, id] = source();
     const current = () => version === connectionVersion() && id === p.account;
@@ -61,7 +76,9 @@ export function AccountVpnSettings(p: { account: string }) {
         <Show when={r().status === "verified"}><span>Verified exit · {r().server} · {r().exits?.join(", ")}</span></Show>
         <Show when={r().status === "blocked"}>
           <span role="status">{r().message ?? "The VPN route is unavailable."}</span>
-          <button class="s-btn" disabled={busy() || !r().can_configure} onClick={() => void save(r().country!)}>Retry verification</button>
+          <Show when={r().reason !== "vpn_awaiting_verification"}>
+            <button class="s-btn" disabled={busy() || !r().can_configure} onClick={() => void save(r().country!)}>Retry verification</button>
+          </Show>
         </Show>
       </>}</Show>
     </Show>
