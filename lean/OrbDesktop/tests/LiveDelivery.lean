@@ -282,7 +282,8 @@ private def renderScreen (st : DesktopState) (streamText : String) : ComputedBox
 
 /-- Pure shape check for a decision node: its label center (device rect) is covered by an
 icon-mask prim (the rhombus stroke rendered through the vector-icon pipeline) that covers
-no other observed node's center. -/
+no other observed node's center, the label sits centered in the contour, and the label's
+extent fits inside the rhombus half-width at the label's rows. -/
 private def diamondObserved (scene : SceneOutput)
     (observed : List (String × Rect × Rect)) (self : String) (others : List String) : Bool :=
   match observed.filter (fun p => p.1 == self) with
@@ -294,9 +295,20 @@ private def diamondObserved (scene : SceneOutput)
     let fy := fix.y + fix.h / 2
     scene.prims.toList.any fun p => match p with
       | .mask _ _ dst _ =>
-        dst.x ≤ fx && fx ≤ dst.x + dst.w && dst.y ≤ fy && fy ≤ dst.y + dst.h &&
-        !(centers.any fun (cx, cy) =>
-          dst.x ≤ cx && cx ≤ dst.x + dst.w && dst.y ≤ cy && cy ≤ dst.y + dst.h)
+        let covers (cx cy : Int) :=
+          dst.x ≤ cx && cx ≤ dst.x + dst.w && dst.y ≤ cy && cy ≤ dst.y + dst.h
+        covers fx fy && !(centers.any fun (cx, cy) => covers cx cy) &&
+        -- The visible label is centered in the contour and fits inside the rhombus
+        -- half-width at the label's rows (the outline insets the tips by 6 of 160
+        -- view units, so the contour half-width shrinks linearly from the middle).
+        let cx := dst.x + dst.w / 2
+        let cy := dst.y + dst.h / 2
+        let lcx := fix.x + fix.w / 2
+        let lcy := fix.y + fix.h / 2
+        let tipInset := dst.w * 6 / 160
+        let dy := if lcy ≥ cy then lcy - cy else cy - lcy
+        let halfRow := (dst.w / 2 - tipInset) * (dst.h / 2 - dy) / max 1 (dst.h / 2)
+        (lcx - cx).natAbs ≤ 8 && dy < dst.h / 2 && fix.w / 2 ≤ halfRow
       | _ => false
   | _ => false
 
@@ -309,7 +321,10 @@ private def assertDiagram (scene : SceneOutput) (observed : List (String × Rect
   let exactlyOne (t what : String) : IO Rect := do
     match observed.filter (fun p => p.1 == t) with
     | [(_, sub, _)] => pure sub
-    | _ => throw (IO.userError ("rendered diagram " ++ what ++ " was not observed exactly once: " ++ t))
+    | hits =>
+      let labels := observed.map (·.1) |> String.intercalate ","
+      throw (IO.userError ("rendered diagram " ++ what ++ " was not observed exactly once: " ++ t ++
+        s!" (hits: {hits.length}; labels: {labels})"))
   let spec ← exactlyOne "Spec" "node label"
   let build ← exactlyOne "Build" "node label"
   let fix ← exactlyOne "Fix" "node label"
@@ -319,6 +334,20 @@ private def assertDiagram (scene : SceneOutput) (observed : List (String × Rect
     throw (IO.userError "Approve edge is not directed Spec -> Build")
   unless build.x < revise.x && revise.x < fix.x do
     throw (IO.userError "Revise edge is not directed Build -> Fix")
+  -- Each orthogonal connector ends in a small accent arrowhead (a ~6 device-px
+  -- rounded square distinct from the flat 2 device-px shaft), one per directed
+  -- edge. Scene prim rects are device pixels (the driver renders at scale 120).
+  let arrowheads := scene.prims.toList.filter fun p => match p with
+    | .rrect r _ (tl, _, _, _) _ _ =>
+      tl ≥ 1 && r.w ≤ 8 && r.h ≥ 4 && r.h ≤ 8
+    | _ => false
+  unless arrowheads.length ≥ 2 do
+    let small := scene.prims.toList.filterMap fun p => match p with
+      | .rrect r _ (tl, _, _, _) _ _ =>
+        if r.w ≤ 12 && r.h ≤ 12 then some s!"({r.x},{r.y},{r.w},{r.h}) tl={tl}" else none
+      | _ => none
+    throw (IO.userError ("rendered diagram edges have no arrowheads; small rrects: " ++
+      String.intercalate " | " small))
   let devRectOf (t : String) : Option Rect :=
     (observed.filter (fun p => p.1 == t)).head?.map (fun p => p.2.2)
   let observedRadius (t : String) : IO Nat := do
@@ -411,6 +440,34 @@ private def flowObserved := (renderedTurns [flowTurn]).1
   | _ => false
 #guard diamondObserved (renderedTurns [flowTurn]).2.1 flowObserved "Review" ["Spec", "Build", "Done"]
 #guard !((renderedTurns [flowTurn]).2.2.contains "```")
+
+-- The decision outline rasterizes as a closed rhombus on the node's actual rectangle:
+-- scanning the rasterized contour row by row, the width is near zero at the upper tip,
+-- widens to the middle, then narrows symmetrically to a lower tip that still carries
+-- paint inside the clip bounds (both lower sides present). Rows are sampled in the
+-- raster of a 136x40 node (nodeW pixels; the rhombus band is exactly nodeH pixels tall).
+private def diamondRowSpan (g : LeanUI.Text.RasterizedGlyph) (y : Nat) : Nat := Id.run do
+  let mut lo := g.width
+  let mut hi := 0
+  for x in [0:g.width] do
+    if g.pixels.get! (y * g.width + x) > 0 then
+      if x < lo then lo := x
+      if x + 1 > hi then hi := x + 1
+  if hi ≤ lo then 0 else hi - lo
+
+private def diamondSpans : List Nat :=
+  -- Rasterized with the pure reference rasterizer at the node width so the scan
+  -- needs no atlas FFI (the segment fast path has no interpreter symbol in the
+  -- harness) and stays cheap to elaborate; the contour shape is scale-invariant
+  -- in the 160-unit view box, so the band maps to band/160 * size pixels.
+  let g := LeanUI.Text.rasterizeIconReference (LeanUI.Widgets.mermaidDiamondOutline (pxToSub 136) (pxToSub 40)) 136
+  [2, 10, 19, 29, 37].map (diamondRowSpan g)
+#guard match diamondSpans with
+  | [top, inner, mid, innerBot, bot] =>
+    top > 0 && bot > 0 && top ≤ inner && inner ≤ mid && mid ≥ innerBot && innerBot ≥ bot &&
+    mid > top && mid > bot && (top + 8 ≥ bot) && (bot + 8 ≥ top) &&
+    (inner + 8 ≥ innerBot) && (innerBot + 8 ≥ inner)
+  | _ => false
 
 def main (args : List String) : IO Unit := do
   for dark in [true, false] do
@@ -531,20 +588,24 @@ def main (args : List String) : IO Unit := do
   let slot ← IO.mkRef (none : Option LiveSubscription)
   try
     if args == ["cold-open"] then
-      -- Cold open of a previously completed mission: both turns are persisted in
-      -- Core's timeline before the client attaches. The client must repopulate the
-      -- earlier turn from the real history projection — in-memory liveTurns alone
-      -- cannot reconstruct it — and a third turn then streams live.
+      -- Cold open of a previously completed mission in the real Core persistence
+      -- shape: user prompts and plain assistant_message turns, with the final turn
+      -- also present as its canonical replacement. The client must repopulate the
+      -- earlier turns from the persisted timeline (in-memory liveTurns alone cannot
+      -- reconstruct them), cover delivered user prompts, keep one copy of the
+      -- canonical replacement, yield the newest turn to the live bubble, and then
+      -- let a third turn stream live.
       let some source ← IO.getEnv "ORB_TEST_MERMAID" | throw (IO.userError "missing ORB_TEST_MERMAID")
       let st ← clickMission st a
-      -- The earlier assistant turn can only come from the persisted timeline: the
-      -- live bubble shows the newest turn, which the transport yields to the stream.
-      let st ← awaitState slot st (fun s => s.liveTurns == ["Amber blossom"] && streamedText s == source)
+      -- The earlier turns can only come from the persisted timeline: the live bubble
+      -- shows the newest turn, which the transport yields to the stream.
+      let st ← awaitState slot st
+        (fun s => s.liveTurns == ["You: PRIVATE", "Amber blossom", "You: PRIVATE"] && streamedText s == source)
       let (rootBox, scene) := renderScreen st source
       let rendered := renderedBoxRoot rootBox
       let observed := collectObserved rootBox 24
-      unless rendered.contains "Amber blossom" do
-        throw (IO.userError "cold open did not repopulate the persisted earlier turn")
+      unless rendered.contains "Amber blossom" && (rendered.splitOn "You: PRIVATE").length == 3 do
+        throw (IO.userError "cold open did not repopulate the persisted turns and user prompts")
       assertDiagram scene observed rendered
       -- Let the fixture stage the next turn only after the cold-open render passed.
       let root := (← IO.getEnv "ORB_STATE_DIR").getD ""
@@ -553,7 +614,8 @@ def main (args : List String) : IO Unit := do
       let (rootBox, scene) := renderScreen st "Ripened fruit"
       let rendered := renderedBoxRoot rootBox
       let observed := collectObserved rootBox 24
-      unless rendered.contains "Amber blossom" && rendered.contains "Ripened fruit" do
+      unless rendered.contains "Amber blossom" && (rendered.splitOn "You: PRIVATE").length == 3 &&
+          rendered.contains "Ripened fruit" do
         throw (IO.userError "continuing live stream lost the persisted earlier turns")
       assertDiagram scene observed rendered
       return
@@ -568,7 +630,8 @@ def main (args : List String) : IO Unit := do
       let rendered := renderedBoxRoot rootBox
       let observed := collectObserved rootBox 24
       unless rendered.contains "Amber blossom" do
-        throw (IO.userError "earlier assistant turn was dropped from the live transcript")
+        throw (IO.userError ("earlier assistant turn was dropped from the live transcript; liveTurns: " ++
+          String.intercalate " | " st.liveTurns ++ "; rendered: " ++ rendered.take 400))
       assertDiagram scene observed rendered
       return
     if args == ["start-running"] then

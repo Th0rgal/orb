@@ -1108,11 +1108,18 @@ def projection(c, mid, presence=False):
 
 
 def history_turns(c, mid, first_text):
-    """Completed assistant turns from the real /open bundle (the same endpoint other
+    """Completed turns from the real /open bundle (the same endpoint other
     clients use to open a mission: first events page plus the older transcript spine),
-    ascending. The live bubble owns the current turn; when the newest persisted turn
-    is exactly the text the bubble already shows, the bubble keeps owning it (history
-    owns completed turns, the stream owns the turn in flight)."""
+    ascending. Core persists assistant turns either as assistant_message or, once
+    finalized, as assistant_message_canonical, and delivered user prompts as
+    user_message; all three belong to the transcript. A canonical event is the
+    finalized form of an earlier plain turn with identical content and claims it
+    (latest unclaimed match) so the archive keeps one copy; plain turns that repeat
+    an earlier text are genuinely distinct and stay separate. User prompts render
+    with a visible "You: " marker. The live bubble owns the current turn; when the
+    newest persisted turn is exactly the text the bubble already shows, the bubble
+    keeps owning it (history owns completed turns, the stream owns the turn in
+    flight)."""
     try:
         bundle = c.get('/api/control/missions/' + mid + '/open', 8 << 20)
     except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, ValueError, KeyError, TypeError):
@@ -1125,11 +1132,38 @@ def history_turns(c, mid, first_text):
         if not isinstance(page, list):
             return []
         rows.extend(page)
-    turns = [(r.get('sequence') or 0, r['content']) for r in rows
-             if isinstance(r, dict) and r.get('event_type') == 'assistant_message_canonical'
-             and isinstance(r.get('content'), str)]
+    turns = []
+    for r in rows:
+        if not isinstance(r, dict):
+            continue
+        kind = r.get('event_type')
+        content = r.get('content')
+        if kind not in ('user_message', 'assistant_message', 'assistant_message_canonical') \
+                or not isinstance(content, str) or not content:
+            continue
+        content = ''.join(ch for ch in content if ch in '\n\t' or ch.isprintable())
+        if content:
+            turns.append((r.get('sequence') or 0, kind, content))
     turns.sort(key=lambda pair: pair[0])
-    texts = [content for _, content in turns]
+    texts = []
+    unclaimed = []
+    for _, kind, content in turns:
+        if kind == 'user_message':
+            texts.append('You: ' + content)
+            continue
+        if kind == 'assistant_message':
+            unclaimed.append(len(texts))
+            texts.append(content)
+            continue
+        # Canonical replacement: the finalized form of an earlier plain turn with
+        # identical content claims that plain turn (latest unclaimed match) so the
+        # archive keeps one copy at the turn's original position. Plain turns that
+        # merely repeat an earlier text are genuinely distinct and stay separate.
+        claim = next((i for i in reversed(unclaimed) if texts[i] == content), None)
+        if claim is not None:
+            unclaimed.remove(claim)
+            continue
+        texts.append(content)
     if texts and texts[-1] == first_text:
         texts.pop()
     return texts
@@ -1147,8 +1181,20 @@ def poll_bubble(mid, binding):
             title, status, text = projection(c, mid)
             if pending_history:
                 pending_history = False
-                for turn in history_turns(c, mid, text):
-                    print('H\t' + turn.replace('\n', '\x1e').replace('\t', '\x1f'), flush=True)
+                turns = history_turns(c, mid, text)
+                if turns:
+                    # One bounded atomic bootstrap message: the client applies the whole
+                    # persisted archive once per selection instead of racing per-line.
+                    newest = []
+                    total = 0
+                    for turn in reversed(turns):
+                        packed = turn.replace('\n', '\x1e').replace('\t', '\x1f')
+                        total += len(packed) + 1
+                        if total > (1 << 20) and newest:
+                            break
+                        newest.append(packed)
+                    newest.reverse()
+                    print('HS\t' + '\x1d'.join(newest), flush=True)
             fields = ('B', title, status, text.replace('\n', '\x1e').replace('\t', '\x1f'))
         except urllib.error.HTTPError as error:
             if error.code in (403, 404):

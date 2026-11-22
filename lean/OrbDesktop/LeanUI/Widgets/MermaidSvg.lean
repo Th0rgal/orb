@@ -9,7 +9,8 @@ import LeanUI.Scene
 Pure native diagram and vector-tile widget supporting:
 - `DiagramNode`, `DiagramEdge`, and `SvgPathCmd` (`moveTo`, `lineTo`, `quadTo`, `cubicTo`, `closePath`)
 - Directed Sugiyama-style layered rank/column layout in `SubPx`
-- Rounded box/pill/diamond diagram nodes, orthogonal connector segments, arrowheads, and edge labels
+- Rounded box/pill nodes, stroked rhombus decision nodes sized to the node rectangle,
+  orthogonal connector segments, arrowheads, and edge labels
   lowered directly into declarative `WidgetNode`s.
 -/
 namespace LeanUI.Widgets
@@ -291,11 +292,17 @@ def collectDiagramSvgPaths (spec : DiagramSpec) : List SvgPathCmd :=
       | _, _ => acc) []
   spec.svgPaths ++ edgePaths
 
-/-- Mermaid decision-node outline: a rhombus in the 160-unit icon view box, stroked
-like the desktop chrome icons so a diamond is visibly distinct from rounded and pill
-nodes even though the scene only ships rect-family fills. -/
-private def diamondOutline : List (List (Int × Int)) :=
-  [[(80, 4), (156, 80), (80, 156), (4, 80), (80, 4)]]
+/-- Mermaid decision-node outline sized to the node's actual rectangle: the icon mask
+draws its square raster 1:1 and clips it to the content rect, so a wide short decision
+box needs the rhombus to occupy exactly the node-height band of the view box (top apex,
+right/left tips and bottom apex), with the 5.5-unit stroke inset so every tip —
+including the lower one — stays inside the paint and clipping bounds. -/
+def mermaidDiamondOutline (nodeW nodeH : SubPx) : List (List (Int × Int)) :=
+  let tip : Int := 6
+  let band : Int :=
+    min (160 - 2 * tip) (max (2 * tip + 2) (Int.ofNat (160 * nodeH / max 1 nodeW)))
+  let mid := band / 2
+  [[(80, tip), (160 - tip, mid), (80, band - tip), (tip, mid), (80, tip)]]
 
 /-- Build a declarative `WidgetNode` for a single `DiagramNode`. -/
 def buildDiagramNodeBox (theme : Theme) (nodeW nodeH : SubPx) (n : DiagramNode) : WidgetNode :=
@@ -316,15 +323,21 @@ def buildDiagramNodeBox (theme : Theme) (nodeW nodeH : SubPx) (n : DiagramNode) 
   let rawBox : WidgetNode :=
     match n.shape with
     | .diamond =>
-      -- Decision parity: a stroked rhombus with the label centered inside, the way
-      -- mermaid.js draws `{decision}` nodes, instead of a small-radius rectangle.
+      -- Decision parity: a stroked rhombus sized to the node's actual dimensions with
+      -- the label centered inside, the way mermaid.js draws `{decision}` nodes. The
+      -- box carries no padding so the mask destination is the full node rect, which is
+      -- exactly the band the outline occupies in the square raster.
+      let runs := [diagramSynthRun labelStyle n.label]
+      let (_, labelW, _) := wrapInlineRuns (nodeW - pxToSub 20) theme.typo.lineTight runs
       WidgetNode.mk none false true
         (BoxStyle.row 0
           |>.withAlign .center
           |>.withJustify .center
-          |>.withPadding (Edges.xy (pxToSub 10) (pxToSub 6))
           |>.withFixedSize nodeW nodeH)
-        (.vectorIcon diamondOutline borderCol) [label]
+        (.vectorIcon (mermaidDiamondOutline nodeW nodeH) borderCol)
+        [WidgetNode.text
+          (BoxStyle.row 0 |>.withFixedSize (min (nodeW - pxToSub 20) labelW) (pxToSub 18))
+          theme.typo.lineTight runs]
     | _ =>
       WidgetNode.rrect
         (BoxStyle.row 0

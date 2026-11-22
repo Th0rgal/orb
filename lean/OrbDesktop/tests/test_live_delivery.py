@@ -501,13 +501,19 @@ class Delivery(unittest.TestCase):
             db.execute("INSERT INTO mission_events VALUES(NULL,'a',2,2,'assistant_message_canonical',?,'{}','')",
                        (json.dumps({'content': 'Amber blossom'}),))
         if mode == 'cold-open':
-            # Completed mission: both turns are already in Core's timeline before
-            # the client attaches. A third turn streams live, but only after the
-            # driver has observed and asserted the cold-open render (marker file).
+            # Completed mission in the real Core persistence shape: delivered user
+            # prompts and assistant turns stored as plain assistant_message, with the
+            # final turn also replaced by its canonical form. The history projection
+            # must cover all three event types, keep one copy of the canonical
+            # replacement and yield the newest turn to the live bubble. A third turn
+            # streams live, but only after the driver has observed and asserted the
+            # cold-open render (marker file).
             db.execute("DELETE FROM mission_events WHERE mission_id='a'")
             db.execute("UPDATE missions SET status='completed' WHERE id='a'")
-            for seq, kind, content in ((1, 'user_message', 'PRIVATE'), (2, 'assistant_message_canonical', 'Amber blossom'),
-                                       (3, 'user_message', 'PRIVATE'), (4, 'assistant_message_canonical', MERMAID_TURN)):
+            for seq, kind, content in (
+                    (1, 'user_message', 'PRIVATE'), (2, 'assistant_message', 'Amber blossom'),
+                    (3, 'user_message', 'PRIVATE'), (4, 'assistant_message', MERMAID_TURN),
+                    (5, 'assistant_message_canonical', MERMAID_TURN)):
                 db.execute("INSERT INTO mission_events VALUES(NULL,'a',?,?,?,?,'{}','')",
                            (seq, seq, kind, json.dumps({'content': content, 'queued': False})))
         project_started = threading.Event()
@@ -568,7 +574,7 @@ class Delivery(unittest.TestCase):
                 elif path.split('?')[0] == a + '/open':
                     # Real Core open bundle: mission detail, first events page and the
                     # older transcript spine, read from the same mission_events rows
-                    # the bubble reads. The client filters completed canonical turns.
+                    # the bubble reads. The client filters transcript event types.
                     rows = db.execute(
                         "SELECT id, COALESCE(NULLIF(seq,0),sequence), event_type, payload, content"
                         " FROM mission_events WHERE mission_id='a'"
@@ -618,12 +624,12 @@ class Delivery(unittest.TestCase):
                         # client sees the real projection sequence after cold open.
                         cold_polls.append(path)
                         if len(cold_polls) == 1 and not db.execute(
-                                "SELECT 1 FROM mission_events WHERE mission_id='a' AND seq=5").fetchone():
-                            db.execute("INSERT INTO mission_events VALUES(NULL,'a',5,5,'user_message',?,'{}','')",
+                                "SELECT 1 FROM mission_events WHERE mission_id='a' AND seq=6").fetchone():
+                            db.execute("INSERT INTO mission_events VALUES(NULL,'a',6,6,'user_message',?,'{}','')",
                                        (json.dumps({'content': 'PRIVATE', 'queued': False}),))
                         elif len(cold_polls) >= 3 and not db.execute(
-                                "SELECT 1 FROM mission_events WHERE mission_id='a' AND seq=6").fetchone():
-                            db.execute("INSERT INTO mission_events VALUES(NULL,'a',6,6,'assistant_message_canonical',?,'{}','')",
+                                "SELECT 1 FROM mission_events WHERE mission_id='a' AND seq=7").fetchone():
+                            db.execute("INSERT INTO mission_events VALUES(NULL,'a',7,7,'assistant_message_canonical',?,'{}','')",
                                        (json.dumps({'content': 'Ripened fruit'}),))
                     if mid == 'b' and ((mode == 'revoke' and paths.count(path) > 1) or mode == 'idle-share'):
                         db.execute('DELETE FROM mission_shares')
@@ -755,14 +761,50 @@ class Delivery(unittest.TestCase):
                 dict(sequence=2, event_type='assistant_message_canonical', content='Amber blossom'),
                 dict(sequence=3, event_type='user_message', content='PRIVATE'),
                 dict(sequence=5, event_type='tool_call', content='PRIVATE'),
+                dict(sequence=1, event_type='assistant_message', content='Seed turn'),
+                dict(sequence=7, event_type='assistant_message', content='graph LR'),
             ],
             spine=[dict(sequence=6, event_type='assistant_message_canonical', content='Oldest spine page turn')],
         )
+        # Delivered user prompts render with the You marker, both assistant event
+        # representations appear, and a canonical event with no matching plain turn
+        # is its own distinct turn.
         self.assertEqual(live.history_turns(conn, 'a', 'graph LR'),
-                         ['Amber blossom', 'graph LR', 'Oldest spine page turn'])
+                         ['Seed turn', 'Amber blossom', 'You: PRIVATE', 'graph LR',
+                          'Oldest spine page turn'])
         self.assertEqual(conn.get.call_args.args[0], '/api/control/missions/a/open')
+        # The newest persisted turn is the plain form at sequence 7, so only a
+        # bubble text matching it is yielded; an older bubble text keeps everything.
         self.assertEqual(live.history_turns(conn, 'a', 'Oldest spine page turn'),
-                         ['Amber blossom', 'graph LR'])
+                         ['Seed turn', 'Amber blossom', 'You: PRIVATE', 'graph LR',
+                          'Oldest spine page turn', 'graph LR'])
+        # Canonical replacement of the turn the bubble already shows: the deduped
+        # copy is yielded to the live bubble instead of duplicating it.
+        conn.get.return_value = dict(
+            protocol=1, mission=dict(id='a'),
+            events=[
+                dict(sequence=1, event_type='user_message', content='First prompt'),
+                dict(sequence=2, event_type='assistant_message', content='Ripened'),
+                dict(sequence=3, event_type='assistant_message_canonical', content='Ripened'),
+            ],
+            spine=[])
+        self.assertEqual(live.history_turns(conn, 'a', 'Ripened'), ['You: First prompt'])
+        self.assertEqual(live.history_turns(conn, 'a', ''), ['You: First prompt', 'Ripened'])
+        # Two genuinely distinct turns with identical visible text stay separate;
+        # the canonical event claims the latest unclaimed plain turn only.
+        conn.get.return_value = dict(
+            protocol=1, mission=dict(id='a'),
+            events=[
+                dict(sequence=1, event_type='user_message', content='First prompt'),
+                dict(sequence=2, event_type='assistant_message', content='Ripened'),
+                dict(sequence=3, event_type='assistant_message', content='Ripened'),
+                dict(sequence=4, event_type='assistant_message_canonical', content='Ripened'),
+            ],
+            spine=[])
+        self.assertEqual(live.history_turns(conn, 'a', 'Ripened'),
+                         ['You: First prompt', 'Ripened'])
+        self.assertEqual(live.history_turns(conn, 'a', ''),
+                         ['You: First prompt', 'Ripened', 'Ripened'])
         for error in (live.ResponseTooLarge('too large'), live.urllib.error.HTTPError('x', 403, '', {}, None)):
             conn.get.side_effect = error
             self.assertEqual(live.history_turns(conn, 'a', ''), [])

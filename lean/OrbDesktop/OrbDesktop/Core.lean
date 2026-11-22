@@ -280,9 +280,12 @@ private def readSample (line : String) : Option LiveUpdate := do
     return .sample (some (if encoded.isEmpty then [] else encoded.splitOn "\x1f")) none []
   | ["B", title, status, text] =>
     return .sample none (some (.text title status ((text.replace "\x1e" "\n").replace "\x1f" "\t"))) []
-  -- One persisted timeline turn per line, oldest first (cold-open history).
-  | ["H", text] =>
-    return .sample none none [((text.replace "\x1e" "\n").replace "\x1f" "\t")]
+  -- One bounded atomic bootstrap message, oldest first (cold-open history).
+  | ["HS", packed] =>
+    let turns := (packed.splitOn "\x1d").filterMap fun raw =>
+      let turn := (raw.replace "\x1e" "\n").replace "\x1f" "\t"
+      if turn.isEmpty then none else some turn
+    return .sample none none turns
   | ["X"] => return .sample none (some .unavailable) []
   | ["D"] => return .sample none (some .revoked) []
   | _ => none
