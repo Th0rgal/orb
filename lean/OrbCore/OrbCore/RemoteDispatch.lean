@@ -1400,7 +1400,12 @@ private def consumeRemoteLogPage (store : CoreStore) (broadcastHub? : Option Bro
   return (next, tail)
 
 private def validRemoteLogWindow (offset next len : Nat) (chunk : String) : Bool :=
-  next == offset + chunk.utf8ByteSize && next ≤ len
+  offset ≤ next && next ≤ len && ((offset == next) == chunk.isEmpty)
+
+private def canCheckpointRemotePage (offset next : Nat) (chunk : String) : Bool :=
+  -- Historical nodes can decode malformed bytes lossily. The cursor is still
+  -- unambiguous at the end of a record, or when no record closed on this page.
+  !chunk.contains '\n' || chunk.endsWith "\n" || next == offset + chunk.utf8ByteSize
 
 /-! ## Remote Job Cancellation, Submission, Polling & Queued Follow-Up Drain -/
 
@@ -1680,7 +1685,8 @@ partial def spawnRemoteJobPoller
                 let nextOff := (ljv.fieldNat? "next_offset").getD (offset + chunk.utf8ByteSize)
                 let logLen := (ljv.fieldNat? "log_len").getD nextOff
                 let matchesOffset := (ljv.fieldNat? "offset").getD offset == offset
-                let valid := matchesOffset && validRemoteLogWindow offset nextOff logLen chunk
+                let valid := matchesOffset && validRemoteLogWindow offset nextOff logLen chunk &&
+                  canCheckpointRemotePage offset nextOff chunk
                 if !valid || (ljv.fieldNat? "offset").isNone || (ljv.fieldNat? "next_offset").isNone ||
                     (ljv.fieldNat? "log_len").isNone || (ljv.fieldStr? "data").isNone then
                   evidenceIntact := false
@@ -1756,7 +1762,8 @@ partial def spawnRemoteJobPoller
                 let some chunk := page.fieldStr? "data" | break
                 let some nextOff := page.fieldNat? "next_offset" | break
                 let some logLen := page.fieldNat? "log_len" | break
-                if page.fieldNat? "offset" != some offset || !validRemoteLogWindow offset nextOff logLen chunk then
+                if page.fieldNat? "offset" != some offset || !validRemoteLogWindow offset nextOff logLen chunk ||
+                    (nextOff != logLen && !canCheckpointRemotePage offset nextOff chunk) then
                   evidenceIntact := false
                   backlog := false
                   break
