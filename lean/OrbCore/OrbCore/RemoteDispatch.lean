@@ -867,7 +867,7 @@ private def resumableGoalSession (backend sid : String) : Bool :=
   | _ => false
 
 def remoteGoalPrompt (objective : String) : String :=
-  s!"[Goal mode]\nObjective: {objective}\n\nTake the next concrete step and report progress. If the objective is fully achieved, end your reply with {RemoteGoal.completionMarker} on its own final line."
+  s!"[Goal mode]\nObjective: {objective}\n\nTake the next concrete step. Report progress during ongoing work. When the objective is fully achieved, give the final result once and end that same message with {RemoteGoal.completionMarker} on its own final line."
 
 def maxRemoteGoalContinuations : Nat := 20
 
@@ -1212,7 +1212,7 @@ private def ingestClaudeStreamLine
 private def ingestRemoteHarnessLine
     (store : CoreStore)
     (broadcastHub? : Option BroadcastHub)
-    (backend missionId rawLine nowIso : String)
+    (backend missionId rawLine nowIso : String) (goalJobId? : Option String)
     (acc : RemoteStreamAcc) : IO RemoteStreamAcc := do
   let bLow := backend.trimAscii.toString.toLower
   let harness := if bLow == "claude" then "claudecode" else bLow
@@ -1263,9 +1263,45 @@ private def ingestRemoteHarnessLine
       if piece.isEmpty then return next
       let full := next.text ++ piece
       next := { next with text := full, lastMessageId? := lastMsg? }
+      let mut fields : Array (String × JVal) := #[("content", .str full)]
+      if let some jobId := goalJobId? then
+        if harness == "codex" && parsed.wholeMessage then
+          if let some itemId := parsed.messageId? then
+            fields := fields ++ #[("codex_goal_job", .str jobId), ("codex_item_id", .str itemId),
+              ("codex_item_chars", JVal.nat parsed.textDelta.length)]
       emitMissionEventAndBroadcast store broadcastHub? missionId "text_delta"
-        (renderCompact (.obj #[("content", .str full)])) nowIso
+        (renderCompact (.obj fields)) nowIso
     return next
+
+/-- Preserve the streamed snapshots. Only the final display folds a verbatim echo from
+    two distinct complete Codex items in the same Goal job. Old snapshots lack provenance. -/
+def codexGoalFinalText (store : CoreStore) (missionId jobId raw : String) : IO String := do
+  unless RemoteGoal.hasCompletionMarker raw do return raw
+  let .ok rows ← execParamQuery store.missionsDb
+      ("SELECT event_type,payload FROM mission_events WHERE mission_id=?1 AND event_type IN " ++
+       "('text_delta','user_message','tool_call','tool_result','thinking','assistant_message') ORDER BY id DESC LIMIT 2;")
+      #[missionId] | return raw
+  unless rows.size == 3 && cell rows[1]! 0 == "text_delta" && cell rows[2]! 0 == "text_delta" do return raw
+  let .ok current := OrbBin.Json.parse (cell rows[1]! 1) | return raw
+  let .ok previous := OrbBin.Json.parse (cell rows[2]! 1) | return raw
+  unless [current, previous].all (fun e => e.fieldStr? "codex_goal_job" == some jobId) do return raw
+  let some prevId := previous.fieldStr? "codex_item_id" | return raw
+  let some currId := current.fieldStr? "codex_item_id" | return raw
+  unless !prevId.isEmpty && !currId.isEmpty && prevId != currId && current.fieldStr? "content" == some raw do return raw
+  let some prior := previous.fieldStr? "content" | return raw
+  let some n := previous.fieldNat? "codex_item_chars" | return raw
+  let some m := current.fieldNat? "codex_item_chars" | return raw
+  unless 0 < n && n < m && n ≤ prior.length && m ≤ raw.length do return raw
+  let item := (raw.takeEnd m).toString
+  let echoed := (prior.takeEnd n).toString
+  unless item.startsWith echoed do return raw
+  let suffix := (item.drop n).toString
+  let marker := suffix.trimAsciiEnd.toString
+  unless marker == "\n" ++ RemoteGoal.completionMarker || marker == "\r\n" ++ RemoteGoal.completionMarker do return raw
+  let (piece, _) := OrbBin.ClaudeControl.joinHarnessText "codex" prior none { textDelta := item, wholeMessage := true }
+  let finalText := prior ++ suffix
+  unless raw == prior ++ piece && RemoteGoal.hasCompletionMarker finalText do return raw
+  return finalText
 
 /-- Only protocol events are assistant output for native agy. Its raw log can contain an
     interactive login URL or a partial JSON line when bounded by the node's tail limit. -/
@@ -1487,6 +1523,7 @@ partial def spawnRemoteJobPoller
       if gRows.size > 1 then capturedGen := (cellNat gRows[1]! 0).toUInt64
     let mut offset : Nat := initialOffset
     let isGoal := (← getMission? store missionId).any (·.goalMode)
+    let goalJobId? := if isGoal then some jobId else none
     let mut evidenceIntact := initialOffset == 0
     let mut lineRem : String := ""
     let mut acc : RemoteStreamAcc := {}
@@ -1564,7 +1601,7 @@ partial def spawnRemoteJobPoller
                   let (lines, rem) := splitCompleteLines (lineRem ++ chunk)
                   lineRem := rem
                   for ln in lines do
-                    acc ← ingestRemoteHarnessLine store broadcastHub? backend missionId ln nowIso acc
+                    acc ← ingestRemoteHarnessLine store broadcastHub? backend missionId ln nowIso goalJobId? acc
                 if nextOff > offset then
                   discard <| execParamQuery store.missionsDb
                     ("INSERT INTO remote_log_offsets(job_id,published_offset,updated_at) VALUES(?1,CAST(?2 AS INTEGER),?3) " ++
@@ -1669,7 +1706,7 @@ partial def spawnRemoteJobPoller
                   let (lines, rem) := splitCompleteLines (lineRem ++ chunk)
                   lineRem := rem
                   for ln in lines do
-                    acc ← ingestRemoteHarnessLine store broadcastHub? backend missionId ln nowIso acc
+                    acc ← ingestRemoteHarnessLine store broadcastHub? backend missionId ln nowIso goalJobId? acc
                 let some nextOff := flJv.fieldNat? "next_offset" | break
                 let some logLen := flJv.fieldNat? "log_len" | break
                 if (flJv.fieldNat? "offset") != some offset || (flJv.fieldStr? "data").isNone ||
@@ -1681,7 +1718,7 @@ partial def spawnRemoteJobPoller
                 if nextOff == offset then break
                 offset := nextOff
               if !lineRem.trimAscii.toString.isEmpty then
-                acc ← ingestRemoteHarnessLine store broadcastHub? backend missionId lineRem nowIso acc
+                acc ← ingestRemoteHarnessLine store broadcastHub? backend missionId lineRem nowIso goalJobId? acc
                 lineRem := ""
               keepRunning := false
               if !proxyTok.isEmpty then
@@ -1696,6 +1733,8 @@ partial def spawnRemoteJobPoller
                         backend != "opencode" && backend != "claudecode" && backend != "claude" && backend != "codex" && backend != "antigravity" then
                   logTail.trimAscii.toString
                 else ""
+              let finalText ← if isGoal && backend == "codex" && jState == "succeeded" then
+                codexGoalFinalText store missionId jobId finalText else pure finalText
               if jState == "succeeded" && !finalText.isEmpty then
                 emitMissionEventAndBroadcast store broadcastHub? missionId "assistant_message"
                   (renderCompact (.obj #[("content", .str finalText)])) nowIso

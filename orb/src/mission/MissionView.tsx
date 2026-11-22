@@ -67,7 +67,7 @@ import {
   transcriptVersion,
 } from "../missionCache";
 import { ConversationSkeleton, DelayedTranscriptSkeleton, ActivitySkeleton } from "../Skeleton";
-import { visibleTranscript, removeUsers, mapUsers, reuseUnchanged } from "../transcriptModel";
+import { projectCompletedGoal, visibleTranscript, removeUsers, mapUsers, reuseUnchanged } from "../transcriptModel";
 import { pollWhileVisible } from "../poll";
 import { contextPct, contextWindow, estimateTokens, formatTokens } from "../missionContext";
 import {
@@ -224,7 +224,7 @@ function MissionDock(p: {
   const [modelOpen, setModelOpen] = createSignal(false);
   const [effortOpen, setEffortOpen] = createSignal(false);
   const [saving, setSaving] = createSignal(false);
-  const catalogMachine = () => p.mission && localBinding(p.mission.id) ? "local" : p.mission?.remote_node_id ?? "core";
+  const catalogMachine = () => p.mission && localBinding(p.mission.id) ? "local" : missionAssignedNode(p.mission) ?? "core";
   const choice = () => harnessChoices(catalogMachine()).find((c) => c.backend.id === p.mission?.backend);
   const harnessName = () => choice()?.backend.name ?? p.mission?.backend ?? "";
   const modelId = () => (p.mission?.backend === "antigravity" ? antigravityBaseModel(p.mission?.model_override) : p.mission?.model_override) || "";
@@ -1003,7 +1003,6 @@ export function NativeMissionView(p: { id: string; active?: boolean; launch?:Lau
           }
           if (ev.type === "goal_status" || ev.type === "goal_iteration") {
             setLiveGoal(old => applyRemoteGoalEvent(old ?? { phase: "active", objective: "", iteration: 0 }, { type: ev.type, data: ev.data }));
-            return;
           }
           if (replaying) held.push(ev);
           else applyLive(ev);
@@ -1195,7 +1194,7 @@ export function NativeMissionView(p: { id: string; active?: boolean; launch?:Lau
   });
   const remoteGoal = createMemo(() => {
     const m = mission();
-    if (!m?.goal_mode || clientPlaced() || !(m.remote_node_id || m.remote_job?.node_id)) return;
+    if (!m?.goal_mode || clientPlaced() || !missionNode(m)) return;
     const phase = remoteGoalPhase(m.status, m.terminal_reason);
     const live = liveGoal();
     return { phase: phase === "active" ? live?.phase ?? phase : phase, objective: m.goal_objective ?? "", iteration: Math.max(m.goal_iteration ?? 0, live?.iteration ?? 0) };
@@ -1252,7 +1251,10 @@ export function NativeMissionView(p: { id: string; active?: boolean; launch?:Lau
   const viewItems = createMemo(() => {
     const ready = p.id ? peekReadyTranscript(p.id) : undefined;
     const spinePending = Boolean(ready?.hasOlder && ready.spineComplete === false);
-    const canonical = withInitialPrompt(items(), mission(), receipt, awaiting() || spinePending);
+    const record = mission();
+    const history = record?.status === "completed" && record.terminal_reason === "remote_goal_complete"
+      ? projectCompletedGoal(items()) : items();
+    const canonical = withInitialPrompt(history, record, receipt, awaiting() || spinePending);
     const outbox = [...acceptedLocalMessages(p.id), ...queuedLocalMessages(p.id).filter(row=>!row.error&&(!row.waiting||row.state==='accepted'||row.state==='dispatching'))];
     const drafts=optimisticList();
     let list = canonical;

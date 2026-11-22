@@ -138,6 +138,63 @@ def verifyManagedWorkerLoss (root : String) : IO Unit := do
     closeCoreStore store
     closeManagedComputeStore mc
 
+private def verifyCodexGoalEcho (store : CoreStore) (sup : RemoteJobSupervisor)
+    (fd : LeanSys.Posix.Fd) (root mid : String) : IO Unit := do
+  let jid := "job-" ++ mid
+  let db := store.missionsDb
+  let .ok _ ← execParamQuery db
+    "UPDATE missions SET backend='codex',goal_mode=1,goal_objective='Count',placement_job_id=?2,terminal_reason='remote_node_job' WHERE id=?1;"
+    #[mid, jid] | throw (IO.userError "Codex echo fixture")
+  let finalText := "23\n<!-- GOAL_COMPLETE -->"
+  let raw := "23\n\n" ++ finalText
+  let line := fun (id text : String) => renderCompact (.obj #[("type", .str "item.completed"),
+    ("item", .obj #[("id", .str id), ("type", .str "agent_message"), ("text", .str text)])]) ++ "\n"
+  let chunk := line "item_0" "23" ++ line "item_1" finalText
+  let len := chunk.utf8ByteSize
+  let slice := fun (offset : Nat) (data : String) => renderCompact (.obj #[
+    ("offset", .nat offset), ("next_offset", .nat len), ("log_len", .nat len), ("data", .str data)])
+  let responder ← IO.asTask do
+    withMockNodeRequest fd fun conn _ => mockNodeReply conn "200 OK" (slice 0 chunk)
+    withMockNodeRequest fd fun conn _ => mockNodeReply conn "200 OK" "{\"state\":\"succeeded\",\"exit_code\":0}"
+    withMockNodeRequest fd fun conn _ => mockNodeReply conn "200 OK" (slice len "")
+  spawnRemoteJobPoller store none none none sup root mid "codex" "mockgoalchecks" jid ""
+  IO.ofExcept responder.get
+  for _ in [:100] do
+    if (← cellOf db "SELECT status FROM missions WHERE id=?1;" #[mid]) != "active" then break
+    IO.sleep 20
+  let .ok deltas ← execParamQuery db
+    "SELECT json_extract(payload,'$.content'),json_extract(payload,'$.codex_item_id') FROM mission_events WHERE mission_id=?1 AND event_type='text_delta' ORDER BY id;" #[mid]
+    | throw (IO.userError "Codex echo snapshots")
+  check (deltas.size == 3 && cell deltas[1]! 0 == "23" && cell deltas[2]! 0 == raw &&
+    cell deltas[1]! 1 == "item_0" && cell deltas[2]! 1 == "item_1")
+    "both original Codex events retain their cumulative content and item IDs"
+  check ((← cellOf db "SELECT json_extract(payload,'$.content') FROM mission_events WHERE mission_id=?1 AND event_type='assistant_message';" #[mid]) == finalText &&
+    (← cellOf db "SELECT status FROM missions WHERE id=?1;" #[mid]) == "completed")
+    "the Goal is completed and its final message contains a single answer and the marker"
+
+private def verifyCodexGoalEchoBoundaries (store : CoreStore) (mid : String) : IO Unit := do
+  let marker := "<!-- GOAL_COMPLETE -->"
+  let jid := "codex-boundary"
+  let snap := fun (job id text : String) (length : Nat) => renderCompact (.obj #[("content", .str text),
+    ("codex_goal_job", .str job), ("codex_item_id", .str id), ("codex_item_chars", .nat length)])
+  let replay := fun (earlier prev next prevJob nextId : String) (tool : Bool) => do
+    let prior := earlier ++ prev
+    let raw := prior ++ "\n\n" ++ next
+    discard <| appendMissionEvent store mid "text_delta" (snap prevJob "a" prior prev.length) "t0"
+    if tool then discard <| appendMissionEvent store mid "tool_result" "{}" "t0"
+    discard <| appendMissionEvent store mid "text_delta" (snap jid nextId raw next.length) "t1"
+    return (← codexGoalFinalText store mid jid raw, raw)
+  for (prev, next, job, id, tool) in #[
+      ("23", "23", jid, "b", false), ("checked", "23\n" ++ marker, jid, "b", false),
+      ("23", "23 " ++ marker, jid, "b", false), ("~~~", "~~~\n" ++ marker, jid, "b", false), ("23", "23\n" ++ marker, "other-job", "b", false),
+      ("23", "23\n" ++ marker, jid, "a", false), ("23", "23\n" ++ marker, jid, "b", true)] do
+    let (actual, raw) ← replay "" prev next job id tool
+    check (actual == raw) "nonmatching, interrupted and unmarked messages remain intact"
+  let para := "é🧮\n\né🧮"
+  let prefixText := "Checking progress\n\n"
+  let (actual, _) ← replay prefixText para (para ++ "\r\n" ++ marker) jid "b" false
+  check (actual == prefixText ++ para ++ "\r\n" ++ marker) "retain earlier commentary, internal paragraphs and CRLF"
+
 private def verifyIncompleteGoalDrain (store : CoreStore) (sup : RemoteJobSupervisor)
     (fd : LeanSys.Posix.Fd) (root mid : String) (capped : Bool) : IO Unit := do
   let jid := s!"job-{mid}"
@@ -691,6 +748,9 @@ def run : IO Unit := do
            let mid := if replaced then "m-completed-goal-followup-replaced" else "m-completed-goal-followup"
            newMission mid "[\"remote-node:mockgoalchecks\"]"
            verifyCompletedGoalFollowupRecovery store checksFd root mid replaced
+         newMission "m-codex-goal-echo" "[\"remote-node:mockgoalchecks\"]"
+         verifyCodexGoalEcho store sup checksFd root "m-codex-goal-echo"
+         verifyCodexGoalEchoBoundaries store "m-codex-goal-echo"
          for (mid, capped) in #[("m-goal-log-failed", false), ("m-goal-log-capped", true)] do
            newMission mid "[\"remote-node:mockgoalchecks\"]"
            verifyIncompleteGoalDrain store sup checksFd root mid capped

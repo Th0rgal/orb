@@ -407,6 +407,6 @@ Only these. Each one names what it unblocks.
 Rows the reconciler dispatches, in order. A row leaves the queue by PR when it
 is done or dropped.
 
-`U5`, `U8`, `U6`, `U6a`, `U7`, `U3`, `R30`, `M3`, `L5`, `R17`, `R18`, `R19`, `R21`, `O3`, `O4`, `R21a`, `R31`
+`U5`, `U8`, `U6`, `U7`, `U3`, `R30`, `M3`, `L5`, `R17`, `R18`, `R19`, `R21`, `O3`, `O4`, `R21a`, `R31`
 
 **Already-owned Linux trial lanes:** follow the [U4 lane table](#u4-linux-trial-owners-and-acceptance). The controller's two cloud verification lanes can proceed in parallel with the existing Spark/m2air work. Source changes stay with #1977 and the separate #1971 owner. These are assignments, not additional automatic starts. Device acceptance gates only the trial and default decision; unrelated queued work keeps its order and capacity.
