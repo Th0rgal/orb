@@ -62,3 +62,32 @@ def check_remote_append(tmp, api, mid, submissions):
             count, = db.execute("SELECT count(*) FROM mission_events WHERE mission_id=? AND event_type='user_message' "
                                 "AND json_extract(payload,'$.id')=?", (mid, key)).fetchone()
             assert count == 1
+
+
+def check_scoped_queue_replay(tmp, api, mid, submissions, restart):
+    route = f"/api/control/missions/{mid}/message"
+    body = {"mission_id": mid, "client_message_id": "scoped-retry", "content": "fixture"}
+    db_path = next(tmp.rglob("missions.db"))
+    with contextlib.closing(sqlite3.connect(db_path)) as db:
+        # The original worker cannot contact the replay observer on startup.
+        db.execute("UPDATE missions SET tags=?,status='active' WHERE id=?", (json.dumps(["remote-node:queue-origin"]), mid))
+        db.commit()
+    first = api(route, body)
+    assert first["queued"] and first["mission_id"] == mid
+
+    def finish_original_turn():
+        with contextlib.closing(sqlite3.connect(db_path)) as db:
+            db.execute("UPDATE missions SET tags=?,status='awaiting_user' WHERE id=?", (json.dumps(["remote-node:fixture"]), mid))
+            db.execute("DELETE FROM remote_message_queue WHERE mission_id=? AND message_id=?", (mid, body["client_message_id"]))
+            db.commit()
+
+    restart(finish_original_turn)
+    assert api(route, body) == first
+    with contextlib.closing(sqlite3.connect(db_path)) as db:
+        db.execute("UPDATE missions SET tags='[]',placement_kind='managed',status='active' WHERE id=?", (mid,))
+        db.commit()
+        assert api(route, body) == first
+        count, = db.execute("SELECT count(*) FROM mission_events WHERE mission_id=? AND event_type='user_message' "
+                            "AND json_extract(payload,'$.id')=?", (mid, body["client_message_id"])).fetchone()
+        assert count == 0
+    assert not submissions
