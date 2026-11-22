@@ -7080,7 +7080,7 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
         unless content?.isNone && st.remoteSup?.isSome && RemoteGoal.harnesses.contains m.backend &&
             (← resolveMissionRemoteNode? st.store st.managedStore? mid).isSome do
           return .ok (mkJson 400 "{\"error\":\"remote_goal_unsupported\"}")
-        unless m.goalMode && m.status == "interrupted" && m.runGeneration == generation do
+        unless m.goalMode && (["interrupted", "awaiting_user", "failed"].contains m.status) && m.runGeneration == generation do
           return .ok (mkJson 409 "{\"error\":\"remote_goal_resume_conflict\"}")
         goalGeneration? := some generation
       let mut promoteCyber? : Option (Selection × String) := none
@@ -7123,7 +7123,7 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
               revision := promoted.revision, key := s!"remote-launch:{mid}", model := effectiveModel
             }
       if let some generation := goalGeneration? then
-        match ← resumeStoppedRemoteGoal st.store mid generation nowEpochSec with
+        match ← resumeRemoteGoal st.store mid generation nowEpochSec with
         | .ok true => return .ok (mkJson 202 "{\"status\":\"awaiting_user\",\"terminal_reason\":\"remote_goal_continuation\"}")
         | .ok false => return .ok (mkJson 409 "{\"error\":\"remote_goal_resume_conflict\"}")
         | .error e => return .ok (mkJson (if e == "remote_goal_session_missing" then 409 else 500) s!"\{\"error\":{jsonEscape e}}")

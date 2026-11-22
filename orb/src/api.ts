@@ -2812,7 +2812,7 @@ export async function moveMissionsBatch(body: MoveMissionsRequest): Promise<Move
   }
 }
 
-export async function resumeStoppedRemoteGoal(id: string, generation: number): Promise<void> {
+export async function resumeRemoteGoal(id: string, generation: number): Promise<void> {
   await api(`/api/control/missions/${encodeURIComponent(id)}/resume-goal`, {
     method: "POST", body: JSON.stringify({ run_generation: generation }),
   });

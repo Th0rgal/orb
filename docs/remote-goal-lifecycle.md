@@ -253,7 +253,11 @@ page. The same rule applies to a cached Done summary that reproduces the
 answer with whitespace flattened. The raw events retain their original text.
 A quoted marker, fenced example or ordinary assistant response remains visible.
 
-An owner can resume a stopped remote Goal from its conversation. The action posts
+An owner sees one **Resume Goal** action when a remote Goal is explicitly stopped
+(`interrupted / remote_goal_stopped`) blocked (`awaiting_user / remote_goal_blocked`), or failed (`failed / remote_job_failed`).
+For a failed job, Core also requires that the placement and terminal run for the displayed
+generation identify the failed native Goal claim. An ordinary failed follow-up cannot rearm it.
+It replaces ordinary recovery buttons in both the transcript and the failure notice. The action posts
 the displayed `run_generation` to `/api/control/missions/:id/resume-goal`. Core checks the saved session and atomically arms one continuation of
 the saved objective. A second click or stale generation receives a conflict.
 Sending a normal follow-up after stopping starts an ordinary turn, as it does
