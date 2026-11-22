@@ -386,29 +386,33 @@ private def resolveAllowedNodePeer (peer : PeerCred) : IO Bool := do
           if pUid == uNat.toUInt32 then return true
   return false
 
-private def lookupUnixUserInfo (uName : String) : IO (Option (UInt32 × UInt32 × String × Array String)) := do
+private def lookupUnixUserInfo (uName : String) : IO (Except String (Option (UInt32 × UInt32 × String × Array String))) := do
   let py :=
     "import grp, json, pwd, sys\n" ++
     "u = sys.argv[1]\n" ++
     "try:\n" ++
     "  pw = pwd.getpwnam(u)\n" ++
+    "except KeyError:\n" ++
+    "  print(json.dumps({'ok': False}))\n" ++
+    "else:\n" ++
     "  gnames = []\n" ++
     "  for g in grp.getgrall():\n" ++
     "    if g.gr_gid == pw.pw_gid or u in g.gr_mem:\n" ++
     "      gnames.append(g.gr_name)\n" ++
-    "  print(json.dumps({'ok': True, 'uid': pw.pw_uid, 'gid': pw.pw_gid, 'dir': pw.pw_dir, 'groups': gnames}))\n" ++
-    "except KeyError:\n" ++
-    "  print(json.dumps({'ok': False}))\n"
+    "  print(json.dumps({'ok': True, 'uid': pw.pw_uid, 'gid': pw.pw_gid, 'dir': pw.pw_dir, 'groups': gnames}))\n"
   let .ok out ← (IO.Process.output { cmd := "python3", args := #["-c", py, uName] }).toBaseIO
-    | return none
-  if out.exitCode != 0 then return none
-  let .ok jv := Json.parse out.stdout | return none
-  if (jv.fieldBool? "ok") != some true then return none
-  let some uid := jv.fieldNat? "uid" | return none
-  let some gid := jv.fieldNat? "gid" | return none
-  let dir := (jv.fieldStr? "dir").getD ""
-  let groups := ((jv.fieldArr? "groups").getD #[]).filterMap JVal.asStr?
-  return some (uid.toUInt32, gid.toUInt32, dir, groups)
+    | return .error "Could not start python3 for Unix account lookup"
+  if out.exitCode != 0 then return .error "Unix account lookup failed; check python3 and its standard library"
+  let invalid := "Invalid Unix account lookup response"
+  let .ok jv := Json.parse out.stdout | return .error invalid
+  let some found := jv.fieldBool? "ok" | return .error invalid
+  unless found do return .ok none
+  let some uid := jv.fieldNat? "uid" | return .error invalid
+  let some gid := jv.fieldNat? "gid" | return .error invalid
+  let some dir := jv.fieldStr? "dir" | return .error invalid
+  let some entries := jv.fieldArr? "groups" | return .error invalid
+  let some groups := entries.mapM JVal.asStr? | return .error invalid
+  return .ok (some (uid.toUInt32, gid.toUInt32, dir, groups))
 
 private def populateUserHomeDropped
     (isNonRootTest : Bool)
@@ -538,8 +542,8 @@ def handleEnsureMissionUser (cfd : LeanSys.Posix.Fd) (cfg : PrivdConfig) (peer :
     if isNonRootTest then
       pure ((2500 : UInt32), (2500 : UInt32), true)
     else do
-      let mut info? ← lookupUnixUserInfo uName
-      if info?.isNone then
+      let mut lookup ← lookupUnixUserInfo uName
+      if let .ok none := lookup then
         let _ ← IO.Process.output {
           cmd := "/usr/sbin/groupadd"
           args := #["-K", "GID_MIN=2000", "-K", "GID_MAX=60000", uName]
@@ -559,9 +563,11 @@ def handleEnsureMissionUser (cfd : LeanSys.Posix.Fd) (cfg : PrivdConfig) (peer :
         }
         if addOut.exitCode != 0 then
           return (← replyError cfd s!"useradd failed for {uName}: {addOut.stderr.trimAscii}" 126)
-        info? ← lookupUnixUserInfo uName
-      let some (u, g, pwDir, grps) := info?
-        | return (← replyError cfd s!"Failed resolving provisioned unix user {uName}" 126)
+        lookup ← lookupUnixUserInfo uName
+      let (u, g, pwDir, grps) ← match lookup with
+        | .ok (some info) => pure info
+        | .ok none => return (← replyError cfd s!"Failed resolving provisioned unix user {uName}" 126)
+        | .error reason => return (← replyError cfd reason 126)
       if pwDir != s!"{homeRoot}/{uName}" then
         return (← replyError cfd s!"Existing unix user {uName} home '{pwDir}' != '{homeRoot}/{uName}'" 126)
       let disj := !(grps.any (fun gn => privilegedUnixGroups.contains gn.toLower))
@@ -693,7 +699,10 @@ def handleSpawnUserJob (cfd : LeanSys.Posix.Fd) (cfg : PrivdConfig) (peer : Peer
     if isNonRootTest then
       pure ((2500 : UInt32), (2500 : UInt32), true)
     else do
-      let some (u, g, pwDir, grps) ← lookupUnixUserInfo uName
+      let info? ← match ← lookupUnixUserInfo uName with
+        | .ok value => pure value
+        | .error reason => return (← replyError cfd reason 126)
+      let some (u, g, pwDir, grps) := info?
         | return (← replyError cfd s!"Unix user '{uName}' is not provisioned" 126)
       if pwDir != s!"{homeRoot}/{uName}" then
         return (← replyError cfd s!"Unix user '{uName}' home mismatch" 126)
@@ -891,7 +900,10 @@ def handleUserFsOp (cfd : LeanSys.Posix.Fd) (_cfg : PrivdConfig) (peer : PeerCre
     if isNonRootTest then
       pure ((2500 : UInt32), (2500 : UInt32), true)
     else do
-      let some (u, g, pwDir, grps) ← lookupUnixUserInfo uName
+      let info? ← match ← lookupUnixUserInfo uName with
+        | .ok value => pure value
+        | .error reason => return (← replyError cfd reason 126)
+      let some (u, g, pwDir, grps) := info?
         | return (← replyError cfd s!"Unix user '{uName}' is not provisioned" 126)
       if pwDir != s!"{homeRoot}/{uName}" then
         return (← replyError cfd s!"Unix user '{uName}' home mismatch" 126)
