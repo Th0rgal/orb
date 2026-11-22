@@ -1,3 +1,4 @@
+import { AirVpnSettings } from "./AirVpnSettings";
 import { HARNESS_IDS, harnessName } from "./harnesses";
 import { cloudAccounts, cloudNames, type CloudAccount } from "./cloudAgentApi";
 import { cachePeek, cachePeekArray, cachePut } from "./pageCache";
@@ -1041,6 +1042,7 @@ export function Settings(p: { onOpenPage?: (id: string) => void } = {}) {
           <summary>Advanced <Ic.ChevronDown size={14} /></summary>
           <Show when={advancedMounted()}>
             <Show when={isAdminUser()}>
+              <AirVpnSettings />
               <WorkspaceCleanupCard />
               <BackupRestoreCard />
             </Show>

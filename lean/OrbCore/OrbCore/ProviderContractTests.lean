@@ -13,6 +13,32 @@ open OrbBin.Json OrbBin.PosixExt
 open OrbCore.Store OrbCore.Control OrbCore.R7Core OrbCore.Proxy OrbCore.Managed
 open OrbCore.ProviderUsageAndLogin
 
+def checkDiscovery (root url : String) (port : UInt16) : IO Unit := do
+  let st ← IO.ofExcept (← openCoreStore root)
+  try
+    let hp : AIProviderRecord := { id := "fixture", providerType := "custom", name := "Fixture", baseUrl := url, apiKey := "fixture-only" }
+    IO.ofExcept (← upsertAIProvider st hp)
+    let hub ← newProviderRuntimeHub
+    let verify := fun (hub : ProviderRuntimeHub) (expected : String) => do
+      refreshCustomModelDiscovery st root hub
+      let metadata ← readDataJsonFile root root "model-discovery.json"
+      let row := ((metadata.fieldArr? "connections").getD #[])[0]!
+      unless row.fieldStr? "status" == some expected && (row.field? "last_success").isSome do
+        throw (IO.userError "unexpected discovery status")
+    verify hub "discovered"
+    IO.ofExcept (← AccountVpnRoutes.set st.missionsDb hp.id (some "NL"))
+    let routed := fun (provider account : String) => pure <|
+      if provider == "custom" && account == hp.id then .ok (some port) else .error "wrong_account"
+    verify { hub with resolveTransport? := some routed } "discovered"
+    verify hub "failed"
+    let seen ← IO.mkRef false
+    let resolver := fun (provider account : String) => do
+      seen.set (provider == "custom" && account == hp.id)
+      pure (.error "fixture_unavailable" : Except String (Option UInt16))
+    verify { hub with resolveTransport? := some resolver } "failed"
+    unless ← seen.get do throw (IO.userError "wrong account passed to discovery resolver")
+  finally closeCoreStore st
+
 private def getJson (app : CoreAppState) (jwt target : String) (now : UInt64) : IO JVal := do
   let raw := s!"GET {target} HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {jwt}\r\n\r\n"
   let .ok req := parseRequest raw.toUTF8 none
@@ -74,6 +100,17 @@ private def lateSidecarError (app : CoreAppState) (hub : ProviderRuntimeHub) (an
         targetProvId? := some "10000000-0000-4000-8000-000000000001", stateToken := "late-state",
         authUrl := "https://fixture.invalid/auth", flow := "redirect", createdSec := wallNow, beforeFiles := baseline
       }) }
+  let staleAccount := "vpn-callback-fixture"
+  hub.mu.atomically do
+    modify fun st => { st with loginSessions := st.loginSessions.push ({
+      sessionId := "stale-vpn-callback", providerSlug := "codex", authFileType := "codex",
+      targetProvId? := some staleAccount, stateToken := "fixture-state", authUrl := "https://fixture.invalid/",
+      flow := "redirect", createdSec := wallNow, beforeFiles := baseline
+    }) }
+  IO.ofExcept (← OrbCore.AccountVpnRoutes.set app.store.missionsDb staleAccount (some "NL"))
+  let (staleCode, _) ← postJson app jwt "/api/ai/providers/cli-proxy-login/stale-vpn-callback/callback"
+    "{\"url\":\"http://localhost/callback?code=fixture&state=fixture-state\"}" now
+  if staleCode != 409 then failures := failures.push "A Direct login callback must be refused after selecting VPN"
   let session := "/api/ai/providers/cli-proxy-login/late-error-fixture"
   -- The sidecar accepts the callback before it exchanges the code, then reports an error.
   answer.set "{\"status\":\"ok\"}"
@@ -823,11 +860,12 @@ private def r26SidecarToggleAndOrphanContract
     IO.FS.writeFile orphanPath
       "{\"type\":\"xai\",\"email\":\"orphan@fixture.invalid\",\"disabled\":true}"
     let listed := (← getJson app jwt "/api/ai/providers" now).asArr?.getD #[]
-    let orphan := (listed.find? (fun v => v.fieldStr? "id" == some "cliproxyapi:xai")).getD .null
+    let orphanId := "cliproxyapi:xai:fb5d024d63da95145145c8093f7628bf4ebfe247900470810378269f4cd6da00"
+    let orphan := (listed.find? (fun v => v.fieldStr? "id" == some orphanId)).getD .null
     if orphan.isNull then
       failures := failures.push "R26 sidecar: a disabled sidecar login with no Core row must be listed"
     let healthRows := (← getJson app jwt "/api/model-routing/health" now).asArr?.getD #[]
-    let orphanHealth := (healthRows.find? (fun v => v.fieldStr? "account_id" == some "cliproxyapi:xai")).getD .null
+    let orphanHealth := (healthRows.find? (fun v => v.fieldStr? "account_id" == some orphanId)).getD .null
     if orphanHealth.fieldStr? "account_state" != some "disabled" ||
        orphanHealth.fieldBool? "disabled" != some true ||
        (orphanHealth.fieldUInt64? "cooldown_secs_remaining").getD 0 != 0 then
@@ -1348,11 +1386,13 @@ private def customDiscoveryContract (app : CoreAppState) (jwt : String) (now : U
   let (fd, port) ← IO.ofExcept (← LeanSys.Posix.tcpListen "127.0.0.1" 0 8)
   let stop ← IO.mkRef false
   let authorized ← IO.mkRef false
+  let requests ← IO.mkRef (0 : Nat)
   let server ← IO.asTask (prio := .dedicated) do
     while !(← stop.get) do
       match ← LeanSys.Posix.tcpAcceptPoll fd 100 with
       | .error _ => pure ()
       | .ok client =>
+        requests.modify (· + 1)
         let raw := String.fromUTF8! (← LeanSys.Posix.readStreamChunk client 8192)
         authorized.set (raw.startsWith "GET /v1/models " && (raw.splitOn "Bearer discovery-fixture-key").length == 2)
         let body := "{\"data\":[{\"id\":\"gpt-6-astra\"},{\"id\":\"gemini-4-argon\"},{\"id\":\"gpt-6-astra\"}]}"
@@ -1376,6 +1416,20 @@ private def customDiscoveryContract (app : CoreAppState) (jwt : String) (now : U
       failures := failures.push "custom discovery must be present on discovery endpoint"
     if ((renderCompact cat ++ renderCompact disc).splitOn "discovery-fixture-key").length != 1 then
       failures := failures.push "custom discovery must never return API key"
+    let some hp := (← loadHydratedProviders app.store app.cfg.workingDir).find? (fun row => row.name == "Surplus Intelligence")
+      | throw (IO.userError "custom discovery account missing")
+    IO.ofExcept (← AccountVpnRoutes.set app.store.missionsDb hp.id (some "NL"))
+    try
+      let before ← requests.get
+      discard <| postJson app jwt "/api/providers/catalog/refresh" "{}" now
+      let metadata ← readDataJsonFile app.cfg.workingDir app.store.rootDir "model-discovery.json"
+      let refreshed := (metadata.fieldArr? "connections").getD #[]
+      let observation := refreshed.find? (fun c => c.fieldStr? "provider_id" == some s!"custom:{hp.id}")
+      if (← requests.get) != before || !(observation.any (fun c => c.fieldStr? "status" == some "failed" &&
+          c.field? "last_success" != none)) then
+        failures := failures.push "A blocked discovery must preserve the previous model list and withhold the provider credential"
+    finally
+      IO.ofExcept (← AccountVpnRoutes.set app.store.missionsDb hp.id none)
     -- Node X4: plain `ethereumfoundation/glm-5.3` is rejected upstream while flash variants work;
     -- discovery, catalog, direct routing, and chain entries must drop plain `glm-5.3` and keep flash variants.
     if OrbCore.ProxyModelRouting.customProviderModelAllowed "Ethereum Foundation" "https://inference.ethereum.foundation/v1" "glm-5.3" ||
@@ -1597,13 +1651,17 @@ private def r21aAdapterReplays (store : CoreStore) (root : String) : IO Unit := 
     if bearer == some "fixture-expired" then return .ok (401, "", none)
     return reply "{\"data\":[{\"name\":\"5h\",\"limit\":20,\"used\":5},{\"model_name\":\"all\",\"limit\":100,\"remaining\":40},{\"name\":\"bonus\",\"remaining\":2}]}" }
   let first ← runProviderUsageUpkeepPass hub store root 0
-  let cached := fun () => hub.mu.atomically (do return ((← get).usageEntries[0]?).map (·.payload) |>.getD .null)
-  unless first == #["cliproxyapi:kimi"] && (← cached ()).fieldStr? "status" == some "needs_reauth" do
+  let account := fileAccountId "kimi" "kimi-fixture.json"
+  let cached := fun () => hub.mu.atomically do
+    let entry := (← get).usageEntries.find? (fun e => e.providerId == account)
+    return (entry.map (·.payload)).getD .null
+  unless first == #[account] && (← cached ()).fieldStr? "status" == some "needs_reauth" do
     throw (IO.userError "r21aUpkeep: rejected login not observed")
   unless (← runProviderUsageUpkeepPass hub store root 0).isEmpty do throw (IO.userError "r21aUpkeep: fresh entry re-polled")
   -- The external owner has already rotated the file. This tests consumption, not renewal.
   IO.FS.writeFile kimiFile "{\"type\":\"kimi\",\"access_token\":\"fixture-rotated\"}"
-  discard <| runProviderUsageUpkeepPass hub store root 0 0
+  unless (← runProviderUsageUpkeepPass hub store root 0 0) == #[account] do
+    throw (IO.userError "r21aUpkeep: token rotation changed the account identity")
   let k ← cached ()
   unless (← calls.get) == #["fixture-expired", "fixture-rotated"] && k.fieldStr? "status" == some "connected" &&
       k.fieldOrNull "kimi_5h_used_percent" == .num "25" && k.fieldOrNull "kimi_weekly_used_percent" == .num "60" &&
@@ -1655,9 +1713,9 @@ def run : IO Unit := do
         | throw (IO.userError "provider contract admin creation failed")
       let jwt := mintSessionTokenV2 cfg.jwtSecret admin.id admin.role admin.sessionEpoch (now + 3600)
       let mut failures : Array String := #[]
-      let .ok member ← createUserRecord store "inventory-member" "inventory-fixture-password" "member"
+      let .ok member ← createUserRecord store "vpn-settings-member" "vpn-member-fixture-password" "member"
           none none "2026-11-16T00:00:00Z"
-        | throw (IO.userError "Inventory member creation failed")
+        | throw (IO.userError "VPN settings member creation failed")
       let memberJwt := mintSessionTokenV2 cfg.jwtSecret member.id member.role member.sessionEpoch (now + 3600)
       let a : HydratedProvider := { (default : HydratedProvider) with
         id := "fixture-a"
@@ -1676,13 +1734,49 @@ def run : IO Unit := do
         ("account_id", .str b.id), ("model_id", .str "fixture-model"), ("api_key", .str "synthetic-inline")]])
       unless (parseChainTargetsJson inlineEntry #[] #[a, { b with enabled := false }]).isEmpty do
         failures := failures.push "Inline chain settings cannot override a disabled account pin"
+      let sidecarAccount := { b with
+        hasApiKey := false
+        apiKey := ""
+        hasOAuth := true
+        oauthFile := "selected.json"
+        boundOauthFile := "selected.json"
+        modelPrefix := "selected" }
+      let viaOwner := (parseChainTargetsJson entry #[] #[a, sidecarAccount] "http://127.0.0.1:8317" "fixture-sidecar")[0]?
+      unless viaOwner.any (fun t => t.modelId == "selected/gpt-5" &&
+          t.sidecarCredential?.any (fun c => c.file == "selected.json" && c.modelPrefix == "selected")) do
+        failures := failures.push "A pinned sidecar account must use the selected credential’s model namespace"
+      let duplicate := { sidecarAccount with id := "fixture-c" }
+      unless (accountRoutingFile #[sidecarAccount, duplicate] sidecarAccount).isEmpty do
+        failures := failures.push "Two accounts claiming one file must lose routing authority"
+      let legacy := { sidecarAccount with boundOauthFile := "" }
+      let viaDisplay := (parseChainTargetsJson entry #[] #[a, legacy] "http://127.0.0.1:8317" "fixture-sidecar")[0]?
+      unless viaDisplay.any (fun t => t.sidecarCredential?.any (fun c => c.file.isEmpty)) do
+        failures := failures.push "A display-only OAuth file must never authorize account VPN routing"
+      let vpnSettings := "/api/settings/airvpn"
+      let accountRoute := "/api/ai/providers/missing-account/vpn"
+      for path in [vpnSettings, accountRoute] do
+        let (anonymous, _) ← putJson app "" path "{}" now
+        let (memberCode, _) ← putJson app memberJwt path "{}" now
+        if anonymous != 401 || memberCode != 403 then
+          failures := failures.push s!"VPN settings authority {path}: anonymous={anonymous}, member={memberCode}"
       let ownerRow : AIProviderRecord := {
-        id := "inventory-owner-fixture"
+        id := "vpn-owner-fixture"
         name := "Owner fixture"
         providerType := "openai"
         apiKey := "fixture-only"
       }
       IO.ofExcept (← upsertAIProvider store ownerRow)
+      let ownerRoute := s!"/api/ai/providers/{ownerRow.id}/vpn"
+      let ownRoute ← getJson app memberJwt ownerRoute now
+      unless ownRoute.fieldBool? "can_configure" == some true do
+        failures := failures.push "A member can configure a shared provider"
+      let testPool ← Std.Mutex.new ({} : AccountVpnPool.PoolState)
+      let (memberCode, saved) ← putJson { app with vpnPool? := some testPool } memberJwt ownerRoute
+        "{\"mode\":\"vpn\",\"country\":\"NL\"}" now
+      let adminView ← getJson app jwt ownerRoute now
+      unless memberCode == 200 && saved.fieldStr? "country" == some "NL" &&
+          adminView.fieldStr? "country" == some "NL" do
+        failures := failures.push "An administrator must see the shared country saved by a member"
       let configuredIdentities := fun (session : String) => do
         let rows := (← getJson app session "/api/ai/providers" now).asArr?.getD #[]
         return (rows.filter (·.fieldBool? "has_credentials" == some true)).map fun row =>
@@ -1725,8 +1819,9 @@ def run : IO Unit := do
           disabledMember.fieldBool? "enabled" == some false &&
           disabledAdmin.fieldBool? "effective_enabled" == some false &&
           (disabledMember.fieldOrNull "status").fieldStr? "type" == some "connected" &&
-          (disabledMember.field? "base_url").isNone do
-        failures := failures.push "Both sessions retain the disabled configured account"
+          (disabledMember.field? "base_url").isNone &&
+          (← getJson app memberJwt ownerRoute now).fieldStr? "country" == some "NL" do
+        failures := failures.push "Both sessions retain the disabled configured account and its shared VPN country"
       let legacyFile := s!"{root}/.sandboxed-sh/ai_providers.json"
       IO.FS.rename legacyFile (legacyFile ++ ".saved")
       try
@@ -1745,10 +1840,16 @@ def run : IO Unit := do
           (parseChainTargetsJson pinned (← listAIProviders store) (← loadHydratedProviders store root)).isEmpty do
         failures := failures.push "Global disable excludes pinned inference targets and chooser options"
       IO.ofExcept (← upsertAIProvider store { ownerRow with enabled := false, apiKey := "", providerType := "custom" })
-      unless (← listRow memberJwt) == .null &&
+      let (hiddenCode, _) ← putJson app memberJwt ownerRoute "{\"mode\":\"direct\"}" now
+      unless hiddenCode == 403 && (← listRow memberJwt) == .null &&
           (← listRow jwt).fieldBool? "has_credentials" == some false do
         failures := failures.push "Only the operator sees this unconfigured placeholder"
       IO.ofExcept (← deleteAIProvider store ownerRow.id)
+      let (missing, _) ← putJson app jwt accountRoute "{}" now
+      if missing != 404 then failures := failures.push "VPN admin route must resolve the selected account"
+      let settings ← getJson app jwt vpnSettings now
+      if settings.fieldBool? "api_key_configured" != some false then
+        failures := failures.push "VPN admin settings must expose the initial configuration status"
       let listed ← getJson app jwt "/api/ai/providers" now
       let items := listed.asArr?.getD #[]
       if items.size != cases.size then failures := failures.push "provider list row count"

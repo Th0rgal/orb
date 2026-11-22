@@ -66,6 +66,7 @@ it serves every user's missions through routing exactly like the operator's acco
 | Start / poll / complete / cancel a subscription login (`/api/ai/providers/cli-proxy-login*`) | yes | yes; a login session is visible only to the user who started it (`404` otherwise); re-login with `provider_id` only for accounts they added (`403 not_account_owner`) |
 | Edit name, models, limits (`PUT /api/ai/providers/:id`) | any account | any account |
 | Change global `enabled` | yes | no |
+| Read or select the VPN route of a configured shared account | yes | yes |
 | Replace the API key | any account | only accounts they added (`403 not_account_owner`) |
 | Set `base_url` | any account | only on `custom` accounts they added, public `https://` hosts only (no loopback, private, link-local, `.local`, `.internal`; `403 base_url_not_allowed`) |
 | Reorder (`POST /api/ai/providers/reorder`) | yes | yes |

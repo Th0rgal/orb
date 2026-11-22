@@ -1,7 +1,7 @@
 import { render, screen, waitFor } from "@solidjs/testing-library";
 import { afterEach, expect, it, vi } from "vitest";
 import { Providers } from "../src/Providers";
-import { clearConnection, setConnection, type AIProvider, type ProviderUsage } from "../src/api";
+import { clearConnection, resetCurrentUserState, setConnection, type AIProvider, type ProviderUsage } from "../src/api";
 import { effectiveProviderStatus, hasProviderUsageDetails, usageWindows, verificationUrl } from "../src/providerUsage";
 const account = (id: string) => ({ id, provider_type: "openai", name: id, enabled: true, uses_oauth: true, credential_owner: "sandboxed_sh", status: { type: "connected" } }) as AIProvider;
 const usage = (used: number) => ({ provider_type: "openai", codex_primary_used_percent: used, codex_primary_window_minutes: 10080, codex_secondary_used_percent: 0, codex_secondary_window_minutes: 0 }) as ProviderUsage;
@@ -272,7 +272,7 @@ it("renders banked subscription resets, confirms manual redemption, and toggles 
   await waitFor(() => expect(ui.queryByTestId("subscription-reset-hint")).toBeNull());
 });
 
-it("does not render an expand chevron on healthy subscription or model connection rows that have no body content", async () => {
+it("opens shared account connections for members even without usage details", async () => {
   expect(hasProviderUsageDetails({ provider_type: "xai", xai_plan: "SuperGrok", xai_prepaid_usd: 0, xai_on_demand_used: 0, xai_on_demand_cap: 0 })).toBe(false);
   expect(hasProviderUsageDetails({ provider_type: "kimi", kimi_plan: "Moderato", account_email: "user@example.com" }, "user@example.com")).toBe(false);
   expect(hasProviderUsageDetails({ provider_type: "kimi", account_email: "user@example.com" })).toBe(true);
@@ -280,6 +280,7 @@ it("does not render an expand chevron on healthy subscription or model connectio
   expect(hasProviderUsageDetails({ provider_type: "anthropic", unified_status: "rejected" })).toBe(true);
 
   setConnection("http://core.test", "test-token");
+  resetCurrentUserState("multi_user");
   const rows: AIProvider[] = [
     { ...account("kimi-oauth"), provider_type: "kimi", name: "Kimi Code", account_email: "user@example.com" },
     { ...account("google-model"), provider_type: "google", name: "Gemini model access" },
@@ -290,14 +291,19 @@ it("does not render an expand chevron on healthy subscription or model connectio
   vi.stubGlobal("fetch", vi.fn(async (url: string) => new Response(JSON.stringify(
     url.endsWith("/providers") ? rows
     : url.endsWith("/providers/usage") ? { entries: usages }
+    : url.endsWith("/kimi-oauth/vpn") ? { mode: "direct", countries: ["NL"], can_configure: true }
     : url.endsWith("/kimi-oauth/usage") ? usages["kimi-oauth"]
     : {}
   ))));
   const { container } = render(() => <Providers />);
   await waitFor(() => expect(container.textContent).toContain("Moderato"));
   expect(container.textContent).toContain("Gemini model access");
-  expect(container.querySelectorAll(".p-acc-chev")).toHaveLength(0);
-  expect(container.querySelectorAll(".p-acc-btn")).toHaveLength(0);
+  const buttons = Array.from(container.querySelectorAll<HTMLButtonElement>(".p-acc-btn"));
+  expect(buttons).toHaveLength(2);
+  const kimi = buttons.find(button => button.textContent?.includes("Kimi"));
+  expect(kimi).toBeDefined();
+  kimi!.click();
+  await waitFor(() => expect(container.querySelector<HTMLSelectElement>('select[aria-label="Account connection"]')?.value).toBe(""));
 });
 
 
