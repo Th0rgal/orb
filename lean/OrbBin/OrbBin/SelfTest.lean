@@ -1678,6 +1678,21 @@ def runAllTests : IO UInt32 := do
   assertEq "Warm Claude turn 2 output" st2.text "Warm turn 2!"
   stopHarnessRun warmMgr "m-warm-1"
 
+  -- Simulate numerical PGID reuse: this live child now owns the number in a
+  -- completed generation's handle. A delayed Stop must never signal it.
+  let other ← spawnPgrp "/bin/sh" #["-c", "exec sleep 10"] (← environList)
+  let expired : HarnessProcessGroup := {
+    toSpawnedPgrp := other
+    lock := ← Std.Mutex.new ()
+    state := ← IO.mkRef (.reaped 0) }
+  warmMgr.activeGroupsRef.set #[("stale-generation", expired)]
+  stopHarnessRun warmMgr "stale-generation"
+  let stillRunning := (← waitpidWnohang other.pid) == 0xFFFFFFFF
+  if stillRunning then
+    discard <| killSig (-other.pid) 9
+    discard <| waitpidBlock other.pid
+  assertTrue "delayed Stop preserves the process that reused a reaped PGID" stillRunning
+
   -- Verify hidden git checkpoints (`refs/orb/checkpoints/...`), diffing, and atomic rollback!
   let cpsRes ← listCheckpoints repoDir.toString "m-warm-1"
   let cps := cpsRes.toOption.getD #[]
