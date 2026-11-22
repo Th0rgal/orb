@@ -82,7 +82,7 @@ for (const theme of ["light", "dark"]) test(`account VPN retry and Direct select
   expect(routerWrites).toEqual(Array(2).fill("/api/ai/providers/b/alternative-routers"));
   await own.click();
   await shared.click();
-  const select = page.getByLabel("Account connection", { exact: true });
+  const select = page.getByRole("combobox", { name: "Account connection", exact: true });
   await expect(select).toHaveValue("");
   await select.click();
   const routes = page.getByRole("listbox", { name: "Account connection" });
@@ -93,6 +93,16 @@ for (const theme of ["light", "dark"]) test(`account VPN retry and Direct select
   await select.click();
   const netherlands = routes.getByRole("option", { name: "AirVPN · NL" });
   expect(await netherlands.evaluate(el => el.scrollWidth <= el.clientWidth)).toBe(true);
+  for (const button of ["right", "middle"] as const) {
+    await netherlands.click({ button });
+    expect(changes).toHaveLength(0);
+    await expect(select).toHaveValue("");
+    await expect(routes).toBeVisible();
+  }
+  await page.keyboard.press("Escape");
+  await expect(select).toBeFocused();
+  await page.keyboard.press("Enter");
+  await expect(routes).toBeVisible();
   await netherlands.click();
   await expect(page.getByText("All five AirVPN sessions are in use.")).toBeVisible();
   await page.getByRole("button", { name: "Retry verification" }).click();

@@ -73,7 +73,11 @@ export function Select(props: JSX.SelectHTMLAttributes<HTMLSelectElement>) {
     <span class="orb-select-label" aria-hidden="true">{label()}</span><span class="orb-select-arrows" aria-hidden="true"><ChevronDown size={10}/><ChevronDown size={10}/></span>
     <Show when={open()}><Popover anchor={select} width="anchor" trap={false} label={props["aria-label"] ?? "Options"} onClose={close} id={id} class="orb-options" role="listbox">
       <For each={options()}>{(o, i) => <div id={`${id}-${i()}`} class="orb-option" title={o.label} role="option" aria-selected={i() === select.selectedIndex} aria-disabled={o.disabled} data-active={i() === active()}
-        onPointerMove={() => !o.disabled && setActive(i())} onPointerDown={e => { e.preventDefault(); e.stopPropagation(); choose(i()); }}>{o.label}</div>}</For>
+        onPointerMove={() => !o.disabled && setActive(i())} onPointerDown={e => {
+          e.preventDefault();
+          e.stopPropagation();
+          if (e.button === 0) choose(i());
+        }}>{o.label}</div>}</For>
     </Popover></Show>
   </span>;
 }
