@@ -11,6 +11,7 @@ http {
     uwsgi_temp_path /run/orb-native-tests-tls/uwsgi;
     server {
         listen @WORKER_MESH_IP@:13443 ssl;
+        client_max_body_size 128m;
         ssl_protocols TLSv1.2 TLSv1.3;
         ssl_certificate /run/credentials/orb-native-tests-tls.service/worker.pem;
         ssl_certificate_key /run/credentials/orb-native-tests-tls.service/worker.key;

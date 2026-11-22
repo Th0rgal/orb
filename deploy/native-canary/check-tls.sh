@@ -21,8 +21,25 @@ chown nobody:nogroup "$c/worker.key" "$c/worker.pem"
 chmod 400 "$c/worker.key" "$c/worker.pem"
 sed 's/@WORKER_MESH_IP@/192.0.2.10/g;s/@CORE_MESH_IP@/192.0.2.11/g' "$1" > nginx.conf
 chmod 644 nginx.conf
-printf 'native-canary-proof' > ready
-python3 -m http.server --directory "$t" --bind 127.0.0.1 13088 > /dev/null 2>&1 &
+python3 - > /dev/null 2>&1 <<'PYTHON' &
+from http.server import BaseHTTPRequestHandler, HTTPServer
+
+class Fixture(BaseHTTPRequestHandler):
+    def reply(self, body):
+        self.send_response(200)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_GET(self):
+        self.reply(b"native-canary-proof")
+
+    def do_POST(self):
+        data = self.rfile.read(int(self.headers["Content-Length"]))
+        self.reply(str(len(data)).encode())
+
+HTTPServer(("127.0.0.1", 13088), Fixture).serve_forever()
+PYTHON
 backend=$!
 setpriv --reuid=nobody --regid=nogroup --clear-groups nginx -e stderr -p /run/orb-native-tests-tls -c "$t/nginx.conf" -g 'daemon off;' &
 proxy=$!
@@ -31,6 +48,8 @@ for n in $(seq 1 30); do test -f /run/orb-native-tests-tls/nginx.pid && break; s
 curl_cmd=(curl --noproxy '*' -sS --max-time 3 --cacert "$c/worker.pem")
 actual=$("${curl_cmd[@]}" --interface 192.0.2.11 https://192.0.2.10:13443/ready)
 test "$actual" = native-canary-proof
+truncate -s 2M payload
+test "$("${curl_cmd[@]}" --interface 192.0.2.11 --data-binary @payload https://192.0.2.10:13443/jobs)" = 2097152
 test "$("${curl_cmd[@]}" --interface 127.0.0.1 -o /dev/null -w '%{http_code}' https://192.0.2.10:13443/ready)" = 403
 trust_error=0
 curl --noproxy '*' -s --interface 192.0.2.11 --max-time 3 https://192.0.2.10:13443/ready >/dev/null || trust_error=$?
