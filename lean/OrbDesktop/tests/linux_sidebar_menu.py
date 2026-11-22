@@ -1,6 +1,6 @@
 """Drive the same mission-menu fixture in a packaged Linux client using real pointer input.
 
-Run live_writes.py --sidebar-menu leanui or --sidebar-menu webkit. OCR reads the
+Run live_writes.py --sidebar-menu with webkit, hybrid or leanui. OCR reads the
 private compositor's pixels so the check also exercises the actual menu layout.
 """
 import contextlib
@@ -28,10 +28,18 @@ def exercise(root, tmp, api, graphical, click, process, wait, stack, client_kind
     a, b = create(fixture['openMission']), create(fixture['contextMission'])
     def status(mid):
         return api('/api/control/missions/' + mid)['status']
-    binary = os.environ['ORB_LEANUI_TEST_BINARY' if client_kind == 'leanui' else 'ORB_WEBKIT_TEST_BINARY']
-    cmd = [str(Path(binary).resolve(strict=True))]
-    if client_kind == 'leanui' and Path(binary).name in ('orb', 'orb-desktop'):
-        cmd.append('--leanui')
+    package = os.environ.get('ORB_PACKAGED_TEST_BINARY')
+    if package:
+        flag = {'webkit': '--webkit', 'hybrid': '--leanui-hybrid', 'leanui': '--leanui'}[client_kind]
+        cmd = [str(Path(package).resolve(strict=True)), flag]
+    else:
+        if client_kind == 'hybrid':
+            raise ValueError('hybrid requires ORB_PACKAGED_TEST_BINARY pointing to the package launcher')
+        variable = 'ORB_LEANUI_TEST_BINARY' if client_kind == 'leanui' else 'ORB_WEBKIT_TEST_BINARY'
+        binary = Path(os.environ[variable])
+        cmd = [str(binary.resolve(strict=True))]
+        if client_kind == 'leanui' and binary.name in ('orb', 'orb-desktop'):
+            cmd.append('--leanui')
     home = tmp / 'home'
     graphical.update(HOME=str(home), XDG_DATA_HOME=str(home/'data'), XDG_CONFIG_HOME=str(home/'config'),
                      XDG_CACHE_HOME=str(home/'cache'), GDK_BACKEND='wayland')
@@ -100,8 +108,16 @@ def exercise(root, tmp, api, graphical, click, process, wait, stack, client_kind
             return hits
         def rows():
             return next((hits for region in regions if (hits := actions_in(region))), None)
-        hits = wait('ordered context actions ' + ', '.join(expected), rows)
-        if client_kind == 'webkit' and choose == 'rename':
+        try:
+            hits = wait('ordered context actions ' + ', '.join(expected), rows)
+        except TimeoutError as error:
+            with tempfile.NamedTemporaryFile(prefix=f'orb-{client_kind}-menu-', suffix='.png', delete=False) as frame:
+                subprocess.run(['grim', '-t', 'png', '-'], stdout=frame, env=graphical, check=True)
+            raise AssertionError(f'{choose} for {target or fixture["contextMission"]} at {(x, y)}: {frame.name}') from error
+        if choose == 'dismiss':
+            subprocess.run(['wtype', '-k', 'Escape'], env=graphical, check=True)
+            wait('context menu dismissed', lambda: rows() is None)
+        elif client_kind != 'leanui' and choose == 'rename':
             # Rename receives focus when the GTK menu opens.
             subprocess.run(['wtype', '-k', 'Return'], env=graphical, check=True)
         else:
@@ -125,7 +141,14 @@ def exercise(root, tmp, api, graphical, click, process, wait, stack, client_kind
         subprocess.run(['wtype', '-M', 'ctrl', '-k', 'b', '-m', 'ctrl'], env=graphical, check=True)
         see(fixture['openMission'], header)
         see(fixture['contextMission'], sidebar)
-    if client_kind == 'webkit':
+    if package:
+        from sidebar_backdrop import measure
+        backdrop = measure(graphical)
+        print(json.dumps({'client': client_kind, 'sidebar_backdrop_delta': backdrop}), flush=True)
+        assert 0 < backdrop < 255, 'sidebar must transmit part of the compositor backdrop'
+    action_menu(fixture['activeActions'], 'dismiss')
+    see(fixture['openMission'], header)
+    if client_kind != 'leanui':
         action_menu(fixture['activeActions'], 'rename')
         def rename_open():
             tree = json.loads(subprocess.check_output(['swaymsg', '-t', 'get_tree'], env=graphical))

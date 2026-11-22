@@ -17,3 +17,24 @@ Core-local activation allocates a generation before PID registration. Archive ca
 Retiring warm children remain visible to Archive until exit. Transcript writes from a harness are conditional on its active generation. An occupied local one-shot returns a replayable `409 local_run_busy` before recording a second user message. LeanUI keeps the draft for an explicit new submission once idle (`live_writes.py busy`); an uncertain response retains its original key.
 
 For a running remote mission, both follow-up endpoints confirm queueing only after the queue transaction commits. If the transaction fails, the draft can be retried with the same message ID. Repeated delivery of that ID leaves one queued item.
+
+### Packaged Linux desktop comparison
+
+Run the same sidebar scenario against Classic, hybrid and native with the same
+Orb package and Core build. Open Indigo, dismiss the other mission's context
+menu with Escape, and archive the other mission while it becomes active. Core
+must refuse the first write and leave Indigo selected. Stop the other mission,
+archive again, restart the client, restore it and check both mission states.
+For transparency, switch the private compositor background between black and
+white and compare the same unoccupied sidebar pixels. Keep separate results
+for each renderer and retain the physical compositor measurements on m2air.
+
+Set `ORB_PACKAGED_TEST_BINARY` to the package's `bin/orb` and
+`ORB_CORE_TEST_BINARY` to its matching `bin/orb-core`. With the graphical
+test dependencies in PATH, run from the repository root:
+
+```sh
+for client in webkit hybrid leanui; do
+  OMP_THREAD_LIMIT=1 dbus-run-session -- python3 lean/OrbDesktop/tests/live_writes.py --sidebar-menu "$client" || exit 1
+done
+```

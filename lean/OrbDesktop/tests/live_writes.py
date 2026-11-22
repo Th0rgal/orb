@@ -342,8 +342,8 @@ for i in range(300):
 if __name__ == '__main__':
     with tempfile.TemporaryDirectory(prefix='orb-u6a-') as directory:
         if sys.argv[1:2] == ['--sidebar-menu']:
-            if sys.argv[2:] not in (['webkit'], ['leanui']):
-                raise SystemExit("usage: live_writes.py --sidebar-menu {webkit,leanui}")
+            if sys.argv[2:] not in (['webkit'], ['hybrid'], ['leanui']):
+                raise SystemExit("usage: live_writes.py --sidebar-menu {webkit,hybrid,leanui}")
             run(Path(directory), mouse=True, menu_client=sys.argv[2])
         elif sys.argv[1:] == ["--providers"]:
             run(Path(directory), mouse=True, providers=True)
