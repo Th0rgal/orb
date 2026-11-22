@@ -14,7 +14,7 @@ import { MissionBoardSection } from "./MissionBoard";
 import { MissionLookupContext } from "./orchestrationModel";
 import { renamedTitle, renameOptimistically, withRenamedTitles } from "./renames";
 import { readString, writeString } from "./storage";
-import { nodeLabel } from "./machines/nodes";
+import { missionAssignedNode, nodeLabel } from "./machines/nodes";
 import { isLive, isWorking, missionActivity, presentedStatus } from "./missionStatus";
 import { swallow } from "./log";
 import { connectClientLink, reportClientHarnesses, type RemoteStart } from "./clientLink";
@@ -1730,8 +1730,8 @@ export default function App() {
       activityMissions={missions()}
       currentMission={(() => { const m = findKnownMission(currentMissionId()); return m ? movedMission(m) : undefined; })()}
       harnessChoices={harnessChoices()}
-      forkChoices={mission => harnessChoices(mission.remote_node_id ?? "core")}
-      onForkOpen={mission => void refreshNodeAntigravityModels(mission.remote_node_id ?? "core")}
+      forkChoices={mission => harnessChoices(missionAssignedNode(mission) ?? "core")}
+      onForkOpen={mission => void refreshNodeAntigravityModels(missionAssignedNode(mission) ?? "core")}
       onFork={commitFork}
       selected={selected}
       onDeleted={ids => {

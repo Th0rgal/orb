@@ -1259,3 +1259,5 @@ Configure distinct node IDs and state directories for separate instances.
 For the first upgrade from the previous global scope names, drain the old
 instance and confirm its old scopes are empty before replacing its binary;
 legacy global scopes are not blindly stopped by the new startup sweep.
+
+Desktop can reopen a completed mission without a cached launch receipt or a live job. A fixed node recorded in its placement tags supplies the machine name and model catalog when the structured node fields are absent. A scheduler selector does not identify the machine that ran the job.
