@@ -1778,6 +1778,19 @@ private def memberNativeCatalog (store : CoreStore) (root : String) : IO Unit :=
     let routed := { hub with
       resolveTransport? := some fun _ account => pure (.ok (if account == a.id then some 41001 else none)) }
     let list := fun (hub : ProviderRuntimeHub) user => memberAntigravityModels hub store root user true
+    let seen ← IO.mkRef (#[] : Array String)
+    let scopedHub ← newProviderRuntimeHub
+    let scopedHub := { scopedHub with resolveTransport? := some fun _ account => do
+      seen.modify (·.push account)
+      return .ok none }
+    let restricted := nativeCatalogForRequest (.selected "worker" "other" b.id) scopedHub store root
+    unless (← restricted "member" "/?node_id=worker" true true true).isEmpty &&
+        (← restricted "other" "/?node_id=elsewhere" false true false).isEmpty && (← seen.get).isEmpty do
+      throw (IO.userError "a catalog request probed outside the native canary")
+    let expected := #[("second-model", "Second model")]
+    unless (← restricted "other" "/?node_id=worker" false true false) == expected &&
+        (← restricted "other" "/" true false false) == expected && (← seen.get) == #[b.id] do
+      throw (IO.userError "native catalog failed to isolate the selected account before lookup")
     IO.ofExcept (← setUserProviderPref store "member" a.id false "fixture")
     unless (← list routed "member") == #[("second-model", "Second model")] do
       throw (IO.userError "member saw a disabled account or failed to discover the Direct account")

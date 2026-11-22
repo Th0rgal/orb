@@ -6143,8 +6143,7 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
     let configured ← configuredOpenCodeOptions st.store caller.userId isAdm
     opencodeModels := opencodeModels ++ configured.map renderCompact
     let pHub ← match st.providerHub? with | some h => pure h | none => newProviderRuntimeHub
-    let pairs ← if isAdm then getCachedAntigravityModels pHub false else
-      memberAntigravityModels pHub st.store st.cfg.workingDir caller.userId false
+    let pairs ← nativeCatalogForRequest (← NativeCanary.load) pHub st.store st.cfg.workingDir caller.userId rawTarget isAdm false false
     let agyModels := pairs.map fun (mId, mLbl) => mkOpt mId mLbl ""
     let vibeModels : Array String := #[
       mkOpt "mistral/mistral-vibe-cli-latest" "Mistral Vibe" "Native Mistral Vibe CLI"

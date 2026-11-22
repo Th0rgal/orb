@@ -21,6 +21,7 @@
 -/
 import Std.Sync.Mutex
 import Orb.ProviderLogin
+import OrbCore.NativeCanary
 import OrbCore.ProviderCredentialIdentity
 import OrbCore.AccountVpnRoutes
 import OrbCore.AccountVpnSidecar
@@ -689,12 +690,24 @@ def nativeAntigravityAccounts (hub : ProviderRuntimeHub) (store : CoreStore) (wo
   return catalogs
 
 def memberAntigravityModels (hub : ProviderRuntimeHub) (store : CoreStore) (workingDir userId : String)
-    (probe : Bool) : IO (Array (String × String)) := do
+    (probe : Bool) (onlyAccount : Option String := none) : IO (Array (String × String)) := do
   let mut models : Array (String × String) := #[]
-  for (_, rows) in ← nativeAntigravityAccounts hub store workingDir userId probe do
+  for (_, rows) in ← nativeAntigravityAccounts hub store workingDir userId probe onlyAccount do
     for row in rows do
       unless models.any (fun m => m.1 == row.1) do models := models.push row
   return models
+
+def nativeCatalogForRequest (scope : NativeCanary.Scope) (hub : ProviderRuntimeHub) (store : CoreStore)
+    (workingDir userId rawTarget : String) (admin probe force : Bool) : IO (Array (String × String)) := do
+  match scope with
+  | .unrestricted =>
+    if admin then return ← getCachedAntigravityModels hub force
+    return ← memberAntigravityModels hub store workingDir userId probe
+  | .invalid _ => return #[]
+  | .selected node .. =>
+    let target := (qParam? (parseQueryMap rawTarget) "node_id").getD node
+    let .ok account := scope.accountFor target userId | return #[]
+    return ← memberAntigravityModels hub store workingDir userId probe account
 
 def memberProviderDisplayName (hps : Array HydratedProvider) (hp : HydratedProvider) : String := Id.run do
   let metaInfo := lookupProviderMeta hp.providerType
@@ -2848,8 +2861,7 @@ def dispatchProviderAndAiRoute
   -- 1. `GET /api/providers/antigravity-models` & `GET /api/antigravity-models` (300s cached!)
   if method == "GET" && (segs == ["api", "providers", "antigravity-models"] || segs == ["api", "antigravity-models"]) then
     let force := ((qParam? qMap "force").getD "") == "true"
-    let lookup := if effAdmin then getCachedAntigravityModels hub force else
-      memberAntigravityModels hub store workingDir callerUserId true
+    let lookup := nativeCatalogForRequest (← NativeCanary.load) hub store workingDir callerUserId rawTarget effAdmin true force
     let .ok pairs ← lookup.toBaseIO |
       return some (jsonResp 503 (.obj #[("error", .str "antigravity_catalog_unavailable")]))
     let arr := pairs.map (fun (mId, mLbl) => JVal.arr #[.str mId, .str mLbl])
@@ -2891,7 +2903,7 @@ def dispatchProviderAndAiRoute
   if segs == ["api", "providers", "catalog", "refresh"] && method == "POST" then
     if !effAdmin then return some (jsonErr 403 "admin_required")
     refreshCustomModelDiscovery store workingDir hub
-    let _ ← getCachedAntigravityModels hub true
+    let _ ← nativeCatalogForRequest (← NativeCanary.load) hub store workingDir callerUserId rawTarget effAdmin true true
     let nowSec ← nowEpoch
     hub.mu.atomically do
       let st ← get
