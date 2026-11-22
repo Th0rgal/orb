@@ -2916,6 +2916,12 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
   if req.method == "OPTIONS" then
     return .ok { status := 204, corsOrigin? := reqOrigin?, body := ByteArray.empty }
 
+  let queueRefusal (msgId error : String) : CoreHttpResponse :=
+    let invalid := error.startsWith "deferred_batch_"
+    let reason := if invalid then error else "message_enqueue_failed"
+    mkJson (if invalid then 400 else 500) (renderCompact (.obj #[
+      ("id", .str msgId), ("error", .str reason), ("message_accepted", .bool false), ("queued", .bool false)]))
+
   -- 1. Public Health Endpoint (`GET /api/health`)
   if req.method == "GET" && cleanPath == "/api/health" then
     let multiDb ← hasMultipleActiveUsers st.store
@@ -5308,7 +5314,8 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
         match st.remoteSup?, (← resolveMissionRemoteNode? st.store st.managedStore? mid) with
         | some sup, some targetNode =>
           if mRec.status == "active" || mRec.status == "pending" then
-            discard <| enqueueStructuredFollowup st.store "core" msgId mid content "control" nowIso
+            if let .error e ← enqueueStructuredFollowup st.store "core" msgId mid content "control" nowIso then
+              return .ok (queueRefusal msgId e)
             queued := true
           else
             let (resolvedNode, rentedVmId) ← match ← resolveOrProvisionAutoManagedTarget st caller mid mRec.ownerUserId mRec.project targetNode jv nowEpochSec with
@@ -6502,7 +6509,12 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
       if let (some sup, some m, some targetNode) := (st.remoteSup?, mission?, ← resolveMissionRemoteNode? st.store st.managedStore? mid) then
         dispatchedRemote := true
         if m.status == "active" || m.status == "pending" then
-          discard <| enqueueStructuredFollowup st.store "core" msgId mid delivContent "control" nowIso
+          if let .error e ← enqueueStructuredFollowup st.store "core" msgId mid delivContent "control" nowIso then
+            -- The enqueue transaction rolled back. A retry may safely reuse this message ID.
+            if keyed then
+              if let .error _ ← abortIdempotencySlot st.store receiptScope msgId then
+                return .ok (mkJson 500 "{\"error\":\"message_receipt_unconfirmed\"}")
+            return .ok (queueRefusal msgId e)
           queued := true
         else
           let (resolvedNode, rentedVmId) ← match ← resolveOrProvisionAutoManagedTarget st caller mid m.ownerUserId m.project targetNode bodyJv nowEpochSec with
