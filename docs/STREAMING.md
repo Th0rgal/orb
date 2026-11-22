@@ -209,3 +209,15 @@ canonical row rather than the op log.
 - `src/api/control_metrics.rs` records p50/p99 SSE chunk sizes so we
   can spot regressions in the streaming contract.
 - `src/api/control/mod.rs::stream()` is the server-side mission filter.
+
+### Remote log ingestion
+
+The mission event sequence increases across both the native `seq` column and the
+historical `sequence` column, including transcripts containing both formats.
+Remote ACP fragments retain their order. Core records when it ingests each
+line, and preserves the tool's reported execution times in the event payload.
+A slow log read can span several seconds within a single poll. Events from a
+later log page must carry an ingestion time at or after receipt of that page.
+
+With a built Core binary, `python3 scripts/test_remote_acp_ingest.py /path/to/orb-core`
+replays this case through a loopback worker and a disposable mixed-format store.

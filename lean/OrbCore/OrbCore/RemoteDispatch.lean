@@ -1271,8 +1271,9 @@ private def ingestClaudeStreamLine
 private def ingestRemoteHarnessLine
     (store : CoreStore)
     (broadcastHub? : Option BroadcastHub)
-    (backend missionId rawLine nowIso : String) (goalJobId? : Option String)
+    (backend missionId rawLine : String) (goalJobId? : Option String)
     (acc : RemoteStreamAcc) : IO RemoteStreamAcc := do
+  let nowIso := formatEpochIso8601Utc (← nowEpoch)
   let bLow := backend.trimAscii.toString.toLower
   let harness := if bLow == "claude" then "claudecode" else bLow
   if harness == "claudecode" then
@@ -1617,8 +1618,6 @@ partial def spawnRemoteJobPoller
       IO.sleep 350
       -- The poller must not retry an unreachable node after its store shuts down.
       if (← store.closedRef.get) then break
-      let nowSec ← nowEpoch
-      let nowIso := formatEpochIso8601Utc nowSec
       -- Check if mission was cancelled/interrupted on Core
       if !cancelSent then
         if let .ok mRows ← execParamQuery store.missionsDb
@@ -1627,6 +1626,7 @@ partial def spawnRemoteJobPoller
             let mst := cell mRows[1]! 0
             if mst == "cancelled" || mst == "interrupted" then
               cancelSent := true
+              let nowIso := formatEpochIso8601Utc (← nowEpoch)
               let hdrs := #[
                 ("x-sandboxed-cancel-actor", "core"),
                 ("x-sandboxed-cancel-reason", s!"Mission {mst} on Core")
@@ -1663,12 +1663,12 @@ partial def spawnRemoteJobPoller
                   let (lines, rem) := splitCompleteLines (lineRem ++ chunk)
                   lineRem := rem
                   for ln in lines do
-                    acc ← ingestRemoteHarnessLine store broadcastHub? backend missionId ln nowIso goalJobId? acc
+                    acc ← ingestRemoteHarnessLine store broadcastHub? backend missionId ln goalJobId? acc
                 if nextOff > offset then
                   discard <| execParamQuery store.missionsDb
                     ("INSERT INTO remote_log_offsets(job_id,published_offset,updated_at) VALUES(?1,CAST(?2 AS INTEGER),?3) " ++
                      "ON CONFLICT(job_id) DO UPDATE SET published_offset=excluded.published_offset, updated_at=excluded.updated_at;")
-                    #[jobId, s!"{nextOff}", nowIso]
+                    #[jobId, s!"{nextOff}", formatEpochIso8601Utc (← nowEpoch)]
                 offset := nextOff
                 drainedMore := nextOff < logLen && !chunk.isEmpty
               else
@@ -1678,6 +1678,8 @@ partial def spawnRemoteJobPoller
 
         -- 2. Poll job state
         let jobStatus ← callRemoteNodeHttpOpt relayHub? mc? effNodeId "GET" s!"/jobs/{jobId}" none #[] 12000
+        let nowSec ← nowEpoch
+        let nowIso := formatEpochIso8601Utc nowSec
         let lostReason? ← match jobStatus with
           | .ok (404, _, _, _, _) => pure (some "remote_job_missing_on_node")
           | .error _ => pure (if ← verifiedManagedWorkerLoss mc? effNodeId then some "managed_worker_lost" else none)
@@ -1768,7 +1770,7 @@ partial def spawnRemoteJobPoller
                   let (lines, rem) := splitCompleteLines (lineRem ++ chunk)
                   lineRem := rem
                   for ln in lines do
-                    acc ← ingestRemoteHarnessLine store broadcastHub? backend missionId ln nowIso goalJobId? acc
+                    acc ← ingestRemoteHarnessLine store broadcastHub? backend missionId ln goalJobId? acc
                 let some nextOff := flJv.fieldNat? "next_offset" | break
                 let some logLen := flJv.fieldNat? "log_len" | break
                 if (flJv.fieldNat? "offset") != some offset || (flJv.fieldStr? "data").isNone ||
@@ -1780,8 +1782,10 @@ partial def spawnRemoteJobPoller
                 if nextOff == offset then break
                 offset := nextOff
               if !lineRem.trimAscii.toString.isEmpty then
-                acc ← ingestRemoteHarnessLine store broadcastHub? backend missionId lineRem nowIso goalJobId? acc
+                acc ← ingestRemoteHarnessLine store broadcastHub? backend missionId lineRem goalJobId? acc
                 lineRem := ""
+              let nowSec ← nowEpoch
+              let nowIso := formatEpochIso8601Utc nowSec
               keepRunning := false
               if !proxyTok.isEmpty then
                 revokeSingleMissionProxyToken store proxyTok
