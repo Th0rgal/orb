@@ -69,8 +69,8 @@ def exercise(root, tmp, api, graphical, click, process, wait, stack, client_kind
                 except TimeoutError:
                     return False
         wait('visible open mission in project', reveal)
-    def action_menu(expected, choose, target_region=sidebar):
-        x, y = see(fixture['contextMission'], target_region)
+    def action_menu(expected, choose, target_region=sidebar, target=None):
+        x, y = see(target or fixture['contextMission'], target_region)
         click(x, y, 'button3')
         if client_kind == 'leanui':
             regions = [f'{x+20},{min(y,535)} 165x175']
@@ -139,6 +139,16 @@ def exercise(root, tmp, api, graphical, click, process, wait, stack, client_kind
         wait('rename dialog dismissed', lambda: not rename_open())
         see(fixture['openMission'], header)
         assert api('/api/control/missions/' + b)['title'] == fixture['contextMission']
+        title = fixture['contextMission']
+        for replacement, key in [('Violet', 'Return'), (fixture['contextMission'], 'KP_Enter')]:
+            action_menu(fixture['activeActions'], 'rename', target=title)
+            wait('rename dialog opened', rename_open)
+            subprocess.run(['wtype', '-M', 'ctrl', '-k', 'a', '-m', 'ctrl', replacement], env=graphical, check=True)
+            subprocess.run(['wtype', '-k', key], env=graphical, check=True)
+            wait('rename accepted', lambda: not rename_open() and api('/api/control/missions/' + b)['title'] == replacement)
+            see(replacement)
+            see(fixture['openMission'], header)
+            title = replacement
     # The client has already read B as idle when its Archive POST reaches
     # the relay. Activate B directly through Core before forwarding that POST.
     db_path, = tmp.rglob('missions.db')
