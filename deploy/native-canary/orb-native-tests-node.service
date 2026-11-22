@@ -1,0 +1,25 @@
+[Unit]
+Description=Orb Tests member worker
+Requires=orb-native-tests-privd.service
+After=orb-native-tests-privd.service
+
+[Service]
+User=orb-node
+Group=orb-node
+StateDirectory=orb-native-tests-node
+StateDirectoryMode=0700
+WorkingDirectory=/var/lib/orb-native-tests-node
+UMask=0077
+EnvironmentFile=/etc/orb-native-tests/node.env
+Environment=SANDBOXED_NODE_ID=native-tests
+Environment=SANDBOXED_NODE_BIND=127.0.0.1:13088
+Environment=SANDBOXED_NODE_ENV_FILE=/etc/orb-native-tests/node.env
+Environment=SANDBOXED_NODE_WORK_DIR=/var/lib/orb-native-tests-node/jobs
+Environment=ORB_PRIVD_SOCKET=/run/orb-native-tests-privd/node.sock
+Environment=SANDBOXED_NODE_CAPACITY=1
+Environment=SANDBOXED_NODE_COORDINATOR_CAPACITY=1
+Environment=SANDBOXED_NODE_SIDE_CAPACITY=1
+ExecStart=/opt/orb-native-tests/current/bin/sandboxed-node
+NoNewPrivileges=true
+PrivateTmp=true
+InaccessiblePaths=-/etc/sandboxed-node.env -/etc/orb-privd.env -/run/orb-privd.sock -/var/lib/sandboxed-node

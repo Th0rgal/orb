@@ -1,0 +1,20 @@
+[Unit]
+Description=Orb Tests member execution broker
+After=network.target
+
+[Service]
+User=root
+Group=orb-node
+RuntimeDirectory=orb-native-tests-privd
+RuntimeDirectoryMode=0750
+LogsDirectory=orb-native-tests-privd
+LogsDirectoryMode=0700
+UMask=0007
+EnvironmentFile=/etc/orb-native-tests/node.env
+Environment=ORB_NODE_NAME=native-tests
+Environment=ORB_PRIVD_SOCKET=/run/orb-native-tests-privd/node.sock
+Environment=ORB_PRIVD_SOCKET_GROUP=orb-node
+Environment=ORB_PRIVD_STATE_DIR=/run/orb-native-tests-privd/jobs
+Environment=ORB_PRIVD_AUDIT_LOG=/var/log/orb-native-tests-privd/audit.jsonl
+ExecStart=/opt/orb-native-tests/current/bin/orb-privd
+InaccessiblePaths=-/etc/sandboxed-node.env -/etc/orb-privd.env -/run/orb-privd.sock -/var/lib/sandboxed-node

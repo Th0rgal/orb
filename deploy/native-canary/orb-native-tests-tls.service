@@ -1,0 +1,16 @@
+[Unit]
+Description=Private TLS endpoint for the Orb Tests worker
+After=network-online.target orb-native-tests-node.service
+Requires=orb-native-tests-node.service
+
+[Service]
+DynamicUser=yes
+RuntimeDirectory=orb-native-tests-tls
+RuntimeDirectoryMode=0700
+LoadCredential=worker.key:/etc/orb-native-tests/tls/worker.key
+LoadCredential=worker.pem:/etc/orb-native-tests/tls/worker.pem
+ExecStartPre=/usr/sbin/nginx -e stderr -p /run/orb-native-tests-tls -t -c /etc/orb-native-tests/nginx.conf
+ExecStart=/usr/sbin/nginx -e stderr -p /run/orb-native-tests-tls -c /etc/orb-native-tests/nginx.conf -g "daemon off;"
+ProtectSystem=strict
+PrivateTmp=yes
+NoNewPrivileges=yes
