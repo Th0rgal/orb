@@ -1552,7 +1552,7 @@ input[type="checkbox"]:enabled, input[type="radio"]:enabled { cursor: pointer; }
   padding: 6px;
 }
 .slash-head {
-  padding: 6px 8px 4px; font-size: 11px; font-weight: 500; color: var(--fg-4);
+  padding: 6px 8px 4px; font-size: 11px; font-weight: 500; color: var(--fg-2);
 }
 .slash-folder-bar {
   display: flex; align-items: center; gap: 4px; padding-bottom: 4px; margin-bottom: 2px;

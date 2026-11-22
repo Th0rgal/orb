@@ -1,4 +1,4 @@
-import {test, expect} from '@playwright/test';
+import {test, expect, type Locator} from '@playwright/test';
 test('composer expands for a soft wrap and shrinks back to one row', async ({page}, testInfo) => {
  await page.goto('/tests/form-feedback.html?voice');
  const input=page.locator('.composer textarea');
@@ -19,24 +19,32 @@ test('composer expands for a soft wrap and shrinks back to one row', async ({pag
  await page.screenshot({path:testInfo.outputPath('empty.png')});
 });
 
+async function textContrast(label: Locator, surfaceSelector: string, pseudo?: string) {
+  return label.evaluate((el, {surfaceSelector, pseudo}) => {
+    function luminance(rgb: string) {
+      const [r, g, b] = rgb.match(/[\d.]+/g)!.map(value => {
+        const channel = Number(value) / 255;
+        return channel <= 0.04045 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4;
+      });
+      return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+    }
+    const text = luminance(getComputedStyle(el, pseudo).color);
+    const surface = luminance(getComputedStyle(el.closest(surfaceSelector)!).backgroundColor);
+    return (Math.max(text, surface) + 0.05) / (Math.min(text, surface) + 0.05);
+  }, {surfaceSelector, pseudo});
+}
+
 for (const theme of ['dark', 'light']) {
-  test(`empty composer hint is legible in the ${theme} theme`, async ({page}) => {
+  test(`composer hint and command menu headings are legible in the ${theme} theme`, async ({page}) => {
     await page.goto('/tests/form-feedback.html?voice');
     const input = page.locator('.composer textarea');
     await expect(input).toBeVisible();
-    const contrast = await input.evaluate((field, theme) => {
-      document.documentElement.dataset.theme = theme;
-      function luminance(rgb: string) {
-        const [r, g, b] = rgb.match(/[\d.]+/g)!.map(value => {
-          const channel = Number(value) / 255;
-          return channel <= 0.04045 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4;
-        });
-        return 0.2126 * r + 0.7152 * g + 0.0722 * b;
-      }
-      const hint = luminance(getComputedStyle(field, '::placeholder').color);
-      const surface = luminance(getComputedStyle(field.closest('.composer')!).backgroundColor);
-      return (Math.max(hint, surface) + 0.05) / (Math.min(hint, surface) + 0.05);
-    }, theme);
-    expect(contrast).toBeGreaterThanOrEqual(4.5);
+    await page.evaluate(theme => { document.documentElement.dataset.theme = theme; }, theme);
+    expect(await textContrast(input, '.composer', '::placeholder')).toBeGreaterThanOrEqual(4.5);
+
+    await input.press('/');
+    const heading = page.getByRole('listbox', {name: 'Commands'}).getByText('Modes', {exact: true});
+    await expect(heading).toBeVisible();
+    expect(await textContrast(heading, '.slash-menu')).toBeGreaterThanOrEqual(4.5);
   });
 }
