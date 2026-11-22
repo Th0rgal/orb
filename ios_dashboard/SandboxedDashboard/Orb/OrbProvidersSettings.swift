@@ -1139,6 +1139,7 @@ struct OrbCloudAccountsSettings: View {
 
 
 private struct AlternativeRouterSettings: View {
+    @Environment(\.scenePhase) private var scenePhase
     let client: OrbSettingsClient
     let account: String
     @State private var allowed: Bool?
@@ -1177,11 +1178,13 @@ private struct AlternativeRouterSettings: View {
                 Text(error).font(.caption)
                 Button("Retry router settings") { Task { await update() } }.disabled(busy)
             }
-        }.task { await update() }
+        }.task(id: account) { await update() }
+        .onChange(of: scenePhase) { _, phase in if phase == .active { Task { await update() } } }
     }
 }
 
 private struct OrbAccountVpnSettings: View {
+    @Environment(\.scenePhase) private var scenePhase
     let client: OrbSettingsClient
     let account: String
     @State private var route: OrbJSON = .null
@@ -1235,5 +1238,6 @@ private struct OrbAccountVpnSettings: View {
                 Button("Retry connection settings") { Task { await update() } }.disabled(busy)
             }
         }.task(id: account) { await update() }
+        .onChange(of: scenePhase) { _, phase in if phase == .active { Task { await update() } } }
     }
 }

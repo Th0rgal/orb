@@ -232,8 +232,8 @@ The isolated sidecar test sends buffered and streaming requests before restricti
 Before confirming a native-only Antigravity setting, Core checks both the saved wildcard and the sidecar’s live model registry for the selected credential. If any model is still registered or the registry cannot be queried, the client must surface an unconfirmed setting. A sibling credential may continue serving the same model.
 
 
-An open desktop account rereads the shared VPN and alternative-router settings
-when the window regains focus or visibility. The observing window performs a
+An open account rereads the shared VPN and alternative-router settings when
+the desktop window regains focus or visibility, or the mobile app resumes. The observing window performs a
 read. A member’s enabled-account preference stays personal across reorder and
 reload. Credential owners and administrators control the account-wide exclusion.
 

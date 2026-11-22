@@ -2230,7 +2230,10 @@ private fun AlternativeRouterSettings(core: OrbCore, account: String) {
             failed = true
         } finally { busy = false }
     }
-    LaunchedEffect(core, account) { update() }
+    val lifecycleOwner = LocalLifecycleOwner.current
+    LaunchedEffect(core, account, lifecycleOwner) {
+        lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) { update() }
+    }
     allowed?.let { current ->
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text("Allow alternative routers")
@@ -2263,7 +2266,10 @@ private fun AccountVpnSettings(core: OrbCore, account: String) {
             error = e.localizedMessage ?: "Connection settings unavailable."
         } finally { busy = false }
     }
-    LaunchedEffect(core, account) { update() }
+    val lifecycleOwner = LocalLifecycleOwner.current
+    LaunchedEffect(core, account, lifecycleOwner) {
+        lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) { update() }
+    }
     route?.let { current ->
         val selected = current["country"] as? String ?: ""
         val editable = current["can_configure"] == true
