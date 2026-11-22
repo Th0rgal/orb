@@ -620,6 +620,25 @@ def run : IO Unit := do
          check (match completed with | .ok (some ("completed", "remote_goal_complete", _)) => true | _ => false)
            "only the current Goal job can settle completion"
          setenvVar "SANDBOXED_REMOTE_NODES" s!"mockgoalchecks=http://127.0.0.1:{checksPort}|TURN_OUTCOME_MOCK_TOK"
+         -- A normal turn after a completed Goal must not arm its old objective.
+         -- The live poller retires the run before settleRemoteGoal.
+         discard <| execParamQuery db
+           "UPDATE mission_runs SET execution_state='terminal' WHERE mission_id='m-goal-dispatch';" #[]
+         let standard ← IO.asTask do
+           submitRemoteMissionTurn store none none none sup root {
+             missionId := "m-goal-dispatch", targetNodeId := "mockgoalchecks", backend := "codex",
+             prompt := "Add seven", resumeSessionId? := some "019ad719-730d-7777-9221-e0eabcd44611"
+           } 24
+         withMockNodeRequest checksFd fun conn req => do
+           check (req.method == "POST" && req.path == "/jobs") "standard follow-up dispatched"
+           mockNodeReply conn "200 OK" "{\"accepted\":true}"
+         let .ok standardJob ← IO.ofExcept standard.get | throw (IO.userError "standard follow-up refused")
+         let newGen ← cellOf db "SELECT run_generation FROM missions WHERE id='m-goal-dispatch';"
+         let staleObjective ← settleRemoteGoal store "m-goal-dispatch" standardJob "Ship it" "26"
+           (newGen.toNat?.getD 0).toUInt64 25 true true
+         check ((match staleObjective with | .ok none => true | _ => false) &&
+             (← cellOf db "SELECT COUNT(*) FROM mission_continuations WHERE mission_id='m-goal-dispatch' AND phase=1;") == "0")
+           "standard follow-up after Goal completion cannot rearm the settled objective"
          for (mid, capped) in #[("m-goal-log-failed", false), ("m-goal-log-capped", true)] do
            newMission mid "[\"remote-node:mockgoalchecks\"]"
            verifyIncompleteGoalDrain store sup checksFd root mid capped

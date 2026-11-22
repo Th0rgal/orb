@@ -2063,7 +2063,8 @@ partial def submitRemoteMissionTurn
           "UPDATE remote_node_jobs SET state='running',updated_at=?2 WHERE job_id=?1;" #[jobId, nowIso] then return .error e
       carryArmedWakeupsForward (execParamQueryUnlocked store.missionsDb) spec.missionId nextGen nowIso
       let result ← execParamQueryUnlocked store.missionsDb
-        ("UPDATE missions SET status='active', terminal_reason='remote_node_job', placement_job_id=?2, " ++
+        ("UPDATE missions SET goal_mode=CASE WHEN terminal_reason='remote_goal_complete' THEN 0 ELSE goal_mode END, " ++
+         "status='active', terminal_reason='remote_node_job', placement_job_id=?2, " ++
          "run_generation=CAST(?3 AS INTEGER), state_revision=state_revision+1, updated_at=?4 WHERE id=?1;")
         #[spec.missionId, jobId, s!"{nextGen}", nowIso]
       if let .error e := result then return .error e

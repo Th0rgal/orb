@@ -5,7 +5,10 @@
 Core advertises OpenCode, Codex and Antigravity in `remote_launch.goal_harnesses` when the typed remote
 adapter is available. The mission-create endpoint independently rejects an empty
 Goal objective or an unsupported remote harness before creating a mission.
-Remote follow-ups steer the existing mission; `/goal` can only start a new
+An ordinary follow-up after a completed Goal starts a standard turn in the same
+mission and harness session. The completed objective remains in history. It cannot
+arm another continuation, including for missions completed by an older Core.
+Remote follow-ups to an unfinished Goal steer the existing mission; `/goal` can only start a new
 remote mission. Rejected commands leave the transcript and queue untouched.
 
 Antigravity runs in stream-json mode. Its init event binds the mission to a native
