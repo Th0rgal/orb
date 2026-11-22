@@ -262,6 +262,25 @@ private def verifyRemoteGoalResume (store : CoreStore) (mid : String) : IO Unit 
     "only an explicitly blocked Goal on the displayed generation can resume once"
   discard <| execParamQuery db "DELETE FROM mission_continuations WHERE mission_id=?1;" #[mid]
 
+  let jid := "failed-native-goal-job"
+  discard <| execParamQuery db "UPDATE missions SET status='failed',terminal_reason='remote_job_failed',placement_job_id=?2 WHERE id=?1;" #[mid,jid]
+  discard <| execParamQuery db "INSERT INTO remote_node_jobs(job_id,mission_id,state,payload_json) VALUES(?1,?2,'failed','{}');" #[jid,mid]
+  let .ok _ ← db.mu.atomically do
+    insertMissionRunUnlocked db "failed-goal-run" mid "8" "terminal" "remote_job_failed" jid "t1"
+    | throw (IO.userError "failed Goal fixture run")
+  let ordinaryFailed ← resumeRemoteGoal store mid 8 20
+  discard <| execParamQuery db "UPDATE remote_node_jobs SET payload_json=?2 WHERE job_id=?1;" #[jid,"{\"goal_claim\":\"native\",\"goal_generation\":7}"]
+  discard <| execParamQuery db "INSERT INTO remote_node_jobs(job_id,mission_id,state) VALUES('busy-native-goal-job',?1,'unreachable');" #[mid]
+  let stillRunning ← resumeRemoteGoal store mid 8 20
+  discard <| execParamQuery db "DELETE FROM remote_node_jobs WHERE job_id='busy-native-goal-job';" #[]
+  let failedStale ← resumeRemoteGoal store mid 7 20
+  let failed ← resumeRemoteGoal store mid 8 20
+  let failedTwice ← resumeRemoteGoal store mid 8 20
+  check (ordinaryFailed.toOption == some false && stillRunning.toOption == some false &&
+    failedStale.toOption == some false && failed.toOption == some true && failedTwice.toOption == some false)
+    "only the current failed native Goal run with no live job can resume once"
+  discard <| execParamQuery db "DELETE FROM mission_continuations WHERE mission_id=?1;" #[mid]
+
 private def verifyTerminalGoalFollowupRecovery (store : CoreStore) (fd : LeanSys.Posix.Fd)
     (root mid : String) (replaced stopped : Bool) : IO Unit := do
   let db := store.missionsDb

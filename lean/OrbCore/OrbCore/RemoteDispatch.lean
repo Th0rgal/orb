@@ -996,14 +996,7 @@ def resumeRemoteGoal (store : CoreStore) (mid : String) (generation now : UInt64
   withImmediateTx store.missionsDb do
     let query := execParamQueryUnlocked store.missionsDb
     let .ok rows ← query
-      ("UPDATE missions SET status='awaiting_user',terminal_reason='remote_goal_continuation', " ++
-       "state_revision=state_revision+1,updated_at=?3 WHERE id=?1 AND run_generation=CAST(?2 AS INTEGER) " ++
-       "AND goal_mode=1 AND ((status='interrupted' AND terminal_reason='remote_goal_stopped') OR " ++
-       "(status='awaiting_user' AND terminal_reason='remote_goal_blocked')) " ++
-       "AND length(trim(goal_objective))>0 AND NOT EXISTS(SELECT 1 FROM mission_continuations " ++
-       "WHERE mission_id=?1 AND phase IN (1,2)) AND NOT EXISTS(SELECT 1 FROM remote_node_jobs " ++
-       "WHERE mission_id=?1 AND state IN ('submitting','uncertain','running','queued')) " ++
-       "RETURNING goal_objective,backend,session_id;") #[mid,toString generation,iso]
+      (include_str "resume_remote_goal.sql") #[mid,toString generation,iso]
       | return .error "remote_goal_resume_failed"
     let some row := rows[1]? | return .ok false
     unless resumableGoalSession (cell row 1) (cell row 2) do return .error "remote_goal_session_missing"

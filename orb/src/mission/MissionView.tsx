@@ -1203,7 +1203,8 @@ export function NativeMissionView(p: { id: string; active?: boolean; launch?:Lau
   const goalRecovery = createMemo(() => {
     const m = mission();
     return !!remoteGoal() && ((m?.status === "interrupted" && m.terminal_reason === "remote_goal_stopped") ||
-      (m?.status === "awaiting_user" && m.terminal_reason === "remote_goal_blocked"));
+      (m?.status === "awaiting_user" && m.terminal_reason === "remote_goal_blocked") ||
+      (m?.status === "failed" && m.terminal_reason === "remote_job_failed"));
   });
   const [resumingGoal, setResumingGoal] = createSignal(false);
   async function resumeGoal() {

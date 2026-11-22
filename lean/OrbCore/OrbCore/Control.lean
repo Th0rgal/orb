@@ -7074,7 +7074,7 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
         unless content?.isNone && st.remoteSup?.isSome && RemoteGoal.harnesses.contains m.backend &&
             (← resolveMissionRemoteNode? st.store st.managedStore? mid).isSome do
           return .ok (mkJson 400 "{\"error\":\"remote_goal_unsupported\"}")
-        unless m.goalMode && (m.status == "interrupted" || m.status == "awaiting_user") && m.runGeneration == generation do
+        unless m.goalMode && (["interrupted", "awaiting_user", "failed"].contains m.status) && m.runGeneration == generation do
           return .ok (mkJson 409 "{\"error\":\"remote_goal_resume_conflict\"}")
         goalGeneration? := some generation
       let mut promoteCyber? : Option (Selection × String) := none

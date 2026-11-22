@@ -11,13 +11,13 @@ const node={id:"dgx-spark",status:"online",cordoned:false};
 // backend that supports native Grok remote launches says so.
 type Capability={typed?:boolean;harnesses?:string[];goal_harnesses?:string[];raw_command?:boolean;proxy_url_configured?:boolean;requires_proxy_harnesses?:string[]};
 const typedCapability:Capability={typed:true,harnesses:["claudecode","opencode"],goal_harnesses:["opencode"],raw_command:true,proxy_url_configured:true};
-async function setup(page:Page, options:{nativeOwner?:boolean;memberFleetGate?:Promise<void>;cyberRefusal?:boolean;reject?:boolean;legacy?:boolean;remoteSuccess?:boolean;missing?:boolean;failed?:boolean;remoteJob?:{phase:string;node_state?:string};emptyStatus?:string;blockedGoalRole?:"owner"|"participant";capability?:Capability|null;fleetFailAfterFirst?:boolean;files?:{name:string;kind:string}[];emptyContext?:boolean}={}){
+async function setup(page:Page, options:{nativeOwner?:boolean;memberFleetGate?:Promise<void>;cyberRefusal?:boolean;reject?:boolean;legacy?:boolean;remoteSuccess?:boolean;missing?:boolean;failed?:boolean;remoteJob?:{phase:string;node_state?:string};emptyStatus?:string;blockedGoalRole?:"owner"|"participant";failedGoal?:boolean;capability?:Capability|null;fleetFailAfterFirst?:boolean;files?:{name:string;kind:string}[];emptyContext?:boolean}={}){
  let attachmentReads:string[]=[];
  let posts:any[]=[], releasePost!:()=>void,releaseHistory!:()=>void, stops=0;
  const postGate=new Promise<void>(resolve=>releasePost=resolve),historyGate=new Promise<void>(resolve=>releaseHistory=resolve);
  let fail=!!options.reject;let fleetReads=0;let listReads=0;let fleetChanged=false;
  const capability=options.capability===undefined?typedCapability:options.capability;
- const m={...base,...(options.remoteSuccess?{status:"active",remote_job:{job_id:"job-123",node_id:"dgx-spark",phase:"observed"},execution:{state:"waiting_remote_job"}}:{}),...(options.remoteJob?{remote_job:{job_id:"job-123",node_id:"dgx-spark",...options.remoteJob},execution:{state:"waiting_remote_job"}}:{}),...(options.failed?{status:options.emptyStatus??"interrupted",goal_mode:true,goal_objective:"Original saved objective",terminal_reason:"orphan_no_runner",remote_node_id:"dgx-spark"}:{}),...(options.blockedGoalRole?{backend:"antigravity",status:"awaiting_user",terminal_reason:"remote_goal_blocked",run_generation:9,viewer_role:options.blockedGoalRole}:{})};
+ const m={...base,...(options.remoteSuccess?{status:"active",remote_job:{job_id:"job-123",node_id:"dgx-spark",phase:"observed"},execution:{state:"waiting_remote_job"}}:{}),...(options.remoteJob?{remote_job:{job_id:"job-123",node_id:"dgx-spark",...options.remoteJob},execution:{state:"waiting_remote_job"}}:{}),...(options.failed?{status:options.emptyStatus??"interrupted",goal_mode:true,goal_objective:"Original saved objective",terminal_reason:"orphan_no_runner",remote_node_id:"dgx-spark"}:{}),...(options.blockedGoalRole?{backend:"antigravity",status:options.failedGoal?"failed":"awaiting_user",terminal_reason:options.failedGoal?"remote_job_failed":"remote_goal_blocked",run_generation:9,viewer_role:options.blockedGoalRole}:{})};
  await page.addInitScript((nativeOwner)=>{
   localStorage.setItem("orb.apiUrl",location.origin);localStorage.setItem("orb.jwt","test");localStorage.setItem("orb-theme","dark");
   localStorage.setItem("orb.harnessPick",JSON.stringify(nativeOwner ? {backend:"antigravity",model:"gemini-4-carbon-high"} : {backend:"grok",model:"grok-4.6"}));
@@ -359,8 +359,8 @@ test("capability read failure refuses before POST and reports support as last kn
  await expect(page.getByRole("button",{name:/dgx-spark online/})).toBeVisible();
 });
 
- for (const role of ["owner", "participant"] as const) test(`blocked remote Goal recovery for ${role}`, async ({page}) => {
-  await setup(page,{failed:true,blockedGoalRole:role});
+ for (const [role,failedGoal] of [["owner",false], ["participant",false], ["owner",true]] as const) test(`${failedGoal?"failed":"blocked"} remote Goal recovery for ${role}`, async ({page}) => {
+  await setup(page,{failed:true,blockedGoalRole:role,failedGoal});
   const resumeRequests: unknown[] = [];
   const ordinaryRequests: string[] = [];
   page.on("request", req => {
