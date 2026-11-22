@@ -642,7 +642,7 @@ def buildPrivdSystemdRunCmd
   if supportsExpandEnvNo then
     cmd := cmd.push "--expand-environment=no"
   cmd := cmd ++ #[
-    "--quiet", "--collect",
+    "--quiet",
     s!"--unit={unit}",
     s!"--uid={uid}", s!"--gid={gid}",
     s!"--working-directory={cwd}",
@@ -849,10 +849,15 @@ def handleControlUserJob (cfd : LeanSys.Posix.Fd) (_cfg : PrivdConfig) (peer : P
     "    for ln in sh.stdout.splitlines():\n" ++
     "      if '=' in ln:\n" ++
     "        k, v = ln.split('=', 1); kv[k] = v\n" ++
-    "    ast = kv.get('ActiveState', 'inactive')\n" ++
+    "    missing = kv.get('LoadState') == 'not-found'\n" ++
+    "    if sh.returncode and not missing:\n" ++
+    "      print(json.dumps({'ok': False, 'stderr': 'systemd job status unavailable'}))\n" ++
+    "      sys.exit(0)\n" ++
+    "    ast = kv.get('ActiveState', '')\n" ++
     "    sst = kv.get('SubState', '')\n" ++
-    "    rc = int(kv.get('ExecMainStatus', '0') or '0')\n" ++
-    "    running = ast in ('active', 'activating') and sst == 'running'\n" ++
+    "    rc = -1 if missing else int(kv.get('ExecMainStatus') or '-1')\n" ++
+    "    if ast == 'failed' and rc == 0: rc = -1\n" ++
+    "    running = ast in ('activating', 'reloading', 'deactivating') or (ast == 'active' and sst != 'exited')\n" ++
     "    if not running:\n" ++
     "      subprocess.run(['/usr/bin/systemctl', 'stop', unit], capture_output=True)\n" ++
     "      subprocess.run(['/usr/bin/systemctl', 'reset-failed', unit], capture_output=True)\n" ++
