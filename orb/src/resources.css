@@ -333,8 +333,10 @@
   font-weight: 600;
 }
 
-.res-sankey-mid-pill {
+.res-sankey-mid-pill,
+.res-sankey-node-pill {
   fill: color-mix(in srgb, var(--bg-elev) 88%, var(--bg));
+  fill-opacity: 0.94;
   stroke: var(--stroke-soft);
   stroke-width: 1;
   pointer-events: none;

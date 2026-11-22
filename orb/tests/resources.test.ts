@@ -6,6 +6,7 @@ import {
   buildOverviewSankeyInput,
   computeMonotoneCurve,
   computeSankeyLayout,
+  fitSankeyText,
   formatLargeNumber,
   formatResourceRate,
   layoutDagRows,
@@ -545,5 +546,15 @@ describe("resourcesModel shared spec", () => {
     expect(sankey.nodes.find((n) => n.id === "ethereumfoundation:pool")?.color).toBe("#627eea");
     expect(sankey.nodes.find((n) => n.id === "particleai:pool")?.label).toBe("Particle");
     expect(sankey.nodes.find((n) => n.id === "particleai:pool")?.color).toBe("#cf6f2e");
+  });
+
+  it("truncates compact Sankey pill text to fit within the available width", () => {
+    const short = fitSankeyText("EF", 80, "500 12px sans-serif", 7.2);
+    expect(short.text).toBe("EF");
+    expect(short.width).toBeLessThanOrEqual(80);
+
+    const long = fitSankeyText("Very long mission title that exceeds pill budget", 80, "500 12px sans-serif", 7.2);
+    expect(long.text.endsWith("…")).toBe(true);
+    expect(long.width).toBeLessThanOrEqual(80);
   });
 });
