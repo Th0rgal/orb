@@ -1505,8 +1505,7 @@ structure OneShotLineParsed where
   errorMsg?        : Option String := none
   activity?        : Option LocalActivityItem := none
   thinking?        : Option String := none
-  /-- Set for a streamed piece of an assistant message (OpenCode ACP `agent_message_chunk`):
-      pieces of one message are joined as-is, a new message starts a new paragraph. -/
+  /-- ID of a completed Codex assistant item or an OpenCode ACP message chunk. -/
   messageId?       : Option String := none
   isChunk          : Bool := false
   model?           : Option String := none
@@ -1727,7 +1726,8 @@ def parseOneShotHarnessEvent (harness : String) (rawLine : String) : OneShotLine
       let item := jv.fieldOrNull "item"
       let itemTy := (item.fieldStr? "type").getD ""
       if ty == "item.completed" && itemTy == "agent_message" then
-        return { sessionId? := sid?, textDelta := (item.fieldStr? "text").getD "", wholeMessage := harness == "codex" }
+        return { sessionId? := sid?, textDelta := (item.fieldStr? "text").getD "", wholeMessage := harness == "codex",
+          messageId? := item.fieldStr? "id" }
       else if itemTy == "command_execution" then
         let aid := (item.fieldStr? "id").getD "cmd"
         let cmdStr := (item.fieldStr? "command").getD "command"
