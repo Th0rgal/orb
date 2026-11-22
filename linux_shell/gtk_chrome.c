@@ -196,7 +196,7 @@ static void embedded_action(gpointer data, const char *kind, const char *target)
 #endif
 GtkWidget *orb_gtk_chrome_wrap(GtkWidget *win, GtkWidget *wv, WebKitUserContentManager *ucm, unsigned port, const char *token) {
     OrbGtkChrome *c = g_new0(OrbGtkChrome, 1); c->win = win; c->wv = wv; c->port = port; c->jsc = jsc_context_new(); c->sse_buf = g_string_sized_new(1024); snprintf(c->token, sizeof(c->token), "%s", token ? token : "");
-    c->css = gtk_css_provider_new(); orb_gtk_apply_theme(c->css, FALSE);
+    orb_gtk_bind_keyboard_focus(win); c->css = gtk_css_provider_new(); orb_gtk_apply_theme(c->css, FALSE);
     gtk_style_context_add_provider_for_screen(gtk_widget_get_screen(win), GTK_STYLE_PROVIDER(c->css), GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
     if (ORB_EMBEDDED) c->sb_list = c->sb_box = orb_leanui_new(wv, embedded_action, c);
     else build_classic_sidebar(c);

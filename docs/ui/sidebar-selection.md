@@ -110,3 +110,6 @@ Project, roster and conversation reads belong to the connection that started the
 In both Linux sidebars, clicking a mission disclosure gives it keyboard focus.
 Return toggles the same mission on subsequent presses, including after a projection
 refresh replaces the row. Toggling leaves the open conversation selected.
+
+The Linux sidebar draws a one-pixel focus border when the keyboard is used.
+Pointer activation keeps the control quiet while preserving keyboard focus.

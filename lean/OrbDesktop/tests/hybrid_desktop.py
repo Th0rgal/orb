@@ -256,6 +256,16 @@ def run():
                 was_open = row('copper')['expanded']
                 pointer.click(195, parent_y)
                 check('pointer toggles disclosure', lambda: row('copper')['expanded'] != was_open)
+                pointer.move(850, 570)
+                def disclosure_pixels():
+                    time.sleep(.3)
+                    image = subprocess.check_output(['grim', '-t', 'ppm', '-g', f'174,{parent_y-14} 44x28', '-'], env=env)
+                    return image.split(b'\n', 3)[3]
+
+                mouse_pixels = disclosure_pixels()
+                subprocess.run(['wtype', '-k', 'Tab', '-M', 'shift', '-k', 'Tab', '-m', 'shift'], env=env, check=True)
+                keyboard_pixels = disclosure_pixels()
+                assert sum(abs(a-b) > 10 for a,b in zip(mouse_pixels,keyboard_pixels)) > 20, 'missing keyboard focus stroke'
                 for expected in (was_open, not was_open):
                     subprocess.run(['wtype', '-k', 'Return'], env=env, check=True)
                     check('keyboard toggles disclosure', lambda: row('copper')['expanded'] == expected)
