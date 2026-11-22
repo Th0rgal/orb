@@ -55,13 +55,14 @@ def route (store : CoreStore) (pool? : Option AccountVpnPool.Pool) (dir account 
       | _, _ => return err 400 "invalid_vpn_preference"
     let some pool := pool? | return err 503 "vpn_coordinator_unavailable"
     if let .error e ← AccountVpnPool.savePreference pool store.missionsDb account country? configure? then return err 503 e
-  let preference ← match ← AccountVpnRoutes.read store.missionsDb account with
+  let selection ← match ← AccountVpnRoutes.snapshot store.missionsDb account with
     | .ok p => pure p
     | .error e => return err 503 e
   let countries := ((← AirVpnSettings.endpoints store.rootDir).map (·.country)).eraseDups.mergeSort
   let mut fields := #[("countries", JVal.arr (countries.toArray.map JVal.str)),
     ("can_configure", .bool canConfigure)]
-  let some pref := preference | return (200, .obj (fields ++ #[("mode", .str "direct"), ("status", .str "direct")]))
+  let .vpn pref := selection | return (200, .obj (fields ++ #[
+    ("mode", .str "direct"), ("status", .str "direct"), ("saved", .bool (selection.generation > 0))]))
   fields := fields ++ #[("mode", .str "vpn"), ("country", .str pref.country)]
   let mut reason := "vpn_awaiting_verification"
   if dir.isEmpty || pool?.isNone then reason := "vpn_coordinator_unconfigured"

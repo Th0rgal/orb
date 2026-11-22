@@ -82,3 +82,15 @@ it("rereads a shared account when returning to its window after another user cha
   expect(select.value).toBe("NL");
   expect(vi.mocked(api).mock.calls).toEqual(Array(2).fill(["/api/ai/providers/shared/vpn", undefined]));
 });
+
+it("confirms an implicit Direct native route without briefly enabling a VPN", async () => {
+  const direct = { mode: "direct", status: "direct", countries: [], can_configure: true };
+  vi.mocked(api).mockClear().mockResolvedValueOnce({ ...direct, saved: false }).mockResolvedValueOnce(direct);
+  render(() => <AccountVpnSettings account="native" nativeAccount />);
+  fireEvent.click(await screen.findByRole("button", { name: "Confirm Direct route" }));
+  await vi.waitFor(() => expect(screen.queryByRole("button", { name: "Confirm Direct route" })).toBeNull());
+  expect(vi.mocked(api).mock.calls).toEqual([
+    ["/api/ai/providers/native/vpn", undefined],
+    ["/api/ai/providers/native/vpn", { method: "PUT", body: JSON.stringify({ mode: "direct" }) }],
+  ]);
+});
