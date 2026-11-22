@@ -32,4 +32,5 @@ allow = [
   "LeanUI.FFI=LeanUI.FFI.fontMetrics=lean_ui_font_metrics",
   "LeanUI.FFI=LeanUI.FFI.shape=lean_ui_shape",
   "LeanUI.FFI=LeanUI.FFI.rasterize=lean_ui_rasterize",
+  "LeanUI.FFI=LeanUI.FFI.sidebarHost=lean_ui_sidebar_host",
 ]

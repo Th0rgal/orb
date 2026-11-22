@@ -1,4 +1,5 @@
 import { isRecord, readJson } from "./storage";
+import { shallowEqual } from "./poll";
 import { writeInboxState } from "./inboxState";
 import { createSignal } from "solid-js";
 import { sideQuestionKey } from "./sideQuestionStorage";
@@ -67,7 +68,11 @@ export function inboxSummaryChoice(model: string, choice: string) {
 
 export function applySharedInboxPreferences(prefs: unknown): void {
   if (prefs === undefined || prefs === null) {
-    writeInboxState("preferences", inboxConfig());
+    // Migrate a local customization. A fresh account already uses Core's defaults.
+    const local = inboxConfig();
+    if (!shallowEqual(local, DEFAULT_INBOX_CONFIG)) {
+      writeInboxState("preferences", local);
+    }
     return;
   }
   if (typeof prefs !== "object" || Array.isArray(prefs)) return;

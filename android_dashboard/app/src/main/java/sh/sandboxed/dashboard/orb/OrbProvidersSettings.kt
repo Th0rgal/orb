@@ -1539,7 +1539,7 @@ fun OrbProvidersSettingsPage(
                                                         moveProvider(idx, idx + 1)
                                                     }
                                                 }
-                                                Box(
+                                                if (isAdmin) Box(
                                                     modifier = Modifier
                                                         .clip(CircleShape)
                                                         .background(OrbStyle.card)
@@ -2281,8 +2281,10 @@ private fun AccountVpnSettings(core: OrbCore, account: String) {
                 }
             }
         }
-        if (!editable) Text("This credential’s connection is managed by the sidecar.")
-        else if (countries.isEmpty()) Text("Import a named server profile in AirVPN Settings to enable VPN routing.")
+        if (!editable) {
+            Text(current["configuration_message"] as? String ?: "VPN routing is unavailable for this credential.")
+            TextButton(enabled = !busy, onClick = { scope.launch { update() } }) { Text("Refresh connection settings") }
+        } else if (countries.isEmpty()) Text("Import a named server profile in AirVPN Settings to enable VPN routing.")
         when (current["status"]) {
             "verified" -> {
                 val exits = (current["exits"] as? List<*>)?.filterIsInstance<String>().orEmpty().joinToString(", ")

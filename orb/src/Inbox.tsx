@@ -1,14 +1,11 @@
-import { pollWhileVisible, shallowEqual } from "./poll";
+import { shallowEqual } from "./poll";
 import { followProjectFolder, seedDelivered, seededPrompt } from "./localFolder";
 import { invokeNative } from "./native";
 import { useNow } from "./time";
 import { missionAssignedNode } from "./machines/nodes";
 import { isLive } from "./missionStatus";
 import { swallow } from "./log";
-import { readInboxState } from "./inboxState";
 import { ErrorToast, dismissToast, notify } from "./toast";
-import { applySharedInboxSeen } from "./missionUnread";
-import { applySharedInboxPreferences } from "./inboxSettings";
 import {
   For,
   Show,
@@ -304,18 +301,7 @@ export function InboxPage(p: {
   let listContainerRef: HTMLDivElement | undefined;
   const peekedSectionById = new Map<string, "needs_you" | "ready">();
 
-  onMount(() => {
-    const refreshSharedState = async () => {
-      const state = await readInboxState();
-      if (state) { applySharedInboxSeen(state); applySharedInboxPreferences(state.preferences); }
-    };
-    void refreshSharedState();
-    const stopSync = pollWhileVisible(refreshSharedState, 10_000, "inbox.sharedState");
-    onCleanup(() => {
-      stopSync();
-      if (undoTimer) clearTimeout(undoTimer);
-    });
-  });
+  onCleanup(() => { if (undoTimer) clearTimeout(undoTimer); });
 
   const addBusy = (id: string) =>
     setBusyIds((prev) => {
