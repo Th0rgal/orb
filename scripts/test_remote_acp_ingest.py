@@ -21,7 +21,7 @@ def chunk(update):
     return json.dumps({"method": "session/update", "params": {"update": update}}) + "\n"
 
 
-def replay(binary, historical, fragments, measure_only):
+def replay(binary, historical, fragments, measure_only, restart=False):
     mission, job = str(uuid4()), str(uuid4())
     first = chunk({"sessionUpdate": "agent_thought_chunk", "content": {"text": "first"}})
     rest = "".join(chunk({"sessionUpdate": "agent_thought_chunk", "content": {"text": str(i)}})
@@ -31,6 +31,15 @@ def replay(binary, historical, fragments, measure_only):
                        "state": {"status": "completed", "time": {"start": 1234000, "end": 1235000}}}}) + "\n"
     log = (first + rest).encode()
     final_line = chunk({"sessionUpdate": "agent_message_chunk", "content": {"text": "done"}}).rstrip().encode()
+    # Restart inside a tool record, then give the resumed poller more than two
+    # bounded batches before the unterminated assistant message becomes visible.
+    cut = log.index(b'"tool_use"') + 5
+    if restart:
+        padding = json.dumps({"type": "fixture-padding", "data": "x" * 49000}).encode() + b"\n"
+        log += padding * 120
+    terminal_polls = []
+    checkpoint_ready = threading.Event()
+    resumed = threading.Event()
     finished = threading.Event()
     final_at = []
     page_two_at = []
@@ -47,9 +56,12 @@ def replay(binary, historical, fragments, measure_only):
                 off = int(args["offset"][0])
                 source = log + final_line if finished.is_set() else log
                 stop = min(len(source), off + int(args["max_bytes"][0]))
+                if restart and not resumed.is_set():
+                    source = log[:cut]
+                    stop = min(stop, cut)
                 if off == 0:
                     first_request.append(time.monotonic())
-                    stop = len(first)
+                    stop = cut if restart else len(first)
                 elif off == len(first):
                     time.sleep(1.1)  # Same Core drain, a later wall-clock second.
                     page_two_at.append(int(time.time()))
@@ -58,8 +70,13 @@ def replay(binary, historical, fragments, measure_only):
                     final_at.append(int(time.time()))
                 data = dict(offset=off, next_offset=stop, log_len=len(source), data=source[off:stop].decode())
             elif path.path == f"/jobs/{job}":
-                finished.set()
-                data = {"state": "succeeded", "exit_code": 0}
+                if restart and not resumed.is_set():
+                    checkpoint_ready.set()
+                    data = {"state": "running"}
+                else:
+                    terminal_polls.append(time.monotonic())
+                    finished.set()
+                    data = {"state": "succeeded", "exit_code": 0}
             else:
                 data = {}
             wire = json.dumps(data).encode()
@@ -103,6 +120,15 @@ def replay(binary, historical, fragments, measure_only):
             db.executemany("INSERT INTO mission_events(mission_id,seq,sequence,event_type,timestamp) "
                            "VALUES(?,?,0,'native','')", ((mission, i) for i in range(2, historical + 1, 2)))
             db.commit()
+            if restart:
+                with core(binary, env):
+                    assert checkpoint_ready.wait(30), "missing initial log checkpoint"
+                    saved = db.execute("SELECT published_offset FROM remote_log_offsets WHERE job_id=?",
+                                       (job,)).fetchone()
+                    assert saved == (log.rfind(b"\n", 0, cut) + 1,), saved
+                    assert db.execute("SELECT count(*) FROM mission_events WHERE mission_id=? AND event_type='tool_result'",
+                                      (mission,)).fetchone() == (0,)
+                resumed.set()
             with core(binary, env):
                 deadline = time.monotonic() + 180
                 while time.monotonic() < deadline:
@@ -130,6 +156,14 @@ def replay(binary, historical, fragments, measure_only):
             assert (tool["started_at"], tool["updated_at"]) == (1234000, 1235000)
             times = [r[3] for r in rows]
             times.extend(row[1] for row in terminal)
+            if restart:
+                assert db.execute("SELECT published_offset FROM remote_log_offsets WHERE job_id=?",
+                                  (job,)).fetchone() == (len(log) + len(final_line),)
+                assert len(terminal_polls) >= 3, "a single poll consumed an unbounded terminal backlog"
+                print(json.dumps(dict(checkpoint=saved[0], split=cut, bytes=len(log) + len(final_line),
+                                      terminal_polls=len(terminal_polls), prefix_events=len(rows) - 1,
+                                      tool_results=1)), flush=True)
+                return
             fresh = min(times[1:]) >= page_two_at[0] and times[-2] >= final_at[0] and times == sorted(times)
             print(json.dumps(dict(history=historical, fragments=fragments, first_seq=rows[0][0],
                                   last_seq=terminal[-1][2], elapsed_seconds=round(elapsed, 3),
@@ -145,3 +179,5 @@ if __name__ == "__main__":
     parser.add_argument("--measure-only", action="store_true", help="record timing on a pre-fix binary")
     args = parser.parse_args()
     replay(str(args.binary.resolve()), args.history, args.fragments, args.measure_only)
+    if not args.measure_only:
+        replay(str(args.binary.resolve()), 0, 5, False, restart=True)

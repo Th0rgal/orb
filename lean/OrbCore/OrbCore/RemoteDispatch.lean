@@ -1378,6 +1378,35 @@ private def splitCompleteLines (buf : String) : Array String × String := Id.run
   let rem := parts.getLast!
   return (complete, rem)
 
+/-- Checkpoint only complete records, so recovery rereads any unfinished record.
+    Only a verified terminal EOF can close a final record without a newline. -/
+private def consumeRemoteLogPage (store : CoreStore) (broadcastHub? : Option BroadcastHub)
+    (backend missionId jobId : String) (goalJobId? : Option String) (acc : RemoteStreamAcc)
+    (remainder chunk : String) (nextOffset : Nat) (terminalEof : Bool) : IO (RemoteStreamAcc × String) := do
+  if chunk.isEmpty && (!terminalEof || remainder.isEmpty) then return (acc, remainder)
+  let (lines, tail) := splitCompleteLines (remainder ++ chunk)
+  let mut next := acc
+  for line in lines do
+    next ← ingestRemoteHarnessLine store broadcastHub? backend missionId line goalJobId? next
+  if terminalEof && !tail.trimAscii.toString.isEmpty then
+    next ← ingestRemoteHarnessLine store broadcastHub? backend missionId tail goalJobId? next
+  let tail := if terminalEof then "" else tail
+  if !lines.isEmpty || terminalEof then
+    let published := nextOffset - tail.utf8ByteSize
+    discard <| execParamQuery store.missionsDb
+      ("INSERT INTO remote_log_offsets(job_id,published_offset,updated_at) VALUES(?1,CAST(?2 AS INTEGER),?3) " ++
+       "ON CONFLICT(job_id) DO UPDATE SET published_offset=excluded.published_offset,updated_at=excluded.updated_at;")
+      #[jobId, s!"{published}", formatEpochIso8601Utc (← nowEpoch)]
+  return (next, tail)
+
+private def validRemoteLogWindow (offset next len : Nat) (chunk : String) : Bool :=
+  offset ≤ next && next ≤ len && ((offset == next) == chunk.isEmpty)
+
+private def canCheckpointRemotePage (offset next : Nat) (chunk : String) : Bool :=
+  -- Historical nodes can decode malformed bytes lossily. The cursor is still
+  -- unambiguous at the end of a record, or when no record closed on this page.
+  !chunk.contains '\n' || chunk.endsWith "\n" || next == offset + chunk.utf8ByteSize
+
 /-! ## Remote Job Cancellation, Submission, Polling & Queued Follow-Up Drain -/
 
 /-- Send `POST /jobs/:id/cancel` to the remote `OrbNode` for any live remote job on `missionId`. -/
@@ -1588,7 +1617,7 @@ partial def spawnRemoteJobPoller
     let isGoal := (← getMission? store missionId).any (·.goalMode)
     let goalJobId? := if isGoal then some jobId else none
     let mut evidenceIntact := initialOffset == 0
-    let mut lineRem : String := ""
+    let mut lineRem := ""
     let mut acc : RemoteStreamAcc := {}
     let mut unreachableNotified : Bool := false
     if initialOffset > 0 then
@@ -1655,22 +1684,20 @@ partial def spawnRemoteJobPoller
                 let chunk := (ljv.fieldStr? "data").getD ""
                 let nextOff := (ljv.fieldNat? "next_offset").getD (offset + chunk.utf8ByteSize)
                 let logLen := (ljv.fieldNat? "log_len").getD nextOff
-                if isGoal && ((ljv.fieldNat? "offset") != some offset || (ljv.fieldNat? "next_offset").isNone ||
-                    (ljv.fieldNat? "log_len").isNone || (ljv.fieldStr? "data").isNone || nextOff < offset ||
-                    nextOff > logLen || ((nextOff == offset) != chunk.isEmpty)) then
+                let matchesOffset := (ljv.fieldNat? "offset").getD offset == offset
+                let valid := matchesOffset && validRemoteLogWindow offset nextOff logLen chunk &&
+                  canCheckpointRemotePage offset nextOff chunk
+                if !valid || (ljv.fieldNat? "offset").isNone || (ljv.fieldNat? "next_offset").isNone ||
+                    (ljv.fieldNat? "log_len").isNone || (ljv.fieldStr? "data").isNone then
                   evidenceIntact := false
-                if !chunk.isEmpty then
-                  let (lines, rem) := splitCompleteLines (lineRem ++ chunk)
+                if !valid then
+                  drainedMore := false
+                else
+                  let (next, rem) ← consumeRemoteLogPage store broadcastHub? backend missionId jobId goalJobId? acc lineRem chunk nextOff false
+                  acc := next
                   lineRem := rem
-                  for ln in lines do
-                    acc ← ingestRemoteHarnessLine store broadcastHub? backend missionId ln goalJobId? acc
-                if nextOff > offset then
-                  discard <| execParamQuery store.missionsDb
-                    ("INSERT INTO remote_log_offsets(job_id,published_offset,updated_at) VALUES(?1,CAST(?2 AS INTEGER),?3) " ++
-                     "ON CONFLICT(job_id) DO UPDATE SET published_offset=excluded.published_offset, updated_at=excluded.updated_at;")
-                    #[jobId, s!"{nextOff}", formatEpochIso8601Utc (← nowEpoch)]
-                offset := nextOff
-                drainedMore := nextOff < logLen && !chunk.isEmpty
+                  offset := nextOff
+                  drainedMore := nextOff < logLen && !chunk.isEmpty
               else
                 drainedMore := false
             else
@@ -1721,6 +1748,36 @@ partial def spawnRemoteJobPoller
               if rawJState == "canceled" || rawJState == "aborted" then "cancelled"
               else if rawJState == "completed" || rawJState == "terminal" then "succeeded"
               else rawJState
+            let terminal := ["succeeded", "failed", "cancelled", "lost"].contains jState
+            let mut finalDrained := false
+            if terminal then
+              -- Confirm EOF after the terminal status. Yield to another bounded poll
+              -- if a well-formed, advancing window still has unpublished bytes.
+              let mut backlog := drainedMore
+              let budget := if isGoal && jState == "succeeded" then 8 else 1
+              for _ in [:budget] do
+                let .ok (st, _, some page, _, _) ← callRemoteNodeHttpOpt relayHub? mc? effNodeId "GET" s!"/jobs/{jobId}/log?offset={offset}&max_bytes=262144" none #[] 10000
+                  | break
+                if st < 200 || st ≥ 300 then break
+                let some chunk := page.fieldStr? "data" | break
+                let some nextOff := page.fieldNat? "next_offset" | break
+                let some logLen := page.fieldNat? "log_len" | break
+                if page.fieldNat? "offset" != some offset || !validRemoteLogWindow offset nextOff logLen chunk ||
+                    (nextOff != logLen && !canCheckpointRemotePage offset nextOff chunk) then
+                  evidenceIntact := false
+                  backlog := false
+                  break
+                let eof := nextOff == logLen
+                backlog := !eof && nextOff > offset
+                let (next, rem) ← consumeRemoteLogPage store broadcastHub? backend missionId jobId goalJobId? acc lineRem chunk nextOff eof
+                acc := next
+                lineRem := rem
+                offset := nextOff
+                if eof then
+                  -- Legacy nodes can report a zero-length window on an I/O error.
+                  finalDrained := evidenceIntact && logLen > 0
+                unless backlog do break
+              if backlog && !cancelSent then continue
             discard <| execParamQuery store.missionsDb
               "UPDATE mission_runs SET updated_at=?2 WHERE mission_id=?1 AND remote_job_id=?3 AND execution_state NOT IN ('terminal','completed','failed','aborted');"
               #[missionId, nowIso, jobId]
@@ -1756,34 +1813,7 @@ partial def spawnRemoteJobPoller
                   (if detail.isEmpty then "" else s!" Last log: {detail}")))])) nowIso
               emitMissionEventAndBroadcast store broadcastHub? missionId "mission_status_changed"
                 (renderCompact (.obj #[("status", .str "failed"), ("reason", .str reason)])) nowIso
-            else if jState == "succeeded" || jState == "failed" || jState == "cancelled" || jState == "lost" then
-              -- Final log drain after terminal transition
-              let mut finalDrained := false
-              let mut remaining := if isGoal && jState == "succeeded" then 8 else 1
-              while remaining > 0 do
-                remaining := remaining - 1
-                let .ok (flSt, _, some flJv, _, _) ← callRemoteNodeHttpOpt relayHub? mc? effNodeId "GET" s!"/jobs/{jobId}/log?offset={offset}&max_bytes=262144" none #[] 10000
-                  | break
-                if flSt < 200 || flSt ≥ 300 then break
-                let chunk := (flJv.fieldStr? "data").getD ""
-                if !chunk.isEmpty then
-                  let (lines, rem) := splitCompleteLines (lineRem ++ chunk)
-                  lineRem := rem
-                  for ln in lines do
-                    acc ← ingestRemoteHarnessLine store broadcastHub? backend missionId ln goalJobId? acc
-                let some nextOff := flJv.fieldNat? "next_offset" | break
-                let some logLen := flJv.fieldNat? "log_len" | break
-                if (flJv.fieldNat? "offset") != some offset || (flJv.fieldStr? "data").isNone ||
-                    nextOff < offset || nextOff > logLen || ((nextOff == offset) != chunk.isEmpty) then break
-                if nextOff == logLen then
-                  -- Older nodes also return an empty zero-length slice for file I/O errors.
-                  finalDrained := evidenceIntact && logLen > 0
-                  break
-                if nextOff == offset then break
-                offset := nextOff
-              if !lineRem.trimAscii.toString.isEmpty then
-                acc ← ingestRemoteHarnessLine store broadcastHub? backend missionId lineRem goalJobId? acc
-                lineRem := ""
+            else if terminal then
               let nowSec ← nowEpoch
               let nowIso := formatEpochIso8601Utc nowSec
               keepRunning := false
