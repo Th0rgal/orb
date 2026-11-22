@@ -118,3 +118,12 @@ The shared-workspace profile binds both the kind and generation of the saved acc
 The node-wide relay and the read-only qualification tools continue to require their own configured transports. Release validation needs the native workspace and parent delegation receipts for the same live route.
 
 The profile advertises read_file and write_file for a writable checkout and read_file for a read-only checkout. Those exact tools have corresponding native permissions. The workspace MCP independently enforces this catalog with its bound-files mode, pins its working directory to the mounted checkout, and keeps the checkout mounted read-only for read-only jobs. Install the matching workspace-mcp binary in the worker image.
+
+A native Goal can read through the bound workspace MCP. On a writable placement,
+an ACP `workspace/write_file` request opens an Orb approval displaying the path,
+byte count and SHA-256 of the proposed content. The subsequent MCP call must
+present the accepted single-use ticket for those exact arguments. Core rechecks
+the active Goal, job, owner and holder before forwarding to the workspace writer.
+The worker still applies its UID, checkout boundary, file policy and filesystem
+permissions. A read-only placement offers no write tool. Older holders and Core
+versions cannot complete this approval protocol.

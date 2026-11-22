@@ -1,5 +1,6 @@
 import OrbCore.NativeSharedWorkspace
 import OrbBin.McpCatalog
+import OrbBin.WorkspaceFilePolicy
 
 namespace OrbCore.NativeGoalApproval
 
@@ -23,6 +24,19 @@ def validArgs (args : JVal) : Bool := Id.run do
       ((args.fieldStr? k).getD "").trimAscii.toString != "") do return false
   unless #["codex","antigravity","opencode"].contains ((args.fieldStr? "backend").getD "") do return false
   return (renderCompact args).utf8ByteSize ≤ 32768
+
+/-- The approval describes exactly the bytes the existing bounded workspace writer receives. -/
+def validWrite (args : JVal) : Bool := Id.run do
+  let .obj fields := args | return false
+  let some path := args.fieldStr? "path" | return false
+  let some content := args.fieldStr? "content" | return false
+  return fields.size == 2 && path.utf8ByteSize ≤ 4096 && content.utf8ByteSize ≤ 262144 &&
+    path.toList.all (fun c => c.toNat ≥ 32 && c.toNat != 127 && c != '\\') &&
+    (path.splitOn "/").all (fun part => !part.isEmpty && part != "." && part != ".." &&
+      !OrbBin.WorkspaceFilePolicy.deniedSegment part)
+
+private def permitted (p : Placement) (tool : String) (args : JVal) : Bool :=
+  (tool == "start_mission" && validArgs args) || (tool == "write_file" && !p.readonly && validWrite args)
 
 def catalogue : JVal := Id.run do
   let some raw := OrbBin.McpCatalog.catalogPrettyJsonForRole "executor" | return .arr #[]
@@ -50,8 +64,8 @@ def answer (store : CoreStore) (id owner explicitMid action : String) (now : UIn
   return rows[1]?.bind (·[0]?)
 
 def ask (store : CoreStore) (p : Placement) (args : JVal) (now : UInt64)
-    (announce : String → JVal → IO Unit) (live : IO Bool) : IO JVal := do
-  unless validArgs args && (← currentGoal store p) do return .null
+    (announce : String → JVal → IO Unit) (live : IO Bool) (tool : String := "start_mission") : IO JVal := do
+  unless permitted p tool args && (← currentGoal store p) do return .null
   discard <| execParamQuery store.missionsDb "DELETE FROM native_goal_approvals WHERE expires<=CAST(?1 AS INTEGER);" #[toString now]
   let id := ticketPrefix ++ (← OrbBin.PosixExt.newUuidV4)
   let expiry := min p.expires (now.toNat + 90)
@@ -62,8 +76,13 @@ def ask (store : CoreStore) (p : Placement) (args : JVal) (now : UInt64)
   let model := (((args.fieldStr? "model_override").getD "").take 100).toString
   let backend := (args.fieldStr? "backend").getD ""
   let target := (((args.fieldStr? "remote_node_id").getD "automatic placement").take 100).toString
-  let label := s!"Start child mission “{title}” using {backend} / {model} on {target}?"
-  announce id (.obj #[("method",.str "permission"),("params",.obj #[("tool",.str "start_mission"),
+  let label := if tool == "write_file" then
+      let path := (args.fieldStr? "path").getD ""
+      let bytes := ((args.fieldStr? "content").getD "").toUTF8
+      let checksum := LeanSys.Auth.bytesToHexLower (LeanSys.Auth.sha256Bytes bytes)
+      s!"Write {bytes.size} bytes to {path} in this mission workspace? SHA-256 {checksum}"
+    else s!"Start child mission “{title}” using {backend} / {model} on {target}?"
+  announce id (.obj #[("method",.str "permission"),("params",.obj #[("tool",.str tool),
     ("input",.obj #[("description",.str label),("once_only",.bool true)])])])
   for _ in [:360] do
     IO.sleep 250
@@ -76,8 +95,8 @@ def ask (store : CoreStore) (p : Placement) (args : JVal) (now : UInt64)
   discard <| execParamQuery store.missionsDb "DELETE FROM native_goal_approvals WHERE id=?1;" #[id]
   return .null
 
-def consume (store : CoreStore) (p : Placement) (args : JVal) (ticket : String) (now : UInt64) : IO Bool := do
-  unless ticket.startsWith ticketPrefix && validArgs args && (← currentGoal store p) do return false
+def consume (store : CoreStore) (p : Placement) (args : JVal) (ticket : String) (now : UInt64) (tool : String := "start_mission") : IO Bool := do
+  unless ticket.startsWith ticketPrefix && permitted p tool args && (← currentGoal store p) do return false
   let .ok rows ← execParamQuery store.missionsDb
     ("DELETE FROM native_goal_approvals WHERE id=?1 AND owner=?2 AND mission=?3 AND job=?4 " ++
      "AND input_digest=?5 AND expires>CAST(?6 AS INTEGER) AND decision='accepted' RETURNING id;")

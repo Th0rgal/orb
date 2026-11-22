@@ -3,7 +3,7 @@ import json
 import uuid
 
 
-def permission_choice(params, session, ask):
+def permission_choice(params, session, ask, ask_write=None):
     """Select one turn-local option. Core still authorizes the actual MCP call."""
     if not isinstance(params, dict) or params.get("sessionId") != session or not session:
         return None
@@ -28,16 +28,19 @@ def permission_choice(params, session, ask):
     if not isinstance(args, dict):
         return None
     tool = raw.get("ServerName"), raw.get("ToolName")
-    if tool == ("workspace", "read_file") and set(args) == {"path"}:
+    read = tool == ("workspace", "read_file") and set(args) == {"path"}
+    write = tool == ("workspace", "write_file") and set(args) == {"path", "content"}
+    if read or write:
         path = args["path"]
         if isinstance(path, str) and 0 < len(path) <= 4096 and "\\" not in path and "\0" not in path and all(
                 part not in ("", ".", "..") for part in path.split("/")):
-            return choices[0]
+            if read or (ask_write and isinstance(args["content"], str) and ask_write(args)):
+                return choices[0]
     elif tool == ("sandboxed", "start_mission") and isinstance(args.get("prompt"), str) and ask(args):
         return choices[0]
     return None
 
-def turn(child, packet, ask, emit):
+def turn(child, packet, ask, emit, ask_write=None):
     """The outer supervisor bounds lifetime and kills the process on revocation."""
     session = ""
     next_id = 0
@@ -68,7 +71,7 @@ def turn(child, packet, ask, emit):
                 if msg["method"] != "session/request_permission":
                     send({"id": msg["id"], "error": {"code": -32601, "message": "Unavailable"}})
                     continue
-                choice = permission_choice(request, session, ask) if method == "session/prompt" else None
+                choice = permission_choice(request, session, ask, ask_write) if method == "session/prompt" else None
                 outcome = {"outcome": "cancelled"}
                 if choice is not None:
                     outcome = {"outcome": "selected", "optionId": choice}
