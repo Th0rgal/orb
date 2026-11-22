@@ -134,6 +134,13 @@ def spawnUserJob
     let pid := (resp.fieldUInt64? "pid").getD 0
     return .ok { unit, pid }
 
+/-- A terminal job succeeds only when the broker returns an explicit numeric zero. -/
+def UserJobStatus.ofJson (resp : JVal) : UserJobStatus := {
+  done := (resp.fieldBool? "done").getD false
+  exitCode := (resp.fieldInt? "exit_code").getD (-1)
+  state := (resp.fieldStr? "state").getD ""
+}
+
 /-- Query status (`"status"`) or terminate (`"stop"` / `"kill"`) a confined user job. -/
 def controlUserJob
     (socketPath op jobId unixUsername : String) : IO (Except String UserJobStatus) := do
@@ -145,11 +152,7 @@ def controlUserJob
   ]
   match ← callPrivd socketPath req 15000 with
   | .error e => return .error e
-  | .ok resp =>
-    let done := (resp.fieldBool? "done").getD false
-    let exitCode := (resp.fieldInt? "exit_code").getD 0
-    let state := (resp.fieldStr? "state").getD ""
-    return .ok { done, exitCode, state }
+  | .ok resp => return .ok (UserJobStatus.ofJson resp)
 
 /-- Execute a confined UID-dropped `file_browser` operation inside `/home/<unixUsername>/.orb-missions/<missionId>`. -/
 def userFileBrowser

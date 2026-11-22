@@ -1974,6 +1974,13 @@ private def runO12CapacityConfigTests (check : String → Bool → IO Unit) (tmp
 set_option maxRecDepth 2048 in
 set_option maxHeartbeats 400000 in
 def runTests : IO UInt32 := do
+  let done := JVal.obj #[("done", .bool true)]
+  let decode := OrbNode.PrivdClient.UserJobStatus.ofJson
+  assertTrue "member job terminal status requires an explicit numeric exit code"
+    ((decode done).exitCode == -1 &&
+     (decode (done.setField "exit_code" (.str "0"))).exitCode == -1 &&
+     (decode (done.setField "exit_code" (.nat 23))).exitCode == 23 &&
+     (decode (done.setField "exit_code" (.nat 0))).exitCode == 0)
   let passedRef ← IO.mkRef (0 : Nat)
   let check (label : String) (cond : Bool) : IO Unit := do
     assertTrue label cond
