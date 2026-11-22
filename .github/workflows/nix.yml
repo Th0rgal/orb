@@ -64,21 +64,63 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa # v23
+      - name: Prepare and verify the private desktop runtime on Ubuntu
+        run: |
+          if [[ ! -e /run/opengl-driver ]]; then
+            mesa=$(nix build --inputs-from . --no-link --print-out-paths nixpkgs#mesa)
+            sudo ln -s "$mesa" /run/opengl-driver
+          fi
+          test -r /run/opengl-driver/share/glvnd/egl_vendor.d/50_mesa.json
+          dbus=$(nix build --inputs-from . --no-link --print-out-paths nixpkgs#dbus.out)
+          atspi=$(nix build --inputs-from . --no-link --print-out-paths nixpkgs#at-spi2-core.out)
+          config="$dbus/share/dbus-1/session.conf"
+          test -r "$config"
+          export XDG_DATA_DIRS="$atspi/share:${XDG_DATA_DIRS:-/usr/local/share:/usr/share}"
+          HOME="$(mktemp -d)" XDG_RUNTIME_DIR="$(mktemp -d)" "$dbus/bin/dbus-run-session" --config-file="$config" -- \
+            "$dbus/bin/dbus-send" --session --print-reply --dest=org.a11y.Bus /org/a11y/bus org.a11y.Bus.GetAddress
+          echo "ORB_TEST_DBUS_CONFIG=$config" >> "$GITHUB_ENV"
+          echo "XDG_DATA_DIRS=$XDG_DATA_DIRS" >> "$GITHUB_ENV"
       - name: Build the packaged launchers on aarch64
+        id: package
         run: nix build .#orb-desktop --max-jobs 1 --cores 2 -L
       - name: Exercise Classic and hybrid in a private Wayland session
         env:
           ORB_TEST_SCREENSHOT: ${{ runner.temp }}/hybrid-desktop.png
         run: |
-          nix shell --inputs-from . nixpkgs#sway nixpkgs#grim nixpkgs#wtype nixpkgs#imagemagick nixpkgs#tesseract --command bash -euc '
+          nix shell --inputs-from . nixpkgs#sway nixpkgs#grim nixpkgs#wtype nixpkgs#imagemagick nixpkgs#tesseract nixpkgs#dbus --command bash -euc '
             export ORB_WEBKIT_TEST_BINARY="$PWD/result/bin/orb-desktop"
             export ORB_HYBRID_TEST_BINARY="$PWD/result/bin/orb-desktop-hybrid"
             export ORB_DIST_DIR="$(nix build .#orb-desktop.webUi --no-link --print-out-paths)"
-            python3 -B lean/OrbDesktop/tests/hybrid_desktop.py
+            # D-Bus activates the accessibility registry using its initial environment.
+            HOME="$(mktemp -d)" XDG_RUNTIME_DIR="$(mktemp -d)" dbus-run-session --config-file="$ORB_TEST_DBUS_CONFIG" -- python3 -B lean/OrbDesktop/tests/hybrid_desktop.py
+          '
+      - name: Replay packaged sidebar actions in all three clients
+        if: ${{ !cancelled() && steps.package.outcome == 'success' }}
+        env:
+          OMP_THREAD_LIMIT: 1
+        run: |
+          export ORB_PACKAGED_TEST_BINARY="$PWD/result/bin/orb-desktop"
+          export ORB_CORE_TEST_BINARY="$(nix build .#orb-desktop.core --no-link --print-out-paths)/bin/orb-core"
+          nix shell --inputs-from . nixpkgs#sway nixpkgs#swaybg nixpkgs#grim nixpkgs#wtype nixpkgs#imagemagick nixpkgs#tesseract nixpkgs#dbus --command bash -euc '
+            set -o pipefail
+            results="$RUNNER_TEMP/sidebar-replay"
+            mkdir -p "$results"
+            export TMPDIR="$(mktemp -d)"
+            status=0
+            for client in webkit hybrid leanui; do
+              HOME="$(mktemp -d)" XDG_RUNTIME_DIR="$(mktemp -d)" dbus-run-session --config-file="$ORB_TEST_DBUS_CONFIG" -- \
+                python3 -Bu lean/OrbDesktop/tests/live_writes.py --sidebar-menu "$client" 2>&1 | tee "$results/$client.log" || status=1
+            done
+            for frame in "$TMPDIR"/orb-{webkit,hybrid,leanui}-{sidebar,refusal}-*.png; do
+              if [[ -f "$frame" ]]; then cp "$frame" "$results/"; fi
+            done
+            exit "$status"
           '
       - uses: actions/upload-artifact@v4
-        if: failure()
+        if: ${{ !cancelled() && steps.package.outcome == 'success' }}
         with:
-          name: hybrid-desktop-screenshot
-          path: ${{ runner.temp }}/hybrid-desktop.png
+          name: desktop-parity-receipts
+          path: |
+            ${{ runner.temp }}/hybrid-desktop.png
+            ${{ runner.temp }}/sidebar-replay
           if-no-files-found: ignore

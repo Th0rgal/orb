@@ -1,6 +1,6 @@
 """Drive the same mission-menu fixture in a packaged Linux client using real pointer input.
 
-Run live_writes.py --sidebar-menu leanui or --sidebar-menu webkit. OCR reads the
+Run live_writes.py --sidebar-menu with webkit, hybrid or leanui. OCR reads the
 private compositor's pixels so the check also exercises the actual menu layout.
 """
 import contextlib
@@ -28,10 +28,18 @@ def exercise(root, tmp, api, graphical, click, process, wait, stack, client_kind
     a, b = create(fixture['openMission']), create(fixture['contextMission'])
     def status(mid):
         return api('/api/control/missions/' + mid)['status']
-    binary = os.environ['ORB_LEANUI_TEST_BINARY' if client_kind == 'leanui' else 'ORB_WEBKIT_TEST_BINARY']
-    cmd = [str(Path(binary).resolve(strict=True))]
-    if client_kind == 'leanui' and Path(binary).name in ('orb', 'orb-desktop'):
-        cmd.append('--leanui')
+    package = os.environ.get('ORB_PACKAGED_TEST_BINARY')
+    if package:
+        flag = {'webkit': '--webkit', 'hybrid': '--leanui-hybrid', 'leanui': '--leanui'}[client_kind]
+        cmd = [str(Path(package).resolve(strict=True)), flag]
+    else:
+        if client_kind == 'hybrid':
+            raise ValueError('hybrid requires ORB_PACKAGED_TEST_BINARY pointing to the package launcher')
+        variable = 'ORB_LEANUI_TEST_BINARY' if client_kind == 'leanui' else 'ORB_WEBKIT_TEST_BINARY'
+        binary = Path(os.environ[variable])
+        cmd = [str(binary.resolve(strict=True))]
+        if client_kind == 'leanui' and binary.name in ('orb', 'orb-desktop'):
+            cmd.append('--leanui')
     home = tmp / 'home'
     graphical.update(HOME=str(home), XDG_DATA_HOME=str(home/'data'), XDG_CONFIG_HOME=str(home/'config'),
                      XDG_CACHE_HOME=str(home/'cache'), GDK_BACKEND='wayland')
@@ -49,14 +57,25 @@ def exercise(root, tmp, api, graphical, click, process, wait, stack, client_kind
     launch()
     sidebar = '10,100 200x560'
     header = '220,0 630x43'
-    def words(geometry):
+    def words(geometry, contrast="normal"):
         image = subprocess.check_output(['grim', '-t', 'ppm', '-g', geometry, '-'], env=graphical)
-        return read_words(image, geometry)
+        return read_words(image, geometry, contrast=contrast)
 
     def locate(label, geometry):
-        return next(((x, y) for word, x, y in words(geometry) if word == label.lower()), None)
+        for contrast in ("normal", "binary", "local"):
+            hit = next(((x, y) for word, x, y in words(geometry, contrast) if word == label.lower()), None)
+            if hit:
+                return hit
+        return None
+    def capture_failure():
+        with tempfile.NamedTemporaryFile(prefix=f'orb-{client_kind}-sidebar-', suffix='.png', delete=False) as frame:
+            subprocess.run(['grim', '-t', 'png', '-'], stdout=frame, env=graphical, check=True)
+            return frame.name
     def see(label, geometry=sidebar):
-        return wait('visible ' + label, lambda: locate(label, geometry))
+        try:
+            return wait('visible ' + label, lambda: locate(label, geometry))
+        except TimeoutError as error:
+            raise AssertionError(f'{label} in {geometry}: {capture_failure()}') from error
     def open_project():
         def reveal():
             if locate(fixture['openMission'], sidebar):
@@ -71,6 +90,11 @@ def exercise(root, tmp, api, graphical, click, process, wait, stack, client_kind
         wait('visible open mission in project', reveal)
     def action_menu(expected, choose, target_region=sidebar, target=None):
         x, y = see(target or fixture['contextMission'], target_region)
+        def sidebar_pixels():
+            # Raw 8-bit channels from a stable compositor frame, excluding the cursor.
+            image = subprocess.check_output(['grim', '-t', 'ppm', '-g', '0,0 320x700', '-'], env=graphical)
+            return subprocess.check_output(['magick', '-', '-depth', '8', 'rgb:-'], input=image)
+        closed = sidebar_pixels() if choose == 'dismiss' else None
         click(x, y, 'button3')
         if client_kind == 'leanui':
             regions = [f'{x+20},{min(y,535)} 165x175']
@@ -79,8 +103,8 @@ def exercise(root, tmp, api, graphical, click, process, wait, stack, client_kind
             regions = [f'{max(0,x-12)},{min(y-8,510)} 220x185', f'{max(0,x-38)},{max(0,y-207)} 170x185']
         labels = {'rename':'rename', 'move':'move', 'archive':'archive', 'restore':'restore',
                   'copy-id':'copy', 'settings':'settings'}
-        def actions_in(geo):
-            visible = words(geo)
+        def actions_in(geo, contrast):
+            visible = words(geo, contrast)
             first = next((i for i, (word, _, _) in enumerate(visible) if word == 'rename'), None)
             if first is None:
                 return None
@@ -99,9 +123,32 @@ def exercise(root, tmp, api, graphical, click, process, wait, stack, client_kind
                 first = match + 1
             return hits
         def rows():
-            return next((hits for region in regions if (hits := actions_in(region))), None)
-        hits = wait('ordered context actions ' + ', '.join(expected), rows)
-        if client_kind == 'webkit' and choose == 'rename':
+            for contrast in ("normal", "binary", "local"):
+                for region in regions:
+                    hits = actions_in(region, contrast)
+                    if hits:
+                        return hits
+            return None
+        try:
+            hits = wait('ordered context actions ' + ', '.join(expected), rows)
+        except TimeoutError as error:
+            raise AssertionError(f'{choose} for {target or fixture["contextMission"]} at {(x, y)}: {capture_failure()}') from error
+        if choose == 'dismiss':
+            opened = sidebar_pixels()
+            # Observe the pixels changed by the popover around its five action labels.
+            # An incomplete OCR read of a still-open menu cannot satisfy this check.
+            indices = [3 * (320 * cy + cx) + channel for px, py in hits.values()
+                       for cy in range(py - 4, py + 5) for cx in range(px - 12, px + 13)
+                       for channel in range(3)]
+            changed = [i for i in indices if abs(opened[i] - closed[i]) > 16]
+            assert len(changed) >= 100, 'popover did not change the sampled area'
+            subprocess.run(['wtype', '-k', 'Escape'], env=graphical, check=True)
+            def restored():
+                current = sidebar_pixels()
+                return sum(abs(current[i] - closed[i]) < abs(current[i] - opened[i])
+                           for i in changed) >= .9 * len(changed)
+            wait('context menu dismissed and underlying pixels restored', restored)
+        elif client_kind != 'leanui' and choose == 'rename':
             # Rename receives focus when the GTK menu opens.
             subprocess.run(['wtype', '-k', 'Return'], env=graphical, check=True)
         else:
@@ -125,7 +172,14 @@ def exercise(root, tmp, api, graphical, click, process, wait, stack, client_kind
         subprocess.run(['wtype', '-M', 'ctrl', '-k', 'b', '-m', 'ctrl'], env=graphical, check=True)
         see(fixture['openMission'], header)
         see(fixture['contextMission'], sidebar)
-    if client_kind == 'webkit':
+    if package:
+        from sidebar_backdrop import measure
+        backdrop = measure(graphical)
+        print(json.dumps({'client': client_kind, 'sidebar_backdrop_delta': backdrop}), flush=True)
+        assert 0 < backdrop < 255, 'sidebar must transmit part of the compositor backdrop'
+    action_menu(fixture['activeActions'], 'dismiss')
+    see(fixture['openMission'], header)
+    if client_kind != 'leanui':
         action_menu(fixture['activeActions'], 'rename')
         def rename_open():
             tree = json.loads(subprocess.check_output(['swaymsg', '-t', 'get_tree'], env=graphical))
@@ -196,8 +250,12 @@ def exercise(root, tmp, api, graphical, click, process, wait, stack, client_kind
             observed.clear()
             for region, phrase in [(refusal_region, expected), (header, fixture['openMission'].lower()),
                                    (sidebar, fixture['contextMission'].lower())]:
-                observed[region] = ' '.join(word for word, _, _ in read_words(pixels, region, full_frame=True))
-                if phrase not in observed[region]:
+                for contrast in ("normal", "binary", "local"):
+                    observed[region] = ' '.join(word for word, _, _ in read_words(
+                        pixels, region, full_frame=True, contrast=contrast))
+                    if phrase in observed[region]:
+                        break
+                else:
                     return False
             return True
         try:
@@ -226,8 +284,9 @@ def exercise(root, tmp, api, graphical, click, process, wait, stack, client_kind
     see(fixture['openMission'], header)
     archived = see('Archived')
     assert status(b) == 'acknowledged'
-    click(*archived)
     below_archive = f'10,{archived[1]+10} 200x{660-archived[1]-10}'
+    if not locate(fixture['contextMission'], below_archive):
+        click(*archived)
     action_menu(fixture['archivedActions'], 'restore', below_archive)
     wait('context mission restored', lambda: status(b) == 'paused')
     see(fixture['openMission'], header)

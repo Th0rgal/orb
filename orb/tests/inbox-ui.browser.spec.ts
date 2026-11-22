@@ -212,11 +212,33 @@ test("Space returns from the sidebar to the selected Inbox row without opening i
 });
 
 test("Space closes the narrow-screen sidebar before returning to Inbox", async ({ page }) => {
+  // Deliver the media query notification after the shortcut. CSS and
+  // MediaQueryList.matches already reflect the actual narrow viewport.
+  await page.addInitScript(() => {
+    const match = window.matchMedia.bind(window);
+    window.matchMedia = query => {
+      const media = match(query);
+      if (query === "(max-width: 720px)") {
+        media.addEventListener("change", event => {
+          if (!event.isTrusted) return;
+          event.stopImmediatePropagation();
+          document.documentElement.dataset.resizePending = "true";
+          window.addEventListener("test:deliver-resize", () => {
+            delete document.documentElement.dataset.resizePending;
+            media.dispatchEvent(new MediaQueryListEvent("change", { matches: media.matches, media: query }));
+          }, { once: true });
+        });
+      }
+      return media;
+    };
+  });
   await openInbox(page);
   await page.setViewportSize({ width: 390, height: 844 });
+  await expect(page.locator("html")).toHaveAttribute("data-resize-pending", "true");
   const title = page.locator('[data-inbox-id="done"] .inbox-row-title-btn');
   await title.focus();
   await page.keyboard.press("Meta+5");
+  await page.evaluate(() => window.dispatchEvent(new Event("test:deliver-resize")));
   await expect(page.locator("#orb-sidebar")).toBeVisible();
   await expect(page.locator("[data-project-navigation] button.row-main").first()).toBeFocused();
   await page.keyboard.press("Space");
