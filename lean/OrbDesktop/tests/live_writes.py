@@ -272,7 +272,8 @@ for i in range(300):
             sidebar_region = '10,110 195x305'
             def locate(label, region):
                 rows = read_words(crop(region), region)
-                return next(((x, y) for text, x, y in rows if text == label), None)
+                return next(((x, y) for text, x, y in rows
+                             if text == label or (label == 'move' and text == 'moveto')), None)
             def select(label, region):
                 click(*wait('visible ' + label, lambda: locate(label, region)))
             def open_actions():
@@ -286,6 +287,7 @@ for i in range(300):
             edit([('Indigo edited', len(api(path)['title'].encode()), 0)])
             select('save', region)
             wait('renamed mission', lambda: api(path)['title'] == 'Indigo edited')
+            wait('renamed row rendered', lambda: locate('edited', sidebar_region) and not locate('save', region))
             region = open_actions()
             select('move', region)
             select('menu', region)
