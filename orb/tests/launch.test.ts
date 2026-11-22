@@ -1,10 +1,24 @@
 import { describe,it,expect } from "vitest";
 import { initialPrompt,withInitialPrompt,missionDestination,missionPhase,launchError,dockModelLabel } from "../src/missionLaunch";
 import { isSettingsIdle as missionSettingsIdle } from "../src/missionStatus";
+import { missionAssignedNode, missionNode } from "../src/machines/nodes";
 import { ApiError,type Mission } from "../src/api";
 import { buildTranscript } from "../src/Transcript";
 const mission=(extra:Partial<Mission>={}):Mission=>({id:"m",title:null,status:"interrupted",history:[],created_at:"",updated_at:"",...extra});
 describe("mission launch projection",()=>{
+ it("restores an explicitly placed mission on a fresh client after its job ends", () => {
+   const closed = mission({ id: "ben-closed", placement_kind: "managed", tags: ["pr-writer", "remote-node:ashur"] });
+   expect(missionDestination(closed)).toBe("ashur");
+   expect(missionAssignedNode(closed)).toBe("ashur");
+   expect(missionNode({ tags: ["remote_node:uruk"] })).toBe("uruk");
+   expect(missionNode({ ...closed, remote_node_id: "nippur" })).toBe("nippur");
+   expect(missionNode({ ...closed, remote_job: { node_id: "babylon" } })).toBe("babylon");
+   expect(missionNode({ ...closed, machine_transfer: {destination: {kind: "core"}} })).toBeUndefined();
+   expect(missionNode({ ...closed, placement_kind: "client" })).toBeUndefined();
+   for (const target of ["auto", "auto:pool", "auto-managed:boat:small", "local", "client", "core"]) {
+     expect(missionAssignedNode({ tags: [`remote-node:${target}`] })).toBeUndefined();
+   }
+ });
  it("recovers persisted goal when empty history never recorded the initial user event",()=>{
   const m=mission({goal_mode:true,goal_objective:"Check the guard",terminal_reason:"orphan_no_runner"});
   expect(initialPrompt(m)).toBe("/goal Check the guard");expect(withInitialPrompt([],m)).toMatchObject([{kind:"user",text:"/goal Check the guard"}]);

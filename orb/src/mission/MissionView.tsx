@@ -224,7 +224,7 @@ function MissionDock(p: {
   const [modelOpen, setModelOpen] = createSignal(false);
   const [effortOpen, setEffortOpen] = createSignal(false);
   const [saving, setSaving] = createSignal(false);
-  const catalogMachine = () => p.mission && localBinding(p.mission.id) ? "local" : p.mission?.remote_node_id ?? "core";
+  const catalogMachine = () => p.mission && localBinding(p.mission.id) ? "local" : missionAssignedNode(p.mission) ?? "core";
   const choice = () => harnessChoices(catalogMachine()).find((c) => c.backend.id === p.mission?.backend);
   const harnessName = () => choice()?.backend.name ?? p.mission?.backend ?? "";
   const modelId = () => (p.mission?.backend === "antigravity" ? antigravityBaseModel(p.mission?.model_override) : p.mission?.model_override) || "";
@@ -1195,7 +1195,7 @@ export function NativeMissionView(p: { id: string; active?: boolean; launch?:Lau
   });
   const remoteGoal = createMemo(() => {
     const m = mission();
-    if (!m?.goal_mode || clientPlaced() || !(m.remote_node_id || m.remote_job?.node_id)) return;
+    if (!m?.goal_mode || clientPlaced() || !missionNode(m)) return;
     const phase = remoteGoalPhase(m.status, m.terminal_reason);
     const live = liveGoal();
     return { phase: phase === "active" ? live?.phase ?? phase : phase, objective: m.goal_objective ?? "", iteration: Math.max(m.goal_iteration ?? 0, live?.iteration ?? 0) };

@@ -1,13 +1,38 @@
 /** Where a mission runs, and how a machine id reads. */
 
-type Placed = { remote_job?: { node_id?: string | null } | null; remote_node_id?: string | null } | null | undefined;
+import { isClientPlacement } from "../missionTree";
+
+type Placed = {
+  remote_job?: { node_id?: string | null } | null;
+  remote_node_id?: string | null;
+  tags?: readonly string[] | null;
+  placement_kind?: string | null;
+  origin?: string | null;
+  machine_transfer?: { destination: { kind: string; id?: string } } | null;
+} | null | undefined;
+
+/** Core persists explicitly selected nodes in placement tags. A completed job
+ * can omit both node fields on a fresh client. Scheduler targets do not name
+ * a physical node, and a transfer supersedes the original placement. */
+function taggedMissionNode(m: Placed): string | undefined {
+  const transfer = m?.machine_transfer?.destination;
+  if (transfer) return transfer.kind === "node" ? transfer.id : undefined;
+  if (!m?.tags || isClientPlacement(m)) return;
+  for (const prefix of ["remote-node:", "remote_node:"]) {
+    const tag = m.tags.find(value => value.startsWith(prefix) && value.slice(prefix.length).trim());
+    if (!tag) continue;
+    const node = tag.slice(prefix.length).trim();
+    if (["auto", "local", "client", "core", "self"].includes(node) || node.startsWith("auto:") || node === "auto-managed" || node.startsWith("auto-managed:")) return;
+    return node;
+  }
+}
 
 /** The node a remote mission runs on: the live job's node, then its assignment. */
-export const missionNode = (m: Placed): string | undefined => m?.remote_job?.node_id ?? m?.remote_node_id ?? undefined;
+export const missionNode = (m: Placed): string | undefined => m?.remote_job?.node_id ?? m?.remote_node_id ?? taggedMissionNode(m);
 
 /** The node a mission is assigned to, then the live job's node. Uploads and
  * composer targets follow the assignment while a job is being replaced. */
-export const missionAssignedNode = (m: Placed): string | undefined => m?.remote_node_id ?? m?.remote_job?.node_id ?? undefined;
+export const missionAssignedNode = (m: Placed): string | undefined => m?.remote_node_id ?? m?.remote_job?.node_id ?? taggedMissionNode(m);
 
 import { createSignal } from "solid-js";
 
