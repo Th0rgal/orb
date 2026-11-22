@@ -37,6 +37,7 @@ def replay(binary, historical, fragments, measure_only, restart=False):
     if restart:
         padding = json.dumps({"type": "fixture-padding", "data": "x" * 49000}).encode() + b"\n"
         log += padding * 120
+    terminal_polls = []
     checkpoint_ready = threading.Event()
     resumed = threading.Event()
     finished = threading.Event()
@@ -73,6 +74,7 @@ def replay(binary, historical, fragments, measure_only, restart=False):
                     checkpoint_ready.set()
                     data = {"state": "running"}
                 else:
+                    terminal_polls.append(time.monotonic())
                     finished.set()
                     data = {"state": "succeeded", "exit_code": 0}
             else:
@@ -123,7 +125,7 @@ def replay(binary, historical, fragments, measure_only, restart=False):
                     assert checkpoint_ready.wait(30), "missing initial log checkpoint"
                     saved = db.execute("SELECT published_offset FROM remote_log_offsets WHERE job_id=?",
                                        (job,)).fetchone()
-                    assert saved == (log.rfind(b"\n", 0, cut) + 1,)
+                    assert saved == (log.rfind(b"\n", 0, cut) + 1,), saved
                     assert db.execute("SELECT count(*) FROM mission_events WHERE mission_id=? AND event_type='tool_result'",
                                       (mission,)).fetchone() == (0,)
                 resumed.set()
@@ -157,8 +159,10 @@ def replay(binary, historical, fragments, measure_only, restart=False):
             if restart:
                 assert db.execute("SELECT published_offset FROM remote_log_offsets WHERE job_id=?",
                                   (job,)).fetchone() == (len(log) + len(final_line),)
-                print(json.dumps(dict(restarted_at=cut, bytes=len(log) + len(final_line),
-                                      prefix_events=fragments + 1, tool_results=1)), flush=True)
+                assert len(terminal_polls) >= 3, "a single poll consumed an unbounded terminal backlog"
+                print(json.dumps(dict(checkpoint=saved[0], split=cut, bytes=len(log) + len(final_line),
+                                      terminal_polls=len(terminal_polls), prefix_events=len(rows) - 1,
+                                      tool_results=1)), flush=True)
                 return
             fresh = min(times[1:]) >= page_two_at[0] and times[-2] >= final_at[0] and times == sorted(times)
             print(json.dumps(dict(history=historical, fragments=fragments, first_seq=rows[0][0],
