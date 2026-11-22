@@ -851,6 +851,9 @@ def run (root : String) : IO Unit := do
     sql store.missionsDb "DELETE FROM remote_message_queue WHERE mission_id=?1 AND message_id='scoped-replay';" #[placementMid]
     let replayed ← send "POST" scopedRoute member scopedBody placementApp
     check (replayed == original) "scoped endpoint replays the authorized acknowledgment after the live queue row disappears"
+    sql store.missionsDb "UPDATE missions SET tags='[]',placement_kind='managed',status='active' WHERE id=?1;" #[placementMid]
+    check ((← send "POST" scopedRoute member scopedBody placementApp) == original)
+      "an active local mission replays its original remote queue acknowledgment"
     let foreignReplay ← send "POST" scopedRoute admin scopedBody placementApp
     let unknownReplay ← send "POST" "/api/control/missions/unknown-scoped-replay/message" admin scopedBody placementApp
     check (foreignReplay == unknownReplay && foreignReplay.1 == 404) "a queue receipt cannot expose another user's mission"

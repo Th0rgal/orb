@@ -5321,8 +5321,7 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
       if !content.trimAscii.toString.isEmpty then
         let defMsgId ← nextUniqueId st "msg" nowEpochSec
         let msgId := (jv.fieldStr? "client_message_id").getD defMsgId
-        if cleanPath.endsWith "/message" && mRec.status != "active" && mRec.status != "pending" &&
-            (jv.fieldStr? "client_message_id").any (!·.isEmpty) then
+        if cleanPath.endsWith "/message" && (jv.fieldStr? "client_message_id").any (!·.isEmpty) then
           -- A committed enqueue survives removal of the live row and changes in placement.
           let replay ← execParamQuery st.store.missionsDb
             "SELECT 1 FROM queue_item_receipts WHERE mission_id=?1 AND message_id=?2 LIMIT 1;" #[mid, msgId]
