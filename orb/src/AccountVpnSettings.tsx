@@ -44,7 +44,7 @@ export function AccountVpnSettings(p: { account: string }) {
   };
   return <SettingsRow title="Account connection" stack>
     <Show when={!route.error} fallback={<button class="s-btn" onClick={() => void refetch()}>Retry connection settings</button>}>
-      <Show when={route()}>{r => <>
+      <Show when={route()}>{r => <div class="p-native-controls">
         <select class="s-input" aria-label="Account connection" disabled={busy() || !r().can_configure}
           value={r().country ?? ""} onChange={e => {
             const selected = e.currentTarget.value;
@@ -58,12 +58,12 @@ export function AccountVpnSettings(p: { account: string }) {
         <Show when={!r().can_configure}><span>{r().configuration_message ?? "VPN routing is unavailable for this credential."}</span>
           <button class="s-btn" disabled={route.loading} onClick={() => void refetch()}>Refresh connection settings</button></Show>
         <Show when={r().can_configure && !r().countries.length}><span>Import a named server profile in AirVPN Settings to enable VPN routing.</span></Show>
-        <Show when={r().status === "verified"}><span>Verified exit · {r().server} · {r().exits?.join(", ")}</span></Show>
+        <Show when={r().status === "verified"}><span class="s-row-desc" role="status">Verified exit · {r().server} · {r().exits?.join(", ")}</span></Show>
         <Show when={r().status === "blocked"}>
           <span role="status">{r().message ?? "The VPN route is unavailable."}</span>
           <button class="s-btn" disabled={busy() || !r().can_configure} onClick={() => void save(r().country!)}>Retry verification</button>
         </Show>
-      </>}</Show>
+      </div>}</Show>
     </Show>
     <Show when={error()}><span role="alert">{error()}</span></Show>
   </SettingsRow>;

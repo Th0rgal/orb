@@ -38,7 +38,7 @@ for (const theme of ["light", "dark"]) test(`account VPN retry and Direct select
       const vpn = { ...direct, mode: "vpn", country: "NL" };
       const result = body.mode === "direct" ? direct : changes.length === 1
         ? { ...vpn, status: "blocked", message: "All five AirVPN sessions are in use." }
-        : { ...vpn, status: "verified", server: "west", exits: ["192.0.2.35"] };
+        : { ...vpn, status: "verified", server: "west", exits: ["192.0.2.35", "2001:db8:abcd:abcd:abcd:abcd:abcd:1234"] };
       return route.fulfill({ json: result });
     }
     return route.fulfill({ json: path === "/api/projects" ? { projects: [] } : [] });
@@ -76,6 +76,10 @@ for (const theme of ["light", "dark"]) test(`account VPN retry and Direct select
   await page.getByRole("button", { name: "Retry verification" }).click();
   const verified = page.getByText("Verified exit · west · 192.0.2.35");
   await expect(verified).toBeVisible();
+  const countryBox = (await select.boundingBox())!;
+  const statusBox = (await verified.boundingBox())!;
+  expect(Math.max(statusBox.x - countryBox.x - countryBox.width,
+    statusBox.y - countryBox.y - countryBox.height)).toBeGreaterThanOrEqual(8);
   await select.selectOption("");
   await expect(verified).toHaveCount(0);
   const path = "/api/ai/providers/a/vpn";
