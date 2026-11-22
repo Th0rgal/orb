@@ -97,9 +97,42 @@ def replay_workspace_read():
         "status": "FAILED", "error": "Antigravity ended the turn without an assistant response."}
 
 
+def replay_workspace_write():
+    from native_job_relay.remote import definition, respond
+    request = {"sessionId": "s", "toolCall": {"rawInput": {"ServerName": "workspace", "ToolName": "write_file",
+               "Arguments": {"path": "summary.md", "content": "exact"}}},
+               "options": [{"kind": "allow_once", "optionId": "once"}]}
+    args = request["toolCall"]["rawInput"]["Arguments"]
+    calls = []
+    accepted = False
+    def core_call(op):
+        calls.append(op)
+        if op["action"] == "ask":
+            assert op["tool"] == "write_file" and op["arguments"] == args
+            return {"ticket": "approved"} if accepted else None
+        assert op == {"action": "write_file", "arguments": args, "ticket": "approved"}
+        return {"size": 5}
+
+    broker = Delegation(core_call)
+    def request_once():
+        return permission_choice(request, "s", lambda _: False, lambda a: broker.ask(a, "write_file"))
+    def write(**override):
+        frame = {"jsonrpc": "2.0", "id": 3, "method": "tools/call",
+                 "params": {"name": "write_file", "arguments": {**args, **override}}}
+        return respond(frame, {"write_file": definition("write_file")}, broker.write)["result"]
+    assert write()["isError"] and not calls
+    assert request_once() is None and write()["isError"]
+    accepted = True
+    assert request_once() == "once"
+    assert write(path="other.md")["isError"] and write(content="different")["isError"]
+    assert not write()["isError"] and write()["isError"]
+    assert [c["action"] for c in calls] == ["ask", "ask", "write_file"]
+
+
 def main():
     replay_current_goal()
     replay_workspace_read()
+    replay_workspace_write()
     session = "s"
     args = {"title": "Proof", "backend": "codex", "model_override": "fixture", "prompt": "Reply OK"}
     request = {

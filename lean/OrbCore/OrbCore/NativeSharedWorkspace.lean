@@ -166,7 +166,7 @@ def pumpTurn (store : CoreStore) (hub : ProviderRuntimeHub) (working grant job n
           unless config.remote do return .error "native_holder_protocol"
           let delegated := (envelope.field? "delegate").isSome
           let action := operation.fieldStr? "action"
-          unless (delegated && goal) || (!delegated && (action == some "read_file" || (action == some "write_file" && !p.readonly))) do
+          unless (delegated && goal) || (!delegated && (action == some "read_file" || (action == some "write_file" && !p.readonly && !goal))) do
             return .error "native_holder_protocol"
           let checked ← withVerifiedProfile store hub working grant job node owner fun current currentToken _ => do
             unless current == p && currentToken == token do return .error "native_shared_workspace_denied"

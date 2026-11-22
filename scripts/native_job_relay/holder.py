@@ -118,15 +118,19 @@ def run(runtime, profile_uid, profile_gid, packet, lifetime, emit, exchange=None
         goal = packet.get("goal") is True
         if goal and not remote:
             raise PermissionError("Goal requires an enrolled remote workspace")
+        delegate = Delegation(lambda request: exchange({"delegate": request})) if goal else None
         if remote:
-            listener = remote_socket(tmp, profile_uid, profile_gid, packet["readonly"], lambda file: exchange({"file": file}))
+            def forward_file(file):
+                if delegate is not None and file["action"] == "write_file":
+                    return delegate.write(file)
+                return exchange({"file": file})
+            listener = remote_socket(tmp, profile_uid, profile_gid, packet["readonly"], forward_file)
         else:
             files = directory(stack, base / "workspace-image")
             listener = workspace_socket(tmp, profile_uid, profile_gid, bwrap, files, checkout, uid, gid,
                                         readonly=packet["readonly"], goal=goal)
         connected, failed = stack.enter_context(listener)
-        if goal:
-            delegate = Delegation(lambda request: exchange({"delegate": request}))
+        if delegate is not None:
             stack.enter_context(rpc_socket(tmp, "delegate.sock", profile_uid, profile_gid, delegate.respond))
         namespace, port = stack.enter_context(profile_transport(packet["port"], direct=packet.get("direct", False)))
         child = start_profile(nsenter, bwrap, image, home, ipc, namespace, port, profile_uid, profile_gid,
@@ -147,7 +151,10 @@ def run(runtime, profile_uid, profile_gid, packet, lifetime, emit, exchange=None
         monitor.start()
         try:
             if goal:
-                acp_turn(child, packet, delegate.ask, emit)
+                ask_write = None
+                if not packet["readonly"]:
+                    ask_write = lambda args: delegate.ask(args, "write_file")
+                acp_turn(child, packet, delegate.ask, emit, ask_write)
                 return
             message = {"event": "user", "message": {"role": "user", "content": packet["prompt"]}}
             child.stdin.write(json.dumps(message).encode() + b"\n")

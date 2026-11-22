@@ -3151,10 +3151,16 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
       match op.fieldStr? "action" with
       | some "catalog" => return NativeGoalApproval.catalogue
       | some "ask" =>
+        let tool := (op.fieldStr? "tool").getD "start_mission"
         return ← NativeGoalApproval.ask st.store p args now (fun id notice => do
           let payload := renderCompact (.obj #[("tool_call_id",.str id),("tool_name",.str "ui_native_request"),("args",notice)])
           discard <| appendMissionEvent st.store p.mission "tool_call" payload (formatEpochIso8601Utc now)
-          publishControlEvent st.broadcastHub? "tool_call" payload (some p.mission)) live
+          publishControlEvent st.broadcastHub? "tool_call" payload (some p.mission)) live tool
+      | some "write_file" =>
+        let ticket := (op.fieldStr? "ticket").getD ""
+        unless ← NativeGoalApproval.consume st.store p args ticket now "write_file" do return JVal.null
+        unless ← live do return JVal.null
+        return ← fileCall p (args.setField "action" (.str "write_file"))
       | some "dispatch" =>
         let ticket := (op.fieldStr? "ticket").getD ""
         unless ← NativeGoalApproval.consume st.store p args ticket now do return JVal.null

@@ -645,6 +645,25 @@ private def verifyNativeApprovalBudget (root : String) : IO Unit := do
     check ((← closed.get) && result == .null &&
       (← cellOf db "SELECT COUNT(*) FROM native_goal_approvals;") == "0")
       "holder closure withdraws the ticket before the permission timeout"
+    let write := JVal.obj #[("path", .str "summary.md"), ("content", .str "fixture contents")]
+    check (!NativeGoalApproval.validWrite (write.setField "path" (.str "../outside")) &&
+      !NativeGoalApproval.validWrite (write.setField "path" (.str ".git/config"))) "private and escaping write paths refused"
+    let readonly ← NativeGoalApproval.ask store {placement with readonly := true} write 100
+      (fun _ _ => throw (IO.userError "readonly approval unexpectedly announced")) (pure true) "write_file"
+    check (readonly == .null) "read-only workspace cannot request a write"
+    let approved ← NativeGoalApproval.ask store placement write 100 (fun id notice => do
+      let label := renderCompact notice
+      check (label.contains "summary.md" && label.contains "SHA-256" && !label.contains "fixture contents")
+        "approval shows path and hash and omits file contents"
+      check ((← NativeGoalApproval.answer store id "other" "m" "accept" 101).isNone)
+        "another member cannot accept the file"
+      check ((← NativeGoalApproval.answer store id "member" "m" "accept" 101).isSome) "member accepted"
+    ) (pure true) "write_file"
+    let some ticket := approved.fieldStr? "ticket" | throw (IO.userError "missing approved file ticket")
+    for changed in #[write.setField "path" (.str "other.md"), write.setField "content" (.str "different")] do
+      check (!(← NativeGoalApproval.consume store placement changed ticket 101 "write_file")) "changed operation refused"
+    check ((← NativeGoalApproval.consume store placement write ticket 101 "write_file") &&
+      !(← NativeGoalApproval.consume store placement write ticket 101 "write_file")) "one exact write per decision"
   finally
     closeCoreStore store
 
