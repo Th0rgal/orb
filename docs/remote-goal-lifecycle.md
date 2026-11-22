@@ -25,6 +25,13 @@ If the terminal log cannot be read through its confirmed end, Core parks the
 Goal with `remote_goal_evidence_incomplete`; partial evidence cannot complete
 the Goal or arm a continuation.
 
+For remote Codex Goals, the final assistant message shows a result once when
+two successive, distinct completed assistant items in the same job contain
+the same result and the second adds only the standalone completion marker.
+The log and both cumulative streaming snapshots keep their original text.
+Intermediate reports, tool activity and repeated paragraphs inside an item
+retain their positions in the conversation.
+
 Settlement and Stop serialize on the mission database. The generation, job ID,
 and current status fence settlement; Stop advances the generation and revokes
 the armed continuation. Before POSTing either the first job or a continuation,
