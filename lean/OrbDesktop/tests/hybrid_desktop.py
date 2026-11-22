@@ -256,6 +256,9 @@ def run():
                 was_open = row('copper')['expanded']
                 pointer.click(195, parent_y)
                 check('pointer toggles disclosure', lambda: row('copper')['expanded'] != was_open)
+                # The Core projection can lead the rendered list by one frame.
+                check('disclosure redraw', lambda: ('maple' in words('maple')) != was_open)
+                _, parent_y = check('rendered parent row', lambda: words('copper').get('copper'))
                 pointer.move(850, 570)
                 def disclosure_pixels():
                     time.sleep(.3)
@@ -263,9 +266,10 @@ def run():
                     return image.split(b'\n', 3)[3]
 
                 mouse_pixels = disclosure_pixels()
-                subprocess.run(['wtype', '-k', 'Tab', '-M', 'shift', '-k', 'Tab', '-m', 'shift'], env=env, check=True)
-                keyboard_pixels = disclosure_pixels()
-                assert sum(abs(a-b) > 10 for a,b in zip(mouse_pixels,keyboard_pixels)) > 20, 'missing keyboard focus stroke'
+                subprocess.run(['wtype', '-k', 'Tab'], env=env, check=True)
+                subprocess.run(['wtype', '-M', 'shift', '-k', 'Tab', '-m', 'shift'], env=env, check=True)
+                check('keyboard focus stroke', lambda: sum(abs(a-b) > 10 for a, b in
+                      zip(mouse_pixels, disclosure_pixels(), strict=True)) > 20)
                 for expected in (was_open, not was_open):
                     subprocess.run(['wtype', '-k', 'Return'], env=env, check=True)
                     check('keyboard toggles disclosure', lambda: row('copper')['expanded'] == expected)
