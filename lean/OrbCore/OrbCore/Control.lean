@@ -90,6 +90,7 @@ open OrbNetLeaf.TlsHttp
     `DEV_MODE`, `DASHBOARD_PASSWORD`, `JWT_SECRET`, `SANDBOXED_USERS`, `ALLOW_INSECURE_REMOTE_DEV_AUTH`). -/
 structure CoreConfig where
   instanceName               : String := ""
+  nativeSubscriptionEnabled  : Bool := false
   devGrantIssuerHost         : String := "orbcore.thomas.md"
   host                       : String := "127.0.0.1"
   port                       : UInt16 := 3000
@@ -278,6 +279,7 @@ def loadConfigFromEnv : IO CoreConfig := do
     devMode := devMode
     allowInsecureRemoteDevAuth := allowRemote
     instanceName := (← IO.getEnv "ORB_INSTANCE").getD ""
+    nativeSubscriptionEnabled := ← NativeSharedWorkspace.executionEnabled
     devGrantIssuerHost := (← IO.getEnv "ORB_DEV_GRANT_ISSUER_HOST").getD "orbcore.thomas.md"
     dashboardPassword := pwd
     jwtSecret := jwt
@@ -3089,7 +3091,7 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
       ("id", .str msgId), ("error", .str reason), ("message_accepted", .bool false), ("queued", .bool false)]))
   if cleanPath == "/api/native/antigravity/workspace-turn" then
     let denied := mkJson 403 "{\"error\":\"native_shared_workspace_denied\"}"
-    unless (← NativeSharedWorkspace.executionEnabled) && !st.cfg.devMode && req.method == "POST" do return .ok denied
+    unless st.cfg.nativeSubscriptionEnabled && !st.cfg.devMode && req.method == "POST" do return .ok denied
     let some hub := st.providerHub? | return .ok denied
     let some grant := lookupHeaderCI req.headers "x-orb-job-grant" | return .ok denied
     unless grant.startsWith "orb-agy-v1_" do return .ok denied
@@ -3168,7 +3170,7 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
   -- authority to run a profile or extracting the Google login from Core.
   if cleanPath == "/api/native/antigravity/workspace-admission" then
     let denied := mkJson 403 "{\"error\":\"native_shared_workspace_denied\"}"
-    unless (← NativeSharedWorkspace.executionEnabled) && !st.cfg.devMode && req.method == "POST" do return .ok denied
+    unless st.cfg.nativeSubscriptionEnabled && !st.cfg.devMode && req.method == "POST" do return .ok denied
     let some hub := st.providerHub? | return .ok denied
     let some bearer := extractBearerToken? req.headers nowEpochSec | return .ok denied
     let some node ← authenticateStaticNodeToken? bearer | return .ok denied
@@ -3188,7 +3190,7 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
   -- No gateway address, provider credential or reusable relay secret leaves Core here.
   if cleanPath == "/api/native/antigravity/relay-admission" then
     let denied := mkJson 403 "{\"error\":\"relay_denied\"}"
-    unless (← NativeSharedWorkspace.executionEnabled) && !st.cfg.devMode && req.method == "POST" do
+    unless st.cfg.nativeSubscriptionEnabled && !st.cfg.devMode && req.method == "POST" do
       return .ok denied
     let nodeToken := (extractBearerToken? req.headers nowEpochSec).getD ""
     let some node ← authenticateStaticNodeToken? nodeToken | return .ok denied
@@ -3222,6 +3224,7 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
     return .ok (mkJson 200 (renderCompact (.obj #[("expires", .str (cell row 0)), ("route_generation", .str (cell row 1))])))
 
   if cleanPath.startsWith "/api/native/antigravity/v1internal:" then
+    unless st.cfg.nativeSubscriptionEnabled && !st.cfg.devMode do return .ok (mkJson 404 "{}")
     return .ok (← handleNativeAntigravity st req rawTarget nowEpochSec)
 
   -- 1. Public Health Endpoint (`GET /api/health`)
@@ -3895,7 +3898,7 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
   let utcDay := currentUtcDay nowEpochSec
 
   if cleanPath == "/api/native-owner-enrollments" || cleanPath.startsWith "/api/native-owner-enrollments/" then
-    unless ← NativeSharedWorkspace.executionEnabled do return .ok (mkJson 404 "{}")
+    unless st.cfg.nativeSubscriptionEnabled do return .ok (mkJson 404 "{}")
     let token := (extractBearerToken? req.headers nowEpochSec).getD ""
     unless !st.cfg.devMode && token.startsWith "orb-jwt-v2:" && !caller.disabled && !caller.userId.isEmpty do
       return .ok (mkJson 403 "{\"error\":\"owner_session_required\"}")

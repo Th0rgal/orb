@@ -131,7 +131,8 @@ def start_core(stack, root, binary, cert):
         sock.bind(("127.0.0.1", 0))
         port = sock.getsockname()[1]
     base = f"http://127.0.0.1:{port}"
-    env = dict(HOME=str(home), PATH=os.environ["PATH"], WORKING_DIR=str(root), DEV_MODE="true",
+    env = dict(HOME=str(home), PATH=os.environ["PATH"], WORKING_DIR=str(root), DEV_MODE="false", DASHBOARD_PASSWORD=uuid.uuid4().hex, JWT_SECRET=uuid.uuid4().hex,
+               ORB_NATIVE_SUBSCRIPTION_ENABLED="1",
                HOST="127.0.0.1", PORT=str(port), CLI_PROXY_AUTH_DIR=str(auth), SSL_CERT_FILE=str(cert))
     core = stack.enter_context(subprocess.Popen([binary], env=env, cwd=root, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
     stack.callback(core.terminate)

@@ -53,6 +53,7 @@ def run(binary, root):
     for instance in ("dev", "prod"):
         with core(binary, {**env, "ORB_INSTANCE": instance, "ORB_NATIVE_SUBSCRIPTION_ENABLED": "0"}):
             assert request(port, login("admin"), "GET", "/api/native-owner-enrollments")[0] == 404
+            assert request(port, "unused", "POST", "/api/native/antigravity/v1internal:fetchUserInfo")[0] == 404
     env["ORB_INSTANCE"] = "prod"
     with core(binary, env):
         admin = login("admin")

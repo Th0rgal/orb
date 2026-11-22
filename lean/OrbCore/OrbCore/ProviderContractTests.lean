@@ -1718,7 +1718,7 @@ private def nativeGatewayContract (app : CoreAppState) (owner root : String) (no
       resolveTransport? := some fun _ _ => do
         attempts.modify (· + 1)
         return .error "fixture_offline" }
-    let app := { app with providerHub? := some closed }
+    let app := { app with providerHub? := some closed, cfg := { app.cfg with nativeSubscriptionEnabled := true, devMode := false } }
     let call := fun token rpc body => postJson app token ("/api/native/antigravity/v1internal:" ++ rpc) body now
     let body := renderCompact (.obj #[("model", .str "gemini-4-carbon")])
     unless (← call generic "streamGenerateContent" body).1 == 401 &&

@@ -828,11 +828,13 @@ private def prepareRemoteHarnessCommand
     let readPrompt := "agy_prompt=\"$(cat <&3 && printf .)\" || exit 1; "
     if let some hub := sup.providerHub? then
       let .ok bound? ← nativeMissionAccount? store spec.missionId | return .error "antigravity_binding_unavailable"
-      let catalogs ← (nativeAntigravityAccounts hub store coreWorkDir spec.ownerUserId true).toBaseIO
-      let .ok offers := catalogs | return .error "antigravity_catalog_unavailable"
       let legacyAdmin := spec.ownerUserId == bootstrapAdminId && !bootstrapAdminId.isEmpty && bound?.isNone &&
-        offers.isEmpty && !(← loadHydratedProviders store coreWorkDir).any (·.providerType == "antigravity")
+        !(← loadHydratedProviders store coreWorkDir).any (·.providerType == "antigravity")
       if !legacyAdmin then
+        unless (← NativeSharedWorkspace.executionEnabled) && !sup.devMode do return .error "native_subscription_disabled"
+        let some holder ← NativeSharedWorkspace.holderFor? effNodeId | return .error "native_owner_executor_unavailable"
+        let catalogs ← (nativeAntigravityAccounts hub store coreWorkDir spec.ownerUserId true).toBaseIO
+        let .ok offers := catalogs | return .error "antigravity_catalog_unavailable"
         let (nativeModel, _) := OrbBin.ClaudeControl.normalizeAntigravityCliModel spec.modelOverride (some spec.modelEffort)
         let group := (OrbBin.ClaudeControl.groupAntigravityModels #[(nativeModel, nativeModel)])[0]?.map Prod.fst
         let requested := group.getD nativeModel
@@ -843,27 +845,16 @@ private def prepareRemoteHarnessCommand
         let some model := (models.find? (fun m => requested.isEmpty || m.1 == requested)).map Prod.fst
           | return .error "antigravity_account_model_unavailable"
         let .ok url := parseUrl apiBase | return .error "native_core_url_unavailable"
-        if !url.isHttps && !(sup.devMode && url.host == "127.0.0.1") then return .error "native_core_tls_required"
+        unless url.isHttps do return .error "native_core_tls_required"
         let .ok bearer ← mintNativeAntigravityToken store spec.missionId spec.ownerUserId jobId account model (nowSec + 86400) (some effNodeId)
           | return .error "native_grant_unavailable"
-        if let some holder := (← NativeSharedWorkspace.holderFor? effNodeId).filter (fun _ => !sup.devMode) then
-          if spec.goalDispatch?.isSome && !holder.remote then return .error "native_workspace_goal_unavailable"
-          let worker := include_str "antigravity_workspace_turn.py"
-          let options := #[jobId, spec.ownerUserId, effNodeId, resumeSid?.getD ""]
-          let args := String.intercalate " " (options.toList.map shellSingleQuote)
-          let cmd := wsPrefix ++ skillPrelude ++ fd3Prelude ++ "exec python3 -I -c " ++ shellSingleQuote worker ++ " " ++ args
-          return .ok { command := cmd, envPairs := skillEnvs ++ promptEnvs ++ #[
-            ("ORB_NATIVE_CORE", apiBase), ("ORB_NATIVE_ANTIGRAVITY_TOKEN", bearer)], managedAuth := #[], proxyToken := bearer }
-        let bootstrap := include_str "antigravity_native_launch.py"
-        let cliModel := if spec.modelOverride.isEmpty then model else spec.modelOverride
-        let scopedLaunch := "python3 -I -c " ++ shellSingleQuote bootstrap ++ " sh -c " ++
-          shellSingleQuote (readPrompt ++ invocation cliModel)
-        let privateHome := "export ORB_NATIVE_ANTIGRAVITY_HOME=\"$(pwd -P)\"; "
-        let scopedCmd := privateHome ++ wsPrefix ++ skillPrelude ++ fd3Prelude ++ scopedLaunch
-        let envs := skillEnvs ++ promptEnvs ++ mcpEnvs ++ #[
-          ("NO_COLOR", "1"), ("CLOUD_CODE_URL", apiBase ++ "/api/native/antigravity"),
-          ("ORB_NATIVE_ANTIGRAVITY_TOKEN", bearer)]
-        return .ok { command := scopedCmd, envPairs := envs, managedAuth := #[], proxyToken := bearer }
+        if spec.goalDispatch?.isSome && !holder.remote then return .error "native_workspace_goal_unavailable"
+        let worker := include_str "antigravity_workspace_turn.py"
+        let options := #[jobId, spec.ownerUserId, effNodeId, resumeSid?.getD ""]
+        let args := String.intercalate " " (options.toList.map shellSingleQuote)
+        let cmd := wsPrefix ++ skillPrelude ++ fd3Prelude ++ "exec python3 -I -c " ++ shellSingleQuote worker ++ " " ++ args
+        return .ok { command := cmd, envPairs := skillEnvs ++ promptEnvs ++ #[
+          ("ORB_NATIVE_CORE", apiBase), ("ORB_NATIVE_ANTIGRAVITY_TOKEN", bearer)], managedAuth := #[], proxyToken := bearer }
     let cmd := wsPrefix ++ skillPrelude ++ fd3Prelude ++
       "command -v agy >/dev/null 2>&1 || { echo 'agy is not installed on this node' >&2; exit 127; }; " ++
       readPrompt ++ invocation spec.modelOverride
