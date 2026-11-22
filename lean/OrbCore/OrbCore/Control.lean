@@ -872,8 +872,8 @@ def parseChainTargetsJson
       -- fallbacks when there is no remaining alternative-router credential.
       if pinned && eligibleHydrated.any (·.nativeOnly) then continue
       if provRaw == "antigravity" || provRaw.startsWith "antigravity:" then
-        let pool := eligibleHydrated.filter (fun hp => hp.providerType == "antigravity" && hp.enabled)
-        if !pool.isEmpty && pool.all (·.nativeOnly) then continue
+        let pool := eligibleHydrated.filter (fun hp => hp.providerType == "antigravity")
+        if !pool.isEmpty && !pool.any (fun hp => hp.enabled && !hp.nativeOnly && (hp.hasApiKey || hp.hasOAuth)) then continue
       let matchedHydrated? := eligibleHydrated.find? fun hp =>
         hp.enabled && !hp.nativeOnly && (hp.hasApiKey || hp.hasOAuth) && (
           hp.id == acctRaw ||

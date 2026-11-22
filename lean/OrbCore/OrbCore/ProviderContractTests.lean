@@ -1747,11 +1747,15 @@ def run : IO Unit := do
         failures := failures.push "A pinned sidecar account must use the selected credential’s model namespace"
       let nativeOnly := { sidecarAccount with providerType := "antigravity", nativeOnly := true }
       let routedGoogle := { nativeOnly with id := "other-google", nativeOnly := false }
+      let emptyGoogle := { routedGoogle with hasOAuth := false, oauthFile := "", boundOauthFile := "" }
       let googleEntry := "[{\"provider_id\":\"antigravity\",\"model_id\":\"agy-model-high\"}]"
       let selectedGoogle := "[{\"provider_id\":\"antigravity\",\"account_id\":\"fixture-b\",\"model_id\":\"agy-model-high\"}]"
       let targetsFor := fun entry accounts => parseChainTargetsJson entry #[] accounts "http://127.0.0.1:8317" "fixture-sidecar"
       unless (targetsFor selectedGoogle #[nativeOnly, routedGoogle]).isEmpty &&
           (targetsFor googleEntry #[nativeOnly]).isEmpty &&
+          (targetsFor googleEntry #[nativeOnly, emptyGoogle]).isEmpty &&
+          (targetsFor googleEntry #[{ nativeOnly with enabled := false }, emptyGoogle]).isEmpty &&
+          !(targetsFor googleEntry #[]).isEmpty &&
           !(targetsFor googleEntry #[nativeOnly, routedGoogle]).isEmpty do
         failures := failures.push "A restricted Antigravity account must stay out of explicit and fallback proxy chains"
       let duplicate := { sidecarAccount with id := "fixture-c" }
