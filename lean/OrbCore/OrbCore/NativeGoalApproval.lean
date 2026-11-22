@@ -10,13 +10,9 @@ def ticketPrefix := "native-goal-approval-"
 
 def currentGoal (store : CoreStore) (p : Placement) : IO Bool := do
   let .ok rows ← execParamQuery store.missionsDb
-    ("SELECT j.payload_json FROM missions m JOIN remote_node_jobs j ON j.job_id=m.placement_job_id " ++
-     "WHERE m.id=?1 AND j.job_id=?2 AND j.mission_id=m.id AND m.owner_user_id=?3 AND m.goal_mode=1 " ++
-     "AND m.run_generation=CAST(?4 AS INTEGER) AND m.status='active' AND j.state='running';")
-    #[p.mission,p.job,p.owner,toString p.runGeneration] | return false
-  let some #[raw] := rows[1]? | return false
-  let .ok jobPayload := parse raw | return false
-  return jobPayload.fieldNat? "goal_generation" == some p.runGeneration
+    (include_str "native_goal_placement.sql")
+    #[p.mission, p.job, p.owner, toString p.runGeneration] | return false
+  return rows.size == 2
 
 def allowedKeys := #["title","prompt","backend","model_override","remote_node_id","idempotency_key"]
 

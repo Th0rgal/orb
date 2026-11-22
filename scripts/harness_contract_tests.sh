@@ -13,4 +13,6 @@ echo "== Harness contract tests: shared CLI, OpenCode SSE, event parser & native
 echo "== Harness contract tests: Python Vibe ACP bridge =="
 python3 -m unittest discover -s tests -p test_vibe_bridge.py
 
+python3 scripts/test_native_goal_approval.py
+
 echo "Harness contract tests passed."
