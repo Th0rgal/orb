@@ -15,6 +15,14 @@ successor’s run.
 Remote follow-ups to an unfinished Goal steer the existing mission; `/goal` can only start a new
 remote mission. Rejected commands leave the transcript and queue untouched.
 
+A native Antigravity Goal can request delegation only from its current running
+placement. Core records the Goal claim against the generation *before* dispatch.
+Acceptance (including adoption after a lost acknowledgement) records the job
+in `mission_runs` at the accepted generation. The claim and accepted generation
+can differ after an intervening turn. The current mission, job and accepted run
+must agree, and the job must carry its own Goal dispatch metadata. A standard
+follow-up or a superseded run cannot inherit delegation from mission-level Goal mode.
+
 Antigravity runs in stream-json mode. Its init event binds the mission to a native
 conversation UUID. A continuation passes that UUID to `agy --conversation`.
 Agent response deltas supply the text used by Goal settlement. Tool events and
