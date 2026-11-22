@@ -3054,7 +3054,10 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
     let (_, fleet) ← loadStaticRemoteNodes
     let some sn := fleet.find? (·.id == node) | return .ok denied
     let .ok url := OrbBin.HttpClient.parseUrl sn.baseUrl | return .ok denied
-    unless url.host == "127.0.0.1" do return .ok denied
+    if config.remote then
+      unless url.isHttps && !AutoPlacement.reserved sn && sn.dedicatedOwner?.isNone do return .ok denied
+    else
+      unless url.host == "127.0.0.1" do return .ok denied
     let some p ← OrbCore.NativeSharedWorkspace.placement? st.store grant job node owner nowEpochSec
       | return .ok (mkJson 409 "{\"error\":\"native_workspace_not_running\"}")
     let some auth ← resolveStaticNodeToken? sn | return .ok denied
@@ -3063,8 +3066,17 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
     unless status.fieldStr? "state" == some "running" && status.fieldStr? "mission_id" == some p.mission &&
         status.fieldStr? "owner_user_id" == some p.owner && status.fieldStr? "exec_unix_user" == some p.unixUser &&
         (status.fieldNat? "exec_uid").getD 0 > 0 do return .ok denied
+    let uid := (status.fieldNat? "exec_uid").getD 0
+    let fileCall := fun (placed : OrbCore.NativeSharedWorkspace.Placement) (file : JVal) => do
+      let request := JVal.obj #[("mission", .str placed.mission), ("owner", .str placed.owner),
+        ("unix_user", .str placed.unixUser), ("uid", .nat uid), ("file", file),
+        ("grant_sha256", .str (LeanSys.Auth.bytesToHexLower (LeanSys.Auth.sha256Bytes grant.toUTF8)))]
+      let .ok (200, _, some reply) ← OrbBin.HttpClient.sendJsonRequest "POST"
+          (sn.baseUrl ++ "/jobs/" ++ job ++ "/native-file") (some auth) (some request) #[] 5000 (2*1024*1024)
+        | return JVal.null
+      return reply
     let stream := OrbCore.NativeSharedWorkspace.pumpTurn st.store hub st.cfg.workingDir grant job node
-      owner prompt (j.fieldStr? "conversation") ((status.fieldNat? "exec_uid").getD 0) config
+      owner prompt (j.fieldStr? "conversation") uid config fileCall
     return .ok {
       status := 200
       contentType := "application/x-ndjson"

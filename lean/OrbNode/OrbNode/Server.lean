@@ -956,6 +956,29 @@ def handleNonExecRequestCore (rt0 : NodeRuntime) (req : HttpRequest) :
       return (rt, textResp stCode msg, preLaunches, #[])
     | .ok (l', updated) =>
       return ({ rt with ledger := l' }, jsonResp 200 (updated.toStatusJson none), preLaunches, #[])
+  | "POST", ["jobs", jid, "native-file"] =>
+    -- The authenticated Core supplies the expected placement. The ledger owns
+    -- the Unix identity and checkout used by privd, including the write mode.
+    let denied := (rt, textResp 403 "native_workspace_denied", preLaunches, #[])
+    let some rec := rt.ledger.jobs.get? jid | return denied
+    unless rec.state == .running && rec.execUid > 0 && !rec.execUnixUser.isEmpty &&
+        !rec.ownerUserId.isEmpty && req.body.size ≤ 2 * 1024 * 1024 do return denied
+    let some j := (OrbBin.Json.parseBytes req.body).toOption | return denied
+    unless j.fieldStr? "mission" == some rec.missionId && j.fieldStr? "owner" == some rec.ownerUserId &&
+        j.fieldStr? "unix_user" == some rec.execUnixUser && j.fieldNat? "uid" == some rec.execUid.toNat do
+      return denied
+    let some jobPayload := (OrbBin.Json.parse rec.payloadJson).toOption | return denied
+    let some grant := (jobPayload.field? "env").bind (·.fieldStr? "ORB_NATIVE_ANTIGRAVITY_TOKEN") | return denied
+    unless grant.startsWith "orb-agy-v1_" &&
+        j.fieldStr? "grant_sha256" == some (LeanSys.Auth.bytesToHexLower (LeanSys.Auth.sha256Bytes grant.toUTF8)) do
+      return denied
+    let some file := j.field? "file" | return denied
+    let action := file.fieldStr? "action"
+    unless action == some "read_file" || (action == some "write_file" && rec.authorityMode == "writer") do
+      return denied
+    match ← userNativeJobFile rt.cfg.privdSocket rec.execUnixUser rec.missionId file with
+    | .error _ => return (rt, textResp 400 "native_file_unavailable", preLaunches, #[])
+    | .ok result => return (rt, jsonResp 200 result, preLaunches, #[])
   | "POST", ["jobs", jid, "files"] =>
     let key := (parseUuidCanonical? jid).getD jid
     let some rec := rt.ledger.jobs.get? key

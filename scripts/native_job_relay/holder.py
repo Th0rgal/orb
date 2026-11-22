@@ -6,7 +6,7 @@ import json
 import os
 from pathlib import Path
 import pwd
-import selectors
+import select
 import shutil
 import stat
 import tempfile
@@ -14,6 +14,7 @@ import threading
 import uuid
 
 from .profile import start_profile
+from .remote import remote_socket
 from .session import workspace_socket
 from .supervisor import profile_transport
 
@@ -85,22 +86,26 @@ def member_checkout(stack, username, mission):
     return fd, user.pw_uid, user.pw_gid
 
 
-def run(runtime, profile_uid, profile_gid, packet, lifetime, emit):
+def run(runtime, profile_uid, profile_gid, packet, lifetime, emit, exchange=None):
     """Core closes lifetime on revoke. The socket and private namespace die with this turn."""
     if os.geteuid() != 0:
         raise PermissionError("trusted profile holder required")
     with contextlib.ExitStack() as stack:
-        checkout, uid, gid = member_checkout(stack, packet["unix_user"], packet["mission"])
-        if uid != packet["exec_uid"]:
-            raise PermissionError("workspace UID differs from running job")
-        if profile_uid == uid or profile_gid == gid or profile_uid <= 0 or profile_gid <= 0:
-            raise PermissionError("distinct profile identity required")
+        remote = packet.get("remote") is True
+        if remote:
+            if exchange is None or not packet["exec_uid"]:
+                raise PermissionError("verified remote worker required")
+        else:
+            checkout, uid, gid = member_checkout(stack, packet["unix_user"], packet["mission"])
+            if uid != packet["exec_uid"] or profile_uid == uid or profile_gid == gid:
+                raise PermissionError("invalid workspace principal")
+        if profile_uid <= 0 or profile_gid <= 0:
+            raise PermissionError("invalid profile principal")
         identity = [packet[k] for k in ("owner", "mission", "account")]
         key = hashlib.sha256(json.dumps(identity, separators=(",", ":")).encode()).hexdigest()
         home = private_state(stack, runtime, key, profile_uid, profile_gid)
         base = Path(runtime)
         image = directory(stack, base / "profile-image")
-        files = directory(stack, base / "workspace-image")
         tmp = stack.enter_context(tempfile.TemporaryDirectory(dir=base))
         os.chmod(tmp, 0o711)
         ipc = directory(stack, tmp)
@@ -108,8 +113,13 @@ def run(runtime, profile_uid, profile_gid, packet, lifetime, emit):
         nsenter = shutil.which("nsenter")
         if not bwrap or not nsenter:
             raise RuntimeError("native isolation unavailable")
-        connected, failed = stack.enter_context(workspace_socket(tmp, profile_uid, profile_gid, bwrap, files,
-                                checkout, uid, gid, readonly=packet["readonly"]))
+        if remote:
+            listener = remote_socket(tmp, profile_uid, profile_gid, packet["readonly"], exchange)
+        else:
+            files = directory(stack, base / "workspace-image")
+            listener = workspace_socket(tmp, profile_uid, profile_gid, bwrap, files, checkout, uid, gid,
+                                        readonly=packet["readonly"])
+        connected, failed = stack.enter_context(listener)
         namespace, port = stack.enter_context(profile_transport(packet["port"], direct=packet.get("direct", False)))
         child = start_profile(nsenter, bwrap, image, home, ipc, namespace, port, profile_uid, profile_gid,
                               packet["access_token"], packet["model"], packet.get("conversation"), readonly=packet["readonly"])
@@ -117,13 +127,13 @@ def run(runtime, profile_uid, profile_gid, packet, lifetime, emit):
         invalid = threading.Event()
 
         def revoke():
-            with selectors.DefaultSelector() as sel:
-                sel.register(lifetime, selectors.EVENT_READ)
-                while not stop.is_set():
-                    if sel.select(.15) or failed.is_set():
-                        invalid.set()
-                        child.kill()
-                        return
+            poller = select.poll()
+            poller.register(lifetime, select.POLLERR | select.POLLHUP)
+            while not stop.is_set():
+                if poller.poll(150) or failed.is_set():
+                    invalid.set()
+                    child.kill()
+                    return
 
         monitor = threading.Thread(target=revoke)
         monitor.start()

@@ -942,9 +942,11 @@ def handleUserFsOp (cfd : LeanSys.Posix.Fd) (_cfg : PrivdConfig) (peer : PeerCre
     "  st = os.lstat(full)\n" ++
     "  if stat.S_ISLNK(st.st_mode) or (not stat.S_ISDIR(st.st_mode) and not stat.S_ISREG(st.st_mode)): return None\n" ++
     "  return {'name': segs[-1], 'path': '/'.join(segs), 'kind': 'dir' if stat.S_ISDIR(st.st_mode) else 'file', 'size': 0 if stat.S_ISDIR(st.st_mode) else st.st_size, 'modified': int(st.st_mtime)}\n" ++
+    (include_str "native_job_file.py") ++ "\n" ++
     "try:\n" ++
     "  subop = req['subop']\n" ++
-    "  if subop == 'file_browser':\n" ++
+    "  if subop == 'native_job_file': res = job_file(root, req['req_json'], bad_seg)\n" ++
+    "  elif subop == 'file_browser':\n" ++
     "    fb = req.get('req_json') or {}\n" ++
     "    act = fb.get('action', '')\n" ++
     "    if act == 'roots': res = {'path': root}\n" ++

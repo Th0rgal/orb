@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import pwd
 import sys
+import threading
 
 # Installed under the root-owned private runtime; -I disables user imports.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -21,15 +22,28 @@ def main():
         if len(raw) > 4 * 1024 * 1024 or not raw.endswith(b"\n"):
             return 1
         packet = json.loads(raw)
-        def emit(frame):
+        lock = threading.Lock()
+
+        def send(frame):
             line = json.dumps(frame, separators=(",", ":"))
             if packet["access_token"] in line:
                 raise ValueError("credential present in native frame")
-            print(line, flush=True)
-        run(runtime, account.pw_uid, account.pw_gid, packet, sys.stdin.fileno(), emit)
+            with lock:
+                sys.stdout.write(line + "\n")
+                sys.stdout.flush()
+
+        def exchange(file):
+            send({"file": file})
+            line = sys.stdin.buffer.readline(2 * 1024 * 1024 + 1)
+            if len(line) > 2 * 1024 * 1024 or not line.endswith(b"\n"):
+                raise ValueError("invalid Core response")
+            return json.loads(line)
+
+        run(runtime, account.pw_uid, account.pw_gid, packet, sys.stdin.fileno(),
+            lambda event: send({"agent": event}), exchange)
         return 0
     except (KeyError, ValueError, OSError, RuntimeError):
-        print('{"event":"error","message":"Native profile or bound workspace unavailable"}', flush=True)
+        print('{"agent":{"event":"error","message":"Native profile or bound workspace unavailable"}}', flush=True)
         return 1
 
 

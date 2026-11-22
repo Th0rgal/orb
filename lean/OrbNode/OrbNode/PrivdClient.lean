@@ -152,20 +152,24 @@ def controlUserJob
     return .ok { done, exitCode, state }
 
 /-- Execute a confined UID-dropped `file_browser` operation inside `/home/<unixUsername>/.orb-missions/<missionId>`. -/
-def userFileBrowser
+private def userFileOp (subop : String)
     (socketPath unixUsername missionId : String)
     (reqJson : JVal) : IO (Except String JVal) := do
   let req := JVal.obj #[
     ("action", .str "user_fs_op"),
     ("unix_username", .str unixUsername),
     ("mission_id", .str missionId),
-    ("subop", .str "file_browser"),
+    ("subop", .str subop),
     ("req_json", reqJson)
   ]
   match ← callPrivd socketPath req 30000 with
   | .error e => return .error e
   | .ok resp =>
     return .ok (resp.fieldOrNull "result")
+
+def userFileBrowser := userFileOp "file_browser"
+
+def userNativeJobFile := userFileOp "native_job_file"
 
 /-- Write a binary/text file inside `/home/<unixUsername>/.orb-missions/<missionId>` via UID-dropped `O_NOFOLLOW`. -/
 def userWriteFile

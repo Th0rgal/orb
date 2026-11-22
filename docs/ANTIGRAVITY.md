@@ -148,3 +148,24 @@ Legacy assistant/Telegram channels configured for Gemini, or linked to a Gemini
 mission, are deactivated before webhook registration. Configure Antigravity and
 a workspace-native model, migrate linked missions without reusing Gemini native
 session IDs, then reactivate the channel. Historical mission records are retained.
+
+### Development qualification on a separate member worker
+
+The trusted native profile runs on Core. Set `ORB_NATIVE_WORKSPACE_NODE` to one
+explicit static worker with HTTPS and a valid server certificate. Configure
+`ORB_NATIVE_PROFILE_RUNTIME` and `ORB_NATIVE_PROFILE_USER` for the private
+holder, and persist the account's Direct or VPN selection before testing.
+The selected member must have an enabled account, a Linux identity, and a
+permitted fleet placement. Core and administration nodes are reserved. Nodes
+reserved for a specific account's dedicated enrollment retain their launch gate.
+
+The profile exposes a file MCP with UTF-8 reads and writer-only writes up to
+256 KiB inside the currently running job's checkout. Core revalidates the grant
+and route on each operation. The worker checks the stored job, mission, owner,
+UID and authority. Its existing privilege service drops to that UID and applies
+a filesystem rule tied to the opened checkout. This development transport
+requires Linux Landlock ABI 3 or later on aarch64 or x86_64. File requests
+and model output travel in separate message types on the holder's private
+pipe. The worker receives only its job grant. The Google profile remains on
+Core. Run `python3 scripts/test_native_worker_files.py` for the offline file
+and authority checks. Native Goal dispatch awaits end-to-end qualification.
