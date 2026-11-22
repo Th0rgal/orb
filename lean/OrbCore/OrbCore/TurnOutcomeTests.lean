@@ -218,6 +218,11 @@ private def verifyIncompleteGoalDrain (store : CoreStore) (sup : RemoteJobSuperv
           let off := chunk.utf8ByteSize + i
           check (req.path.contains s!"/log?offset={off}&") "final drain advances one bounded slice at a time"
           mockNodeReply conn "200 OK" (slice off (off + 1) (chunk.utf8ByteSize + 9) "\n")
+      let off := chunk.utf8ByteSize + 8
+      let stall := fun conn => mockNodeReply conn "200 OK" (slice off off (off + 1) "")
+      withMockNodeRequest fd fun conn _ => stall conn
+      withMockNodeRequest fd fun conn _ => mockNodeReply conn "200 OK" "{\"state\":\"succeeded\",\"exit_code\":0}"
+      withMockNodeRequest fd fun conn _ => stall conn
     else
       withMockNodeRequest fd fun conn _ => mockNodeReply conn "503 Service Unavailable" "{}"
   spawnRemoteJobPoller store none none none sup root mid "opencode" "mockgoalchecks" jid ""
@@ -228,7 +233,7 @@ private def verifyIncompleteGoalDrain (store : CoreStore) (sup : RemoteJobSuperv
   check ((← cellOf store.missionsDb "SELECT status || ':' || terminal_reason FROM missions WHERE id=?1;" #[mid]) ==
     "awaiting_user:remote_goal_evidence_incomplete" &&
     (← cellOf store.missionsDb "SELECT COUNT(*) FROM mission_continuations WHERE mission_id=?1;" #[mid]) == "0")
-    "a failed or capped final read cannot complete or continue a Goal"
+    "a failed or stalled final read cannot complete or continue a Goal"
 
 private def verifyStoppedGoalResume (store : CoreStore) (mid : String) : IO Unit := do
   let db := store.missionsDb

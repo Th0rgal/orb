@@ -221,3 +221,13 @@ later log page must carry an ingestion time at or after receipt of that page.
 
 With a built Core binary, `python3 scripts/test_remote_acp_ingest.py /path/to/orb-core`
 replays this case through a loopback worker and a disposable mixed-format store.
+
+### Terminal remote logs
+
+A terminal worker status can arrive while Core still has unread log pages. When a
+valid page advances the cursor and advertises more bytes, Core keeps the run
+active for another bounded poll. Each poll checks for cancellation. A stalled
+read cannot prove Goal completion. Core checkpoints the worker's byte offset
+and the trailing incomplete NDJSON record together. On recovery it resumes
+from that pair. A verified terminal EOF closes the last record even if the
+worker omitted its final newline.
