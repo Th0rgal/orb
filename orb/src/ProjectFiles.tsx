@@ -2052,7 +2052,7 @@ export function LiveProjectsSection(p: {
       const { slug: destSlug, path: destPath } = dest;
       if (pendingMoves().length > 1) { pasteMission(destSlug, destPath); return; }
       const version = connectionVersion();
-      void navigator.clipboard.readText().then(text => {
+      void Promise.resolve().then(() => navigator.clipboard.readText()).then(text => {
         if (version !== connectionVersion()) return;
         const usable = isClipboardReferenceRetired(text) ? undefined : text;
         if (!applyPastePayload(destSlug, destPath, usable)) pasteMission(destSlug, destPath, usable);
