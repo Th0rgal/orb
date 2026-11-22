@@ -789,6 +789,8 @@ private def runMultiUserPrivdBrokerTests (tmpDir : System.FilePath) : IO Unit :=
     "/home/orb-alice/.orb-missions/m1" "/home/orb-alice" "/var/log/orb/j1.log"
     3600 (some 2147483648) (some 1932735283) (some 100) (some "200%")
     scrubbed #["bash", "-lc", privdForkSnippet] true
+  assertTrue "failed member units remain available until their status is recorded"
+    (!privdSdCmd.contains "--collect" && privdSdCmd.contains "--property=RemainAfterExit=yes")
   let idxPrivdNoExp := (privdSdCmd.findIdx? (· == "--expand-environment=no")).getD 999
   let idxPrivdDash := (privdSdCmd.findIdx? (· == "--")).getD 999
   assertTrue "buildPrivdSystemdRunCmd passes --expand-environment=no before '--' and preserves ${fork_root%/*}"

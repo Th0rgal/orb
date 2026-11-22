@@ -1097,7 +1097,6 @@ def handle_spawn_user_job(req: dict, peer_uid: int, peer_gid: int) -> dict:
         cmd.append("--expand-environment=no")
     cmd.extend([
         "--quiet",
-        "--collect",
         f"--unit={unit}",
         f"--uid={target_uid}",
         f"--gid={target_gid}",
@@ -1197,13 +1196,19 @@ def handle_control_user_job(req: dict, peer_uid: int) -> dict:
         meta_path.unlink(missing_ok=True)
         return {"ok": True, "done": True, "exit_code": 137, "state": "stopped"}
     sh = subprocess.run(
-        ["/usr/bin/systemctl", "show", "--property=ActiveState,SubState,ExecMainStatus", unit],
+        ["/usr/bin/systemctl", "show", "--property=ActiveState,SubState,ExecMainStatus,LoadState", unit],
         capture_output=True,
         text=True,
     )
     kv = dict(ln.split("=", 1) for ln in sh.stdout.splitlines() if "=" in ln)
-    running = kv.get("ActiveState") in ("active", "activating") and kv.get("SubState") == "running"
-    rc = int(kv.get("ExecMainStatus", "0") or "0")
+    missing = kv.get("LoadState") == "not-found"
+    if sh.returncode and not missing:
+        return {"ok": False, "stderr": "systemd job status unavailable"}
+    state = kv.get("ActiveState", "")
+    running = state in ("activating", "reloading", "deactivating") or (state == "active" and kv.get("SubState") != "exited")
+    rc = -1 if missing else int(kv.get("ExecMainStatus") or "-1")
+    if state == "failed" and rc == 0:
+        rc = -1
     if not running:
         subprocess.run(["/usr/bin/systemctl", "stop", unit], capture_output=True)
         subprocess.run(["/usr/bin/systemctl", "reset-failed", unit], capture_output=True)

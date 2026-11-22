@@ -13,6 +13,31 @@ import privd_confinement_model as pcm
 
 
 class MultiUserPrivdTests(unittest.TestCase):
+    def test_systemd_exit_status_survives_delayed_poll(self) -> None:
+        from unittest import mock
+        import json
+        import subprocess
+
+        req = {"op": "status", "job_id": "status-probe", "unix_username": "orb-alice"}
+        cases = [
+            ("loaded", "active", "exited", 0, True, 0),
+            ("loaded", "failed", "failed", 23, True, 23),
+            ("loaded", "failed", "failed", 0, True, -1),
+            ("not-found", "inactive", "dead", 0, True, -1),
+            ("loaded", "activating", "start", 0, False, 0),
+        ]
+        with tempfile.TemporaryDirectory() as directory, mock.patch.dict(os.environ, ORB_PRIVD_STATE_DIR=directory), mock.patch.object(pcm, "_peer_is_node_uid", return_value=True):
+            meta = Path(directory) / "orb-job-statusprobe.json"
+            for load, active, sub, code, done, expected in cases:
+                with self.subTest(load=load, active=active, code=code):
+                    meta.write_text(json.dumps({"unix_username": "orb-alice"}))
+                    properties = f"LoadState={load}\nActiveState={active}\nSubState={sub}\nExecMainStatus={code}\n"
+                    reply = subprocess.CompletedProcess([], 4 if load == "not-found" else 0, properties, "")
+                    with mock.patch.object(pcm.subprocess, "run", return_value=reply):
+                        result = pcm.handle_control_user_job(req, peer_uid=0)
+                    self.assertEqual((result["done"], result["exit_code"]), (done, expected))
+                    self.assertEqual(meta.exists(), not done)
+
     def test_valid_unix_username_grammar_and_denylist(self) -> None:
         self.assertTrue(pcm.valid_unix_username("orb-alice"))
         self.assertTrue(pcm.valid_unix_username("_worker_01"))
@@ -123,6 +148,7 @@ class MultiUserPrivdTests(unittest.TestCase):
                     self.assertEqual(len(captured_cmds), 2)
                     sd_cmd = captured_cmds[0]
                     self.assertEqual(sd_cmd[0], "/usr/bin/systemd-run")
+                    self.assertNotIn("--collect", sd_cmd)
                     self.assertIn("--expand-environment=no", sd_cmd)
                     self.assertLess(sd_cmd.index("--expand-environment=no"), sd_cmd.index("--"))
                     self.assertEqual(sd_cmd[-1], fork_cmd)
