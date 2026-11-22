@@ -9,9 +9,13 @@ export async function readPalomaPub(): Promise<string> {
   } catch {
     /* fall through */
   }
+  // Only the Vite dev server serves this endpoint. Packaged WebViews serve index.html for unknown paths.
+  if (!import.meta.env.DEV) return "";
   try {
     const r = await fetch("/__paloma_pub");
-    if (r.ok) return (await r.text()).trim();
+    if (r.ok && r.headers.get("content-type")?.split(";")[0].trim() === "text/plain") {
+      return (await r.text()).trim();
+    }
   } catch {
     /* ignore */
   }
