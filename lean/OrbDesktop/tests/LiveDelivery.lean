@@ -619,6 +619,108 @@ def main (args : List String) : IO Unit := do
         throw (IO.userError "continuing live stream lost the persisted earlier turns")
       assertDiagram scene observed rendered
       return
+    if args == ["mermaid-backedge"] then
+      -- The controller-reported graph: all four edges render, including the
+      -- Review -> Draft back edge, both edge labels are visible, and Review
+      -- (two labelled outgoing edges) shows Approve and Revise on opposite
+      -- sides. The back edge routes through a lane below the rank rows with its
+      -- arrowhead at the Draft (target) end.
+      let some backedge ← IO.getEnv "ORB_TEST_BACKEDGE" | throw (IO.userError "missing ORB_TEST_BACKEDGE")
+      let st ← clickMission st a
+      let st ← awaitState slot st (fun s => streamedText s == backedge)
+      let (rootBox, scene) := renderScreen st backedge
+      let rendered := renderedBoxRoot rootBox
+      let observed := collectObserved rootBox 24
+      let exactlyOne (t what : String) : IO Rect := do
+        match observed.filter (fun p => p.1 == t) with
+        | [(_, sub, _)] => pure sub
+        | hits =>
+          let labels := observed.map (·.1) |> String.intercalate ","
+          throw (IO.userError ("rendered diagram " ++ what ++ " was not observed exactly once: " ++ t ++
+            s!" (hits: {hits.length}; labels: {labels})"))
+      let draft ← exactlyOne "Design spec" "node label"
+      let review ← exactlyOne "Code review" "node label"
+      let deploy ← exactlyOne "Canary deploy" "node label"
+      let _verify ← exactlyOne "Verify release" "node label"
+      let approve ← exactlyOne "Approve" "edge label"
+      let revise ← exactlyOne "Revise" "edge label"
+      unless review.x < approve.x && approve.x < deploy.x do
+        throw (IO.userError "Approve edge is not directed Review -> Deploy")
+      unless draft.x < revise.x && revise.x < review.x do
+        throw (IO.userError "Revise back edge label is not between Draft (target) and Review (source)")
+      unless review.y < revise.y && deploy.y < revise.y do
+        throw (IO.userError "Revise back edge is not routed below the rank rows")
+      unless approve.x > review.x && revise.x < review.x do
+        throw (IO.userError "Review does not show two labelled outgoing edges on opposite sides")
+      let arrowheads := scene.prims.toList.filter fun p => match p with
+        | .rrect r _ (tl, _, _, _) _ _ => tl ≥ 1 && r.w ≤ 8 && r.h ≥ 4 && r.h ≤ 8
+        | _ => false
+      unless arrowheads.length ≥ 4 do
+        throw (IO.userError s!"rendered diagram edges have {arrowheads.length} arrowheads, expected 4")
+      let some (_, _, draftDev) := observed.filter (fun p => p.1 == "Design spec") |>.head? |
+        throw (IO.userError "missing device rect for Design spec")
+      let some (_, _, verifyDev) := observed.filter (fun p => p.1 == "Verify release") |>.head? |
+        throw (IO.userError "missing device rect for Verify release")
+      let draftCx := draftDev.x + draftDev.w / 2
+      let laneArrows := arrowheads.filter fun p => match p with
+        | .rrect r _ (tl, _, _, _) _ _ =>
+          tl ≥ 1 && (r.x - draftCx).natAbs ≤ 16 && r.y > verifyDev.y
+        | _ => false
+      unless laneArrows.length ≥ 1 do
+        throw (IO.userError "the back edge has no arrowhead at the Draft end inside the lane row")
+      unless rendered.contains "Design spec" && rendered.contains "Verify release" do
+        throw (IO.userError "reported graph nodes missing from the render")
+      return
+    if args == ["cold-recover"] then
+      -- Cold open with persisted turns, then a transient unavailable window,
+      -- then the same text: the wipe must not cost the persisted archive for
+      -- good, and the replayed current turn shows exactly one visible copy.
+      let st ← clickMission st a
+      let st ← awaitState slot st
+        (fun s => s.liveTurns == ["You: PRIVATE", "Amber blossom", "You: PRIVATE"] &&
+          streamedText s == "Cold ember glow")
+      let st ← awaitState slot st (fun s => s.liveTurns.isEmpty && (streamedText s).isEmpty)
+      let st ← awaitState slot st
+        (fun s => s.liveTurns == ["You: PRIVATE", "Amber blossom", "You: PRIVATE"] &&
+          streamedText s == "Cold ember glow")
+      let (rootBox, _) := renderScreen st "Cold ember glow"
+      let rendered := renderedBoxRoot rootBox
+      unless rendered.contains "Amber blossom" && (rendered.splitOn "You: PRIVATE").length == 3 &&
+          (rendered.splitOn "Cold ember glow").length == 2 do
+        throw (IO.userError "unavailable window lost the persisted archive or duplicated the current turn")
+      return
+    if args == ["markdown-turn"] then
+      -- Both stream shapes render markdown-lite: a one-line stream must not show
+      -- its literal bold markers, and the completed multi-line document renders
+      -- headings, bullets, links, inline styles and a non-mermaid code fence.
+      let some md ← IO.getEnv "ORB_TEST_MARKDOWN" | throw (IO.userError "missing ORB_TEST_MARKDOWN")
+      let st ← clickMission st a
+      let st ← awaitState slot st (fun s => streamedText s == "Amber blossom")
+      let st ← awaitState slot st (fun s => streamedText s == "**Ember glow**")
+      let (rootBox, _) := renderScreen st "**Ember glow**"
+      let rendered := renderedBoxRoot rootBox
+      unless rendered.contains "Ember glow" && !rendered.contains "**" do
+        throw (IO.userError ("single-line stream kept literal markdown markers: " ++ rendered.take 300))
+      let st ← awaitState slot st (fun s => streamedText s == md)
+      let (rootBox, _) := renderScreen st md
+      let rendered := renderedBoxRoot rootBox
+      unless rendered.contains "Release notes" && rendered.contains "• First bullet" &&
+          rendered.contains "• Second bullet" &&
+          rendered.contains "the guide (https://example.test/guide)" &&
+          rendered.contains "a soft italic" && rendered.contains "inline code" &&
+          rendered.contains "print(\"hi\")" do
+        throw (IO.userError ("multi-line markdown lost a rendered span: " ++ rendered.take 600))
+      let markerContext (m : String) : String :=
+        match rendered.splitOn m with
+        | before :: after :: _ =>
+          let i := before.length
+          "…" ++ before.drop (if i > 40 then i - 40 else 0) ++ "⟪" ++ m ++ "⟫" ++ after.take 40 ++ "…"
+        | _ => ""
+      for m in ["#", "**", "](", "```", "`", "- First"] do
+        if rendered.contains m then
+          throw (IO.userError ("multi-line markdown kept literal marker " ++ m ++ ": " ++
+            markerContext m))
+      return
     if args == ["mermaid-turn"] then
       -- Two-turn live case: the earlier assistant turn must survive the follow-up
       -- turn, whose canonical Mermaid fence renders as an actual diagram.

@@ -72,6 +72,28 @@ class Connection:
     def get(self, path, cap=4 << 20, *, deadline=6):
         return self.request(path, cap, deadline=deadline)
 
+    def get_page(self, path, cap=4 << 20, deadline=6):
+        """GET returning ``(json, lowercased headers)`` so event pages can read the
+        ``X-Has-More`` / ``X-Next-Cursor`` continuation headers the same way the
+        web client drives its older-spine paging."""
+        self.check()
+        base, token = self.creds
+        req = urllib.request.Request(base + path, headers={'Authorization': 'Bearer ' + token,
+                                                           'Accept': 'application/json', 'Cache-Control': 'no-cache'})
+        previous = signal.signal(signal.SIGALRM, request_timeout)
+        signal.setitimer(signal.ITIMER_REAL, deadline)
+        try:
+            with self.opener.open(req, timeout=deadline if deadline > 6 else 4) as response:
+                data = response.read(cap + 1)
+                headers = {name.lower(): value for name, value in response.headers.items()}
+        finally:
+            signal.alarm(0)
+            signal.signal(signal.SIGALRM, previous)
+        self.check()
+        if len(data) > cap:
+            raise ResponseTooLarge('response too large')
+        return (json.loads(data) if data else None), headers
+
     def request(self, path, cap=4 << 20, body=None, key=None, method=None, deadline=6):
         self.check()
         base, token = self.creds
@@ -1132,6 +1154,47 @@ def history_turns(c, mid, first_text):
         if not isinstance(page, list):
             return []
         rows.extend(page)
+    # The spine page is bounded by Core (80 rows by default). Page the older
+    # transcript spine with the same exclusive before-cursor the web client uses
+    # (X-Has-More / X-Next-Cursor on the /events page) so long missions reach
+    # their full history instead of silently dropping older turns. Bounded at 50
+    # pages of 200 rows; a failing page keeps what was read so far.
+    cursor = bundle.get('spine_next_cursor')
+    pages = 0
+    while bundle.get('spine_has_more') is True and isinstance(cursor, int) and pages < 50:
+        pages += 1
+        requested = cursor
+        try:
+            page, headers = c.get_page('/api/control/missions/' + mid +
+                '/events?before_seq=' + str(cursor) + '&view=transcript&limit=200')
+        except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError,
+                ValueError, KeyError, TypeError):
+            break
+        page_rows = page.get('events') if isinstance(page, dict) else page
+        if not isinstance(page_rows, list):
+            break
+        rows.extend(page_rows)
+        nxt = headers.get('x-next-cursor')
+        more = headers.get('x-has-more') == 'true' and isinstance(nxt, str) and nxt.lstrip('-').isdigit()
+        cursor = int(nxt) if more else None
+        # Exclusive before-cursor semantics: a healthy page returns rows older
+        # than the cursor it was asked with. A page whose oldest row sits at or
+        # after the requested cursor would page the same rows forever, so stop.
+        if not more or (page_rows and (page_rows[0].get('sequence') or 0) >= requested):
+            break
+    # Pages may overlap under either cursor convention; keep the first copy of
+    # each row (newest source wins) so the archive never duplicates a turn.
+    seen = set()
+    unique_rows = []
+    for r in rows:
+        if not isinstance(r, dict):
+            continue
+        key = (r.get('sequence'), r.get('event_type'), r.get('content'))
+        if key in seen:
+            continue
+        seen.add(key)
+        unique_rows.append(r)
+    rows = unique_rows
     turns = []
     for r in rows:
         if not isinstance(r, dict):
@@ -1175,16 +1238,22 @@ def poll_bubble(mid, binding):
         return
     previous = None
     pending_history = True
+    degraded = False
     while True:
         c.check()
         try:
             title, status, text = projection(c, mid)
-            if pending_history:
+            if pending_history or degraded:
+                # One bounded atomic bootstrap message: the client applies the whole
+                # persisted archive once per selection instead of racing per-line.
+                # After a degraded window (unavailable or network failure) the
+                # bootstrap repeats once on recovery, so a client that cleared its
+                # transcript on the unavailable frame re-reads the persisted
+                # timeline from Core instead of losing the archive for good.
                 pending_history = False
+                degraded = False
                 turns = history_turns(c, mid, text)
                 if turns:
-                    # One bounded atomic bootstrap message: the client applies the whole
-                    # persisted archive once per selection instead of racing per-line.
                     newest = []
                     total = 0
                     for turn in reversed(turns):
@@ -1202,10 +1271,13 @@ def poll_bubble(mid, binding):
                 return
             if error.code == 401:
                 raise
+            degraded = True
             fields = None
         except (ValueError, KeyError, TypeError):
+            degraded = True
             fields = ('X',)
         except (urllib.error.URLError, TimeoutError):
+            degraded = True
             fields = None
         c.check()
         if fields is not None and fields != previous:

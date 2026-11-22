@@ -331,14 +331,95 @@ private def splitMermaidFences (src : String) : List (Bool × String) := Id.run 
     segs := segs ++ [(false, String.intercalate "\n" proseBuf.toList)]
   return segs
 
+/-! ## Markdown-lite inline spans
+
+Transcript prose renders bold, italic, inline code, links, unordered list markers and
+non-mermaid code fences instead of their literal markers. Unterminated markers stay
+literal; `_italic_` is deliberately not recognized so snake_case survives. -/
+
+/-- Markdown-lite inline span kinds. -/
+private inductive MdKind where
+  | plain | bold | italic | code | link
+
+/-- Style for one markdown-lite span: emphasis without a dedicated italic face uses the
+secondary tone, links use the accent, code uses the mono face. -/
+private def mdKindStyle (theme : Theme) : MdKind → TextStyle
+  | .plain => { (Theme.bodyText theme) with color := theme.palette.textPrimary }
+  | .bold => { (Theme.bodyText theme) with color := theme.palette.textPrimary, weight := 700 }
+  | .italic => { (Theme.bodyText theme) with color := theme.palette.textSecondary, weight := 500 }
+  | .code => { (Theme.codeText theme) with color := theme.palette.textPrimary }
+  | .link => { (Theme.bodyText theme) with color := theme.palette.accent, weight := 500 }
+
+/-- First index of `c` at or after `n` in `xs`. -/
+private partial def mdFindFrom (c : Char) (n : Nat) : List Char → Option Nat
+  | [] => none
+  | x :: rest => if x == c then some n else mdFindFrom c (n + 1) rest
+
+/-- First index at or after `n` where the pair `a b` occurs in `xs`. -/
+private partial def mdFindSeq (a b : Char) (n : Nat) : List Char → Option Nat
+  | x :: y :: rest =>
+    if x == a && y == b then some n else mdFindSeq a b (n + 1) (y :: rest)
+  | _ => none
+
+private def mdFlush (acc : List (String × MdKind)) (buf : List Char) (k : MdKind) :
+    List (String × MdKind) :=
+  if buf.isEmpty then acc else acc ++ [(String.ofList buf.reverse, k)]
+
+/-- Scanner for `mdSpans`: `buf` holds the pending plain-text characters in reverse. -/
+private partial def mdScan (acc : List (String × MdKind)) (buf : List Char) :
+    List Char → List (String × MdKind)
+  | [] => mdFlush acc buf .plain
+  | c :: rest =>
+    if c == '`' then
+      match mdFindFrom '`' 0 rest with
+      | some i =>
+        let span := mdFlush (mdFlush acc buf .plain) (rest.take i).reverse .code
+        mdScan span [] (rest.drop (i + 1))
+      | none => mdScan acc ('`' :: buf) rest
+    else if c == '*' && rest.head? == some '*' then
+      match mdFindSeq '*' '*' 0 (rest.drop 1) with
+      | some i =>
+        let span := mdFlush (mdFlush acc buf .plain) ((rest.drop 1).take i).reverse .bold
+        mdScan span [] (rest.drop (i + 3))
+      | none => mdScan acc ('*' :: buf) rest
+    else if c == '*' then
+      match mdFindFrom '*' 0 rest with
+      | some i =>
+        let span := mdFlush (mdFlush acc buf .plain) (rest.take i).reverse .italic
+        mdScan span [] (rest.drop (i + 1))
+      | none => mdScan acc ('*' :: buf) rest
+    else if c == '[' then
+      match mdFindSeq ']' '(' 0 rest with
+      | some j =>
+        let after := rest.drop (j + 2)
+        match mdFindFrom ')' 0 after with
+        | some k =>
+          let url := String.ofList (after.take k)
+          let span := mdFlush (mdFlush acc buf .plain) (rest.take j).reverse .link
+          let span := mdFlush span ((" (" ++ url ++ ")").toList.reverse) .plain
+          mdScan span [] (after.drop (k + 1))
+        | none => mdScan acc ('[' :: buf) rest
+      | none => mdScan acc ('[' :: buf) rest
+    else mdScan acc (c :: buf) rest
+
+/-- Split one line into markdown-lite spans: `**bold**`, `*italic*`, `` `code` `` and
+`[text](url)` links (the url keeps rendering in parentheses). Unterminated markers stay
+literal. -/
+private def mdSpans (line : String) : List (String × MdKind) :=
+  mdScan [] [] line.toList
+
 /-- One markdown-lite line of the live transcript, synthesized from plain text; the runtime
-`shapeWidgetTree` pass re-shapes synth runs with HarfBuzz on real displays. `#{1,6} ` headings
-reuse the rich-text heading recipe; every other line renders as wrapped body prose. -/
-private def liveProseLine (theme : Theme) (colW width : SubPx) (line0 : String) : Option WidgetNode :=
+`shapeWidgetTree` pass re-shapes synth runs with HarfBuzz on real displays. Blank lines
+produce no row, `#{1,6} ` headings reuse the rich-text heading recipe, unordered list
+markers become bullets, and every other line renders as wrapped body prose with inline
+markdown spans. -/
+private def liveProseLine (theme : Theme) (colW width : SubPx) (line0 : String) :
+    Option WidgetNode :=
   let line := mermaidTrim line0
   let hashes := (line.toList.takeWhile (· == '#')).length
   let rest := line.toList.drop hashes
-  if hashes >= 1 && hashes <= 6 && rest.length > 1 && rest.head? == some ' ' then
+  if line.isEmpty then none
+  else if hashes >= 1 && hashes <= 6 && rest.length > 1 && rest.head? == some ' ' then
     let heading := mermaidTrim (String.ofList (rest.drop 1))
     let hSize := if hashes <= 1 then theme.typo.xl else if hashes == 2 then theme.typo.lg else theme.typo.md
     let lh := if hashes <= 2 then theme.typo.lineHeading else theme.typo.lineRelaxed
@@ -353,7 +434,10 @@ private def liveProseLine (theme : Theme) (colW width : SubPx) (line0 : String) 
         (BoxStyle.row 0 |>.withFixedSize width height)
         lh runs])
   else
-    let runs := [synthInlineRun { (Theme.bodyText theme) with color := theme.palette.textPrimary } line]
+    let listed := line.startsWith "- " || line.startsWith "* "
+    let body := if listed then "• " ++ line.drop 2 else line
+    let runs := (mdSpans body).filterMap fun (txt, k) =>
+      if txt.isEmpty then none else some (synthInlineRun (mdKindStyle theme k) txt)
     let (_, _, height) := wrapInlineRuns width theme.typo.lineBase runs
     some (WidgetNode.box
       (BoxStyle.row 0
@@ -363,16 +447,37 @@ private def liveProseLine (theme : Theme) (colW width : SubPx) (line0 : String) 
         (BoxStyle.row 0 |>.withFixedSize width height)
         theme.typo.lineBase runs])
 
+/-- One monospace code row of a non-mermaid fence; blank fence lines become thin spacers. -/
+private def liveCodeRow (theme : Theme) (colW width : SubPx) (line : String) : WidgetNode :=
+  let runs := if line.isEmpty then []
+    else [synthInlineRun { (Theme.codeText theme) with color := theme.palette.textPrimary } line]
+  let (_, _, height) := wrapInlineRuns width theme.typo.lineBase runs
+  WidgetNode.box
+    (BoxStyle.row 0
+      |>.withPadding (Edges.xy (pxToSub 20) (pxToSub 2))
+      |>.withFixedSize colW (height + pxToSub 4))
+    [WidgetNode.text
+      (BoxStyle.row 0 |>.withFixedSize width height)
+      theme.typo.lineBase runs]
+
 /-- Render prose text line by line: blank lines produce nothing (a literal newline
-character never reaches the glyph atlas, where it would rasterize as a missing glyph)
-and markdown headings render with the heading style. -/
+character never reaches the glyph atlas, where it would rasterize as a missing glyph),
+markdown headings render with the heading style, and non-mermaid ``` fences render as
+monospace code rows without their fence markers. -/
 private def liveProseLines (theme : Theme) (colW width : SubPx) (text : String) : List WidgetNode :=
   Id.run do
     let mut rows : List WidgetNode := []
+    let mut inFence := false
     for line in text.splitOn "\n" do
-      match liveProseLine theme colW width line with
-      | some row => rows := rows ++ [row]
-      | none => pure ()
+      let t := mermaidTrim line
+      if t.startsWith "```" then
+        inFence := !inFence
+      else if inFence then
+        rows := rows ++ [liveCodeRow theme colW width line]
+      else
+        match liveProseLine theme colW width line with
+        | some row => rows := rows ++ [row]
+        | none => pure ()
     return rows
 
 /-- Render one turn's text: mermaid fences become diagram widgets (node widget ids from
@@ -435,15 +540,12 @@ def buildMissionTranscriptBody (st : DesktopState) (mainW bodyH : SubPx)
       -- Multi-line stream text shares the completed-turn rendering so newline
       -- characters and markdown headings never rasterize as literal missing glyphs.
       liveProseLines theme colW width currentText
-    else Id.run do
-      let (_, _, height) := wrapInlineRuns width theme.typo.lineBase _runs.streamRuns
-      return [WidgetNode.box
-      (BoxStyle.row 0
-        |>.withPadding (Edges.xy (pxToSub 20) (pxToSub 6))
-        |>.withFixedSize colW (height + pxToSub 12))
-      [WidgetNode.text
-        (BoxStyle.row 0 |>.withFixedSize width height)
-        theme.typo.lineBase _runs.streamRuns (some 900)]]
+    else
+      -- Single-line stream text shares the markdown-lite prose pipeline, so a
+      -- one-line `# Title` or `**bold**` never shows its literal markers.
+      match liveProseLine theme colW width currentText with
+      | some row => [row]
+      | none => []
 
   let liveRows := priorRows ++ liveStreamRow ++ (st.selectedCard.toList.map fun c =>
     screenTextLine theme colW (pxToSub 21) (pxToSub 12) (pxToSub 21) pal.textMuted (conversationStatusLabel c.status))
