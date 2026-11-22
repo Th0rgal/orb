@@ -5310,10 +5310,19 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
         discard <| mark_mission_opened st.store mid nowIso
         return .ok (mkJson 200 "{\"ok\":true}")
       let content := ((jv.fieldStr? "content").orElse (fun _ => jv.fieldStr? "message")).getD ""
+      let receipt (queued : Bool) := mkJson 200 s!"\{\"ok\":true,\"queued\":{if queued then "true" else "false"},\"mission_id\":{jsonEscape mid},\"sender_user_id\":{jsonEscape caller.userId},\"sender_username\":{jsonEscape caller.username}}"
       let mut queued := false
       if !content.trimAscii.toString.isEmpty then
         let defMsgId ← nextUniqueId st "msg" nowEpochSec
         let msgId := (jv.fieldStr? "client_message_id").getD defMsgId
+        if cleanPath.endsWith "/message" && mRec.status != "active" && mRec.status != "pending" &&
+            (jv.fieldStr? "client_message_id").any (!·.isEmpty) then
+          -- A committed enqueue survives removal of the live row and changes in placement.
+          let replay ← execParamQuery st.store.missionsDb
+            "SELECT 1 FROM queue_item_receipts WHERE mission_id=?1 AND message_id=?2 LIMIT 1;" #[mid, msgId]
+          match replay with
+          | .error _ => return .ok (mkJson 500 "{\"error\":\"message_receipt_unconfirmed\"}")
+          | .ok rows => if rows.size > 1 then return .ok (receipt true)
         let pl := renderCompact (.obj #[
           ("type", .str "user_message"),
           ("id", .str msgId),
@@ -5378,7 +5387,7 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
         discard <| execParamQuery st.store.missionsDb
           "UPDATE missions SET status='awaiting_user', orphaned_at='', state_revision=state_revision+1, updated_at=?2 WHERE id=?1;"
           #[mid, nowIso]
-      return .ok (mkJson 200 s!"\{\"ok\":true,\"queued\":{if queued then "true" else "false"},\"mission_id\":{jsonEscape mid},\"sender_user_id\":{jsonEscape caller.userId},\"sender_username\":{jsonEscape caller.username}}")
+      return .ok (receipt queued)
 
   -- Cloud Agent & Parity Sub-Routes before `/api/control/missions/:id`
   if cleanPath.startsWith "/api/cloud/" ||

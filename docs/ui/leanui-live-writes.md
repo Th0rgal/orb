@@ -7,6 +7,7 @@
 * A Send delayed after its event was stored must activate only the generation observed at admission. A warm child that does not read its prompt must still be stoppable. `python3 lean/OrbDesktop/tests/write_windows.py` exercises both orderings and the preceding checkpoint and restart cases against an isolated Core.
 
 A remote follow-up refused before managed provisioning starts may reuse its submission ID. Once provisioning has started, a failure can have external effects, so a retry keeps the original claim.
+The mission-specific message endpoint replays a committed queue acknowledgment for the same mission and message ID after the mission becomes idle, including after queue cleanup and a Core restart.
 Both remote follow-up endpoints persist the user’s event before submitting the turn. If the event write fails, Core returns a storage error and sends no job to the node.
 
 On Linux, build `scripts/build_orb_bins.sh --only orb-core` and run `python3 lean/OrbDesktop/tests/live_writes.py` with Sway and wtype. The desktop sends through a loopback proxy which withholds the first successful Send reply. The observer reads Core directly and checks the submitted text, event ID, launch count, process lifetime via pidfd, and persisted archive for the created mission.

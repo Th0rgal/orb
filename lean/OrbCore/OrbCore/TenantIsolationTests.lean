@@ -819,6 +819,17 @@ def run (root : String) : IO Unit := do
       "SELECT COUNT(*) FROM remote_message_queue WHERE mission_id=?1 AND message_id='placement-retry';" #[placementMid]
       | throw (IO.userError "query recovered follow-up")
     check ((placementRows[1]?.bind (·[0]?)) == some "1") "placement recovery queues once"
+    let scopedRoute := s!"/api/control/missions/{placementMid}/message"
+    let scopedBody := JVal.obj #[("mission_id", .str placementMid), ("content", .str "scoped"), ("client_message_id", .str "scoped-replay")]
+    let original ← send "POST" scopedRoute member scopedBody placementApp
+    check (original.1 == 200 && original.2.fieldBool? "queued" == some true) "scoped endpoint originally enqueued"
+    sql store.missionsDb "UPDATE missions SET status='awaiting_user' WHERE id=?1;" #[placementMid]
+    sql store.missionsDb "DELETE FROM remote_message_queue WHERE mission_id=?1 AND message_id='scoped-replay';" #[placementMid]
+    let replayed ← send "POST" scopedRoute member scopedBody placementApp
+    check (replayed == original) "scoped endpoint replays the authorized acknowledgment after the live queue row disappears"
+    let foreignReplay ← send "POST" scopedRoute admin scopedBody placementApp
+    let unknownReplay ← send "POST" "/api/control/missions/unknown-scoped-replay/message" admin scopedBody placementApp
+    check (foreignReplay == unknownReplay && foreignReplay.1 == 404) "a queue receipt cannot expose another user's mission"
     sql store.missionsDb "DELETE FROM remote_message_queue WHERE mission_id=?1;" #[placementMid]
     sql store.missionsDb "DELETE FROM queue_item_receipts WHERE mission_id=?1;" #[placementMid]
     sql store.missionsDb "UPDATE missions SET tags='[\"remote-node:fixture\"]',status='awaiting_user' WHERE id=?1;" #[placementMid]
