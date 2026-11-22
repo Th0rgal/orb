@@ -29,13 +29,14 @@ export function AccountVpnSettings(p: { account: string }) {
   const [busy, setBusy] = createSignal(false);
   const [error, setError] = createSignal("");
   createEffect(() => {
-    if (busy() || route.state !== "ready" || route().reason !== "vpn_awaiting_verification") return;
+    if (busy() || route.state !== "ready") return;
+    const interval = route().reason === "vpn_awaiting_verification" ? 5000 : null;
     const [, id] = source();
     let active = true;
     const stop = pollWhileVisible(async () => {
       const next = await readRoute(id);
       if (active) mutate(next);
-    }, 5000, "account-vpn");
+    }, interval, "account-vpn");
     onCleanup(() => {
       active = false;
       stop();

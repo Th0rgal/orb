@@ -90,6 +90,11 @@ for (const theme of ["light", "dark"]) test(`account VPN retry and Direct select
   await select.selectOption("");
   await expect(verified).toHaveCount(0);
   const path = "/api/ai/providers/a/vpn";
+  // Another session changed the shared route while this account row stayed open.
+  verifying = true;
+  await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+  await expect(verified).toBeVisible();
+  await expect(select).toHaveValue("NL");
   expect(changes).toEqual([[path, { mode: "vpn", country: "NL" }], [path, { mode: "vpn", country: "NL" }], [path, { mode: "direct" }]]);
 });
 

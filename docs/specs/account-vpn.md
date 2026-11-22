@@ -234,3 +234,5 @@ The isolated sidecar test sends buffered and streaming requests before restricti
 Before confirming a native-only Antigravity setting, Core checks both the saved wildcard and the sidecar’s live model registry for the selected credential. If any model is still registered or the registry cannot be queried, the client must surface an unconfirmed setting. A sibling credential may continue serving the same model.
 
 When Core reports `vpn_awaiting_verification`, an open desktop account row periodically reads the route while visible and checks again when the window regains visibility. Verification may finish independently after a Core restart. Observing this transition requires only a read. Closing the row or changing its account or route discards any older pending observation.
+
+An open account row rereads a settled route when the desktop window regains focus or visibility. This reflects a VPN change made by another user without a periodic timer or a write from the observing client.
