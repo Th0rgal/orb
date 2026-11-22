@@ -76,6 +76,17 @@ jobs:
             export ORB_DIST_DIR="$(nix build .#orb-desktop.webUi --no-link --print-out-paths)"
             python3 -B lean/OrbDesktop/tests/hybrid_desktop.py
           '
+      - name: Replay packaged sidebar actions in all three clients
+        env:
+          OMP_THREAD_LIMIT: 1
+        run: |
+          export ORB_PACKAGED_TEST_BINARY="$PWD/result/bin/orb-desktop"
+          export ORB_CORE_TEST_BINARY="$(nix build .#orb-desktop.core --no-link --print-out-paths)/bin/orb-core"
+          nix shell --inputs-from . nixpkgs#sway nixpkgs#swaybg nixpkgs#grim nixpkgs#wtype nixpkgs#imagemagick nixpkgs#tesseract nixpkgs#dbus --command bash -euc '
+            for client in webkit hybrid leanui; do
+              dbus-run-session -- python3 -B lean/OrbDesktop/tests/live_writes.py --sidebar-menu "$client"
+            done
+          '
       - uses: actions/upload-artifact@v4
         if: failure()
         with:

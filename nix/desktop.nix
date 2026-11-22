@@ -23,7 +23,7 @@ stdenv.mkDerivation {
   pname = "orb-desktop";
   version = core.version;
   src = ../.;
-  passthru = {inherit webUi;};
+  passthru = {inherit core webUi;};
   dontConfigure = true;
   nativeBuildInputs = [clang pkg-config makeBinaryWrapper];
   buildInputs = [gtk3 webkitgtk_4_1];
@@ -53,11 +53,11 @@ stdenv.mkDerivation {
 #!/usr/bin/env bash
 set -euo pipefail
 # GTK/WebKit is the default; LeanUI is available as a separate trial launcher.
-if [[ "''${1:-}" == "--leanui" ]]; then
-  shift
-  exec "$(dirname "$0")/orb-desktop-native" "$@"
-fi
-[[ "''${1:-}" == "--webkit" ]] && shift
+case "''${1:-}" in
+  --leanui) shift; exec "$(dirname "$0")/orb-desktop-native" "$@" ;;
+  --leanui-hybrid) shift; exec "$(dirname "$0")/orb-desktop-hybrid" "$@" ;;
+  --webkit) shift ;;
+esac
 exec "$(dirname "$0")/orb-webkit" "$@"
 SH
     chmod 0755 "$out/bin/orb-desktop"
