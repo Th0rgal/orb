@@ -227,3 +227,35 @@ test("project folders contain agents and offer scoped creation", async ({page}) 
   await page.getByRole("menuitem",{name:"New agent",exact:true}).click();
   await expect(page.getByRole("button",{name:"Choose project"})).toContainText("/ audit");
 });
+
+test("resizing into drawer mode keeps the page accessible and remembers the wide sidebar", async ({ page }) => {
+  const resize = (width: number) => page.setViewportSize({ width, height: 800 });
+  await resize(960);
+  await page.addInitScript(() => {
+    localStorage.setItem("orb.apiUrl", location.origin);
+    localStorage.setItem("orb.jwt", "fixture");
+  });
+  await page.route("**/api/**", route => route.fulfill({ json: [] }));
+  await page.goto("/");
+  await page.getByRole("button", { name: "Inference", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "Inference", exact: true }).first()).toBeVisible();
+  const toggle = page.getByRole("button", { name: "Toggle sidebar", exact: true });
+  const backdrop = page.locator(".sidebar-backdrop");
+  await expect(page.locator("#orb-sidebar")).toBeVisible();
+  await resize(720);
+  await expect(backdrop).toBeHidden();
+  await expect(toggle).toHaveAttribute("aria-expanded", "false");
+  await toggle.click();
+  await resize(640);
+  await expect(backdrop).toBeVisible();
+  await page.keyboard.press("Escape");
+  await resize(900);
+  await expect(page.locator("#orb-sidebar")).toBeVisible();
+  await page.keyboard.press("Meta+b");
+  await expect(page.locator("#orb-sidebar")).toBeHidden();
+  await resize(700);
+  await toggle.click();
+  await expect(backdrop).toBeVisible();
+  await resize(900);
+  await expect(toggle).toHaveAttribute("aria-expanded", "false");
+});

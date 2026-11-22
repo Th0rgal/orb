@@ -144,11 +144,13 @@ def check(tmp, mode):
             (tmp / 'git').unlink()
             entered.unlink(missing_ok=True)
             claude = tmp / 'claude'
-            claude.write_text(f'#!{sys.executable}\nimport array, fcntl, os, termios, time\n'
+            # A pipe may be full with a partially occupied page on either 4K or 16K kernels.
+            claude.write_text(f'#!{sys.executable}\nimport os, select, time\n'
                               f'open({str(launches)!r}, "w").write(str(os.getpid()))\n'
-                              'capacity = fcntl.fcntl(0, fcntl.F_GETPIPE_SZ)\n'
-                              'while True:\n n = array.array("i", [0]); fcntl.ioctl(0, termios.FIONREAD, n)\n'
-                              f' if n[0] >= capacity - 4096: open({str(entered)!r}, "w").close()\n time.sleep(.02)\n')
+                              'writer = os.open("/proc/self/fd/0", os.O_WRONLY | os.O_NONBLOCK)\n'
+                              'poller = select.poll()\npoller.register(writer, select.POLLOUT)\n'
+                              'while poller.poll(0): time.sleep(.02)\n'
+                              f'open({str(entered)!r}, "w").close()\nwhile True: time.sleep(1)\n')
             claude.chmod(0o700)
             with concurrent.futures.ThreadPoolExecutor(2) as pool:
                 sent = pool.submit(send)

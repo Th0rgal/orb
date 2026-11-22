@@ -329,7 +329,7 @@ export const isHierarchyTag = (tag: string) =>
 const isDirectBtwTag = (tag: string) => tag.startsWith("btw-parent:") || tag === "btw-subagent";
 
 type Link = { parent?: string; callback?: string; supersededBy?: string; superseded?: boolean; tags: string[] };
-type Seen = { title?: string | null; project?: string | null; folder?: string; status?: string };
+type Seen = { title?: string | null; metadata_updated_at?: string; project?: string | null; folder?: string; status?: string };
 
 const links = new Map<string, Link>();
 const seen = new Map<string, Seen>();
@@ -348,6 +348,14 @@ const internParentOrd = (id: string | undefined): number => {
 };
 const nonEmpty = (v: string | null | undefined): string | undefined => (typeof v === "string" && v.trim() ? v : undefined);
 
+/** Core stamps title changes; a legacy row has no title clock until its first edit. */
+function predatesTitle(row: HierarchyFields, known: Seen | undefined): boolean {
+  const stamp = known?.metadata_updated_at;
+  if (!stamp || row.metadata_updated_at === stamp) return false;
+  const incoming = Date.parse(row.metadata_updated_at ?? "");
+  return !Number.isFinite(incoming) || incoming < Date.parse(stamp);
+}
+
 /** Remember hierarchy links and display facts from an existing local row without re-observing its placement as a fresh server snapshot. */
 function observeHierarchyFactsOnly(m: HierarchyFields | null | undefined): void {
   if (!m || typeof m.id !== "string") return;
@@ -365,7 +373,12 @@ function observeHierarchyFactsOnly(m: HierarchyFields | null | undefined): void 
     links.set(m.id, link);
   }
   const s = seen.get(m.id) ?? {};
-  if (m.title !== undefined && m.title !== null) s.title = m.title;
+  if (m.title !== undefined && (m.title !== null || m.metadata_updated_at) && !predatesTitle(m, s)) {
+    s.title = m.title;
+    if (m.metadata_updated_at && m.metadata_updated_at !== s.metadata_updated_at && Number.isFinite(Date.parse(m.metadata_updated_at))) {
+      s.metadata_updated_at = m.metadata_updated_at;
+    }
+  }
   const authPlace = placements.get(m.id);
   if (authPlace) {
     s.project = authPlace.project;
@@ -394,9 +407,17 @@ export function observeMission(m: HierarchyFields | null | undefined, isPartial 
 export function withHierarchy<M extends HierarchyFields>(m: M): M {
   const link = links.get(m.id);
   const place = placements.get(m.id);
-  if (!link && !place) return m;
+  const known = seen.get(m.id);
+  // A partial overlay may inherit the previous timestamp while replacing just its title.
+  const restoreTitle = known?.metadata_updated_at && (predatesTitle(m, known) ||
+    (m.metadata_updated_at === known.metadata_updated_at && m.title !== known.title));
+  if (!link && !place && !restoreTitle) return m;
   let out: M | undefined;
   const set = (key: keyof HierarchyFields, value: unknown) => { out ??= { ...m }; (out as Record<string, unknown>)[key] = value; };
+  if (restoreTitle && known) {
+    set("title", known.title);
+    set("metadata_updated_at", known.metadata_updated_at);
+  }
   if (link) {
     if (link.parent && !nonEmpty(m.parent_mission_id)) set("parent_mission_id", link.parent);
     if (link.callback && !nonEmpty(m.callback_parent_mission_id)) set("callback_parent_mission_id", link.callback);
@@ -424,30 +445,19 @@ export function withHierarchy<M extends HierarchyFields>(m: M): M {
 export function stickHierarchy<M extends HierarchyFields>(m: M): M { observeMission(m); return withHierarchy(m); }
 
 /**
- * The one mission merge. `next` is either a full row (a list or read answer:
+ * The one mission merge. `incoming` is either a full row (a list or read answer:
  * it replaces `prev`, so cleared fields stay cleared) or a partial patch (a
  * stream status, an optimistic edit: only the fields it names change). Either
  * way the hierarchy links are never dropped.
  */
-export function mergeMission<M extends HierarchyFields>(prev: M | undefined, next: Partial<M> & { id: string }, mode: "full" | "partial" = "full"): M {
+export function mergeMission<M extends HierarchyFields>(prev: M | undefined, incoming: Partial<M> & { id: string }, mode: "full" | "partial" = "full"): M {
   if (prev) observeHierarchyFactsOnly(prev);
-  const nextIsProjected = Boolean((next as Record<symbol, unknown>)[Symbol.for("orb.projectedMove")]);
+  const nextIsProjected = Boolean((incoming as Record<symbol, unknown>)[Symbol.for("orb.projectedMove")]);
   if (nextIsProjected) {
-    observeHierarchyFactsOnly(next as HierarchyFields);
+    observeHierarchyFactsOnly(incoming as HierarchyFields);
   } else {
-    observeMission(next as HierarchyFields, mode === "partial");
+    observeMission(incoming as HierarchyFields, mode === "partial");
   }
-  // Detail reads can finish after a rename.  A full stale response must not
-  // redraw metadata that a newer list or mutation has already committed.
-  const incoming = (() => {
-    if (mode !== "full" || !prev) return next;
-    const previousMetadata = prev.metadata_updated_at ? Date.parse(prev.metadata_updated_at) : NaN;
-    const incomingMetadata = next.metadata_updated_at ? Date.parse(next.metadata_updated_at) : NaN;
-    if (!Number.isNaN(previousMetadata) && !Number.isNaN(incomingMetadata) && incomingMetadata < previousMetadata) {
-      return { ...next, title: prev.title, metadata_updated_at: prev.metadata_updated_at };
-    }
-    return next;
-  })();
   const prevLink = links.get(incoming.id);
   const curParentOrd = internParentOrd(prevLink?.parent ?? nonEmpty(prev?.parent_mission_id));
   const incParent = nonEmpty(incoming.parent_mission_id);

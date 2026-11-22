@@ -5,6 +5,7 @@ import { PopupMenu, type MenuEntry } from "./Menu";
 import { ConfirmDialog, Dialog, DialogButton, Field } from "./Dialog";
 import { ErrorNotice } from "./ErrorNotice";
 import { ErrorToast } from "./toast";
+import { ProvidersLoadingCard } from "./ProvidersSkeleton";
 import { Select } from "./Select";
 import { pollWhileVisible } from "./poll";
 import { useNow } from "./time";
@@ -477,7 +478,7 @@ function NewManagedMachine(p: { data: ManagedMachinesResponse; onClose: () => vo
 /** Managed cloud section of the Machines page. Renders nothing when the
  * backend lacks the endpoint or has the feature disabled. */
 export function ManagedMachines(p: { nodes?: readonly RemoteNodeView[] | null; onDestroyed?: (nodeIds: string[]) => void } = {}) {
-  const [data, setData] = createSignal<ManagedMachinesResponse | null>(null);
+  const [data, setData] = createSignal<ManagedMachinesResponse | null>();
   const [fetchedAt, setFetchedAt] = createSignal(Date.now());
   const [loadError, setLoadError] = createSignal<string | null>(null);
   const [creating, setCreating] = createSignal(false);
@@ -495,12 +496,15 @@ export function ManagedMachines(p: { nodes?: readonly RemoteNodeView[] | null; o
   const version = connectionVersion();
   let seq = 0;
 
+  let refreshId = 0;
   const refresh = async () => {
+    const id = ++refreshId;
+    const current = () => version === connectionVersion() && id === refreshId;
     try {
       const r = await listManagedMachines();
-      if (version !== connectionVersion()) return;
+      if (!current()) return;
       setData(r); setFetchedAt(Date.now()); setLoadError(null);
-    } catch (e) { setLoadError(managedError(e)); }
+    } catch (e) { if (current()) setLoadError(managedError(e)); }
   };
   onMount(() => {
     if (isConnected()) void refresh();
@@ -591,7 +595,12 @@ export function ManagedMachines(p: { nodes?: readonly RemoteNodeView[] | null; o
     };
   };
 
-  return <Show when={isConnected() && data()}>
+  return <Show when={isConnected()}>
+    <ErrorToast title="Couldn’t refresh managed machines" error={loadError()} background action={{ label: "Retry", run: refresh }} />
+    <Show when={data() === undefined && !loadError()}>
+      <ProvidersLoadingCard label="Loading machine providers" />
+    </Show>
+    <Show when={data()}>
     <Show when={(data()!.providers?.length ?? 0) > 0}>
       <MachineProvidersCard
         providers={data()!.providers!}
@@ -614,7 +623,6 @@ export function ManagedMachines(p: { nodes?: readonly RemoteNodeView[] | null; o
         {days => <SpendChart days={days()} budget={data()!.budget} />}
       </Show>
       <ErrorToast error={actionError()} onDismiss={() => setActionError(null)} />
-      <ErrorToast title="Couldn’t refresh managed machines" error={loadError()} background action={{ label: "Retry", run: () => refresh() }} />
       <div class="m-list s-card managed-list">
         <For each={liveGroups().map(g => g.provider)}>{provider => {
           const group = () => liveGroups().find(g => g.provider === provider)!;
@@ -663,6 +671,7 @@ export function ManagedMachines(p: { nodes?: readonly RemoteNodeView[] | null; o
       <Show when={confirm()}>{m => <ConfirmDialog title={`Destroy ${machineName(m())}?`} destructive action="Destroy"
         description={`The ${m().size} machine and everything on it are deleted now${m().owner_mission_id ? `, and mission ${m().owner_mission_id!.slice(0, 8)} loses it` : ""}. Cost so far: ${usd(liveCost(m(), fetchedAt()))}.`}
         onClose={() => setConfirm(null)} onConfirm={() => void destroy(m())} />}</Show>
+    </Show>
     </Show>
   </Show>;
 }

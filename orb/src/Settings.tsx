@@ -632,7 +632,7 @@ export function BackendTab(p: { standalone?: boolean } = {}) {
       return;
     }
     const cached = cachePeek<ServerHealthInfo>(`settings:health:${target}`);
-    if (cached !== undefined) setHealth(cached);
+    setHealth(cached ?? null);
     const ctrl = new AbortController();
     const timer = setTimeout(() => {
       void probeHealth(target, ctrl.signal)
@@ -692,6 +692,7 @@ export function BackendTab(p: { standalone?: boolean } = {}) {
     return status?.auth_mode === "single_tenant" || status?.auth_mode === "disabled";
   };
   const isMultiUser = () => health()?.auth_mode === "multi_user";
+  const acceptsUsername = () => !health() || isMultiUser();
   const authNotRequired = () => health()?.auth_required === false;
   const canConnect = () => {
     if (busy() || githubBusy()) return false;
@@ -711,7 +712,7 @@ export function BackendTab(p: { standalone?: boolean } = {}) {
       if (authNotRequired() && !password().trim()) {
         await setConnection(url(), "dev-mode");
       } else {
-        await login(password(), isMultiUser() ? username() : undefined);
+        await login(password(), acceptsUsername() ? username() : undefined);
         setPassword("");
       }
     } catch (e) {
@@ -803,8 +804,8 @@ export function BackendTab(p: { standalone?: boolean } = {}) {
             onInput={(e) => setUrl(e.currentTarget.value)}
           />
         </Row>
-        <Show when={!isConnected() && isMultiUser()}>
-          <Row title="Username" desc="Multi-user account configured on Core.">
+        <Show when={!isConnected() && acceptsUsername()}>
+          <Row title="Username" desc={isMultiUser() ? "Multi-user account configured on Core." : "Enter your username if this Core uses named accounts."}>
             <input
               class="s-input"
               aria-label="Username"
