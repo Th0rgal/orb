@@ -40,6 +40,17 @@ private def hydratedHistory : DesktopState := { hierarchyFixture with
 #guard (({ hydratedHistory with openMission := some "m" } : DesktopState).visibleProjectRows.map (·.rowId)) ==
   ["project:now", "mission:m"]
 
+-- Cold open: the persisted Core timeline populates completed turns; foreign, empty
+-- and identical batches are no-ops that never erase or redraw.
+private def coldFixture : DesktopState :=
+  { hierarchyFixture with screen := .missionTranscript, openMission := some "m", liveData := true }
+#guard (applyHistoryTurns 120 vp coldFixture "m" ["one"]).1.liveTurns == ["one"]
+#guard (applyHistoryTurns 120 vp coldFixture "m" ["one"]).2.isSome
+#guard (applyHistoryTurns 120 vp coldFixture "other" ["one"]).2.isNone
+#guard (applyHistoryTurns 120 vp coldFixture "m" []).2.isNone
+#guard (applyHistoryTurns 120 vp { coldFixture with liveTurns := ["one"] } "m" ["one"]).2.isNone
+#guard (applyHistoryTurns 120 vp { coldFixture with liveTurns := ["old"] } "m" ["one", "two"]).1.liveTurns == ["one", "two"]
+
 private def treeRow (depth : Nat) (selected := false) : ChromeSidebarRow :=
   { widgetId := 1001, rowId := "row", kind := "mission", title := "Row", depth, selected }
 private def treeGeometry (rows : List ChromeSidebarRow) :=
@@ -250,6 +261,72 @@ private def awaitState (slot : IO.Ref (Option LiveSubscription)) (st : DesktopSt
     IO.sleep 10
   throw (IO.userError "poll timed out")
 
+/-- Render the live transcript the way Main.lean's window does, with the current
+stream text synthesized for the no-font driver. -/
+private def renderScreen (st : DesktopState) (streamText : String) : ComputedBox × SceneOutput :=
+  let stream := Widgets.synthInlineRun (Theme.bodyText st.theme) streamText
+  renderWidgetTree 120 (pxToSub 800) (pxToSub 600) st.initialFocusState st.theme
+    (buildDesktopScreen st (pxToSub 800) (pxToSub 600) { streamRuns := [stream] } true)
+
+/-- Semantic diagram assertions shared by the live-turn and cold-open cases: node and
+edge labels are observed exactly once, edges are directed (each label sits strictly
+between its source and target columns), the requested node shapes are observable, the
+nodes are separately hit-testable, and no fence source leaks into the render. -/
+private def assertDiagram (scene : SceneOutput) (observed : List (String × Rect × Rect))
+    (rendered : String) : IO Unit := do
+  let exactlyOne (t what : String) : IO Rect := do
+    match observed.filter (fun p => p.1 == t) with
+    | [(_, sub, _)] => pure sub
+    | _ => throw (IO.userError ("rendered diagram " ++ what ++ " was not observed exactly once: " ++ t))
+  let spec ← exactlyOne "Spec" "node label"
+  let build ← exactlyOne "Build" "node label"
+  let fix ← exactlyOne "Fix" "node label"
+  let approve ← exactlyOne "Approve" "edge label"
+  let revise ← exactlyOne "Revise" "edge label"
+  unless spec.x < approve.x && approve.x < build.x do
+    throw (IO.userError "Approve edge is not directed Spec -> Build")
+  unless build.x < revise.x && revise.x < fix.x do
+    throw (IO.userError "Revise edge is not directed Build -> Fix")
+  let devRectOf (t : String) : Option Rect :=
+    (observed.filter (fun p => p.1 == t)).head?.map (fun p => p.2.2)
+  let observedRadius (t : String) : IO Nat := do
+    let some dev := devRectOf t | throw (IO.userError ("missing device rect for " ++ t))
+    let cx := dev.x + dev.w / 2
+    let cy := dev.y + dev.h / 2
+    let nearest := scene.prims.toList.foldl (fun best p => match p with
+      | .rrect r _ (tl, _, _, _) _ _ =>
+        if r.x ≤ cx && cx ≤ r.x + r.w && r.y ≤ cy && cy ≤ r.y + r.h then
+          let area := r.w * r.h
+          match best with
+          | some (ba, _) => if area < ba then some (area, tl) else best
+          | none => some (area, tl)
+        else best
+      | _ => best) none
+    match nearest with
+    | some (_, radius) => pure radius
+    | none => throw (IO.userError ("no scene rect observed around " ++ t))
+  let specR ← observedRadius "Spec"
+  let buildR ← observedRadius "Build"
+  let fixR ← observedRadius "Fix"
+  unless buildR > specR && specR > fixR do
+    throw (IO.userError "rendered node shapes did not observe pill > rounded > diamond")
+  let covering (sub : Rect) : List Rect :=
+    (scene.hitRegionsSub.filter fun r =>
+      let cx := sub.x + sub.w / 2
+      let cy := sub.y + sub.h / 2
+      r.2.x ≤ cx && cx ≤ r.2.x + r.2.w && r.2.y ≤ cy && cy ≤ r.2.y + r.2.h).map (·.2)
+  let coversCenter (r : Rect) (other : Rect) : Bool :=
+    let ox := other.x + other.w / 2
+    let oy := other.y + other.h / 2
+    r.x ≤ ox && ox ≤ r.x + r.w && r.y ≤ oy && oy ≤ r.y + r.h
+  let hasOwnRegion (self a b : Rect) : Bool :=
+    (covering self).any (fun r => !coversCenter r a && !coversCenter r b)
+  unless hasOwnRegion spec build fix && hasOwnRegion build spec fix &&
+      hasOwnRegion fix spec build do
+    throw (IO.userError "rendered diagram nodes are not separately hit-testable")
+  unless !rendered.contains "```" && !rendered.contains "mermaid" do
+    throw (IO.userError "Mermaid source was rendered as literal text")
+
 def main (args : List String) : IO Unit := do
   for dark in [true, false] do
     for width in [480, 1000] do
@@ -368,6 +445,33 @@ def main (args : List String) : IO Unit := do
   unless st.expandedProjects == ["p"] do throw (IO.userError "single project was collapsed at launch")
   let slot ← IO.mkRef (none : Option LiveSubscription)
   try
+    if args == ["cold-open"] then
+      -- Cold open of a previously completed mission: both turns are persisted in
+      -- Core's timeline before the client attaches. The client must repopulate the
+      -- earlier turn from the real history projection — in-memory liveTurns alone
+      -- cannot reconstruct it — and a third turn then streams live.
+      let some source ← IO.getEnv "ORB_TEST_MERMAID" | throw (IO.userError "missing ORB_TEST_MERMAID")
+      let st ← clickMission st a
+      -- The earlier assistant turn can only come from the persisted timeline: the
+      -- live bubble shows the newest turn, which the transport yields to the stream.
+      let st ← awaitState slot st (fun s => s.liveTurns == ["Amber blossom"] && streamedText s == source)
+      let (rootBox, scene) := renderScreen st source
+      let rendered := renderedBoxRoot rootBox
+      let observed := collectObserved rootBox 24
+      unless rendered.contains "Amber blossom" do
+        throw (IO.userError "cold open did not repopulate the persisted earlier turn")
+      assertDiagram scene observed rendered
+      -- Let the fixture stage the next turn only after the cold-open render passed.
+      let root := (← IO.getEnv "ORB_STATE_DIR").getD ""
+      IO.FS.writeFile (System.FilePath.mk root / "cold-open-observed") "1"
+      let st ← awaitState slot st (fun s => streamedText s == "Ripened fruit")
+      let (rootBox, scene) := renderScreen st "Ripened fruit"
+      let rendered := renderedBoxRoot rootBox
+      let observed := collectObserved rootBox 24
+      unless rendered.contains "Amber blossom" && rendered.contains "Ripened fruit" do
+        throw (IO.userError "continuing live stream lost the persisted earlier turns")
+      assertDiagram scene observed rendered
+      return
     if args == ["mermaid-turn"] then
       -- Two-turn live case: the earlier assistant turn must survive the follow-up
       -- turn, whose canonical Mermaid fence renders as an actual diagram.
@@ -375,78 +479,12 @@ def main (args : List String) : IO Unit := do
       let st ← clickMission st a
       let st ← awaitState slot st (fun s => streamedText s == "Amber blossom")
       let st ← awaitState slot st (fun s => streamedText s == source)
-      -- Mirror Main.lean's stream feed; synthesized runs match the no-font driver.
-      let stream := Widgets.synthInlineRun (Theme.bodyText st.theme) source
-      let (rootBox, scene) := renderWidgetTree 120 (pxToSub 800) (pxToSub 600) st.initialFocusState st.theme
-        (buildDesktopScreen st (pxToSub 800) (pxToSub 600) { streamRuns := [stream] } true)
+      let (rootBox, scene) := renderScreen st source
       let rendered := renderedBoxRoot rootBox
       let observed := collectObserved rootBox 24
       unless rendered.contains "Amber blossom" do
         throw (IO.userError "earlier assistant turn was dropped from the live transcript")
-      -- Observe the graph from the rendered boxes; no widget ids are assumed, so a
-      -- correctly rendered graph with any ids passes.
-      let exactlyOne (t what : String) : IO Rect := do
-        match observed.filter (fun p => p.1 == t) with
-        | [(_, sub, _)] => pure sub
-        | _ => throw (IO.userError ("rendered diagram " ++ what ++ " was not observed exactly once: " ++ t))
-      let spec ← exactlyOne "Spec" "node label"
-      let build ← exactlyOne "Build" "node label"
-      let fix ← exactlyOne "Fix" "node label"
-      let approve ← exactlyOne "Approve" "edge label"
-      let revise ← exactlyOne "Revise" "edge label"
-      -- Directed connections: in the LR chain each edge label sits strictly between
-      -- its source and target columns.
-      unless spec.x < approve.x && approve.x < build.x do
-        throw (IO.userError "Approve edge is not directed Spec -> Build")
-      unless build.x < revise.x && revise.x < fix.x do
-        throw (IO.userError "Revise edge is not directed Build -> Fix")
-      -- Node shapes are observable in the scene prims: the pill (Build) has the
-      -- largest corner radius, the rounded node (Spec) the middle and the diamond
-      -- (Fix) the smallest.
-      let devRectOf (t : String) : Option Rect :=
-        (observed.filter (fun p => p.1 == t)).head?.map (fun p => p.2.2)
-      let observedRadius (t : String) : IO Nat := do
-        let some dev := devRectOf t | throw (IO.userError ("missing device rect for " ++ t))
-        let cx := dev.x + dev.w / 2
-        let cy := dev.y + dev.h / 2
-        let nearest := scene.prims.toList.foldl (fun best p => match p with
-          | .rrect r _ (tl, _, _, _) _ _ =>
-            if r.x ≤ cx && cx ≤ r.x + r.w && r.y ≤ cy && cy ≤ r.y + r.h then
-              let area := r.w * r.h
-              match best with
-              | some (ba, _) => if area < ba then some (area, tl) else best
-              | none => some (area, tl)
-            else best
-          | _ => best) none
-        match nearest with
-        | some (_, radius) => pure radius
-        | none => throw (IO.userError ("no scene rect observed around " ++ t))
-      let specR ← observedRadius "Spec"
-      let buildR ← observedRadius "Build"
-      let fixR ← observedRadius "Fix"
-      unless buildR > specR && specR > fixR do
-        throw (IO.userError "rendered node shapes did not observe pill > rounded > diamond")
-      -- The three nodes are separately interactive, asserted semantically: each
-      -- label center is covered by at least one hit region that does not cover the
-      -- other two nodes' label centers (a region specific to that node), whatever
-      -- widget ids the renderer assigned and even if a container region spans the
-      -- whole diagram.
-      let covering (sub : Rect) : List Rect :=
-        (scene.hitRegionsSub.filter fun r =>
-          let cx := sub.x + sub.w / 2
-          let cy := sub.y + sub.h / 2
-          r.2.x ≤ cx && cx ≤ r.2.x + r.2.w && r.2.y ≤ cy && cy ≤ r.2.y + r.2.h).map (·.2)
-      let coversCenter (r : Rect) (other : Rect) : Bool :=
-        let ox := other.x + other.w / 2
-        let oy := other.y + other.h / 2
-        r.x ≤ ox && ox ≤ r.x + r.w && r.y ≤ oy && oy ≤ r.y + r.h
-      let hasOwnRegion (self a b : Rect) : Bool :=
-        (covering self).any (fun r => !coversCenter r a && !coversCenter r b)
-      unless hasOwnRegion spec build fix && hasOwnRegion build spec fix &&
-          hasOwnRegion fix spec build do
-        throw (IO.userError "rendered diagram nodes are not separately hit-testable")
-      unless !rendered.contains "```" && !rendered.contains "mermaid" do
-        throw (IO.userError "Mermaid source was rendered as literal text")
+      assertDiagram scene observed rendered
       return
     if args == ["start-running"] then
       let st ← clickMission st b

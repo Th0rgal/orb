@@ -1561,4 +1561,18 @@ def applyLiveText (scale : Nat) (viewport : Rect) (st : DesktopState) (mission t
       else st.liveTurns
     flushStreamFrame scale viewport { st with liveTurns, stream := { st.stream with shown := [], pending := [text] } }
 
+/-- Cold open of a persisted mission: the Core timeline owns completed turns, so a fresh
+history batch read from `GET /events` replaces the client's archive; the live bubble keeps
+owning the current turn (the transport yields the exact-colliding newest turn to the
+stream). Empty, foreign or identical batches are no-ops that never erase or redraw. -/
+def applyHistoryTurns (scale : Nat) (viewport : Rect) (st : DesktopState) (mission : String)
+    (turns : List String) : DesktopState × Damage :=
+  if !st.liveData || st.screen != .missionTranscript || st.openMission != some mission ||
+      turns.isEmpty || st.liveTurns == turns then (st, none)
+  else
+    ({ st with
+      liveTurns := turns
+      stream := { st.stream with shown := [], pending := [] } },
+      some (transcriptDamageRect scale viewport st.sidebarWidth))
+
 end OrbDesktop

@@ -490,7 +490,7 @@ class Delivery(unittest.TestCase):
         self.run_wire('reconnect')
 
     def run_wire(self, mode):
-        paths, tokens = [], []
+        paths, tokens, cold_polls = [], [], []
         db = fixture()
         if mode == 'mermaid-turn':
             # Two-turn live case: turn one is already persisted when the client
@@ -500,6 +500,16 @@ class Delivery(unittest.TestCase):
                        (json.dumps({'content': 'PRIVATE', 'queued': False}),))
             db.execute("INSERT INTO mission_events VALUES(NULL,'a',2,2,'assistant_message_canonical',?,'{}','')",
                        (json.dumps({'content': 'Amber blossom'}),))
+        if mode == 'cold-open':
+            # Completed mission: both turns are already in Core's timeline before
+            # the client attaches. A third turn streams live, but only after the
+            # driver has observed and asserted the cold-open render (marker file).
+            db.execute("DELETE FROM mission_events WHERE mission_id='a'")
+            db.execute("UPDATE missions SET status='completed' WHERE id='a'")
+            for seq, kind, content in ((1, 'user_message', 'PRIVATE'), (2, 'assistant_message_canonical', 'Amber blossom'),
+                                       (3, 'user_message', 'PRIVATE'), (4, 'assistant_message_canonical', MERMAID_TURN)):
+                db.execute("INSERT INTO mission_events VALUES(NULL,'a',?,?,?,?,'{}','')",
+                           (seq, seq, kind, json.dumps({'content': content, 'queued': False})))
         project_started = threading.Event()
         release_project = threading.Event()
         events = '/current-bubble'
@@ -554,6 +564,23 @@ class Delivery(unittest.TestCase):
                     result = []
                 elif path.startswith('/api/control/missions?project=p&') or path == '/api/machines':
                     result = []
+                elif path.split('?')[0] == a + '/events':
+                    # Real Core timeline projection (bounded canonical page, newest
+                    # first), read from the same mission_events rows the bubble reads.
+                    query = live.urllib.parse.parse_qs(live.urllib.parse.urlsplit(path).query)
+                    if query.get('types') != ['assistant_message_canonical'] or query.get('limit') != ['200']:
+                        self.send_error(400)
+                        return
+                    rows = db.execute(
+                        "SELECT id, COALESCE(NULLIF(seq,0),sequence), payload, content FROM mission_events"
+                        " WHERE mission_id='a' AND event_type='assistant_message_canonical'"
+                        " ORDER BY COALESCE(NULLIF(seq,0),sequence) DESC, id DESC LIMIT 200").fetchall()
+                    result = []
+                    for row in reversed(rows):
+                        payload = json.loads(row[2]) if row[2] else {}
+                        content = payload.get('content') if isinstance(payload.get('content'), str) else row[3]
+                        result.append(dict(id=row[0], mission_id='a', sequence=row[1],
+                                           event_type='assistant_message_canonical', content=content))
                 elif path.split('?')[0] in (a + events, b + events):
                     mid = path.split('/')[-2]
                     presence = path.endswith('?presence=1')
@@ -575,6 +602,18 @@ class Delivery(unittest.TestCase):
                     elif mid == 'a' and paths.count(path) > 1:
                         db.execute("UPDATE missions SET title='Updated', status='awaiting_user' WHERE id='a'")
                         db.execute("UPDATE mission_events SET payload=json_set(payload,'$.queued',json('false')) WHERE mission_id='a' AND seq=3")
+                    if mid == 'a' and mode == 'cold-open' and (Path(root) / 'cold-open-observed').exists():
+                        # Turn boundary first, then the new canonical turn, so the
+                        # client sees the real projection sequence after cold open.
+                        cold_polls.append(path)
+                        if len(cold_polls) == 1 and not db.execute(
+                                "SELECT 1 FROM mission_events WHERE mission_id='a' AND seq=5").fetchone():
+                            db.execute("INSERT INTO mission_events VALUES(NULL,'a',5,5,'user_message',?,'{}','')",
+                                       (json.dumps({'content': 'PRIVATE', 'queued': False}),))
+                        elif len(cold_polls) >= 3 and not db.execute(
+                                "SELECT 1 FROM mission_events WHERE mission_id='a' AND seq=6").fetchone():
+                            db.execute("INSERT INTO mission_events VALUES(NULL,'a',6,6,'assistant_message_canonical',?,'{}','')",
+                                       (json.dumps({'content': 'Ripened fruit'}),))
                     if mid == 'b' and ((mode == 'revoke' and paths.count(path) > 1) or mode == 'idle-share'):
                         db.execute('DELETE FROM mission_shares')
                     row = db.execute(QUERY, {'1': mid, '2': '0', '3': 'owner', '4': '1' if presence else '0'}).fetchone()
@@ -623,6 +662,13 @@ class Delivery(unittest.TestCase):
                     # (turn, boundary, canonical) and mission b stays unpolled.
                     self.assertGreaterEqual(paths.count(a + events), 3)
                     self.assertNotIn(b + events, paths)
+                elif mode == 'cold-open':
+                    # One bounded history read populates the cold open; the third
+                    # turn must stage across later polls; mission b stays unpolled.
+                    self.assertEqual(paths.count(a + '/events?types=assistant_message_canonical&limit=200'), 1)
+                    self.assertGreaterEqual(paths.count(a + events), 3)
+                    self.assertNotIn(b + events, paths)
+                    self.assertFalse(any(p.split('?')[0] == b + '/events' for p in paths))
                 elif mode in ('page-two', 'null-retry', 'start-running', 'project-lag'):
                     self.assertIn(b + events, paths)
                 elif mode in ('idle-identity', 'before-open', 'unavailable', 'denied', 'idle-session', 'project-first'):
@@ -670,8 +716,31 @@ class Delivery(unittest.TestCase):
     def test_oversized_bubble_preserves_roster(self):
         self.run_wire('oversize')
 
+    def test_cold_open_history_yields_the_newest_persisted_turn_to_the_live_bubble(self):
+        rows = [
+            dict(sequence=4, event_type='assistant_message_canonical', content='graph LR'),
+            dict(sequence=2, event_type='assistant_message_canonical', content='Amber blossom'),
+            dict(sequence=3, event_type='user_message', content='PRIVATE'),
+            dict(sequence=5, event_type='tool_call', content='PRIVATE'),
+        ]
+        conn = Mock(binding='bound')
+        conn.get.return_value = rows
+        path = '/api/control/missions/a/events?types=assistant_message_canonical&limit=200'
+        self.assertEqual(live.history_turns(conn, 'a', 'graph LR'), ['Amber blossom'])
+        self.assertEqual(conn.get.call_args.args[0], path)
+        self.assertEqual(live.history_turns(conn, 'a', 'Ripened fruit'), ['Amber blossom', 'graph LR'])
+        for error in (live.ResponseTooLarge('too large'), live.urllib.error.HTTPError('x', 403, '', {}, None)):
+            conn.get.side_effect = error
+            self.assertEqual(live.history_turns(conn, 'a', ''), [])
+        conn.get.side_effect = None
+        conn.get.return_value = {'error': 'invalid timeline'}
+        self.assertEqual(live.history_turns(conn, 'a', ''), [])
+
     def test_two_turn_live_keeps_history_and_renders_mermaid(self):
         self.run_wire('mermaid-turn')
+
+    def test_cold_open_repopulates_persisted_history_and_streams_onward(self):
+        self.run_wire('cold-open')
 
     def test_credential_rotation(self):
         self.run_wire('identity')

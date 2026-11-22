@@ -1107,15 +1107,42 @@ def projection(c, mid, presence=False):
     return [label(obj['title']), label(obj['status']), ''.join(ch for ch in obj['text'] if ch in '\n\t' or ch.isprintable())]
 
 
+def history_turns(c, mid, first_text):
+    """Completed assistant turns from the real Core timeline, one bounded page,
+    ascending. The live bubble owns the current turn; when the newest persisted
+    turn is exactly the text the bubble already shows, the bubble keeps owning it
+    (history owns completed turns, the stream owns the turn in flight)."""
+    try:
+        rows = c.get('/api/control/missions/' + mid + '/events?types=assistant_message_canonical&limit=200',
+                     8 << 20)
+    except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, ValueError, KeyError, TypeError):
+        return []
+    if not isinstance(rows, list):
+        return []
+    turns = [(r.get('sequence') or 0, r['content']) for r in rows
+             if isinstance(r, dict) and r.get('event_type') == 'assistant_message_canonical'
+             and isinstance(r.get('content'), str)]
+    turns.sort(key=lambda pair: pair[0])
+    texts = [content for _, content in turns]
+    if texts and texts[-1] == first_text:
+        texts.pop()
+    return texts
+
+
 def poll_bubble(mid, binding):
     c = Connection()
     if c.binding != binding or not re.fullmatch(r'[A-Za-z0-9_-]{1,128}', mid):
         return
     previous = None
+    pending_history = True
     while True:
         c.check()
         try:
             title, status, text = projection(c, mid)
+            if pending_history:
+                pending_history = False
+                for turn in history_turns(c, mid, text):
+                    print('H\t' + turn.replace('\n', '\x1e').replace('\t', '\x1f'), flush=True)
             fields = ('B', title, status, text.replace('\n', '\x1e').replace('\t', '\x1f'))
         except urllib.error.HTTPError as error:
             if error.code in (403, 404):
