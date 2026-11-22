@@ -100,7 +100,7 @@ routes through the verified unboxed kernel functions in `Orb.Kernel`:
   API calls (`renameOptimistically`, `moveMission`, `archiveMission`, `reopenMission`), so
   optimistic updates and error toasts have one implementation. macOS (`NSTableView`) does
   not have this menu yet.
-- In the GTK rename dialog, Escape discards the edited title and returns focus to the originating window. The mission title and current selection are preserved.
+- In the focused title field, Return and keypad Enter submit the new name to Core. In the GTK rename dialog, Escape discards the edited title and returns focus to the originating window. The mission title and current selection are preserved.
 - "+" buttons (`linux_shell/gtk_chrome.c`, `row_add_target`), matching the HTML sidebar: the
   `section:projects` row always shows "+" (New project); `project` and `folder` rows show "+"
   (New agent in that project or folder) on row hover or keyboard focus. They occupy space the row

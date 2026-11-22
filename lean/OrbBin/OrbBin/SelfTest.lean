@@ -1043,6 +1043,20 @@ private def runCodexMessageBoundaryTests : IO Unit := do
   let codexChunk := parseOneShotHarnessEvent "codex" "{\"type\":\"text\",\"text\":\"lo\"}"
   assertEq "Codex partial text frames stay contiguous" (joinHarnessText "codex" "Hel" none codexChunk).1 "lo"
 
+private def testAntigravityProviderDenial : IO Unit := do
+  let agEvent := OrbBin.ClaudeControl.parseOneShotHarnessEvent "antigravity"
+  let denied := "HTTP 403 PERMISSION_DENIED: terms of service (private-fixture.invalid)"
+  let refusal := some "Google denied this Antigravity request and cited its terms of service. Review the account status with Google."
+  assertEq "Provider terms refusal takes priority over a subsequent sign-in link"
+    (agEvent (denied ++ " " ++ "Authentication required. Please visit https://accounts.google.com/o/oauth2/auth?state=test-marker")).errorMsg? refusal
+  let structured := agEvent (renderCompact (.obj #[("event", .str "result"), ("result",
+    .obj #[("status", .str "ERROR"), ("error", .obj #[("status", .str "PERMISSION_DENIED"),
+      ("message", .str denied)])])]))
+  assertEq "Structured provider refusal omits identifiers" structured.errorMsg? refusal
+  assertEq "Other provider denials do not imply a terms violation" (agEvent "HTTP 403 forbidden").errorMsg?
+    (some "Google denied this Antigravity request. Check the account’s access to the selected model.")
+  assertEq "A terms reference alone does not classify a denial" (agEvent "terms of service").errorMsg? none
+
 def runAllTests : IO UInt32 := do
   runCodexMessageBoundaryTests
   let prompt := "--model is part of this prompt\nwith 'quotes' and a trailing newline\n"
@@ -1078,6 +1092,7 @@ def runAllTests : IO UInt32 := do
   let authFailure := agEvent (renderCompact (.obj #[("event", .str "result"),
     ("result", .obj #[("status", .str "ERROR"), ("error", .str authLine)])]))
   assertEq "Structured Antigravity login failures use the same diagnostic" authFailure.errorMsg? authMessage
+  testAntigravityProviderDenial
   runOpenCodeAcpTests
   IO.println "=== OrbBin Wave 1 Companion Binaries Self-Test ==="
 

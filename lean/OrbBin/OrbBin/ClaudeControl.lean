@@ -1604,10 +1604,16 @@ def parseOpenCodeAcpUpdate (u : JVal) : OneShotLineParsed :=
         } }
   else {}
 
-/-- A noninteractive mission cannot complete the CLI's browser challenge. Keep its
-    OAuth state and authorization URL out of the mission's error message. -/
-def antigravitySignInError? (diagnostic : String) : Option String :=
-  if ["Authentication required. Please visit", "Waiting for authentication (timeout",
+/-- Publish a stable account diagnostic without echoing Google account identifiers or OAuth URLs. -/
+def antigravityAccountError? (diagnostic : String) : Option String :=
+  let lower := diagnostic.toLower
+  let denied := lower.contains "permission_denied" || lower.contains "403 forbidden" ||
+    lower.contains "http 403" || lower.contains "status code 403"
+  if denied && ["terms of service", "terms acceptance", "tos_violation"].any (fun marker => lower.contains marker) then
+    some "Google denied this Antigravity request and cited its terms of service. Review the account status with Google."
+  else if denied then
+    some "Google denied this Antigravity request. Check the account’s access to the selected model."
+  else if ["Authentication required. Please visit", "Waiting for authentication (timeout",
       "paste the authorization code here", "authentication timed out", "authentication failed or timed out",
       "accounts.google.com/o/oauth2/auth"].any (fun marker => diagnostic.contains marker) then
     some "Antigravity needs a native Google sign-in for the account on this machine. Check its connection in Inference before retrying."
@@ -1618,7 +1624,7 @@ def parseOneShotHarnessEvent (harness : String) (rawLine : String) : OneShotLine
   let trimmed := rawLine.trimAscii.toString
   if trimmed.isEmpty then return {}
   if harness == "antigravity" then
-    let .ok event := OrbBin.Json.parse trimmed | return { errorMsg? := antigravitySignInError? trimmed }
+    let .ok event := OrbBin.Json.parse trimmed | return { errorMsg? := antigravityAccountError? trimmed }
     match event.fieldStr? "event" with
     | some "init" =>
       return { sessionId? := event.fieldStr? "conversation_id" >>= parseUuidCanonical? }
@@ -1639,12 +1645,14 @@ def parseOneShotHarnessEvent (harness : String) (rawLine : String) : OneShotLine
       let result := event.fieldOrNull "result"
       let ok := result.fieldStr? "status" == some "SUCCESS"
       let usage := result.fieldOrNull "usage"
+      let error := result.fieldOrNull "error"
       let diagnostic := (result.fieldStr? "error").getD "Antigravity turn failed"
+      let accountError := antigravityAccountError? (renderCompact error)
       return {
         sessionId? := result.fieldStr? "conversation_id" >>= parseUuidCanonical?
         textDelta := if ok then (result.fieldStr? "response").getD "" else ""
         finalTextFallback := true
-        errorMsg? := if ok then none else some ((antigravitySignInError? diagnostic).getD (diagnostic.take 500).toString)
+        errorMsg? := if ok then none else some (accountError.getD (diagnostic.take 500).toString)
         inputTokens? := usage.fieldUInt64? "input_tokens", outputTokens? := usage.fieldUInt64? "output_tokens",
         cacheReadTokens? := usage.fieldUInt64? "cache_read_tokens" }
     | _ => return {}

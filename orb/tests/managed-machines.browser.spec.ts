@@ -60,7 +60,7 @@ async function mock(page: Page, opts: Opts = {}) {
     if (path === "/api/managed-machines/snapshots") return route.fulfill({ json: { snapshots } });
     if (path === "/api/managed-machines/providers" && method === "GET") {
       if (!providers) return route.fulfill({ status: 404, body: "" });
-      return route.fulfill({ json: { providers } });
+      return route.fulfill({ json: providers });
     }
     if (path.startsWith("/api/managed-machines/providers/") && method === "PUT") {
       state.calls.push(`${method} ${path} ${req.postData() ?? ""}`);

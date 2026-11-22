@@ -3,6 +3,14 @@
 Status: normative. Applies to the desktop Orb (`orb/`), and in reduced form to
 iOS (`ios_dashboard/`) and Android (`android_dashboard/`).
 
+**A confirmed rename survives stale reads.** The open conversation and
+project roster can deliver their copies in either order. Once a row has a
+title stamped by Core, a full or partial row carrying older or missing
+`metadata_updated_at` keeps that title and timestamp. Other fields in the
+response follow their usual merge rules, including status. A later timestamp
+can rename the mission again, including back to its previous title. Legacy rows without a known title timestamp keep merging
+in arrival order.
+
 ## Problem
 
 The sidebar nests missions a mission launched (subagents) inside their parent,
@@ -122,14 +130,6 @@ parent of every row in the converged tree is the same.
 optimistic moves and archives, and an open conversation laid over its list
 row all go through `mergeMission(prev, patch, "partial")`. That call changes
 only the fields the patch names.
-
-**H6. A confirmed rename survives stale reads.** The open conversation and
-project roster can deliver their copies in either order. Once a row has a
-title stamped by Core, a full or partial row carrying older or missing
-`metadata_updated_at` keeps that title and timestamp. Its status can still
-advance. A later timestamp can rename the mission again, including back to
-its previous title. Legacy rows without a known title timestamp keep merging
-in arrival order.
 
 **F1. Fork-group leadership respects retirement, liveness, and lineage.** Within
 any connected `fork-of:` group (`forkLeaders` on desktop, iOS, and Android),
