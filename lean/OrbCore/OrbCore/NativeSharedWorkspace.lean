@@ -89,6 +89,25 @@ private def claim (store : CoreStore) (grant job : String) : IO Bool := do
     #[job, digest] | return false
   return rows.size == 2
 
+/-- Time spent waiting for an explicit approval is accounted separately from model work. -/
+structure ApprovalWait where
+  elapsedMs : Nat := 0
+  startedMs : Option Nat := none
+  deriving Inhabited
+
+def ApprovalWait.totalMs (wait : ApprovalWait) (now : Nat) : Nat :=
+  wait.elapsedMs + (wait.startedMs.map (fun start => now - start)).getD 0
+
+private def modelBudgetMs : Nat := 150000
+private def approvalBudgetMs : Nat := 450000
+
+def turnExpired (start now : Nat) (wait : ApprovalWait) : Bool :=
+  now - start ≥ modelBudgetMs + min approvalBudgetMs (wait.totalMs now)
+
+/-- Read grace after Core's hard deadline lets the worker receive the terminal frame. -/
+def turnReadTimeoutSecs (goal : Bool) : Nat :=
+  (modelBudgetMs + (if goal then approvalBudgetMs else 0)) / 1000 + 5
+
 /-- Pump one process only. The stdin pipe ties the isolated route and profile to Core. -/
 def pumpTurn (store : CoreStore) (hub : ProviderRuntimeHub) (working grant job node owner prompt : String)
     (conversation : Option String) (expectedUid : Nat) (config : HolderConfig)
@@ -109,9 +128,10 @@ def pumpTurn (store : CoreStore) (hub : ProviderRuntimeHub) (working grant job n
       | return .error "native_holder_unavailable"
     let (input, running) ← child.takeStdin
     let stopping ← IO.mkRef false
+    let approvalWait ← IO.mkRef ({} : ApprovalWait)
+    let start ← IO.monoMsNow
     let watch ← IO.asTask (prio := .dedicated) do
       try
-        let deadline := (← IO.monoMsNow) + 150000
         let mut ticks : Nat := 0
         while !(← stopping.get) do
           IO.sleep 250
@@ -122,7 +142,7 @@ def pumpTurn (store : CoreStore) (hub : ProviderRuntimeHub) (working grant job n
             let accounts ← loadHydratedProviders store working
             valid := accounts.any fun hp => hp.id == p.account && hp.providerType == "antigravity" &&
               hp.enabled && hp.hasOAuth && hp.oauthToken == token && !(accountRoutingFile accounts hp).isEmpty
-          if !valid || (← IO.monoMsNow) > deadline then
+          if !valid || turnExpired start (← IO.monoMsNow) (← approvalWait.get) then
             discard <| running.kill.toBaseIO
             break
       catch _ =>
@@ -146,6 +166,14 @@ def pumpTurn (store : CoreStore) (hub : ProviderRuntimeHub) (working grant job n
             return .error "native_holder_protocol"
           let checked ← withVerifiedProfile store hub working grant job node owner fun current currentToken _ => do
             unless current == p && currentToken == token do return .error "native_shared_workspace_denied"
+            if delegated && action == some "ask" then
+              let before ← IO.monoMsNow
+              approvalWait.modify fun w => {w with startedMs := some before}
+              try
+                return .ok (← delegateCall p operation)
+              finally
+                let afterWait ← IO.monoMsNow
+                approvalWait.modify fun w => ⟨w.totalMs afterWait, none⟩
             return .ok (← (if delegated then delegateCall else fileCall) p operation)
           let .ok reply := checked | return .error "native_shared_workspace_denied"
           unless (← placement? store grant job node owner (← coreEpochSec)) == some p do

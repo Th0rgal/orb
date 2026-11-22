@@ -540,3 +540,12 @@ the subscriber returns a successful terminal event without offering a callable
 workspace tool. API-key fixtures and synthetic subscription catalogs exercise
 different provider behavior. Neither qualifies a Google subscription for
 delegation or Goal mode.
+
+A native workspace turn has 150 seconds of model and tool execution time.
+While a remote Goal waits for an individual delegation approval, its holder
+continues to check the live grant, placement, owner and provider credential.
+Only time inside the approval request is credited, up to 450 seconds across
+the turn. A turn therefore ends within ten minutes even if every request is
+waiting. Processing resumes against the original execution budget when the
+member answers. The worker allows five seconds beyond the holder deadline
+for the terminal response.

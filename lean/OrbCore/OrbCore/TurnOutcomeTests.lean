@@ -609,6 +609,16 @@ private def startupRecovery (root : String) : IO Unit := do
     closeCoreStore recovered
 
 def run : IO Unit := do
+  -- Production Neon spent 158 seconds on one turn with three sequential permissions.
+  let openWait : NativeSharedWorkspace.ApprovalWait := ⟨20000, some 130000⟩
+  check (!(NativeSharedWorkspace.turnExpired 0 158000 openWait)) "approval wait preserves active model time"
+  let finishedWait : NativeSharedWorkspace.ApprovalWait := ⟨openWait.totalMs 158000, none⟩
+  check (!(NativeSharedWorkspace.turnExpired 0 197999 finishedWait) &&
+    NativeSharedWorkspace.turnExpired 0 198000 finishedWait) "model budget resumes after consent"
+  check (NativeSharedWorkspace.turnExpired 0 150000 {} &&
+    NativeSharedWorkspace.turnExpired 0 600000 ⟨0, some 0⟩) "ordinary and absolute Goal limits"
+  check (NativeSharedWorkspace.turnReadTimeoutSecs false == 155 &&
+    NativeSharedWorkspace.turnReadTimeoutSecs true == 605) "worker waits through the holder's hard deadline"
   r24_lost_reply_is_uncertain_not_rejected
   r24_failed_enqueue_is_not_success
   r24_failed_dispatch_is_not_success

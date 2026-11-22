@@ -16,13 +16,13 @@ def turn():
         raw = handle.read(2 * 1024 * 1024 + 1)
     if len(raw) > 2 * 1024 * 1024:
         return False
-    job, owner, node, conversation = sys.argv[1:]
+    job, owner, node, conversation, read_timeout = sys.argv[1:]
     payload = json.dumps(dict(job=job, owner=owner, node=node, prompt=raw.decode(),
                               conversation=conversation or None)).encode()
     headers = {"Content-Type": "application/json", "X-Orb-Job-Grant": os.environ.pop("ORB_NATIVE_ANTIGRAVITY_TOKEN")}
     deadline = time.monotonic() + 20
     while True:
-        conn = http.client.HTTPSConnection(base.hostname, base.port, timeout=155)
+        conn = http.client.HTTPSConnection(base.hostname, base.port, timeout=int(read_timeout))
         try:
             conn.request("POST", base.path.rstrip("/") + "/api/native/antigravity/workspace-turn", payload, headers)
             response = conn.getresponse()
