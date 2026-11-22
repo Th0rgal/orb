@@ -15,6 +15,7 @@ import urllib.request
 import uuid
 
 from live_writes import ROOT, process, wait
+from remote_write_probe import check_remote_append, observe_node
 
 
 def check(tmp, mode):
@@ -52,6 +53,7 @@ def check(tmp, mode):
                 with contextlib.suppress(ProcessLookupError):
                     os.kill(int(pid), 15)
         stack.callback(reap)
+        submissions = observe_node(stack, env) if mode == "remote-append" else []
         server = start()
         token = wait('login', login)
         mid = api('/api/control/missions', {'title': 'write-window', 'backend': 'claudecode' if mode in ('pipe','fd','retire','stop-archive') else 'codex'})['id']
@@ -69,7 +71,9 @@ def check(tmp, mode):
                 return body
             raise AssertionError('expected refusal: ' + error)
 
-        if mode == 'busy':
+        if mode == 'remote-append':
+            check_remote_append(tmp, api, mid, submissions)
+        elif mode == 'busy':
             send()
             wait('first PID', lambda: launches.exists() and launches.stat().st_size)
             key = str(uuid.uuid4())
@@ -268,6 +272,6 @@ def check(tmp, mode):
 
 if __name__ == '__main__':
     import sys
-    for mode in sys.argv[1:] or ('stop', 'receipt', 'activation', 'pipe', 'archive-activation', 'archive-registration', 'supersede', 'completion', 'fd', 'busy', 'retire', 'stop-archive'):
+    for mode in sys.argv[1:] or ('stop', 'receipt', 'activation', 'pipe', 'archive-activation', 'archive-registration', 'supersede', 'completion', 'fd', 'busy', 'retire', 'stop-archive', 'remote-append'):
         with tempfile.TemporaryDirectory(prefix='orb-write-window-') as d:
             check(Path(d), mode)

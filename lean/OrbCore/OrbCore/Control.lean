@@ -2255,11 +2255,15 @@ def launchLocalWakeup (st : CoreAppState) (mr : MissionRecord) (prompt : String)
   return (← launchLocalCoreMissionTurn st mr.id mr.backend mr.workingDirectory prompt mr.modelOverride
     mr.modelEffort "bypassPermissions" sid? "local" false (some claim)).isOk
 
+private inductive ManagedTargetFailure where
+  | preflight (response : Nat × String)
+  | provisioning (response : Nat × String)
+
 /-- Resolve or provision a concrete remote node when a control-plane mission turn targets
     `auto-managed[:provider][:size]`. Reuses any existing scoped ready machine for the mission/user;
     otherwise provisions a managed VM for the mission owner through the shared admission, provider
     choice, pricing, and project-scoped snapshot path, and binds `owner_mission := missionId`. -/
-def resolveOrProvisionAutoManagedTarget
+private def resolveManagedTarget
     (st : CoreAppState)
     (caller : CallerPrincipal)
     (missionId : String)
@@ -2267,18 +2271,18 @@ def resolveOrProvisionAutoManagedTarget
     (missionProject : String)
     (rawTarget : String)
     (reqBodyJv : JVal)
-    (nowEpochSec : UInt64) : IO (Except (Nat × String) (String × String)) := do
+    (nowEpochSec : UInt64) : IO (Except ManagedTargetFailure (String × String)) := do
   let clean := rawTarget.trimAscii.toString
   let lower := clean.toLower
   if lower != "auto-managed" && !lower.startsWith "auto-managed:" then
     return .ok (clean, "")
   let some mst := st.managedStore?
-    | return .error (409, "{\"error\":\"managed_compute_unavailable\"}")
+    | return .error <| .preflight (409, "{\"error\":\"managed_compute_unavailable\"}")
   if let some existingNode ← scopedReadyManagedMachine? mst (some (st.store, missionId)) then
     return .ok (existingNode, "")
   let (namedProvider?, namedSize?) ← match parseAutoManagedTarget clean with
     | .ok target => pure target
-    | .error e => return .error (400, renderCompact (.obj #[("error", .str e)]))
+    | .error e => return .error <| .preflight (400, renderCompact (.obj #[("error", .str e)]))
   let ownerUid := if !missionOwnerUserId.isEmpty then missionOwnerUserId else caller.userId
   let prefUid := if ownerUid.isEmpty then "admin" else ownerUid
   let nowIso := formatEpochIso8601Utc nowEpochSec
@@ -2288,11 +2292,11 @@ def resolveOrProvisionAutoManagedTarget
     | .ok l => pure l
     | .error _ => pure mf0
   if !live.enabled then
-    return .error (409, "{\"error\":\"managed_fleet_disabled\",\"message\":\"Managed machines are turned off for this Core.\"}")
+    return .error <| .preflight (409, "{\"error\":\"managed_fleet_disabled\",\"message\":\"Managed machines are turned off for this Core.\"}")
   let uPrefs ← getUserManagedPrefs mst prefUid
   let ownerUser? ← if ownerUid.isEmpty then pure none else getUserById? st.store ownerUid
   if !ownerUid.isEmpty && !caller.isLegacyUnscoped && (ownerUser?.isNone || (ownerUser?.map (·.disabled)).getD true) then
-    return .error (403, "{\"error\":\"user_unavailable\"}")
+    return .error <| .preflight (403, "{\"error\":\"user_unavailable\"}")
   let effRole := (ownerUser?.map (·.role)).getD caller.role
   let effCap? := if ownerUser?.isSome then ownerUser?.bind (·.dailySpendCapCents?) else caller.dailySpendCapCents?
   let (infS, cmpS) ← if ownerUid.isEmpty then pure (0, 0) else getUserSpentTodayCents st.store ownerUid utcDay
@@ -2315,27 +2319,27 @@ def resolveOrProvisionAutoManagedTarget
       (infS + cmpS) effCap? st.managedProvisioningOverride?
   let prov := choice.provider
   if !isKnownProvider prov then
-    return .error (400, "{\"error\":\"unknown_provider\"}")
+    return .error <| .preflight (400, "{\"error\":\"unknown_provider\"}")
   if !isUserManagedProviderEnabled uPrefs prov then
-    return .error (403, "{\"error\":\"provider_disabled_for_user\",\"message\":\"This cloud provider is disabled in your preferences.\"}")
+    return .error <| .preflight (403, "{\"error\":\"provider_disabled_for_user\",\"message\":\"This cloud provider is disabled in your preferences.\"}")
   let providerEnabled ← match ← ManagedProviderSettings.isEnabled mst prov with
     | .ok value => pure value
-    | .error e => return .error (503, renderCompact (.obj #[("error", .str e)]))
+    | .error e => return .error <| .preflight (503, renderCompact (.obj #[("error", .str e)]))
   if !providerEnabled then
-    return .error (409, renderCompact (.obj #[("error", .str "provider_disabled"), ("provider", .str prov)]))
+    return .error <| .preflight (409, renderCompact (.obj #[("error", .str "provider_disabled"), ("provider", .str prov)]))
   let sz ← match ← resolveObservedSpawnSize st.store.rootDir prov (.obj sizeFields) st.managedProvisioningOverride?.isNone with
     | .ok s => pure s
-    | .error e => return .error (400, renderCompact (.obj #[("error", .str e)]))
+    | .error e => return .error <| .preflight (400, renderCompact (.obj #[("error", .str e)]))
   let estCents ← match quoteManagedSpawnCents prov sz ttlMins (st.managedProvisioningOverride?.map Prod.fst) with
     | .ok cents => pure cents
-    | .error e => return .error (400, renderCompact (.obj #[("error", .str e)]))
+    | .error e => return .error <| .preflight (400, renderCompact (.obj #[("error", .str e)]))
   let denyCode := admitManagedSpawnMultiUser live estCents (infS + cmpS) effCap? ttlMins.toUInt32
   if denyCode == 2 then
-    return .error (429, "{\"error\":\"daily_spend_cap_exceeded\",\"scope\":\"user\"}")
+    return .error <| .preflight (429, "{\"error\":\"daily_spend_cap_exceeded\",\"scope\":\"user\"}")
   if denyCode != 0 then
     if estCents > live.dailyCapCents || live.spentTodayCents > live.dailyCapCents - estCents then
-      return .error (429, "{\"error\":\"daily_spend_cap_exceeded\",\"scope\":\"global\"}")
-    return .error (429, renderCompact (.obj #[("error", .str "managed_concurrency_limit_reached"),
+      return .error <| .preflight (429, "{\"error\":\"daily_spend_cap_exceeded\",\"scope\":\"global\"}")
+    return .error <| .preflight (429, renderCompact (.obj #[("error", .str "managed_concurrency_limit_reached"),
       ("max_concurrent", JVal.uint64 live.maxConcurrent)]))
   let userAdmission? := managedUserAdmissionOf effRole effCap? infS cmpS (← memberMaxMachines)
   let vmId ← nextUniqueId st "vm" nowEpochSec
@@ -2362,11 +2366,11 @@ def resolveOrProvisionAutoManagedTarget
       | some pair => pure pair.1
       | none => match ← resolveManagedProvider st.store.rootDir prov with
         | .ok p => pure p
-        | .error e => return .error (409, renderCompact (.obj #[("error", .str e)]))
+        | .error e => return .error <| .preflight (409, renderCompact (.obj #[("error", .str e)]))
     let unscopeProj := (unscopeProjectSlugForOwner ownerUid st.bootstrapAdminId missionProject).getD missionProject
     match ← resolveProjectSnapshot st.store snapshotProvider unscopeProj requestedSnapshot with
     | .ok name => pure name
-    | .error e => return .error (409, renderCompact (.obj #[("error", .str e)]))
+    | .error e => return .error <| .preflight (409, renderCompact (.obj #[("error", .str e)]))
   let spawnArgs := JVal.obj (#[("provider", .str prov), ("size", .str sz)] ++ rentFields)
   match ← spawnConfiguredManagedWorker mst st.store.rootDir live vmRec spawnArgs "" st.managedProvisioningOverride? userAdmission? resolvedSnapshot with
   | .error e =>
@@ -2374,7 +2378,7 @@ def resolveOrProvisionAutoManagedTarget
       if e == "provider_at_capacity" || e == "managed_provider_availability_unavailable" then 503
       else if e == "managed_user_spend_cap_exceeded" || e == "managed_user_machine_limit_reached" then 429
       else 409
-    return .error (status, renderCompact (.obj #[("error", .str e)]))
+    return .error <| .provisioning (status, renderCompact (.obj #[("error", .str e)]))
   | .ok spawned =>
     if spawned.created && !ownerUid.isEmpty && estCents > 0 then
       discard <| addUserSpendCents st.store ownerUid utcDay 0 estCents s!"{nowEpochSec}"
@@ -2382,6 +2386,19 @@ def resolveOrProvisionAutoManagedTarget
       st.managedRef.set refreshed
     let concreteNode := s!"managed-{spawned.machine.id}"
     return .ok (concreteNode, spawned.machine.id)
+
+def resolveOrProvisionAutoManagedTarget
+    (st : CoreAppState)
+    (caller : CallerPrincipal)
+    (missionId : String)
+    (missionOwnerUserId : String)
+    (missionProject : String)
+    (rawTarget : String)
+    (reqBodyJv : JVal)
+    (nowEpochSec : UInt64) : IO (Except (Nat × String) (String × String)) := do
+  match ← resolveManagedTarget st caller missionId missionOwnerUserId missionProject rawTarget reqBodyJv nowEpochSec with
+  | .ok target => return .ok target
+  | .error (.preflight response) | .error (.provisioning response) => return .error response
 
 def updateMissionBoundManagedNode (store : CoreStore) (missionId concreteNode nowIso : String) : IO String := do
   let mut tags : Array String := #[]
@@ -5324,7 +5341,8 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
             let effTagsJson ← if !rentedVmId.isEmpty then
               updateMissionBoundManagedNode st.store mid resolvedNode nowIso
             else pure mRec.tagsJson
-            discard <| appendMissionEvent st.store mid "user_message" pl nowIso
+            if let .error _ ← appendMissionEvent st.store mid "user_message" pl nowIso then
+              return .ok (mkJson 500 "{\"error\":\"message_append_failed\"}")
             if let some tSink := st.telemetrySink? then
               let actorUid? := if caller.isLegacyUnscoped || caller.userId.isEmpty then none else some caller.userId
               let actorUname? := if caller.isLegacyUnscoped || caller.username.isEmpty then none else some caller.username
@@ -6517,13 +6535,22 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
             return .ok (queueRefusal msgId e)
           queued := true
         else
-          let (resolvedNode, rentedVmId) ← match ← resolveOrProvisionAutoManagedTarget st caller mid m.ownerUserId m.project targetNode bodyJv nowEpochSec with
+          let (resolvedNode, rentedVmId) ← match ← resolveManagedTarget st caller mid m.ownerUserId m.project targetNode bodyJv nowEpochSec with
             | .ok pair => pure pair
-            | .error (errCode, errBody) => return .ok (mkJson errCode errBody)
+            | .error (.preflight (errCode, errBody)) =>
+              if keyed then
+                if let .error _ ← abortIdempotencySlot st.store receiptScope msgId then
+                  return .ok (mkJson 500 "{\"error\":\"message_receipt_unconfirmed\"}")
+              return .ok (mkJson errCode errBody)
+            | .error (.provisioning (errCode, errBody)) => return .ok (mkJson errCode errBody)
           let effTagsJson ← if !rentedVmId.isEmpty then
             updateMissionBoundManagedNode st.store mid resolvedNode nowIso
           else pure m.tagsJson
-          let _ ← appendMissionEvent st.store mid "user_message" evPayload nowIso
+          if let .error _ ← appendMissionEvent st.store mid "user_message" evPayload nowIso then
+            if keyed && rentedVmId.isEmpty then
+              if let .error _ ← abortIdempotencySlot st.store receiptScope msgId then
+                return .ok (mkJson 500 "{\"error\":\"message_receipt_unconfirmed\"}")
+            return .ok (mkJson 500 "{\"error\":\"message_append_failed\"}")
           let mut resumeSid? : Option String := none
           if let .ok sRows ← execParamQuery st.store.missionsDb "SELECT COALESCE(session_id,'') FROM missions WHERE id=?1;" #[mid] then
             if sRows.size > 1 then

@@ -825,6 +825,39 @@ def run (root : String) : IO Unit := do
       projection.fieldStr? "text" == some "" && (projection.field? "history").isNone &&
       anonCode == 401 && foreignCode == 404 && missingCode == 404 && renderCompact denied == renderCompact missing)
       "current bubble requires an authenticated mission reader"
+    let placementMid := "retry-managed-placement"
+    let .ok () ← upsertMission store {
+      id := placementMid, ownerUserId := "member", title := "placement fixture", status := "awaiting_user",
+      backend := "opencode", modelOverride := "", workingDirectory := path, updatedAt := "",
+      tagsJson := "[\"remote-node:auto-managed\"]" } | throw (IO.userError "remote placement fixture")
+    let placementApp := { st with managedStore? := none, remoteSup? := some (← OrbCore.RemoteDispatch.newRemoteJobSupervisor st.cfg.jwtSecret) }
+    let placementBody := JVal.obj #[("mission_id", .str placementMid), ("content", .str "resume"), ("client_message_id", .str "placement-retry")]
+    for _ in [0:2] do
+      let (code, rejection) ← send "POST" "/api/control/message" member placementBody placementApp
+      check (code == 409 && rejection.fieldStr? "error" == some "managed_compute_unavailable") "placement preflight releases the same submission ID"
+    sql store.missionsDb "UPDATE missions SET status='active' WHERE id=?1;" #[placementMid]
+    for _ in [0:2] do
+      let (code, accepted) ← send "POST" "/api/control/message" member placementBody placementApp
+      check (code == 200 && accepted.fieldBool? "queued" == some true) "placement recovery accepts and replays the original submission"
+    let .ok placementRows ← execParamQuery store.missionsDb
+      "SELECT COUNT(*) FROM remote_message_queue WHERE mission_id=?1 AND message_id='placement-retry';" #[placementMid]
+      | throw (IO.userError "query recovered follow-up")
+    check ((placementRows[1]?.bind (·[0]?)) == some "1") "placement recovery queues once"
+    sql store.missionsDb "DELETE FROM remote_message_queue WHERE mission_id=?1;" #[placementMid]
+    sql store.missionsDb "DELETE FROM queue_item_receipts WHERE mission_id=?1;" #[placementMid]
+    sql store.missionsDb "UPDATE missions SET tags='[\"remote-node:fixture\"]',status='awaiting_user' WHERE id=?1;" #[placementMid]
+    sql store.missionsDb "CREATE TRIGGER refuse_remote_message BEFORE INSERT ON mission_events WHEN NEW.event_type='user_message' BEGIN SELECT RAISE(ABORT,'test event failure'); END;"
+    for (route, key) in #[("/api/control/message", "append-native"), (s!"/api/control/missions/{placementMid}/message", "append-scoped")] do
+      let body := JVal.obj #[("mission_id", .str placementMid), ("content", .str "resume"), ("client_message_id", .str key)]
+      for _ in [0:2] do
+        let (code, refusal) ← send "POST" route member body placementApp
+        check (code == 500 && refusal.fieldStr? "error" == some "message_append_failed")
+          "a refused event prevents remote dispatch and is retryable before provisioning"
+    sql store.missionsDb "DROP TRIGGER refuse_remote_message;"
+    let .ok eventRows ← execParamQuery store.missionsDb "SELECT COUNT(*) FROM mission_events WHERE mission_id=?1 AND event_type='user_message';" #[placementMid]
+      | throw (IO.userError "query refused user event")
+    check ((eventRows[1]?.bind (·[0]?)) == some "0") "a refused remote send leaves no user event"
+    sql store.missionsDb "DELETE FROM missions WHERE id=?1;" #[placementMid]
     for method in #["GET", "POST"] do
       let route := "/api/workspaces/member-workspace/resources"
       let body := JVal.obj #[("memory_max", .str "1G"), ("cpu_quota", .str "50%")]
