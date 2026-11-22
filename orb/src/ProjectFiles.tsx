@@ -1414,9 +1414,8 @@ export function LiveProjectsSection(p: {
     setRename(null);
     setRenameError(null);
     if ("missionId" in target) {
-      void renameOptimistically("mission", target.missionId, title, target.title, () => renameMission(target.missionId, title)).then(() => {
-        for (const slug of Object.keys(missions)) setMissions(slug, m => m.id === target.missionId, "title", title);
-      }, swallow("projectFiles.renameMission", { mission: target.missionId }));
+      void renameOptimistically("mission", target.missionId, title, target.title, () => renameMission(target.missionId, title))
+        .then(bumpProjects, swallow("projectFiles.renameMission", { mission: target.missionId }));
     } else {
       void renameOptimistically("project", target.slug, title, target.title, () => updateProject({ slug: target.slug, title })).then(() => {
         setProjects(list => list.map(project => project.slug === target.slug ? {...project, title} : project));
