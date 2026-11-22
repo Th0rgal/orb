@@ -193,7 +193,9 @@ private def decodeBoxLines (box : ComputedBox) : String :=
   box.lines.foldl (fun acc line =>
     line.glyphs.foldl (fun acc pg => acc ++ String.singleton (Char.ofNat pg.glyph.glyphId)) acc) ""
 
-private def renderedBoxText : ComputedBox → Nat → String
+-- Traversals are depth-bounded `partial` so they elaborate identically in any
+-- environment (no termination proof for the harness to fail on).
+private partial def renderedBoxText : ComputedBox → Nat → String
   | _box, 0 => ""
   | box, depth + 1 =>
     box.children.foldl (fun acc child => acc ++ renderedBoxText child depth) (decodeBoxLines box)
@@ -201,7 +203,7 @@ private def renderedBoxText : ComputedBox → Nat → String
 private def renderedBoxRoot (box : ComputedBox) : String := renderedBoxText box 24
 
 /-- Observed text boxes: decoded text plus its absolute sub-pixel and device rects. -/
-private def collectObserved : ComputedBox → Nat → List (String × Rect × Rect)
+private partial def collectObserved : ComputedBox → Nat → List (String × Rect × Rect)
   | _box, 0 => []
   | box, depth + 1 =>
     let self := if box.lines.isEmpty then [] else [(decodeBoxLines box, box.rectSub, box.rectDev)]
@@ -424,16 +426,25 @@ def main (args : List String) : IO Unit := do
       let fixR ← observedRadius "Fix"
       unless buildR > specR && specR > fixR do
         throw (IO.userError "rendered node shapes did not observe pill > rounded > diamond")
-      -- The three nodes are separately interactive: distinct hit regions cover their
-      -- label centers, whatever widget ids the renderer assigned.
-      let covering (sub : Rect) : List WidgetId :=
+      -- The three nodes are separately interactive, asserted semantically: each
+      -- label center is covered by at least one hit region that does not cover the
+      -- other two nodes' label centers (a region specific to that node), whatever
+      -- widget ids the renderer assigned and even if a container region spans the
+      -- whole diagram.
+      let covering (sub : Rect) : List Rect :=
         (scene.hitRegionsSub.filter fun r =>
           let cx := sub.x + sub.w / 2
           let cy := sub.y + sub.h / 2
-          r.2.x ≤ cx && cx ≤ r.2.x + r.2.w && r.2.y ≤ cy && cy ≤ r.2.y + r.2.h).map (·.1)
-      let nodeIds := covering spec ++ covering build ++ covering fix
-      unless nodeIds.eraseDups.length >= 3 do
-        throw (IO.userError "rendered diagram nodes are not separately interactive")
+          r.2.x ≤ cx && cx ≤ r.2.x + r.2.w && r.2.y ≤ cy && cy ≤ r.2.y + r.2.h).map (·.2)
+      let coversCenter (r : Rect) (other : Rect) : Bool :=
+        let ox := other.x + other.w / 2
+        let oy := other.y + other.h / 2
+        r.x ≤ ox && ox ≤ r.x + r.w && r.y ≤ oy && oy ≤ r.y + r.h
+      let hasOwnRegion (self a b : Rect) : Bool :=
+        (covering self).any (fun r => !coversCenter r a && !coversCenter r b)
+      unless hasOwnRegion spec build fix && hasOwnRegion build spec fix &&
+          hasOwnRegion fix spec build do
+        throw (IO.userError "rendered diagram nodes are not separately hit-testable")
       unless !rendered.contains "```" && !rendered.contains "mermaid" do
         throw (IO.userError "Mermaid source was rendered as literal text")
       return
