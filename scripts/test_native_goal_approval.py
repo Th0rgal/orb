@@ -135,7 +135,53 @@ def replay_workspace_write(checkout):
     assert [c["action"] for c in calls] == ["ask", "ask", "write_file"]
 
 
+def replay_child_result():
+    from uuid import uuid4
+    query = (Path(__file__).resolve().parents[1] / "lean/OrbCore/OrbCore/native_direct_child.sql").read_text()
+    db = sqlite3.connect(":memory:")
+    db.executescript("""
+        CREATE TABLE missions(id TEXT PRIMARY KEY, parent_mission_id, owner_user_id, status, model_override);
+        CREATE TABLE mission_events(id INTEGER PRIMARY KEY, mission_id, seq, sequence, event_type, payload);
+    """)
+    parent, child, peer, grandchild, foreign, missing = [str(uuid4()) for _ in range(6)]
+    db.executemany("INSERT INTO missions VALUES(?,?,?,'awaiting_user','fixture-model')",
+                   [(parent, None, "ben"), (child, parent, "ben"), (peer, None, "ben"),
+                    (grandchild, child, "ben"), (foreign, parent, "other")])
+    def event(seq, kind, payload):
+        db.execute("INSERT INTO mission_events(mission_id,seq,sequence,event_type,payload) VALUES(?,?,0,?,?)",
+                   (child, seq, kind, json.dumps(payload)))
+    event(1, "user_message", {"content": "private prompt"})
+    event(3, "assistant_message", {"content": "17", "access_token": "private token"})
+    event(2, "user_message", {"content": "late insertion"})
+    event(4, "tool_result", {"content": "private log"})
+    def exchange(op):
+        assert op["action"] == "get_mission"
+        mid = op["arguments"]["mission_id"]
+        row = db.execute(query, (parent, "ben", mid)).fetchone()
+        return None if row is None else dict(status=row[0], model_override=row[1], final_response=row[2])
+    broker = Delegation(exchange)
+    def read(mid):
+        return broker.respond({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                               "params": {"name": "get_mission", "arguments": {"mission_id": mid}}})
+    assert json.loads(read(child)["result"]["content"][0]["text"]) == {
+        "status": "awaiting_user", "model_override": "fixture-model", "final_response": "17"}
+    denied = read(missing)
+    for mid in (parent, peer, foreign, grandchild, "not-a-uuid"):
+        assert read(mid) == denied and "error" in denied
+    assert db.execute(query, (parent, "other", child)).fetchone() is None
+    event(5, "user_message", {"content": "new prompt"})
+    assert db.execute(query, (parent, "ben", child)).fetchone()[2] is None
+    event(6, "assistant_message", {"content": "é" * 4096})
+    assert len(db.execute(query, (parent, "ben", child)).fetchone()[2]) == 2049
+    db.execute("UPDATE missions SET status='active' WHERE id=?", (child,))
+    assert db.execute(query, (parent, "ben", child)).fetchone()[2] is None
+    db.execute("UPDATE missions SET parent_mission_id=? WHERE id=?", (peer, child))
+    assert read(child) == denied
+    db.close()
+
+
 def main():
+    replay_child_result()
     replay_current_goal()
     replay_workspace_read()
     with TemporaryDirectory() as scratch:

@@ -127,3 +127,12 @@ the active Goal, job, owner and holder before forwarding to the workspace writer
 The worker still applies its UID, checkout boundary, file policy and filesystem
 permissions. A read-only placement offers no write tool. Older holders and Core
 versions cannot complete this approval protocol.
+
+A Goal can call `sandboxed/get_mission` with the UUID returned by
+`start_mission`. On each read Core checks the active parent placement, the
+direct parent relationship and both owners. Keep the UUID for later turns.
+The reply contains the child's status, selected model and up to 2048 characters
+of its latest final assistant reply. A newer user turn or active child has no
+final reply yet. The projection omits objectives, prompts, tool logs, credential
+fields and provider metadata. A missing child and an inaccessible mission return
+the same error.

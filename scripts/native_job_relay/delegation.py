@@ -1,6 +1,16 @@
 """Bind an individual ACP decision to the subsequent start_mission MCP invocation."""
 import json
 import threading
+import uuid
+
+
+def child_args(args):
+    if not isinstance(args, dict) or set(args) != {"mission_id"} or not isinstance(args["mission_id"], str):
+        return False
+    try:
+        return str(uuid.UUID(args["mission_id"])) == args["mission_id"]
+    except ValueError:
+        return False
 
 
 class Delegation:
@@ -47,6 +57,10 @@ class Delegation:
         if method == "tools/list":
             allowed = self.exchange({"action": "catalog"})
             return {**response, "result": {"tools": allowed if isinstance(allowed, list) else []}}
+        if method == "tools/call" and params.get("name") == "get_mission" and child_args(params.get("arguments")):
+            result = self.exchange({"action": "get_mission", "arguments": params["arguments"]})
+            if isinstance(result, dict):
+                return {**response, "result": {"content": [{"type": "text", "text": json.dumps(result)}]}}
         if method == "tools/call" and params.get("name") == "start_mission" and isinstance(params.get("arguments"), dict):
             args = params["arguments"]
             ticket = self.consume("start_mission", args)

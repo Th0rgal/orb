@@ -3150,6 +3150,7 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
       let now ← coreEpochSec
       match op.fieldStr? "action" with
       | some "catalog" => return NativeGoalApproval.catalogue
+      | some "get_mission" => return ← NativeGoalApproval.readChild st.store p args
       | some "ask" =>
         let tool := (op.fieldStr? "tool").getD "start_mission"
         return ← NativeGoalApproval.ask st.store p args now (fun id notice => do
