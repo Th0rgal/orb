@@ -25,7 +25,7 @@ export type NativeInteractionRequest = {
   params: {
     plan?: string;
     tool?: string;
-    input?: { command?: string; file_path?: string; description?: string };
+    input?: { command?: string; file_path?: string; description?: string; once_only?: boolean };
     questions?: Array<{
       id?: string;
       question: string;

@@ -665,20 +665,33 @@ private def runTool (name : String) (args : JVal) (workingDir : System.FilePath)
       ("isError", .bool true)
     ]
 
-def runMain (_args : List String) : IO UInt32 := do
+/-- Only the native shared holder pins an already-mounted checkout at /workspace.
+    The same tool definitions govern discovery and calls on this transport. -/
+def boundFileTools (readonly : Bool) : Array JVal :=
+  toolDefinitions.filter fun tool =>
+    let name := (tool.fieldStr? "name").getD ""
+    name == "read_file" || (!readonly && name == "write_file")
+
+def runMain (args : List String) : IO UInt32 := do
+  let boundTools? ← match args with
+    | ["--bound-files", "readonly"] => pure (some (boundFileTools true))
+    | ["--bound-files", "writer"] => pure (some (boundFileTools false))
+    | "--bound-files" :: _ => return 2
+    | _ => pure none
   IO.eprintln "[workspace-mcp] Starting MCP server for workspace tools..."
-  let initialWs ← hydrateWorkspaceEnv none
+  let initialWs ← if boundTools?.isSome then pure (System.FilePath.mk "/workspace") else hydrateWorkspaceEnv none
   let wsLock ← Std.Mutex.new initialWs
   serveStdio fun req _cancelRef => do
     let idVal := req.fieldOrNull "id"
     let method := (req.fieldStr? "method").getD ""
     match method with
     | "initialize" =>
-      let params := req.fieldOrNull "params"
-      if let some p := extractWorkspaceFromInitialize? params then
-        let resolved ← hydrateWorkspaceEnv (some p)
-        wsLock.atomically (set resolved)
-      applyRuntimeWorkspace wsLock
+      if boundTools?.isNone then
+        let params := req.fieldOrNull "params"
+        if let some p := extractWorkspaceFromInitialize? params then
+          let resolved ← hydrateWorkspaceEnv (some p)
+          wsLock.atomically (set resolved)
+        applyRuntimeWorkspace wsLock
       return jsonRpcSuccess idVal (.obj #[
         ("protocolVersion", .str "2024-11-05"),
         ("serverInfo", .obj #[("name", .str "workspace-mcp"), ("version", .str appVersion)]),
@@ -687,11 +700,14 @@ def runMain (_args : List String) : IO UInt32 := do
     | "ping" =>
       return jsonRpcSuccess idVal (.obj #[])
     | "tools/list" =>
-      return jsonRpcSuccess idVal (.obj #[("tools", .arr toolDefinitions)])
+      return jsonRpcSuccess idVal (.obj #[("tools", .arr (boundTools?.getD toolDefinitions))])
     | "tools/call" =>
-      applyRuntimeWorkspace wsLock
+      if boundTools?.isNone then applyRuntimeWorkspace wsLock
       let params := req.fieldOrNull "params"
       let name := (params.fieldStr? "name").getD ""
+      if let some allowed := boundTools? then
+        unless allowed.any (fun tool => tool.fieldStr? "name" == some name) do
+          return jsonRpcError idVal (-32602) "Tool unavailable for this workspace"
       let args := (params.field? "arguments").getD (.obj #[])
       let cwd ← wsLock.atomically get
       let toolRes ← runTool name args cwd

@@ -148,3 +148,48 @@ Legacy assistant/Telegram channels configured for Gemini, or linked to a Gemini
 mission, are deactivated before webhook registration. Configure Antigravity and
 a workspace-native model, migrate linked missions without reusing Gemini native
 session IDs, then reactivate the channel. Historical mission records are retained.
+
+### Development qualification on a separate member worker
+
+The trusted native profile runs on Core. Authenticated Core requires `DEV_MODE=false`.
+Set `ORB_NATIVE_SUBSCRIPTION_ENABLED=1` after provisioning the holder and worker.
+Leaving this setting unset or setting it to `0` disables enrollment and admission.
+Set `ORB_NATIVE_WORKSPACE_NODE` to one
+explicit static worker with HTTPS and a valid server certificate. Configure
+`ORB_NATIVE_PROFILE_RUNTIME` and `ORB_NATIVE_PROFILE_USER` for the private
+holder, and persist the account's Direct or VPN selection before testing.
+The selected member must have an enabled account, a Linux identity, and a
+permitted fleet placement. Core and administration nodes are reserved. Nodes
+reserved for a specific account's dedicated enrollment retain their launch gate.
+
+The profile exposes a file MCP with UTF-8 reads and writer-only writes up to
+256 KiB inside the currently running job's checkout. Core revalidates the grant
+and route on each operation. The worker checks the stored job, mission, owner,
+UID and authority. Its existing privilege service drops to that UID and applies
+a filesystem rule tied to the opened checkout. This development transport
+requires Linux Landlock ABI 3 or later on aarch64 or x86_64. File requests
+and model output travel in separate message types on the holder's private
+pipe. The worker receives only its job grant. The Google profile remains on
+Core. Run `python3 scripts/test_native_worker_files.py` for the offline file
+and authority checks. Native Goal dispatch awaits end-to-end qualification.
+
+### Native subscription delegation qualification
+
+In an isolated qualification on 2026-11-22, the real Antigravity subscription CLI on aarch64 Linux generated a response with Neon over Direct. Separate invocations resumed the same conversation and appended to a workspace file. Credentials stayed with the CLI profile. A separate, client-placed parent in private Orb Core used its own scoped MCP and loopback-only worker for the delegation checks.
+
+| Native CLI flow | Calls reaching the Orb MCP | Children recorded under the parent |
+| --- | ---: | ---: |
+| 1.5.14 headless, full catalog and an exact permission | 0 | 0 |
+| 1.5.14 headless, single-tool server, enabledTools limited to start_mission and exact permission | 1 | 1 |
+| ACP, permission request cancelled | 0 | 0 |
+| ACP, allow_once for the specific private node, model and arguments | 1 | 1 |
+
+The exact permission was `mcp(sandboxed/start_mission)`. The single-tool server filtered tool discovery and enforced the same restriction on every call. An explicit private node gave an accepted Core receipt with a Codex child selecting `gpt-6.2-astra`. Without a node the same request returned `no_remote_nodes_available`. The worker's network isolation kept external inference out of the child test. A successful CLI exit accompanied a denied tool in the broad-catalog run. Inspect the tool result and parent linkage before counting a delegation.
+
+To reproduce the Core portion offline, run the following inside a disposable Linux namespace with only loopback enabled, a private home and a private temporary directory. The package directory must contain the three Orb binaries. The replay creates a fresh Core and node and checks the persisted parent after resending the same MCP request.
+
+```sh
+python3 scripts/test_native_parent_delegation.py /path/to/orb/package/bin
+```
+
+The shared-profile holder in this branch still requires a verified VPN and exposes the workspace MCP. Its stream-json process has no ACP permission reply channel. Native Goal dispatch and member-owned interactive decisions still need an integrated Core-to-worker test. The public Google CLI supports both headless output and interactive permissions. [Headless CLI](https://antigravity.google/docs/cli/headless/) · [CLI permissions](https://antigravity.google/docs/cli-permissions) · [ACP tool permissions](https://agentclientprotocol.com/protocol/v1/tool-calls)

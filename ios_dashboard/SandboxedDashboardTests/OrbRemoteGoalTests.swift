@@ -21,6 +21,28 @@ final class OrbRemoteGoalTests: XCTestCase {
         }
     }
 
+    @MainActor func testNativeLaunchChecksFreshFleetBeforeSubmitting() async throws {
+        let fixture = try OrbSpec.json("fixtures/native-launch-preflight.json")
+        let fleet = try JSONDecoder().decode(OrbJSON.self, from: JSONSerialization.data(withJSONObject: fixture))
+        let cases = try XCTUnwrap(fixture["cases"] as? [[String: Any]])
+        for row in cases {
+            let node = try XCTUnwrap(row["node"] as? String)
+            let expected = row["error"] as? String
+            var reads = 0
+            var failure: String?
+            do {
+                try await OrbNativeLaunch.require(nodeID: node, goalBackend: row["goal_backend"] as? String) {
+                    reads += 1
+                    return fleet
+                }
+            } catch let error as OrbHTTPError {
+                failure = error.detail
+            }
+            XCTAssertEqual(failure, expected, node)
+            XCTAssertEqual(reads, row["reads"] as? Int, node)
+        }
+    }
+
     func testProjectionStopsAfterTruthfulCompletion() {
         var projection = OrbRemoteGoal.Projection(phase: .active, objective: "Ship it", iteration: 0, detail: nil)
         projection = OrbRemoteGoal.apply(projection, event: ["type": "goal_iteration", "data": ["status": "active", "objective": "Ship it", "iteration": 2, "summary": "Progress"]])

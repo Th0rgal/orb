@@ -9,10 +9,14 @@ for (const theme of ['dark', 'light']) test(`provider accounts and machine detai
   }, theme);
   await page.route('**/api/**', route => {
     const url = new URL(route.request().url());
+    if (url.pathname === '/api/native-owner-enrollments') return route.fulfill({json:['ledger-node']});
+    if (url.pathname === '/api/native-owner-enrollments/ledger-node') return route.fulfill({json:{
+      account_id:'antigravity', revision:2, launch_block:'native_owner_executor_unavailable'
+    }});
     const body = url.pathname === '/api/providers/antigravity-models'
       ? url.searchParams.has('node_id') ? [['flash', 'Gemini Flash']] : Array.from({ length: 21 }, (_, i) => [`agy-${i}`, `Gemini model ${i + 1} with a long descriptive name`])
       : url.pathname === '/api/ai/providers' ? [
-        { id: 'antigravity', name: 'Antigravity subscription', provider_type: 'antigravity', uses_oauth: true, has_oauth: true, credential_owner: 'cli_proxy', status: { type: 'connected' } },
+        { id: 'antigravity', added_by_me:true, name: 'Antigravity subscription', provider_type: 'antigravity', uses_oauth: true, has_oauth: true, credential_owner: 'cli_proxy', status: { type: 'connected' } },
         { id: 'google', name: 'Google Gemini', provider_type: 'google', uses_oauth: true, has_oauth: true, status: { type: 'connected' } },
         { id: 'google-key', name: 'Google key', provider_type: 'google', uses_oauth: true, has_oauth: false, has_api_key: true, status: { type: 'connected' } },
       ]
@@ -26,6 +30,7 @@ for (const theme of ['dark', 'light']) test(`provider accounts and machine detai
   const native = page.getByRole('region', { name: 'Antigravity execution', exact: true });
   await expect(native).toHaveCount(0);
   await page.getByRole('button', { name: /Google Antigravity Subscription account/ }).click();
+  await expect(page.getByText(/The isolated workspace executor/)).toBeVisible();
   await expect(native.getByRole('status')).toHaveText('Available on Core +1');
   await expect(native.getByRole('status')).toHaveAttribute('title', /Available on Core, old-agent/);
   await expect(native.getByLabel('Antigravity machine')).toHaveCount(0);

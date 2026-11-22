@@ -210,6 +210,12 @@ def missionsSchemaSql : String :=
   "CREATE TABLE IF NOT EXISTS user_daily_spend (user_id TEXT NOT NULL, utc_day TEXT NOT NULL, inference_cents INTEGER NOT NULL DEFAULT 0, compute_cents INTEGER NOT NULL DEFAULT 0, updated_at TEXT NOT NULL DEFAULT '', PRIMARY KEY (user_id, utc_day));" ++
   "CREATE TABLE IF NOT EXISTS mission_proxy_tokens (token_sha256 TEXT PRIMARY KEY, mission_id TEXT NOT NULL, owner_user_id TEXT NOT NULL, expires_at_epoch INTEGER NOT NULL, revoked INTEGER NOT NULL DEFAULT 0);" ++
   "CREATE INDEX IF NOT EXISTS idx_mission_proxy_tokens_mission ON mission_proxy_tokens(mission_id);" ++
+  "CREATE TABLE IF NOT EXISTS native_owner_enrollments (node_id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, account_id TEXT NOT NULL, revision INTEGER NOT NULL CHECK(revision>0));" ++
+  "CREATE TABLE IF NOT EXISTS native_antigravity_grants (token_sha256 TEXT PRIMARY KEY REFERENCES mission_proxy_tokens(token_sha256) ON DELETE CASCADE, job_id TEXT NOT NULL, account_id TEXT NOT NULL, model TEXT NOT NULL);" ++
+  "CREATE TABLE IF NOT EXISTS native_shared_workspace_bindings (token_sha256 TEXT PRIMARY KEY REFERENCES native_antigravity_grants(token_sha256) ON DELETE CASCADE, node_id TEXT NOT NULL, route_generation INTEGER NOT NULL, route_kind TEXT NOT NULL DEFAULT 'vpn');" ++
+  "CREATE TABLE IF NOT EXISTS native_goal_approvals (id TEXT PRIMARY KEY, mission TEXT NOT NULL REFERENCES missions(id) ON DELETE CASCADE, owner TEXT NOT NULL, job TEXT NOT NULL, input_digest TEXT NOT NULL, expires INTEGER NOT NULL, decision TEXT NOT NULL);" ++
+  "CREATE TABLE IF NOT EXISTS native_shared_workspace_claims (job_id TEXT PRIMARY KEY, token_sha256 TEXT NOT NULL REFERENCES native_antigravity_grants(token_sha256) ON DELETE CASCADE);" ++
+  "CREATE TABLE IF NOT EXISTS native_job_relay_bindings (token_sha256 TEXT PRIMARY KEY REFERENCES native_antigravity_grants(token_sha256) ON DELETE CASCADE, node_id TEXT NOT NULL, enrollment_revision INTEGER NOT NULL, route_generation INTEGER NOT NULL);" ++
   "CREATE TABLE IF NOT EXISTS workspaces (id TEXT PRIMARY KEY, name TEXT NOT NULL DEFAULT '', path TEXT NOT NULL DEFAULT '', kind TEXT NOT NULL DEFAULT 'host', owner_user_id TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL DEFAULT '');" ++
   "CREATE TABLE IF NOT EXISTS mission_terminal_evidence (mission_id TEXT PRIMARY KEY, terminal_reason TEXT NOT NULL DEFAULT '', summary TEXT NOT NULL DEFAULT '', artifact_ref TEXT NOT NULL DEFAULT '', verified INTEGER NOT NULL DEFAULT 1, evidence TEXT NOT NULL DEFAULT '{}', recorded_at TEXT NOT NULL DEFAULT '');" ++
   "CREATE TABLE IF NOT EXISTS effect_outbox (effect_id TEXT PRIMARY KEY, mission_id TEXT NOT NULL, state_revision INTEGER NOT NULL, intent_kind TEXT NOT NULL, payload_json TEXT NOT NULL, phase INTEGER NOT NULL DEFAULT 0, delivered INTEGER NOT NULL DEFAULT 0, attempt_epoch INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL DEFAULT '');" ++
@@ -351,6 +357,7 @@ def missionsAdditiveAlters : Array String := #[
   "ALTER TABLE model_routing_chains ADD COLUMN created_at TEXT;",
   "ALTER TABLE proxy_usage ADD COLUMN requested_model TEXT;",
   "ALTER TABLE proxy_outcomes ADD COLUMN requested_model TEXT;",
+  "ALTER TABLE native_shared_workspace_bindings ADD COLUMN route_kind TEXT NOT NULL DEFAULT 'vpn';",
   "ALTER TABLE missions ADD COLUMN project TEXT NOT NULL DEFAULT '';",
   "ALTER TABLE missions ADD COLUMN folder TEXT NOT NULL DEFAULT '';",
   "ALTER TABLE missions ADD COLUMN placement_revision INTEGER NOT NULL DEFAULT 0;",
@@ -4352,7 +4359,7 @@ def getUserProviderPrefs (st : CoreStore) (userId : String) : IO (Array (String 
   if userId.isEmpty then return #[]
   match ← execParamQuery st.missionsDb
     "SELECT provider_id, enabled FROM user_provider_prefs WHERE user_id=?1;" #[userId] with
-  | .error _ => return #[]
+  | .error _ => throw (IO.userError "Provider preferences temporarily unavailable")
   | .ok rows =>
     let mut out : Array (String × Bool) := #[]
     for i in [1:rows.size] do
@@ -4372,22 +4379,82 @@ def setUserProviderPref (st : CoreStore) (userId providerId : String) (enabled :
     #[userId, providerId, if enabled then "1" else "0", nowAt]
   return res.map (fun _ => ())
 
-def mintMissionProxyToken
-    (st : CoreStore) (missionId ownerUserId : String) (expiresAtEpoch : UInt64) : IO (Except String String) := do
-  let .ok rnd ← OrbNetLeaf.Crypto.randBytes 24
-    | return .error "csprng_failed"
-  let rawTok := "orb-mpt-v1_" ++ bytesToHexLower rnd
-  let tokSha := bytesToHexLower (sha256Bytes rawTok.toUTF8)
-  let res ← execParamQuery st.missionsDb
-    ("INSERT INTO mission_proxy_tokens(token_sha256,mission_id,owner_user_id,expires_at_epoch,revoked) " ++
-     "VALUES(?1,?2,?3,?4,0);")
-    #[tokSha, missionId, ownerUserId, s!"{expiresAtEpoch}"]
-  return res.map (fun _ => rawTok)
+/-- An empty account is a tombstone. Keep the revision so an old enrollment
+    cannot become current again when the owner selects the same account. -/
+def changeNativeOwnerEnrollment (st : CoreStore) (node owner account : String)
+    (expected : UInt64) : IO (Except String String) := withImmediateTx st.missionsDb do
+  let .ok current ← execParamQueryUnlocked st.missionsDb
+      "SELECT owner_id,account_id,revision FROM native_owner_enrollments WHERE node_id=?1;"
+      #[node] | return .error "enrollment_unavailable"
+  let prior := current[1]?
+  let revision := ((prior.bind (·[2]?)).getD "0").toNat?
+  unless revision == some expected.toNat do return .error "enrollment_changed"
+  unless account.isEmpty do
+    let .ok rows ← execParamQueryUnlocked st.missionsDb
+        ("SELECT 1 FROM ai_providers WHERE id=?1 AND created_by_user_id=?2 " ++
+         "AND provider_type='antigravity' AND enabled=1;") #[account, owner]
+      | return .error "enrollment_unavailable"
+    if rows.size < 2 then return .error "provider_access_denied"
+  if (prior.bind (·[0]?)) == some owner && (prior.bind (·[1]?)) == some account then
+    return .ok (toString expected)
+  let .ok _ ← execParamQueryUnlocked st.missionsDb
+      ("UPDATE mission_proxy_tokens SET revoked=1 WHERE token_sha256 IN " ++
+       "(SELECT g.token_sha256 FROM native_antigravity_grants g JOIN remote_node_jobs j " ++
+       "ON j.job_id=g.job_id WHERE j.node_id=?1);") #[node]
+    | return .error "enrollment_unavailable"
+  let next := toString (expected.toNat + 1)
+  let result ← execParamQueryUnlocked st.missionsDb
+      ("INSERT INTO native_owner_enrollments(node_id,owner_id,account_id,revision) VALUES(?1,?2,?3,?4) " ++
+       "ON CONFLICT(node_id) DO UPDATE SET owner_id=excluded.owner_id,account_id=excluded.account_id,revision=excluded.revision;")
+      #[node,owner,account,next]
+  return result.map fun _ => next
 
-def resolveMissionProxyToken?
-    (st : CoreStore) (rawTok : String) (nowEpoch : UInt64) : IO (Option (String × String)) := do
+private def nativeMissionAccountSql :=
+  "SELECT n.account_id FROM mission_proxy_tokens t JOIN native_antigravity_grants n USING(token_sha256) WHERE t.mission_id=?1 LIMIT 1;"
+
+def nativeMissionAccount? (st : CoreStore) (mission : String) : IO (Except String (Option String)) := do
+  return (← execParamQuery st.missionsDb nativeMissionAccountSql #[mission]).map fun rows => rows[1]?.bind (·[0]?)
+
+private def issueProxyToken (st : CoreStore) (tokenPrefix mission owner : String) (expires : UInt64)
+    (native? : Option (String × String × String) := none) (relayNode? : Option String := none) : IO (Except String String) := do
+  let .ok rnd ← OrbNetLeaf.Crypto.randBytes 24 | return .error "csprng_failed"
+  let token := tokenPrefix ++ bytesToHexLower rnd
+  let digest := bytesToHexLower (sha256Bytes token.toUTF8)
+  withImmediateTx st.missionsDb do
+    let insert ← execParamQueryUnlocked st.missionsDb
+      "INSERT INTO mission_proxy_tokens(token_sha256,mission_id,owner_user_id,expires_at_epoch,revoked) VALUES(?1,?2,?3,?4,0);"
+      #[digest, mission, owner, s!"{expires}"]
+    if let .error err := insert then return .error err
+    if let some (job, account, model) := native? then
+      let prior ← execParamQueryUnlocked st.missionsDb nativeMissionAccountSql #[mission]
+      let .ok rows := prior | return .error "antigravity_binding_unavailable"
+      if let some bound := rows[1]?.bind (·[0]?) then
+        if bound != account then return .error "antigravity_continuity_required"
+      let bindingResult ← execParamQueryUnlocked st.missionsDb
+        "INSERT INTO native_antigravity_grants(token_sha256,job_id,account_id,model) VALUES(?1,?2,?3,?4);"
+        #[digest, job, account, model]
+      if let .error err := bindingResult then return .error err
+      if let some node := relayNode? then
+        -- A Core-held profile may use a shared subscription. Keep the route
+        -- revision and intended workspace node immutable for this specific job.
+        let shared ← execParamQueryUnlocked st.missionsDb
+          ("INSERT INTO native_shared_workspace_bindings(token_sha256,node_id,route_generation,route_kind) " ++
+           "SELECT ?1,?2,v.generation,CASE WHEN v.country='' THEN 'direct' ELSE 'vpn' END FROM account_vpn_routes v " ++
+           "WHERE v.account_id=?3 AND (v.country='' OR v.country GLOB '[A-Z][A-Z]') AND v.generation>0;")
+          #[digest,node,account]
+        if let .error err := shared then return .error err
+        let bound ← execParamQueryUnlocked st.missionsDb
+          ("INSERT INTO native_job_relay_bindings SELECT ?1,e.node_id,e.revision,v.generation " ++
+           "FROM native_owner_enrollments e JOIN account_vpn_routes v ON v.account_id=e.account_id " ++
+           "WHERE e.node_id=?2 AND e.owner_id=?3 AND e.account_id=?4 AND length(v.country)=2;")
+          #[digest,node,owner,account]
+        if let .error err := bound then return .error err
+    return .ok token
+
+private def resolveScopedProxyToken?
+    (st : CoreStore) (tokenPrefix rawTok : String) (nowEpoch : UInt64) : IO (Option (String × String)) := do
   let clean := rawTok.trimAscii.toString
-  if !clean.startsWith "orb-mpt-v1_" then return none
+  if !clean.startsWith tokenPrefix then return none
   let tokSha := bytesToHexLower (sha256Bytes clean.toUTF8)
   match ← execParamQuery st.missionsDb
     "SELECT mission_id, owner_user_id, expires_at_epoch, revoked FROM mission_proxy_tokens WHERE token_sha256=?1;"
@@ -4403,9 +4470,44 @@ def resolveMissionProxyToken?
     if rev || nowEpoch >= exp || mid.isEmpty then return none
     return some (mid, uid)
 
+
+def mintMissionProxyToken (st : CoreStore) (missionId ownerUserId : String) (expiresAtEpoch : UInt64) :=
+  issueProxyToken st "orb-mpt-v1_" missionId ownerUserId expiresAtEpoch
+
+def resolveMissionProxyToken? (st : CoreStore) (rawTok : String) (nowEpoch : UInt64) :=
+  resolveScopedProxyToken? st "orb-mpt-v1_" rawTok nowEpoch
+
+/-- Native jobs share the mission revocation ledger. The account and model stay on
+    Core, and the first native turn binds subsequent turns to the same account. -/
+def mintNativeAntigravityToken (st : CoreStore) (mission owner job account model : String) (expires : UInt64)
+    (relayNode? : Option String := none) :
+    IO (Except String String) := do
+  if [mission, owner, job, account, model].any String.isEmpty then return .error "invalid_antigravity_grant"
+  issueProxyToken st "orb-agy-v1_" mission owner expires (some (job, account, model)) relayNode?
+
+structure NativeAntigravityGrant where
+  mission : String
+  owner : String
+  account : String
+  model : String
+  deriving BEq, Repr
+
+def resolveNativeAntigravityToken? (st : CoreStore) (token : String) (now : UInt64) :
+    IO (Option NativeAntigravityGrant) := do
+  unless token.startsWith "orb-agy-v1_" do return none
+  let digest := bytesToHexLower (sha256Bytes token.toUTF8)
+  let .ok rows ← execParamQuery st.missionsDb
+      ("SELECT t.mission_id,t.owner_user_id,g.account_id,g.model FROM native_antigravity_grants g " ++
+       "JOIN mission_proxy_tokens t USING(token_sha256) JOIN remote_node_jobs j ON j.job_id=g.job_id " ++
+       "WHERE t.token_sha256=?1 AND t.revoked=0 AND t.expires_at_epoch>CAST(?2 AS INTEGER) " ++
+       "AND j.mission_id=t.mission_id AND j.state IN ('submitting','running','queued');") #[digest,s!"{now}"] | return none
+  return do
+    let row ← rows[1]?
+    return ⟨← row[0]?, ← row[1]?, ← row[2]?, ← row[3]?⟩
+
 def revokeSingleMissionProxyToken (st : CoreStore) (rawTok : String) : IO Unit := do
   let clean := rawTok.trimAscii.toString
-  if clean.startsWith "orb-mpt-v1_" then
+  if clean.startsWith "orb-mpt-v1_" || clean.startsWith "orb-agy-v1_" then
     let tokSha := bytesToHexLower (sha256Bytes clean.toUTF8)
     discard <| execParamQuery st.missionsDb
       "UPDATE mission_proxy_tokens SET revoked=1 WHERE token_sha256=?1;" #[tokSha]

@@ -118,3 +118,425 @@ verified in `lean/Orb/Spec.lean` and folded through `orb_route_argmin_step`:
    - Periodic `refresh_and_sync` updates the default `antigravity` profile
      without touching `accounts/<slot>` bindings and skips legacy single-slot
      nodes that currently have an active or tentative remote job in `job_ledger`.
+
+### Member catalog discovery
+
+For a signed-in member, Core lists models discovered by the native CLI for
+enabled accounts the member has selected. Each probe uses the uniquely bound
+subscription, a private disposable CLI profile, and the account's resolved
+transport. A refresh credential stays with its owner. A personal opt-out takes
+effect even when a successful catalog is cached. Rotating the credential or
+changing the route invalidates the account's cached result. When every eligible
+probe fails, the dedicated endpoint returns a retryable failure. Restoring the
+route allows a fresh discovery. With no eligible subscription it returns an
+empty list. Loading the other harnesses never waits on native catalog discovery.
+
+### Consumer headless eligibility on remote workers
+
+The native launcher gives agy a local relay nonce. Core alone authenticates
+gateway requests with the selected Google account through its configured
+network route. A successful `v1internal:fetchUserInfo` response verifies only
+that gateway request. On Linux, agy 1.5.13 also sends an authenticated GET to
+`https://www.googleapis.com/oauth2/v2/userinfo` outside the configured
+`CLOUD_CODE_URL`. A 401 there can stop eligibility before generation for both
+Carbon and Neon. The terminal error alone does not identify which request
+failed.
+
+The worker cannot use the relay nonce as a Google OAuth credential. Remote
+support needs a vendor-supported way for the selected account's credential
+holder to perform this auxiliary identity check through the account's network
+route and return Google's actual decision. A plain HTTPS CONNECT proxy would
+transport the same nonce to Google.
+
+To replay the rejection, use a disposable Linux guest with only loopback
+enabled, map `www.googleapis.com` to `127.0.0.1` in the guest, and run:
+
+```sh
+openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
+  -subj /CN=www.googleapis.com -addext subjectAltName=DNS:www.googleapis.com \
+  -out cert.pem -keyout key.pem
+python3 scripts/test_antigravity_native_eligibility.py \
+  --agy "$(command -v agy)" --cert cert.pem --key key.pem
+```
+
+The disposable certificate is trusted only by the test process. The test
+requires port 443 in the guest, rejects every identity request, and checks
+the actual CLI terminal result and zero generation requests. Google's
+headless CLI documentation describes using cached credentials after sign-in.
+[Headless mode](https://antigravity.google/docs/cli/headless/)
+
+### Running the signed-in CLI in a trusted per-account service
+
+A service could keep the genuine native login and all Google traffic inside the
+selected account's VPN. The remaining boundary is between that service and
+mission-controlled workspace operations. On Linux agy 1.5.13 and 1.5.14, we
+found no documented mode that assigns those operations exclusively to a
+separately authenticated workspace executor.
+
+* The terminal sandbox uses OS namespaces and permission-derived mounts for
+  shell commands. Google documents that `--sandbox` has no effect when the
+  sandbox is unavailable and describes execution outside it. The option
+  specifies neither a mandatory remote runner nor the identity for other
+  workspace subprocesses. Hooks can run scripts and stdio MCP servers have their
+  own executable configuration. Mounting the remote checkout into the service
+  solves file visibility alone.
+  [Terminal sandbox](https://antigravity.google/docs/sandbox/)
+  · [Hooks](https://antigravity.google/docs/hooks/)
+  · [MCP transports](https://antigravity.google/docs/mcp/)
+* ACP carries permission decisions and session state. In a loopback-only
+  guest with an empty HOME, both binaries completed ACP v1 `initialize` with
+  client terminal and file capabilities enabled. Both advertised session
+  load and resume; `--process-per-session` added HTTP MCP capability. That
+  handshake exercises capability negotiation only. The documented per-session
+  process flag does not select an OS principal for tools. IDE MCP adds host
+  tools; the documentation provides no exclusive client-execution contract
+  for native commands, filesystem operations, or workspace integrations.
+  [ACP interface and flags](https://antigravity.google/docs/ide/extensions/acp/)
+* Remote Control attaches to the machine running the agent. Remote Agents use
+  Google-managed environments and project resources. The App's SSH mode runs
+  tools and saves the Google login on the SSH host. None documents a headless
+  service option to bind a session to an existing Orb worker for tool execution.
+  [Remote Control](https://antigravity.google/docs/remote-control/)
+  · [Remote Agents](https://antigravity.google/docs/remote-agents/)
+  · [SSH](https://antigravity.google/docs/ssh/)
+
+**Minimal upstream request for native tool execution.** Add a mandatory workspace-executor mode to
+`agy acp`. Let the authenticated service bind a session to a caller-supplied
+executor for all workspace file access and process execution, including
+terminal commands, hooks, and stdio MCP. Unsupported local integrations must
+be disabled in that mode. Apply native tool approvals before dispatch; if the
+executor disconnects, fail the operation without local fallback. The executor
+receives mission-scoped authority only. OAuth, eligibility, inference and
+native conversation state stay in the service.
+
+Orb could then persist the selected account, mission, stable workspace
+identity and native conversation ID together, verify that binding on resume,
+and reconnect the same worker workspace. Acceptance would require a ledger
+edit and resume on that worker, denial before dispatch, and a disconnected
+executor producing zero local executions. The CLI scopes its local conversation
+history by working directory.
+[Conversation scoping](https://antigravity.google/docs/cli/conversations/)
+
+#### Two-UID Linux fixture
+
+The public Linux amd64 manifest identified 1.5.14. In a loopback-only guest,
+we ran that released binary as UID 16001 with a private profile. The checkout
+belonged to UID 16002 and permitted the harness to edit through group access.
+UID 16002 could not read a harmless marker in the 0700 account directory.
+The model endpoint was the existing disposable API-key protocol control;
+this experiment measures local execution identity. It used no Google login.
+
+With the current directory set to the mission checkout, the fixture ran
+`agy --settings <goal-settings> --model gemini-4-carbon-high --mode accept-edits --output-format stream-json --print=<ledger-task>`,
+then resumed with `--conversation <returned-id>`. A second guest repeated both
+turns with `--sandbox`. The native write created the ledger as UID 16001.
+The configured stdio MCP server returned its effective UID, also 16001.
+Both runs resumed the original conversation and passed the explicit MCP denial
+control. We did not measure a shell UID or inspect a keyring. The built-in
+write and MCP measurements already disqualify this arrangement for shared
+missions. They make no claim about terminal sandbox availability in the guest.
+
+Orb's privileged node launcher applies `setgid` and `setuid` when launching a
+user job and scrubs that job's environment. The launcher boundary covers the
+job as a whole. Moving agy into an account-owned job therefore changes the
+principal of the harness; the current CLI exposes no matching selector to
+put all workspace actions back into a mission-owned job.
+
+Orb resolves the account's verified VPN transport before opening the native
+upstream request and passes the resulting SOCKS port to its own network
+client. Launching a separate signed-in CLI does not itself attach that CLI
+to the selected route. Google's `sandboxProxy` setting applies to sandboxed
+terminal commands. A trusted deployment would have to enforce account egress
+for the entire CLI, DNS and auxiliary clients, with end-to-end Google TLS and
+no direct fallback. This fixture did not test a VPN route.
+
+The nearest documented topology is a dedicated **single-owner** Linux host
+or VM where the owner signs in interactively with agy and uses the same
+persistent profile and checkout for headless turns and resume. This requires
+trusting the checkout, its tools and its integrations as that owner. It is not
+a deployment for untrusted Orb mission workspaces.
+[Headless login](https://antigravity.google/docs/cli/headless/)
+· [CLI proxy settings](https://antigravity.google/docs/settings/)
+
+#### Restricted main agent and a separate workspace MCP
+
+Google also supports selecting a custom main agent whose Markdown frontmatter
+sets `tools: []`, `mainAgent: true` and `subagent: false`. We selected this
+agent using `--agent orb-workspace`, gave it a private empty session directory
+and configured a single trusted MCP transport. The account process never
+loads workspace customizations. The real checkout belongs to another UID.
+The supervisor starts Orb's existing `workspace-mcp` as that workspace UID
+in a separate filesystem and network namespace. It pins the trusted runtime
+and checkout using open directory descriptors. The executor accepts stdio
+from the supervisor's private Unix socket. The profile-side stdio adapter only
+relays bytes. [Custom agent tool selection](https://antigravity.google/docs/subagents/)
+
+The Linux arm64 agy 1.5.14 fixture contacted only a loopback synthetic Gemini
+model endpoint. The CLI exposed MCP call and resource tools plus
+`manage_task`. A write followed by a resume changed the ledger under the
+workspace UID for each of the Carbon and Neon model identifiers. The two
+principals could not read each other's directory. The executor could not
+read a world-readable host fixture outside the runtime and checkout, and its
+read-only mount rejected a write. When the socket disappeared,
+the ledger and local session directory remained unchanged. The CLI could
+still report a successful conversational turn. A deployment must detect
+executor loss independently of the final CLI status, enforce the grant
+lifetime, and bind resume to the same account, workspace and conversation.
+The fixture does not use a Google subscription or verify Internet egress.
+
+To replay on a Linux host with subordinate user and group IDs, Python 3,
+`bwrap`, `socat`, `ip`, `agy` and a native Orb `workspace-mcp` binary:
+
+```sh
+unshare --user --map-root-user --map-auto --net sh -ec '
+  ip link set lo up
+  for model in gemini-4-carbon-high gemini-4-neon-high; do
+    python3 scripts/test_antigravity_workspace_executor.py \
+      --agy "$(command -v agy)" --workspace-mcp "$1" --model "$model"
+  done
+' sh /absolute/path/to/workspace-mcp
+```
+
+This qualifies file operations in a synthetic restricted-agent configuration.
+The workspace MCP currently exposes eight tools including file read and write,
+with no command execution. The supervisor
+must derive the checkout, mode and UID from the authorized job. The MCP's
+working directory alone would only be a path-resolution default. Each concurrent account job also needs private
+session state, trusted settings and its own authenticated workspace channel.
+
+#### Whole-process account egress fixture
+
+A supervisor creates an empty Linux network namespace, brings up only its
+loopback interface, and puts the complete native job there before dropping to
+UID 16001 with no supplementary groups and `no_new_privs`. The native CLI and
+its shell inherit the namespace. The supervisor binds one TCP listener inside
+it. Behind that listener it forwards bytes only to a fixed account relay socket
+in the outer namespace. The listener survives relay loss and cannot choose a
+different upstream. Changing proxy environment variables cannot create a route.
+
+The fixture uses the existing Orb account relay's SOCKS5 username/password
+and hostname CONNECT protocol with disposable values. The upstream sees
+`127.0.0.3` on the relayed route and `127.0.0.1` on the direct control.
+Only the local HTTPS origin holds the TLS private key. The test uses a
+synthetic Gemini API-key model response, a native `run_command` ledger probe,
+and the real CLI's conversation ID. Orb's VPN selection, Google OAuth, and
+live WireGuard transport are outside this fixture. Core's verified VPN
+transport has a separate integration test. [Account VPN](account-vpn.md)
+
+**Reproduce in a disposable NIC-free Linux VM** as root with Python 3.12 or
+later, network namespaces enabled, `ip`, OpenSSL, a mounted `/proc` and
+`/dev/pts`, Bash, and native agy 1.5.14. Use a fresh guest with only loopback,
+a free UDP port 53, and no local proxy, resolver service, or host service
+sockets mounted into it. Place the checkout and CLI at paths readable by UID
+16001. Inside the guest, run:
+
+```sh
+ip link set lo up
+printf '127.0.0.2 ledger.test\n' >> /etc/hosts
+printf 'nameserver 127.0.0.2\noptions timeout:1 attempts:1\n' > /etc/resolv.conf
+mkdir -p /run/ledger-fixture
+openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj /CN=ledger.test \
+  -addext subjectAltName=DNS:ledger.test -keyout /run/ledger-fixture/key.pem \
+  -out /run/ledger-fixture/cert.pem
+chmod 600 /run/ledger-fixture/key.pem
+chmod 644 /run/ledger-fixture/cert.pem
+python3 scripts/test_antigravity_job_egress.py --agy "$(command -v agy)" \
+  --cert /run/ledger-fixture/cert.pem --key /run/ledger-fixture/key.pem
+```
+
+The test first reaches the direct TLS and DNS listeners from the outer
+namespace. Inside the job, the native shell probes direct TCP, sends a DNS
+query to the same listener, and exercises the system resolver. It records the
+kernel namespace identity in the ledger receipt. The supervisor then kills
+the account relay with SIGKILL while a job-side TLS tunnel is open. It checks
+that the tunnel closes, a native resume reports a transport error within its
+print deadline, and neither upstream receives fallback traffic. Restarting
+only the relay must allow the same native conversation to finish through it.
+
+Observed fixture stdout (exit 0, Linux amd64 agy 1.5.14):
+
+```text
+direct controls: TLS=204 DNS=NXDOMAIN
+relay up: native turn=SUCCESS shell namespace=job direct TCP/DNS=blocked
+relay down: established TLS closed native resume=ERROR upstream delta=0 direct TCP/DNS=blocked
+relay restored: native resume=SUCCESS same conversation=true direct model calls=0 job DNS packets=0
+```
+
+#### Admission at the real node dispatcher
+
+The optional `--node /absolute/path/to/sandboxed-node` variant starts a
+disposable node in the isolated network namespace. A fixture client performs
+the Core side of the signed `job:submit` exchange with this node's temporary
+secret. Each turn is a new `POST /jobs` for the same mission and owner. The
+client waits for the node ledger's terminal state. The fixture names one synthetic owner in admin-role leases. The daemon and
+harness run under one unprivileged guest UID. The synthetic native profile
+sits outside the mission checkout. The real MCP launcher uses a disposable
+mission-scoped capabilities/call endpoint inside the namespace.
+The guest also needs `env`, `sqlite3`, and `sandboxed-mcp` on PATH. Use
+the preceding guest setup and add `--node /bin/sandboxed-node` to the
+test command. No request is sent to an existing Core or node.
+
+**Prerequisite for a dev runtime.** A trusted-owner enrollment record must bind
+the authenticated Orb user, exact provider account, concrete node identity,
+and local Unix principal/profile. Both Core and the node need to enforce this
+binding on initial launch and resume. Core must check it before account catalog
+probing, which can already open the Core-held credential. The node must check
+it before opening the owner's native profile or starting a workspace process.
+Changes to the owner, account, node, or route must invalidate an outstanding
+launch. Generic and admin jobs must not be able to run an unrelated mission
+as the enrolled profile owner.
+
+The current static node roster stores ID, base URL, token environment name
+and labels. Its signed job lease carries mission, node, job, owner, role, Unix
+user, scope and expiry. Neither identifies an owner-enrolled Google profile.
+The native mission grant binds an account and model for gateway RPCs, but
+does not designate an owner-enrolled execution node. Initial account selection
+can perform model discovery across the user's enabled accounts. Limiting user
+preferences to one account does not establish node ownership.
+[Core dispatch](../../lean/OrbCore/OrbCore/RemoteDispatch.lean)
+· [Node lease](../../lean/OrbNode/OrbNode/Lease.lean)
+
+The verified account SOCKS listener lives on **Core's loopback**. The fixture
+has both ends in one VM. A remote node needs a private authenticated path to
+that particular Core relay, with job-lifetime authority and revocation. It also
+needs a distinct mission-scoped path to Core's MCP endpoint inside the job
+boundary. Exposing the relay's long-lived account credential in a raw job
+payload would persist authority outside that lifetime. Neither a node label
+nor a proxy environment variable supplies these two paths.
+[Account relay](../../lean/OrbCore/OrbCore/AccountVpnRelay.lean)
+· [Node job admission](../../lean/OrbNode/OrbNode/Server.lean)
+
+**Owner steps.** Current Orb UI can configure the account route: open
+**Inference → the Antigravity account → Account connection**, choose
+**AirVPN · NL**, and check **Verified exit**. Keep **Allow alternative
+routers** off for native-only use. Machines shows the registered node. Neither
+screen enrolls the owner/account/profile tuple. There is currently no supported
+Orb UI action or CLI command to complete trusted-owner enrollment.
+
+Once that admission and the node-to-Core path exist, the owner must perform
+Google's native login from a terminal running as the bound Unix user, inside
+the account-routed environment and using the persistent private home/keyring.
+An eligible existing native session for that same profile can be reused.
+Otherwise, over SSH, run `agy acp --login`, open its URL in the owner's
+browser, choose the intended personal Google account, complete Google's
+consent and eligibility prompts, and paste the returned one-time code into
+that same terminal. An interactive `agy` session also supports this SSH flow.
+Run `agy models` in the same context to check catalog access before a dev
+mission. Only the owner can complete Google's interactive step.
+
+The existing dev OAuth remains usable by the Core integration that owns it.
+Google documents reuse of the CLI's cached native session. We found no
+documented exchange of an Orb/CLIProxyAPI grant for that owner-held CLI
+session. Orb's separate managed-auth installer takes access and refresh
+tokens and attaches a credential file to a workspace. That is a different
+credential distribution model from owner enrollment.
+[Google SSH OAuth](https://antigravity.google/docs/install/#remote-ssh-oauth-flow)
+· [Google ACP login](https://antigravity.google/docs/ide/extensions/acp/)
+· [Orb managed-auth installer](../../lean/OrbNode/OrbNode/FileBrowser.lean)
+
+Node dispatcher receipt (agy 1.5.14; installed Linux node binary SHA-256
+`6d9b838e8d9dd5833350e7ffe945e8b74377c39b4ab18fa5f2a82fdbd9ae7c0f`):
+
+```text
+missing signed node ID: HTTP 400, job absent
+different signed node ID: HTTP 400, job absent
+node job=9760a1e5-dda0-4e53-ad36-d368cdb2a01d mission=a1033f4c-8e1c-4d14-a190-672294dc49c4 state=succeeded
+native MCP get_compute_fleet: same mission receipt
+relay up: native turn=SUCCESS shell namespace=job direct TCP/DNS=blocked
+node job=07b835e5-e6d2-4283-9597-69d20fa88c69 mission=a1033f4c-8e1c-4d14-a190-672294dc49c4 state=failed
+relay down: established TLS closed native resume=ERROR upstream delta=0 direct TCP/DNS=blocked
+node job=0ee38fcf-646c-41bd-89dd-3118084665d3 mission=a1033f4c-8e1c-4d14-a190-672294dc49c4 state=succeeded
+relay restored: native resume=SUCCESS same conversation=true direct model calls=0 job DNS packets=0
+```
+
+The two HTTP 400s exercise the existing node-ID check. They do not demonstrate
+a trusted owner/profile admission check. The latter has no enrollment record
+or signed claim in this protocol.
+
+### Dev owner enrollment increment
+
+In the dev candidate, Core's static roster entry accepts `dedicated_owner_id`
+(the Orb user ID). The corresponding disposable Linux node sets
+`ORB_NODE_DEDICATED_OWNER_ID` to that same ID. Use a fresh node work directory.
+Enrollment uses a real owner session on the authenticated dev instance
+(`ORB_INSTANCE=dev`, `DEV_MODE=false`). Open **Inference**, expand the
+Antigravity account added by that user, find the named node and select
+**Enroll this account**. **Remove enrollment** clears the account and advances
+the stored revision. The Core endpoint checks the enabled provider's ownership
+using database metadata. The response contains the revision. Neither input nor
+output contains Google credentials. The account's VPN setting remains a
+separate owner action.
+
+The corresponding HTTP operations are `GET /api/native-owner-enrollments`,
+`GET /api/native-owner-enrollments/<node>` and
+`PUT /api/native-owner-enrollments/<node>`. The PUT body has `account_id`
+and `expected_revision`. Use the revision from GET, including zero for the
+first binding. An empty account ID removes the binding. Rebinding or removal
+revokes existing native RPC grants associated with jobs on that node in the
+same transaction. Other nodes retain their grants.
+
+The owner’s fleet row and enrollment detail expose Core’s `launch_block` reason.
+New Agent shows that reason before a standard or Goal send, including after reopening.
+A fresh fleet read also checks the reason at submit time. The owner can select a
+different machine and send the same draft. Desktop provider settings show the
+same reason alongside the enrolled account. On iOS and Android the new-mission composer shows the same reason on the
+selected machine. Before sending to a fixed remote node, both clients read its
+current fleet row again so an enrollment change keeps the draft available.
+Core and standard auto-managed launches bypass this check. Mobile enrollment
+management remains a separate Settings feature.
+
+This increment reserves the node. A signed job for another owner fails node
+admission. A matching owner also receives a refusal because execution under
+the account profile requires a private job-lifetime tunnel and an isolated
+workspace executor. The initial and resumed Core paths reach this refusal
+before credential discovery. Neither the enrollment record nor the UI
+indicates readiness for Google login. A node-local native profile identity
+and revocable per-job transport have yet to be bound to a signed lease.
+The two-UID evidence above still applies to direct native writes and stdio
+MCP. The public CLI's native login step belongs after those boundaries exist.
+
+Run the focused fixtures in a disposable Linux environment using synthetic
+identities and loopback networking:
+
+```sh
+scripts/build_orb_bins.sh --only orb-core --only sandboxed-node
+python3 scripts/test_native_owner_core.py lean/OrbCore/.lake/build/bin/orb-core
+python3 scripts/test_native_owner_node.py lean/OrbNode/.lake/build/bin/sandboxed-node
+(cd orb && pnpm exec vitest run tests/native-owner-enrollment.test.tsx)
+```
+
+### Core-held profiles for shared subscriptions
+
+A shared subscription and an owner-enrolled node have different credential
+boundaries. A Core-held profile keeps the Google login on Core. Workspace
+tools receive mission authority only. The provider's creator can differ from
+the member who owns the mission, including for legacy subscriptions.
+
+On authenticated dev Core, a registered worker can submit its native job
+grant to `POST /api/native/antigravity/workspace-admission` in the
+`X-Orb-Job-Grant` header. Its bearer identifies the worker. The JSON body
+contains `job` and `owner`. Core checks the running placement, Unix member
+identity, mission, immutable account binding and current personal preference.
+The VPN generation must match grant issuance. Core checks that the subscription
+has a unique enabled OAuth binding and resolves the configured VPN before
+checking the placement again. The receipt contains the job and mission IDs,
+read-only mode, route generation and expiry. It carries no provider credential
+or transport handle. Access to an owner-enrolled profile uses the separate
+enrollment path above.
+
+#### Native subscription acceptance
+
+A model appearing in `agy models` proves discovery. A Google userinfo HTTP 200
+through the account's assigned relay proves the token was accepted for that
+request. To qualify generation, the selected model must return the expected
+one-time response through the same route. A provider refusal ends the check.
+The test records only the selected model, country, route generation, status
+codes and an enumerated reason. The original error may carry account details
+or a sign-in link and stays out of the receipt.
+
+A tool-enabled turn additionally needs a file created by the selected workspace
+UID and read back after resuming the same conversation. The test fails when
+the subscriber returns a successful terminal event without offering a callable
+workspace tool. API-key fixtures and synthetic subscription catalogs exercise
+different provider behavior. Neither qualifies a Google subscription for
+delegation or Goal mode.

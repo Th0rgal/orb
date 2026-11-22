@@ -39,6 +39,7 @@ structure NodeConfig where
   envFile             : String := "/etc/sandboxed-node.env"
   labels              : Array String := #[]
   allowRoot           : Bool := false
+  dedicatedOwner?     : Option String := none
   adminOnly           : Bool := false
   managedSandbox      : Bool := false
   privdSocket         : String := "/run/orb-privd.sock"
@@ -315,6 +316,7 @@ def loadConfigFromEnv : IO NodeConfig := do
     envFile := envFile
     labels := labels
     allowRoot := allowRoot
+    dedicatedOwner? := ← IO.getEnv "ORB_NODE_DEDICATED_OWNER_ID"
     adminOnly := adminOnly
     managedSandbox := managedSandbox
     privdSocket := privdSocket
@@ -1598,6 +1600,7 @@ private def prepareJobOutsideLockInner
     (cfg : NodeConfig) (jid missionId : String) (payload : JVal) (logPath : String)
     (forced sideLane coordLane : Bool)
     (execUnixUser : String := "") (callerRole : String := "admin") : IO (Except String PreparedJobSpec) := do
+  if cfg.dedicatedOwner?.isSome then return .error "native_owner_executor_unavailable"
   let kind := (payload.fieldStr? "kind").getD "raw_command"
   let isUserConfined := !execUnixUser.isEmpty
   if isUserConfined && kind == "lean_build" then

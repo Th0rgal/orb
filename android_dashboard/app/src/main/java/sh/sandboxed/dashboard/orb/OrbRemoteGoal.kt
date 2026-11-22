@@ -43,3 +43,25 @@ object OrbRemoteGoal {
         return Projection(phase, data["objective"] as? String ?: previous.objective, (data["iteration"] as? Number)?.toInt() ?: previous.iteration, data["summary"] as? String ?: previous.detail)
     }
 }
+
+/** Core supplies this owner-scoped reason on the selected fleet row. */
+object OrbNativeLaunch {
+    fun warning(fleet: OrbDict, nodeID: String): String? {
+        val rows = fleet["nodes"] as? List<*> ?: return null
+        val node = rows.filterIsInstance<Map<*, *>>().firstOrNull { it["id"] == nodeID }
+        return when (node?.get("launch_block")) {
+            "native_owner_executor_unavailable" ->
+                "The isolated workspace executor for this enrolled Antigravity account is unavailable. Choose another machine to start a mission."
+            "native_owner_enrollment_required" ->
+                "This node needs an enabled Antigravity account. Check its enrollment in provider settings or choose another machine."
+            else -> null
+        }
+    }
+
+    suspend fun require(nodeID: String, goalBackend: String?, loadFleet: suspend () -> OrbDict) {
+        if (nodeID.isEmpty() || nodeID == "core" || (goalBackend == null && OrbManagedMachines.isAutoManagedTarget(nodeID))) return
+        val fleet = loadFleet()
+        warning(fleet, nodeID)?.let { throw OrbError(it) }
+        if (goalBackend != null && !OrbRemoteGoal.supports(fleet, goalBackend)) throw OrbError(OrbRemoteGoal.UNSUPPORTED)
+    }
+}

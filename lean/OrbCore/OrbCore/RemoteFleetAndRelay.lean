@@ -275,6 +275,7 @@ structure StaticRemoteNode where
   id       : String
   baseUrl  : String
   tokenEnv : String
+  dedicatedOwner? : Option String := none
   labels   : Array String := #[]
   deriving Repr, Inhabited
 
@@ -308,7 +309,7 @@ def parseStaticRemoteNodesRaw (raw : String) : Array StaticRemoteNode := Id.run 
         let tokEnv := ((it.fieldStr? "token_env").filter (!·.isEmpty)).getD (defaultRemoteNodeTokenEnv id)
         let lbls := ((it.fieldArr? "labels").getD #[]).filterMap JVal.asStr?
         if id.isEmpty || url.isEmpty then none
-        else some { id, baseUrl := trimTrailingSlashes url, tokenEnv := tokEnv, labels := lbls }
+        else some { id, baseUrl := trimTrailingSlashes url, tokenEnv := tokEnv, dedicatedOwner? := (it.field? "dedicated_owner_id").map (fun v => v.asStr?.getD ""), labels := lbls }
     | _ => return #[]
   else
     let entries := (trimmed.splitOn ",").map (fun e => e.trimAscii.toString) |>.filter (!·.isEmpty)
@@ -333,6 +334,29 @@ def loadStaticRemoteNodes : IO (Bool × Array StaticRemoteNode) := do
   let raw := ((← IO.getEnv "SANDBOXED_REMOTE_NODES").getD "").trimAscii.toString
   let parsed := parseStaticRemoteNodesRaw raw
   return (enabled || !parsed.isEmpty, parsed)
+
+/-- A previously enrolled node cannot fall back to generic dispatch when its
+    roster owner is removed. An empty owner reserves it against every caller. -/
+def nativeNodeOwner? (store : CoreStore) (nodes : Array StaticRemoteNode) (node : String) : IO (Option String) := do
+  if let some owner := (nodes.find? (fun n => n.id == node)).bind (·.dedicatedOwner?) then return some owner
+  let .ok rows ← execParamQuery store.missionsDb
+      "SELECT 1 FROM native_owner_enrollments WHERE node_id=?1;" #[node] | return some ""
+  return if rows.size > 1 then some "" else none
+
+/-- Return only a current owner/account binding. Provider metadata and preferences
+    are checked without reading the provider credential. -/
+def hasCurrentNativeEnrollment (st : CoreStore) (node owner : String) : IO Bool := do
+  let .ok rows ← execParamQuery st.missionsDb
+      ("SELECT 1 FROM native_owner_enrollments e JOIN ai_providers p ON p.id=e.account_id " ++
+       "LEFT JOIN user_provider_prefs pref ON pref.user_id=e.owner_id AND pref.provider_id=p.id " ++
+       "WHERE e.node_id=?1 AND e.owner_id=?2 AND p.created_by_user_id=e.owner_id " ++
+       "AND p.provider_type='antigravity' AND p.enabled=1 AND COALESCE(pref.enabled,1)=1;") #[node,owner]
+    | return false
+  return rows.size > 1
+
+def nativeOwnerLaunchBlock (store : CoreStore) (node owner : String) : IO String := do
+  if ← hasCurrentNativeEnrollment store node owner then return "native_owner_executor_unavailable"
+  return "native_owner_enrollment_required"
 
 def resolveStaticNodeToken? (node : StaticRemoteNode) : IO (Option String) := do
   if let some v ← IO.getEnv node.tokenEnv then
@@ -801,7 +825,14 @@ def buildComputeFleetJVal
   let probed ← probeAllStaticNodesParallel staticNodes persistedCordons effIso probeDeadlineMs isAdmin
   -- A node that did not answer keeps what its last heartbeat reported.
   let heartbeatCache ← loadNodeHeartbeatCache dataRoot
-  let staticItems := probed.map (NodeLiveness.applyCache heartbeatCache)
+  let staticItems ← probed.mapM fun sample => do
+    let item := NodeLiveness.applyCache heartbeatCache sample
+    let id := (item.fieldStr? "id").getD ""
+    if let some owner := (staticNodes.find? (fun n => n.id == id)).bind (·.dedicatedOwner?) then
+      if callerUserId? == some owner then
+        if let some store := store? then
+          return item.setField "launch_block" (.str (← nativeOwnerLaunchBlock store id owner))
+    return item
   saveNodeHeartbeatCache dataRoot heartbeatCache (NodeLiveness.updateCache heartbeatCache probed)
   let jobLoad ← match store? with
     | some store => activeJobsByNode store
@@ -1557,7 +1588,7 @@ def deleteManagedSnapshot (mc : ManagedComputeStore) (dataRoot snapId : String) 
 
 /-! ## Durable Node Job Ledger Queries (`/api/durable-jobs*`) -/
 
-private def ensureDurableJobsTable (store : CoreStore) : IO Unit := do
+def ensureDurableJobsTable (store : CoreStore) : IO Unit := do
   discard <| execParamQuery store.missionsDb
     "CREATE TABLE IF NOT EXISTS remote_node_jobs (job_id TEXT PRIMARY KEY, mission_id TEXT NOT NULL DEFAULT '', node_id TEXT NOT NULL DEFAULT '', state TEXT NOT NULL DEFAULT 'queued', payload_json TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL DEFAULT '');" #[]
 

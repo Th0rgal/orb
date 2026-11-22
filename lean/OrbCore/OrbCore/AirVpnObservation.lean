@@ -29,7 +29,7 @@ def verifyObservation? (server country : String) (sessions : Array JVal)
   guard (!server.isEmpty && country.length == 2 && country.toList.all (fun c => 'A' ≤ c && c ≤ 'Z'))
   guard (sessions.any fun s =>
     (s.fieldStr? "server_name").map String.toLower == some server.toLower &&
-    s.fieldStr? "server_country_code" == some country &&
+    (s.fieldStr? "server_country_code").map String.toUpper == some country &&
     (s.fieldStr? "exit_ip").bind parseExit? == some v4)
   match v6? with
   | some (.v4 _) => none

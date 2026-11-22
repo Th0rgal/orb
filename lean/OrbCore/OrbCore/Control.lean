@@ -37,6 +37,7 @@ import OrbCore.ManagedProviderSealing
 import OrbCore.AirVpnSettings
 import OrbCore.AccountVpnApi
 import OrbCore.AccountVpnRelay
+import OrbCore.NativeGoalApproval
 import OrbCore.AutoPlacement
 import OrbCore.RemoteDispatch
 import OrbCore.ProjectFilesAndController
@@ -1651,6 +1652,119 @@ private def stopMissionTurnForUnavailableChain
     let statusPayload := renderCompact (.obj #[("status", .str "interrupted"), ("reason", .str termReason), ("mission_id", .str mid)])
     publishControlEvent st.broadcastHub? "mission_status_changed" statusPayload (some mid)
 
+private def proxySpendDenial? (st : CoreAppState) (ownerRec : UserRecord) (utcDay : String) :
+    IO (Option String) := do
+  let (infSpent, cmpSpent) ← getUserSpentTodayCents st.store ownerRec.id utcDay
+  let userSpent := infSpent + cmpSpent
+  let mf ← st.managedRef.get
+  let globalActive : UInt8 := if mf.enabled then 1 else 0
+  let userActive : UInt8 := if ownerRec.dailySpendCapCents?.isSome then 1 else 0
+  let userCapU32 : UInt32 := clampControlSpendU32 (ownerRec.dailySpendCapCents?.getD 0)
+  if globalActive == 1 || userActive == 1 then
+    let capWord := Orb.Kernel.userSpendCapStep
+      globalActive (clampControlSpendU32 mf.spentTodayCents) (clampControlSpendU32 mf.dailyCapCents)
+      userActive (clampControlSpendU32 userSpent) userCapU32
+      1
+    if (capWord &&& 1) != 1 then
+      let denyReason := ((capWord >>> 1) &&& 0x7).toNat
+      let scopeStr := if denyReason == 2 then "user" else "global"
+      return some s!"\{\"error\":\{\"type\":\"spend_cap_exceeded\",\"code\":\"daily_spend_cap_exceeded\",\"scope\":{jsonEscape scopeStr},\"message\":\"Daily spend cap reached\"}}"
+  return none
+
+/-- Only native Cloud Code requests carrying this job's opaque bearer can use
+    the subscription. Google owns model execution and policy responses. -/
+private def handleNativeAntigravity (st : CoreAppState) (req : HttpRequest) (rawTarget : String)
+    (now : UInt64) : IO CoreHttpResponse := do
+  let deny := fun (status : Nat) (code : String) =>
+    jsonResponse status (renderCompact (.obj #[("error", .str code)]))
+  let token := (extractBearerToken? req.headers now).getD ""
+  let some grant ← resolveNativeAntigravityToken? st.store token now | return deny 401 "invalid_native_grant"
+  let some mission ← getMission? st.store grant.mission | return deny 403 "native_mission_unavailable"
+  let some owner ← getUserById? st.store grant.owner | return deny 403 "native_owner_unavailable"
+  if owner.disabled || mission.ownerUserId != grant.owner || mission.backend != "antigravity" then
+    return deny 403 "native_mission_unavailable"
+  let rpcTarget := (rawTarget.drop "/api/native/antigravity/v1internal:".length).toString
+  let (rpc, query) := match rpcTarget.splitOn "?" with
+    | [name] => (name, "")
+    | [name, "alt=sse"] => (name, "?alt=sse")
+    | _ => ("", "")
+  let generate := rpc == "streamGenerateContent"
+  let discovery := ["fetchAdminControls", "fetchAvailableModels", "listExperiments",
+    "loadCodeAssist", "retrieveUserQuotaSummary", "fetchUserInfo"].contains rpc
+  if req.method != "POST" || !(generate || discovery) || (!generate && !query.isEmpty) then
+    return deny 403 "unsupported_native_operation"
+  let some hub := st.providerHub? | return deny 503 "native_transport_unavailable"
+  let rows ← loadHydratedProviders st.store st.cfg.workingDir
+  let prefs ← getUserProviderPrefs st.store grant.owner
+  let some hp := rows.find? (·.id == grant.account) | return deny 403 "native_account_unavailable"
+  if hp.providerType != "antigravity" || !hp.enabled || hp.oauthToken.isEmpty ||
+      (accountRoutingFile rows hp).isEmpty || !isUserProviderEnabled prefs hp.id then
+    return deny 403 "native_account_unavailable"
+  let shared := owner.role != "admin" && !providerAddedBy hp grant.owner
+  let wire := req.bodySlice.toByteArray
+  let encoding := ((lookupHeaderCI req.headers "content-encoding").getD "").toLower
+  let decoded := if encoding == "gzip" then (OrbNetLeaf.Gzip.gunzipBounded wire 16777216).toOption
+    else if encoding.isEmpty || encoding == "identity" then some wire else none
+  let some body := decoded | return deny 400 "invalid_native_encoding"
+  let .ok payload := OrbBin.Json.parseBytes body | return deny 400 "invalid_native_request"
+  if generate then
+    let some model := payload.fieldStr? "model" | return deny 400 "missing_native_model"
+    let grouped := OrbBin.ClaudeControl.groupAntigravityModels #[(model, model)]
+    if grouped[0]?.map Prod.fst != some grant.model then return deny 403 "native_model_mismatch"
+    if let some denied ← proxySpendDenial? st owner (currentUtcDay now) then return jsonResponse 429 denied
+  let some resolve := hub.resolveTransport? | return deny 503 "native_transport_unavailable"
+  let .ok port? ← resolve hp.providerType hp.id | return deny 503 "native_transport_unavailable"
+  let mut headers := #[("Authorization", "Bearer " ++ hp.oauthToken), ("Content-Type", "application/json")]
+  for key in #["accept", "user-agent", "x-goog-api-client", "x-client-version"] do
+    if let some value := lookupHeaderCI req.headers key then headers := headers.push (key, value)
+  let upstream ← streamingUpstreamRequest true "POST" "daily-cloudcode-pa.googleapis.com" 443
+    ("/v1internal:" ++ rpc ++ query) headers body (socksPort? := port?)
+  let .ok (response, pump?) := upstream | return deny 502 "native_upstream_unavailable"
+  let (ctype, _) := sanitizeUpstreamHeaders response.headers
+  if shared && (rpc == "fetchUserInfo" || rpc == "fetchAdminControls") then
+    -- The CLI requires its eligibility check on every start. Forward its actual
+    -- result while exposing only typed eligibility/privacy settings to a member.
+    if response.status / 100 != 2 then return deny response.status "native_eligibility_denied"
+    let (bytes, complete) ← match pump? with
+      | some pump => do
+        let size ← IO.mkRef 0
+        pump fun part => do
+          size.modify (· + part.size)
+          return (← size.get) ≤ 65536
+      | none => pure (response.body, true)
+    unless complete do return deny 502 "invalid_native_eligibility"
+    let .ok (.obj fields) := OrbBin.Json.parseBytes bytes | return deny 502 "invalid_native_eligibility"
+    let upstreamInfo := JVal.obj fields
+    if rpc == "fetchAdminControls" then
+      -- Policy may embed an enterprise MCP configuration, including server
+      -- credentials. Do not send it into a different user's workspace.
+      let mcp := upstreamInfo.fieldOrNull "mcpSetting"
+      if #["overrideMcpConfigJson", "mcpConfigJson"].any (fun key => !((mcp.fieldStr? key).getD "").isEmpty) ||
+          ((upstreamInfo.fieldOrNull "mcpControls").field? "mcpAllowlist").isSome then
+        return deny 403 "native_shared_account_policy_private"
+      return jsonResponse response.status (renderCompact upstreamInfo)
+    let settings := upstreamInfo.fieldOrNull "userSettings"
+    let mut allowedSettings := #[]
+    for field in #["consumerTermsAccepted", "gcpTermsAccepted", "telemetryEnabled", "userDataCollectionForceDisabled"] do
+      if let some flag := settings.fieldBool? field then allowedSettings := allowedSettings.push (field, .bool flag)
+    let mut visible := #[("userSettings", JVal.obj allowedSettings)]
+    if let some region := upstreamInfo.fieldStr? "regionCode" then
+      if region.length == 2 && region.toList.all Char.isUpper then visible := visible.push ("regionCode", .str region)
+    return jsonResponse response.status (renderCompact (.obj visible))
+  let record := fun (bytes : ByteArray) => do
+    if generate && response.status / 100 == 2 then
+      recordProxyUsage st.store now grant.model hp.providerType hp.id "" mission.id
+        (if mission.parentMissionId.isEmpty then "mission" else "subagent") (extractProxyUsage bytes)
+        (requestedModel := mission.modelOverride)
+  if let some pump := pump? then
+    return { status := response.status, contentType := ctype, body := ByteArray.empty
+             bodyStream? := some fun emit => do
+               let (copy, ok) ← pump emit
+               record copy
+               return ok }
+  record response.body
+  return { status := response.status, contentType := ctype, body := response.body }
+
 /-- Gate `/v1/*` proxy requests against execution-bound mission Cyber selections (`#1497`)
     and per-account cooldowns (`#1612`). -/
 private def handleProxyRequest (st : CoreAppState) (req : HttpRequest) (cleanPath : String)
@@ -1719,21 +1833,7 @@ private def handleProxyRequest (st : CoreAppState) (req : HttpRequest) (cleanPat
     if ownerRec.disabled then
       return mkJson 401 "{\"error\":\"account_disabled\"}"
     userPrefs ← getUserProviderPrefs st.store ownerUid
-    let (infSpent, cmpSpent) ← getUserSpentTodayCents st.store ownerUid utcDay
-    let userSpent := infSpent + cmpSpent
-    let mf ← st.managedRef.get
-    let globalActive : UInt8 := if mf.enabled then 1 else 0
-    let userActive : UInt8 := if ownerRec.dailySpendCapCents?.isSome then 1 else 0
-    let userCapU32 : UInt32 := clampControlSpendU32 (ownerRec.dailySpendCapCents?.getD 0)
-    if globalActive == 1 || userActive == 1 then
-      let capWord := Orb.Kernel.userSpendCapStep
-        globalActive (clampControlSpendU32 mf.spentTodayCents) (clampControlSpendU32 mf.dailyCapCents)
-        userActive (clampControlSpendU32 userSpent) userCapU32
-        1
-      if (capWord &&& 1) != 1 then
-        let denyReason := ((capWord >>> 1) &&& 0x7).toNat
-        let scopeStr := if denyReason == 2 then "user" else "global"
-        return mkJson 429 s!"\{\"error\":\{\"type\":\"spend_cap_exceeded\",\"code\":\"daily_spend_cap_exceeded\",\"scope\":{jsonEscape scopeStr},\"message\":\"Daily spend cap reached\"}}"
+    if let some denied ← proxySpendDenial? st ownerRec utcDay then return mkJson 429 denied
   let rawRequestedModel := (bodyJv.fieldStr? "model").getD defaultCodexModel
   let chains ← st.chainsRef.get
   -- A named model is served by its saved chain or by the provider owning that
@@ -2885,6 +2985,16 @@ private def dispatchMissionControlAndGitRoutes?
       | return some (.ok (mkJson 400 "{\"error\":\"invalid_json\"}"))
     let callId := (jv.fieldStr? "tool_call_id").getD ""
     let toolName := (jv.fieldStr? "name").getD "ui_native_request"
+    if callId.startsWith NativeGoalApproval.ticketPrefix then
+      let action := (jv.fieldOrNull "result").fieldStr? "action"
+      let mid? ← NativeGoalApproval.answer st.store callId caller.userId ((jv.fieldStr? "mission_id").getD "")
+        (action.getD "") nowEpochSec
+      if let some mid := mid? then
+        let pl := renderCompact (.obj #[("tool_call_id",.str callId),("tool_name",.str "ui_native_request"),
+          ("result",.obj #[("action",.str (action.getD ""))])])
+        discard <| appendMissionEvent st.store mid "tool_result" pl (formatEpochIso8601Utc nowEpochSec)
+        publishControlEvent st.broadcastHub? "tool_result" pl (some mid)
+      return some (.ok (mkJson 200 (renderCompact (.obj #[("delivered",.bool mid?.isSome)]))))
     let resultVal := (jv.field? "result").getD (.obj #[("action", .str "accept")])
     if callId.trimAscii.toString.isEmpty then
       return some (.ok (mkJson 400 "{\"error\":\"missing_tool_call_id\"}"))
@@ -2977,6 +3087,142 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
     let reason := if invalid then error else "message_enqueue_failed"
     mkJson (if invalid then 400 else 500) (renderCompact (.obj #[
       ("id", .str msgId), ("error", .str reason), ("message_accepted", .bool false), ("queued", .bool false)]))
+  if cleanPath == "/api/native/antigravity/workspace-turn" then
+    let denied := mkJson 403 "{\"error\":\"native_shared_workspace_denied\"}"
+    unless (← NativeSharedWorkspace.executionEnabled) && !st.cfg.devMode && req.method == "POST" do return .ok denied
+    let some hub := st.providerHub? | return .ok denied
+    let some grant := lookupHeaderCI req.headers "x-orb-job-grant" | return .ok denied
+    unless grant.startsWith "orb-agy-v1_" do return .ok denied
+    let body := req.bodySlice.toByteArray
+    if body.size > 4 * 1024 * 1024 then return .ok denied
+    let some j := (OrbBin.Json.parseBytes body).toOption | return .ok denied
+    let some job := j.fieldStr? "job" | return .ok denied
+    let some node := j.fieldStr? "node" | return .ok denied
+    let some owner := j.fieldStr? "owner" | return .ok denied
+    let some prompt := j.fieldStr? "prompt" | return .ok denied
+    let some config ← OrbCore.NativeSharedWorkspace.holderFor? node | return .ok denied
+    let (_, fleet) ← loadStaticRemoteNodes
+    let some sn := fleet.find? (·.id == node) | return .ok denied
+    let .ok url := OrbBin.HttpClient.parseUrl sn.baseUrl | return .ok denied
+    if config.remote then
+      unless url.isHttps && !AutoPlacement.reserved sn && sn.dedicatedOwner?.isNone do return .ok denied
+    else
+      unless url.host == "127.0.0.1" do return .ok denied
+    let some p ← OrbCore.NativeSharedWorkspace.placement? st.store grant job node owner nowEpochSec
+      | return .ok (mkJson 409 "{\"error\":\"native_workspace_not_running\"}")
+    let some auth ← resolveStaticNodeToken? sn | return .ok denied
+    let .ok (200, _, some status) ← OrbBin.HttpClient.sendJsonRequest "GET" (sn.baseUrl ++ "/jobs/" ++ job)
+        (some auth) none #[] 3000 131072 | return .ok denied
+    unless status.fieldStr? "state" == some "running" && status.fieldStr? "mission_id" == some p.mission &&
+        status.fieldStr? "owner_user_id" == some p.owner && status.fieldStr? "exec_unix_user" == some p.unixUser &&
+        (status.fieldNat? "exec_uid").getD 0 > 0 do return .ok denied
+    let uid := (status.fieldNat? "exec_uid").getD 0
+    let fileCall := fun (placed : OrbCore.NativeSharedWorkspace.Placement) (file : JVal) => do
+      let request := JVal.obj #[("mission", .str placed.mission), ("owner", .str placed.owner),
+        ("unix_user", .str placed.unixUser), ("uid", .nat uid), ("file", file),
+        ("grant_sha256", .str (LeanSys.Auth.bytesToHexLower (LeanSys.Auth.sha256Bytes grant.toUTF8)))]
+      let .ok (200, _, some reply) ← OrbBin.HttpClient.sendJsonRequest "POST"
+          (sn.baseUrl ++ "/jobs/" ++ job ++ "/native-file") (some auth) (some request) #[] 5000 (2*1024*1024)
+        | return JVal.null
+      return reply
+    let goal := config.remote && (← NativeGoalApproval.currentGoal st.store p)
+    let live := do
+      let now ← coreEpochSec
+      return (← OrbCore.NativeSharedWorkspace.placement? st.store grant job node owner now) == some p &&
+        (← NativeGoalApproval.currentGoal st.store p)
+    let delegateCall := fun (placed : OrbCore.NativeSharedWorkspace.Placement) (op : JVal) => do
+      unless goal && placed == p && (← live) do return JVal.null
+      let args := op.fieldOrNull "arguments"
+      let now ← coreEpochSec
+      match op.fieldStr? "action" with
+      | some "catalog" => return NativeGoalApproval.catalogue
+      | some "ask" =>
+        return ← NativeGoalApproval.ask st.store p args now (fun id notice => do
+          let payload := renderCompact (.obj #[("tool_call_id",.str id),("tool_name",.str "ui_native_request"),("args",notice)])
+          discard <| appendMissionEvent st.store p.mission "tool_call" payload (formatEpochIso8601Utc now)
+          publishControlEvent st.broadcastHub? "tool_call" payload (some p.mission)) live
+      | some "dispatch" =>
+        let ticket := (op.fieldStr? "ticket").getD ""
+        unless ← NativeGoalApproval.consume st.store p args ticket now do return JVal.null
+        let some sup := st.remoteSup? | return JVal.null
+        let some mission ← getMission? st.store p.mission | return JVal.null
+        let localUrl := s!"http://127.0.0.1:{st.cfg.port}"
+        let env ← mintMissionScopedMcpEnv st.store sup p.mission p.owner mission.project localUrl false now
+        let some (_,token) := env.find? (fun (k,_) => k == "SANDBOXED_MCP_TOKEN") | return JVal.null
+        let key := ((args.fieldStr? "idempotency_key").filter (!·.isEmpty)).getD ticket
+        let bound := (args.setField "parent_mission_id" (.str p.mission)).setField "idempotency_key" (.str key)
+        unless ← live do return JVal.null
+        let .ok (200,_,some reply) ← OrbBin.HttpClient.sendJsonRequest "POST" (localUrl ++ "/api/mcp/call")
+          (some token) (some (.obj #[("name",.str "start_mission"),("arguments",bound)])) #[] 20000 262144 | return JVal.null
+        return reply
+      | _ => return JVal.null
+    let stream := OrbCore.NativeSharedWorkspace.pumpTurn st.store hub st.cfg.workingDir grant job node
+      owner prompt (j.fieldStr? "conversation") uid config goal fileCall delegateCall
+    return .ok {
+      status := 200
+      contentType := "application/x-ndjson"
+      body := ByteArray.empty
+      bodyStream? := some stream }
+
+  -- A node may verify a shared account placement without acquiring any
+  -- authority to run a profile or extracting the Google login from Core.
+  if cleanPath == "/api/native/antigravity/workspace-admission" then
+    let denied := mkJson 403 "{\"error\":\"native_shared_workspace_denied\"}"
+    unless (← NativeSharedWorkspace.executionEnabled) && !st.cfg.devMode && req.method == "POST" do return .ok denied
+    let some hub := st.providerHub? | return .ok denied
+    let some bearer := extractBearerToken? req.headers nowEpochSec | return .ok denied
+    let some node ← authenticateStaticNodeToken? bearer | return .ok denied
+    let body := req.bodySlice.toByteArray
+    if body.size > 4096 then return .ok denied
+    let some j := (OrbBin.Json.parseBytes body).toOption | return .ok denied
+    let some job := j.fieldStr? "job" | return .ok denied
+    let some owner := j.fieldStr? "owner" | return .ok denied
+    let some grant := lookupHeaderCI req.headers "x-orb-job-grant" | return .ok denied
+    let .ok placement ← OrbCore.NativeSharedWorkspace.authorize st.store hub st.cfg.workingDir grant job node owner
+      | return .ok denied
+    return .ok (mkJson 200 (renderCompact (.obj #[("mission", .str placement.mission),
+      ("job", .str placement.job), ("readonly", .bool placement.readonly),
+      ("route_generation", .nat placement.routeGeneration), ("expires", .nat placement.expires)])))
+
+  -- The trusted account relay asks Core on admission and during each stream.
+  -- No gateway address, provider credential or reusable relay secret leaves Core here.
+  if cleanPath == "/api/native/antigravity/relay-admission" then
+    let denied := mkJson 403 "{\"error\":\"relay_denied\"}"
+    unless (← NativeSharedWorkspace.executionEnabled) && !st.cfg.devMode && req.method == "POST" do
+      return .ok denied
+    let nodeToken := (extractBearerToken? req.headers nowEpochSec).getD ""
+    let some node ← authenticateStaticNodeToken? nodeToken | return .ok denied
+    let body := req.bodySlice.toByteArray
+    if body.size > 4096 then return .ok denied
+    let some j := (OrbBin.Json.parseBytes body).toOption | return .ok denied
+    let some job := j.fieldStr? "job" | return .ok denied
+    let some owner := j.fieldStr? "owner" | return .ok denied
+    let some account := j.fieldStr? "account" | return .ok denied
+    let some revision := j.fieldUInt64? "revision" | return .ok denied
+    let some grant := lookupHeaderCI req.headers "x-orb-job-grant" | return .ok denied
+    unless !owner.isEmpty && grant.startsWith "orb-agy-v1_" && j.fieldStr? "node" == some node do return .ok denied
+    let (_, nodes) ← loadStaticRemoteNodes
+    unless (nodes.find? (fun n => n.id == node)).bind (·.dedicatedOwner?) == some owner do return .ok denied
+    let digest := bytesToHexLower (sha256Bytes grant.toUTF8)
+    let .ok rows ← execParamQuery st.store.missionsDb
+        ("SELECT t.expires_at_epoch,v.generation FROM native_antigravity_grants g " ++
+         "JOIN native_job_relay_bindings b USING(token_sha256) JOIN mission_proxy_tokens t USING(token_sha256) " ++
+         "JOIN remote_node_jobs j ON g.job_id=j.job_id AND j.node_id=b.node_id " ++
+         "JOIN missions m ON m.id=t.mission_id AND m.id=j.mission_id AND m.owner_user_id=t.owner_user_id " ++
+         "JOIN users u ON u.id=m.owner_user_id AND u.disabled=0 " ++
+         "JOIN native_owner_enrollments e ON e.node_id=j.node_id AND e.owner_id=u.id AND e.account_id=g.account_id " ++
+         "JOIN ai_providers p ON p.id=e.account_id AND p.enabled=1 AND p.provider_type='antigravity' AND p.created_by_user_id=u.id " ++
+         "JOIN account_vpn_routes v ON v.account_id=e.account_id AND length(v.country)=2 AND v.generation>0 " ++
+         "LEFT JOIN user_provider_prefs f ON f.user_id=u.id AND f.provider_id=p.id " ++
+         "WHERE t.token_sha256=?1 AND j.job_id=?2 AND j.node_id=?3 AND u.id=?4 AND e.account_id=?5 " ++
+         "AND e.revision=b.enrollment_revision AND v.generation=b.route_generation AND e.revision=CAST(?6 AS INTEGER) AND t.revoked=0 AND t.expires_at_epoch>CAST(?7 AS INTEGER) " ++
+         "AND j.state='running' AND m.placement_job_id=j.job_id AND m.backend='antigravity' AND m.status='active' AND COALESCE(f.enabled,1)=1;")
+        #[digest,job,node,owner,account,toString revision,toString nowEpochSec] | return .ok denied
+    let some row := rows[1]? | return .ok denied
+    return .ok (mkJson 200 (renderCompact (.obj #[("expires", .str (cell row 0)), ("route_generation", .str (cell row 1))])))
+
+  if cleanPath.startsWith "/api/native/antigravity/v1internal:" then
+    return .ok (← handleNativeAntigravity st req rawTarget nowEpochSec)
 
   -- 1. Public Health Endpoint (`GET /api/health`)
   if req.method == "GET" && cleanPath == "/api/health" then
@@ -3647,6 +3893,41 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
   let some caller ← resolveCallerPrincipal? st req.headers nowEpochSec
     | return .ok (mkJson 401 "{\"error\":\"unauthorized\"}")
   let utcDay := currentUtcDay nowEpochSec
+
+  if cleanPath == "/api/native-owner-enrollments" || cleanPath.startsWith "/api/native-owner-enrollments/" then
+    unless ← NativeSharedWorkspace.executionEnabled do return .ok (mkJson 404 "{}")
+    let token := (extractBearerToken? req.headers nowEpochSec).getD ""
+    unless !st.cfg.devMode && token.startsWith "orb-jwt-v2:" && !caller.disabled && !caller.userId.isEmpty do
+      return .ok (mkJson 403 "{\"error\":\"owner_session_required\"}")
+    let (_, nodes) ← loadStaticRemoteNodes
+    if cleanPath == "/api/native-owner-enrollments" && req.method == "GET" then
+      let owned := nodes.filter (fun n => n.dedicatedOwner? == some caller.userId)
+      return .ok (mkJson 200 (renderCompact (.arr (owned.map fun n => .str n.id))))
+    let ["", "api", "native-owner-enrollments", encodedNode] := cleanPath.splitOn "/"
+      | return .ok (mkJson 404 "{}")
+    let some node := percentDecodeStrict encodedNode | return .ok (mkJson 400 "{}")
+    unless (nodes.find? (fun n => n.id == node)).bind (·.dedicatedOwner?) == some caller.userId do
+      return .ok (mkJson 403 "{\"error\":\"node_owner_required\"}")
+    if req.method == "GET" then
+      let .ok rows ← execParamQuery st.store.missionsDb
+          "SELECT CASE WHEN owner_id=?2 THEN account_id ELSE '' END,revision FROM native_owner_enrollments WHERE node_id=?1;"
+          #[node,caller.userId] | return .ok (mkJson 503 "{}")
+      let row := rows[1]?.getD #[]
+      let revision := ((row[1]?.getD "0").toNat?).getD 0
+      return .ok (mkJson 200 (renderCompact (.obj #[
+        ("account_id", .str (row[0]?.getD "")), ("revision", JVal.uint64 revision.toUInt64),
+        ("launch_block", .str (← nativeOwnerLaunchBlock st.store node caller.userId))])))
+    unless req.method == "PUT" do return .ok (mkJson 405 "{}")
+    let body := req.bodySlice.toByteArray
+    if body.size > 2048 then return .ok (mkJson 413 "{}")
+    let some j := (OrbBin.Json.parseBytes body).toOption | return .ok (mkJson 400 "{}")
+    let some account := j.fieldStr? "account_id" | return .ok (mkJson 400 "{}")
+    let some rev := j.fieldUInt64? "expected_revision" | return .ok (mkJson 400 "{}")
+    match ← changeNativeOwnerEnrollment st.store node caller.userId account rev with
+    | .ok next => return .ok (mkJson 200 ("{\"revision\":" ++ next ++ "}"))
+    | .error reason =>
+      let status := if reason == "enrollment_changed" then 409 else if reason == "provider_access_denied" then 403 else 503
+      return .ok (mkJson status (renderCompact (.obj #[("error", .str reason)])))
 
   if let ["", "api", "ai", "providers", encodedAccount, setting] := cleanPath.splitOn "/" then
     if setting == "vpn" || setting == "alternative-routers" then
@@ -5779,6 +6060,17 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
   if req.method == "GET" && cleanPath == "/api/providers" then
     return .ok (mkJson 200 (← renderProviderCatalogJson st.store st.cfg.workingDir caller))
 
+  if req.method == "GET" && ["/api/providers/antigravity-models", "/api/antigravity-models",
+      "/api/providers/backend-models"].contains cleanPath then
+    if let some (_, rawNode) := (parseQueryParams rawTarget).find? (fun p => p.1 == "node_id") then
+      let some node := percentDecodeStrict rawNode | return .ok (mkJson 400 "{}")
+      let (_, nodes) ← loadStaticRemoteNodes
+      if let some owner ← nativeNodeOwner? st.store nodes node then
+        if owner.isEmpty || caller.userId != owner then return .ok (mkJson 403 "{\"error\":\"node_owner_required\"}")
+        unless ← hasCurrentNativeEnrollment st.store node owner do
+          return .ok (mkJson 409 "{\"error\":\"native_owner_enrollment_required\"}")
+        return .ok (mkJson 503 "{\"error\":\"native_owner_executor_unavailable\"}")
+
   if cleanPath.startsWith "/api/providers/" || cleanPath == "/api/antigravity-models" then
     if cleanPath != "/api/providers/backend-models" then
       let pHub ← match st.providerHub? with | some h => pure h | none => newProviderRuntimeHub
@@ -5838,12 +6130,10 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
     ]
     let configured ← configuredOpenCodeOptions st.store caller.userId isAdm
     opencodeModels := opencodeModels ++ configured.map renderCompact
-    let mut agyModels : Array String := #[]
-    if isAdm then
-      let pHub ← match st.providerHub? with | some h => pure h | none => newProviderRuntimeHub
-      let pairs ← getCachedAntigravityModels pHub false
-      for (mId, mLbl) in pairs do
-        agyModels := agyModels.push (mkOpt mId mLbl "")
+    let pHub ← match st.providerHub? with | some h => pure h | none => newProviderRuntimeHub
+    let pairs ← if isAdm then getCachedAntigravityModels pHub false else
+      memberAntigravityModels pHub st.store st.cfg.workingDir caller.userId false
+    let agyModels := pairs.map fun (mId, mLbl) => mkOpt mId mLbl ""
     let vibeModels : Array String := #[
       mkOpt "mistral/mistral-vibe-cli-latest" "Mistral Vibe" "Native Mistral Vibe CLI"
     ]
@@ -8228,6 +8518,7 @@ def runCoreServer (cfg : CoreConfig) (maxRequests? : Option Nat := none) : IO UI
     let providerHub := { baseProviderHub with
       resolveTransport? := some (fun provider account => AccountVpnRoutes.resolve store.missionsDb account fun pref =>
         AccountVpnPool.allocate vpnPool store.rootDir vpnCoordinatorDir store.missionsDb account provider pref) }
+    let remoteSup := { remoteSup with providerHub? := some providerHub }
     let appState : CoreAppState := {
       cfg := cfg
       store := store

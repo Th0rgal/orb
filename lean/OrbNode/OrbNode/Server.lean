@@ -199,7 +199,7 @@ private def findCrlf? (buf : ByteArray) (startIdx : Nat := 0) : Option Nat := Id
       `maxTransferBytes` (`10 GiB`) directly to disk in `64 KiB` chunks! -/
 def readHttpRequest
     (cfd : UInt32) (workDir : String := "/tmp") (maxBodyBytes : Nat := 134217728)
-    (authTokens? : Option (String × Option String) := none) : IO (Except String HttpRequest) := do
+    (authTokens? : Option (String × Option String) := none) (ownerReserved : Bool := false) : IO (Except String HttpRequest) := do
   let mut buf := ByteArray.emptyWithCapacity 8192
   let mut hdrEnd? : Option Nat := none
   while hdrEnd?.isNone && buf.size < 65536 do
@@ -239,6 +239,9 @@ def readHttpRequest
   let (path, query) := parsePathAndQuery rawTarget
   let methodUp := method.toUpper
   let segs := (path.splitOn "/").filter (fun s => !s.isEmpty)
+  if ownerReserved && !(methodUp == "GET" && segs == ["heartbeat"]) &&
+      !(methodUp == "POST" && segs == ["jobs"]) then
+    return .error "owner_node_reserved"
   let isArchiveUnpack := methodUp == "POST" && segs == ["machine-transfer", "archive", "unpack"]
   let bodyStart := hdrEnd + 4
   let initialRem := if bodyStart < buf.size then buf.extract bodyStart buf.size else ByteArray.empty
@@ -640,6 +643,32 @@ def admitNodeLeaseRole (cfg : NodeConfig) (claims : LeaseClaims) (requireAdmin :
     else
       throw (textResp 403 "member node execution requires a valid confined unix_username")
 
+/-- Match every untrusted field to the worker ledger before starting the UID-dropped helper. -/
+def admittedNativeFile? (rec : JobRecord) (j : JVal) : Option JVal := do
+  guard (rec.state == .running && rec.execUid > 0 && !rec.execUnixUser.isEmpty && !rec.ownerUserId.isEmpty)
+  guard (j.fieldStr? "mission" == some rec.missionId && j.fieldStr? "owner" == some rec.ownerUserId &&
+    j.fieldStr? "unix_user" == some rec.execUnixUser && j.fieldNat? "uid" == some rec.execUid.toNat)
+  let jobPayload ← (OrbBin.Json.parse rec.payloadJson).toOption
+  let grant ← (jobPayload.field? "env").bind (·.fieldStr? "ORB_NATIVE_ANTIGRAVITY_TOKEN")
+  guard (grant.startsWith "orb-agy-v1_" &&
+    j.fieldStr? "grant_sha256" == some (LeanSys.Auth.bytesToHexLower (LeanSys.Auth.sha256Bytes grant.toUTF8)))
+  let file ← j.field? "file"
+  let action := file.fieldStr? "action"
+  guard (action == some "read_file" || (action == some "write_file" && rec.authorityMode == "writer"))
+  return file
+
+private def nativeJobFile (rt : NodeRuntime) (jid : String) (req : HttpRequest) : IO HttpResponse := do
+  unless verifyBearerHeader (req.header? "authorization") rt.cfg.token rt.cfg.tokenPrevious? do
+    return textResp 401 "invalid node token"
+  let denied := textResp 403 "native_workspace_denied"
+  let some rec := rt.ledger.jobs.get? jid | return denied
+  unless req.body.size ≤ 2 * 1024 * 1024 do return denied
+  let some j := (OrbBin.Json.parseBytes req.body).toOption | return denied
+  let some file := admittedNativeFile? rec j | return denied
+  match ← userNativeJobFile rt.cfg.privdSocket rec.execUnixUser rec.missionId file with
+  | .error _ => return textResp 400 "native_file_unavailable"
+  | .ok result => return jsonResp 200 result
+
 /-- Core route dispatcher over `NodeRuntime` returning `(updatedRuntime, response, pendingLaunches, steerWatchers)`
     so `handleRequestConcurrent` runs blocking checkout preparation and tool-steer watchers outside `Std.Mutex`. -/
 def handleNonExecRequestCore (rt0 : NodeRuntime) (req : HttpRequest) :
@@ -710,6 +739,10 @@ def handleNonExecRequestCore (rt0 : NodeRuntime) (req : HttpRequest) :
       if let some cid := claims.jobId? then
         if cid != jobId then
           return (rt, textResp 400 "lease is scoped to a different job", preLaunches, #[])
+      if let some owner := rt.cfg.dedicatedOwner? then
+        if owner.isEmpty || claims.ownerUserId != owner then
+          return (rt, textResp 403 "node_owner_required", preLaunches, #[])
+        return (rt, textResp 403 "native_owner_executor_unavailable", preLaunches, #[])
       let kind := (payloadVal.fieldStr? "kind").getD "raw_command"
       if kind == "lean_build" then
         if claims.unixUsername.isSome || claims.callerRole == "member" then
@@ -949,6 +982,8 @@ def handleNonExecRequestCore (rt0 : NodeRuntime) (req : HttpRequest) :
       return (rt, textResp stCode msg, preLaunches, #[])
     | .ok (l', updated) =>
       return ({ rt with ledger := l' }, jsonResp 200 (updated.toStatusJson none), preLaunches, #[])
+  | "POST", ["jobs", jid, "native-file"] =>
+    return (rt, ← nativeJobFile rt jid req, preLaunches, #[])
   | "POST", ["jobs", jid, "files"] =>
     let key := (parseUuidCanonical? jid).getD jid
     let some rec := rt.ledger.jobs.get? key
@@ -1362,6 +1397,11 @@ def handleRequest (rt0 : NodeRuntime) (req : HttpRequest) : IO (NodeRuntime × H
 def handleRequestConcurrent
     (mtx : Std.Mutex NodeRuntime) (transferMtx : Std.Mutex Unit) (req : HttpRequest) : IO HttpResponse := do
   let segs := (req.path.splitOn "/").filter (fun s => !s.isEmpty)
+  if req.method == "POST" then
+    if let ["jobs", jid, "native-file"] := segs then
+      -- File I/O under the member UID must never hold the scheduler mutex.
+      let snapshot ← mtx.atomically get
+      return ← nativeJobFile snapshot jid req
   if req.method == "POST" && segs == ["execute"] then
     let (prep, preLaunches) ← mtx.atomically do
       let (rt, preL) ← tickRuntimeReserve (← get)
@@ -1971,7 +2011,9 @@ def runServerLoop (rtInit : NodeRuntime) (dialCred? : Option OrbNode.Dial.DialCr
       else
         let _ ← IO.asTask (prio := Task.Priority.dedicated) do
           try
-            match ← readHttpRequest cfd workDirConst 134217728 authTokensConst with
+            match ← readHttpRequest cfd workDirConst 134217728 authTokensConst rtInit.cfg.dedicatedOwner?.isSome with
+            | .error "owner_node_reserved" =>
+              sendHttpResponse cfd (textResp 403 "native_owner_executor_unavailable")
             | .error "unauthorized" =>
               sendHttpResponse cfd (textResp 401 "invalid node token")
             | .error "payload_too_large" =>

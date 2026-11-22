@@ -18,6 +18,7 @@ import urllib.error
 import urllib.request
 import urllib.parse
 
+from native_job_relay.transport import Destination
 from test_account_vpn_transport import exact, serve
 
 
@@ -56,7 +57,7 @@ def run(binary, reconnect=False, orb_configure=None):
         check_stale_registry(orb_configure)
     hits = []
     kimi_hosts = {"auth.kimi.com", "api.kimi.com"}
-    google_hosts = {"oauth2.googleapis.com", "www.googleapis.com", "daily-cloudcode-pa.googleapis.com", "cloudcode-pa.googleapis.com"}
+    google_hosts = {destination.value for destination in Destination}
 
     class Receiver(http.server.BaseHTTPRequestHandler):
         def do_GET(self):

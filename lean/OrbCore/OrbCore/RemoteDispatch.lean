@@ -8,6 +8,7 @@ import OrbBin.PosixExt
 import OrbBin.HttpClient
 import OrbBin.ClaudeControl
 import OrbCore.Store
+import OrbCore.NativeSharedWorkspace
 import OrbCore.Spec
 import OrbCore.Managed
 import OrbCore.MemoryAndCloud
@@ -45,6 +46,7 @@ structure RemoteJobSupervisor where
   jwtSecret      : String
   devMode        : Bool
   telemetrySink? : Option TelemetrySink := none
+  providerHub?   : Option ProviderRuntimeHub := none
 
 def newRemoteJobSupervisor (jwtSecret : String := "") (devMode : Bool := false) (telemetrySink? : Option TelemetrySink := none) : IO RemoteJobSupervisor := do
   let mu ← Std.Mutex.new (#[] : Array String)
@@ -285,7 +287,7 @@ def resolveConcreteRemoteTargetNode
   if staticNodes.any (fun n => n.id == clean) then
     return .ok clean
   if clean == "auto" || clean.startsWith "auto:" then
-    if let some sn := staticNodes[0]? then
+    if let some sn := staticNodes.find? (·.dedicatedOwner?.isNone) then
       return .ok sn.id
     if let some mc := mc? then
       if let some node ← scopedReadyManagedMachine? mc scope? then return .ok node
@@ -430,12 +432,7 @@ def missionHasManagedPlacement (store : CoreStore) (mc? : Option ManagedComputeS
 /-! ## Remote Harness Command & Environment Construction -/
 
 private def ensureDurableJobsTableLocal (store : CoreStore) : IO Unit := do
-  discard <| execParamQuery store.missionsDb
-    ("CREATE TABLE IF NOT EXISTS remote_node_jobs (" ++
-     "job_id TEXT PRIMARY KEY, mission_id TEXT NOT NULL DEFAULT '', node_id TEXT NOT NULL DEFAULT '', " ++
-     "state TEXT NOT NULL DEFAULT 'queued', payload_json TEXT NOT NULL DEFAULT '{}', " ++
-     "created_at TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL DEFAULT '');")
-    #[]
+  OrbCore.RemoteFleetAndRelay.ensureDurableJobsTable store
   discard <| execParamQuery store.missionsDb
     "CREATE TABLE IF NOT EXISTS remote_log_offsets (job_id TEXT PRIMARY KEY, published_offset INTEGER NOT NULL DEFAULT 0, updated_at TEXT NOT NULL DEFAULT '');"
     #[]
@@ -619,7 +616,7 @@ private def resolveRemoteCallbackUrls (sup : RemoteJobSupervisor) (targetNodeId 
   let proxyBase := if !pubProxyRaw.isEmpty then pubProxyRaw else apiBase
   return (apiBase, proxyBase)
 
-private def mintMissionScopedMcpEnv
+def mintMissionScopedMcpEnv
     (store : CoreStore)
     (sup : RemoteJobSupervisor)
     (missionId ownerUid project apiBaseUrl : String)
@@ -660,7 +657,7 @@ private def mintMissionScopedMcpEnv
 private def prepareRemoteHarnessCommand
     (store : CoreStore)
     (sup : RemoteJobSupervisor)
-    (coreWorkDir effNodeId : String)
+    (coreWorkDir effNodeId jobId : String)
     (spec : RemoteTurnSpec)
     (nowSec : UInt64) : IO (Except String PreparedRemoteCommand) := do
   let tags := parseTagsArray spec.tagsJson
@@ -817,21 +814,59 @@ private def prepareRemoteHarnessCommand
     return .ok { command := cmd, envPairs := envs, managedAuth := #["grok"], proxyToken := "" }
 
   else if harness == "antigravity" then
-    let options := OrbBin.ClaudeControl.antigravityCliOptions spec.modelOverride (some spec.modelEffort) resumeSid?
-    let argv := String.intercalate " " (options.toList.map shellSingleQuote)
-    -- A sentinel preserves trailing newlines across shell command substitution.
-    let goalSettings := include_str "antigravity_goal_settings.json"
-    let goalFlags := if spec.goalDispatch?.isSome then " --settings " ++ shellSingleQuote goalSettings else ""
-    let inner := "agy " ++ argv ++ goalFlags ++ " --print=\"${agy_prompt%.}\""
-    -- Permission to call the Orb tools applies only with the mission-scoped server installed.
-    let launch := if spec.goalDispatch?.isSome then
-        "/usr/local/bin/sandboxed-mcp launch --harness antigravity -- " ++ inner
-      else wrapWithRemoteMcp "antigravity" inner
-    let cmd :=
-      wsPrefix ++ skillPrelude ++ fd3Prelude ++
+    let invocation := fun (chosenModel : String) => Id.run do
+      let options := OrbBin.ClaudeControl.antigravityCliOptions chosenModel (some spec.modelEffort) resumeSid?
+      let argv := String.intercalate " " (options.toList.map shellSingleQuote)
+      -- A sentinel preserves trailing newlines across shell command substitution.
+      let goalSettings := include_str "antigravity_goal_settings.json"
+      let goalFlags := if spec.goalDispatch?.isSome then " --settings " ++ shellSingleQuote goalSettings else ""
+      let inner := "agy " ++ argv ++ goalFlags ++ " --print=\"${agy_prompt%.}\""
+      -- Permission to call the Orb tools applies only with the mission-scoped server installed.
+      return if spec.goalDispatch?.isSome then
+          "/usr/local/bin/sandboxed-mcp launch --harness antigravity -- " ++ inner
+        else wrapWithRemoteMcp "antigravity" inner
+    let readPrompt := "agy_prompt=\"$(cat <&3 && printf .)\" || exit 1; "
+    if let some hub := sup.providerHub? then
+      let .ok bound? ← nativeMissionAccount? store spec.missionId | return .error "antigravity_binding_unavailable"
+      let catalogs ← (nativeAntigravityAccounts hub store coreWorkDir spec.ownerUserId true).toBaseIO
+      let .ok offers := catalogs | return .error "antigravity_catalog_unavailable"
+      let legacyAdmin := spec.ownerUserId == bootstrapAdminId && !bootstrapAdminId.isEmpty && bound?.isNone &&
+        offers.isEmpty && !(← loadHydratedProviders store coreWorkDir).any (·.providerType == "antigravity")
+      if !legacyAdmin then
+        let (nativeModel, _) := OrbBin.ClaudeControl.normalizeAntigravityCliModel spec.modelOverride (some spec.modelEffort)
+        let group := (OrbBin.ClaudeControl.groupAntigravityModels #[(nativeModel, nativeModel)])[0]?.map Prod.fst
+        let requested := group.getD nativeModel
+        let candidates := offers.filter fun (id, models) =>
+          bound?.all (· == id) && models.any (fun m => requested.isEmpty || m.1 == requested)
+        let some (account, models) := candidates[0]? | return .error (if bound?.isSome then
+          "antigravity_continuity_required" else "antigravity_account_model_unavailable")
+        let some model := (models.find? (fun m => requested.isEmpty || m.1 == requested)).map Prod.fst
+          | return .error "antigravity_account_model_unavailable"
+        let .ok url := parseUrl apiBase | return .error "native_core_url_unavailable"
+        if !url.isHttps && !(sup.devMode && url.host == "127.0.0.1") then return .error "native_core_tls_required"
+        let .ok bearer ← mintNativeAntigravityToken store spec.missionId spec.ownerUserId jobId account model (nowSec + 86400) (some effNodeId)
+          | return .error "native_grant_unavailable"
+        if let some holder := (← NativeSharedWorkspace.holderFor? effNodeId).filter (fun _ => !sup.devMode) then
+          if spec.goalDispatch?.isSome && !holder.remote then return .error "native_workspace_goal_unavailable"
+          let worker := include_str "antigravity_workspace_turn.py"
+          let options := #[jobId, spec.ownerUserId, effNodeId, resumeSid?.getD ""]
+          let args := String.intercalate " " (options.toList.map shellSingleQuote)
+          let cmd := wsPrefix ++ skillPrelude ++ fd3Prelude ++ "exec python3 -I -c " ++ shellSingleQuote worker ++ " " ++ args
+          return .ok { command := cmd, envPairs := skillEnvs ++ promptEnvs ++ #[
+            ("ORB_NATIVE_CORE", apiBase), ("ORB_NATIVE_ANTIGRAVITY_TOKEN", bearer)], managedAuth := #[], proxyToken := bearer }
+        let bootstrap := include_str "antigravity_native_launch.py"
+        let cliModel := if spec.modelOverride.isEmpty then model else spec.modelOverride
+        let scopedLaunch := "python3 -I -c " ++ shellSingleQuote bootstrap ++ " sh -c " ++
+          shellSingleQuote (readPrompt ++ invocation cliModel)
+        let privateHome := "export ORB_NATIVE_ANTIGRAVITY_HOME=\"$(pwd -P)\"; "
+        let scopedCmd := privateHome ++ wsPrefix ++ skillPrelude ++ fd3Prelude ++ scopedLaunch
+        let envs := skillEnvs ++ promptEnvs ++ mcpEnvs ++ #[
+          ("NO_COLOR", "1"), ("CLOUD_CODE_URL", apiBase ++ "/api/native/antigravity"),
+          ("ORB_NATIVE_ANTIGRAVITY_TOKEN", bearer)]
+        return .ok { command := scopedCmd, envPairs := envs, managedAuth := #[], proxyToken := bearer }
+    let cmd := wsPrefix ++ skillPrelude ++ fd3Prelude ++
       "command -v agy >/dev/null 2>&1 || { echo 'agy is not installed on this node' >&2; exit 127; }; " ++
-      "agy_prompt=\"$(cat <&3 && printf .)\" || exit 1; " ++
-      launch
+      readPrompt ++ invocation spec.modelOverride
     let envs := skillEnvs ++ promptEnvs ++ mcpEnvs ++ #[("NO_COLOR", "1")]
     return .ok { command := cmd, envPairs := envs, managedAuth := #["antigravity"], proxyToken := "" }
 
@@ -1923,6 +1958,9 @@ partial def submitRemoteMissionTurn
   let spec ← match ← bindRemoteTurnOwner store mc? spec effTarget staticNodes with
     | .ok owned => pure owned
     | .error error => return .error error
+  if let some owner ← nativeNodeOwner? store staticNodes effTarget then
+    if owner.isEmpty || spec.ownerUserId != owner then return .error "node_owner_required"
+    return .error (← nativeOwnerLaunchBlock store effTarget owner)
   let (leaseNodeId, nodeSecret) ← do
     if let some sn := staticNodes.find? (fun n => n.id == effTarget) then
       let some tok ← resolveStaticNodeToken? sn
@@ -1937,14 +1975,14 @@ partial def submitRemoteMissionTurn
         | return .error s!"managed node `{mid}` has no enrolled token"
       pure (nid, ntok)
 
-  let prep ← match ← prepareRemoteHarnessCommand store sup coreWorkDir effTarget spec nowSec with
+  let jobId ← newUuidV4
+  let prep ← match ← prepareRemoteHarnessCommand store sup coreWorkDir effTarget jobId spec nowSec with
     | .ok p => pure p
     | .error e => return .error e
 
   -- The original job identity is minted before the node can accept work so the
   -- lease and payload refer to one id. It is persisted durably immediately
   -- before the POST, after every local validation has passed.
-  let jobId ← newUuidV4
   let ownerUser? ← if spec.ownerUserId.isEmpty then pure none else getUserById? store spec.ownerUserId
   unless spec.ownerUserId.isEmpty || (ownerUser?.map (fun u => !u.disabled)).getD false do
     return .error "remote_owner_unavailable"
