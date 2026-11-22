@@ -227,7 +227,6 @@ replays this case through a loopback worker and a disposable mixed-format store.
 A terminal worker status can arrive while Core still has unread log pages. When a
 valid page advances the cursor and advertises more bytes, Core keeps the run
 active for another bounded poll. Each poll checks for cancellation. A stalled
-read cannot prove Goal completion. Core checkpoints the worker's byte offset
-and the trailing incomplete NDJSON record together. On recovery it resumes
-from that pair. A verified terminal EOF closes the last record even if the
+read cannot prove Goal completion. Core checkpoints the byte offset immediately after each batch of
+complete records. On recovery it rereads the unfinished record from the worker. A verified terminal EOF closes the last record even if the
 worker omitted its final newline.

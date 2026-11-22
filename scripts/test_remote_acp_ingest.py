@@ -123,7 +123,7 @@ def replay(binary, historical, fragments, measure_only, restart=False):
                     assert checkpoint_ready.wait(30), "missing initial log checkpoint"
                     saved = db.execute("SELECT published_offset FROM remote_log_offsets WHERE job_id=?",
                                        (job,)).fetchone()
-                    assert saved == (cut,)
+                    assert saved == (log.rfind(b"\n", 0, cut) + 1,)
                     assert db.execute("SELECT count(*) FROM mission_events WHERE mission_id=? AND event_type='tool_result'",
                                       (mission,)).fetchone() == (0,)
                 resumed.set()
@@ -155,8 +155,8 @@ def replay(binary, historical, fragments, measure_only, restart=False):
             times = [r[3] for r in rows]
             times.extend(row[1] for row in terminal)
             if restart:
-                assert db.execute("SELECT published_offset,line_remainder FROM remote_log_offsets WHERE job_id=?",
-                                  (job,)).fetchone() == (len(log) + len(final_line), "")
+                assert db.execute("SELECT published_offset FROM remote_log_offsets WHERE job_id=?",
+                                  (job,)).fetchone() == (len(log) + len(final_line),)
                 print(json.dumps(dict(restarted_at=cut, bytes=len(log) + len(final_line),
                                       prefix_events=fragments + 1, tool_results=1)), flush=True)
                 return

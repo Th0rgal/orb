@@ -437,10 +437,6 @@ private def ensureDurableJobsTableLocal (store : CoreStore) : IO Unit := do
   discard <| execParamQuery store.missionsDb
     "CREATE TABLE IF NOT EXISTS remote_log_offsets (job_id TEXT PRIMARY KEY, published_offset INTEGER NOT NULL DEFAULT 0, updated_at TEXT NOT NULL DEFAULT '');"
     #[]
-  if let .ok columns ← execParamQuery store.missionsDb "PRAGMA table_info(remote_log_offsets);" #[] then
-    unless columns.any (fun row => row[1]? == some "line_remainder") do
-      discard <| execParamQuery store.missionsDb
-        "ALTER TABLE remote_log_offsets ADD COLUMN line_remainder TEXT NOT NULL DEFAULT '';" #[]
   discard <| execParamQuery store.projectsDb
     ("CREATE TABLE IF NOT EXISTS remote_jobs (" ++
      "job_id TEXT PRIMARY KEY, mission_id TEXT NOT NULL, node_id TEXT NOT NULL, kind TEXT NOT NULL, " ++
@@ -1382,7 +1378,7 @@ private def splitCompleteLines (buf : String) : Array String × String := Id.run
   let rem := parts.getLast!
   return (complete, rem)
 
-/-- Keep the byte cursor and its incomplete NDJSON record in the same checkpoint.
+/-- Checkpoint only complete records, so recovery rereads any unfinished record.
     Only a verified terminal EOF can close a final record without a newline. -/
 private def consumeRemoteLogPage (store : CoreStore) (broadcastHub? : Option BroadcastHub)
     (backend missionId jobId : String) (goalJobId? : Option String) (acc : RemoteStreamAcc)
@@ -1395,14 +1391,16 @@ private def consumeRemoteLogPage (store : CoreStore) (broadcastHub? : Option Bro
   if terminalEof && !tail.trimAscii.toString.isEmpty then
     next ← ingestRemoteHarnessLine store broadcastHub? backend missionId tail goalJobId? next
   let tail := if terminalEof then "" else tail
-  discard <| execParamQuery store.missionsDb
-    ("INSERT INTO remote_log_offsets(job_id,published_offset,line_remainder,updated_at) VALUES(?1,CAST(?2 AS INTEGER),?3,?4) " ++
-     "ON CONFLICT(job_id) DO UPDATE SET published_offset=excluded.published_offset,line_remainder=excluded.line_remainder,updated_at=excluded.updated_at;")
-    #[jobId, s!"{nextOffset}", tail, formatEpochIso8601Utc (← nowEpoch)]
+  if !lines.isEmpty || terminalEof then
+    let published := nextOffset - tail.utf8ByteSize
+    discard <| execParamQuery store.missionsDb
+      ("INSERT INTO remote_log_offsets(job_id,published_offset,updated_at) VALUES(?1,CAST(?2 AS INTEGER),?3) " ++
+       "ON CONFLICT(job_id) DO UPDATE SET published_offset=excluded.published_offset,updated_at=excluded.updated_at;")
+      #[jobId, s!"{published}", formatEpochIso8601Utc (← nowEpoch)]
   return (next, tail)
 
 private def validRemoteLogWindow (offset next len : Nat) (chunk : String) : Bool :=
-  offset ≤ next && next ≤ len && ((offset == next) == chunk.isEmpty)
+  next == offset + chunk.utf8ByteSize && next ≤ len
 
 /-! ## Remote Job Cancellation, Submission, Polling & Queued Follow-Up Drain -/
 
@@ -1599,7 +1597,7 @@ partial def spawnRemoteJobPoller
     (broadcastHub? : Option BroadcastHub)
     (sup : RemoteJobSupervisor)
     (coreWorkDir missionId backend effNodeId jobId proxyTok : String)
-    (initialOffset : Nat := 0) (initialRemainder : String := "") : IO Unit := do
+    (initialOffset : Nat := 0) : IO Unit := do
   let claimed ← claimPolledJob sup jobId
   if !claimed then return ()
   discard <| IO.asTask (prio := .dedicated) do
@@ -1614,7 +1612,7 @@ partial def spawnRemoteJobPoller
     let isGoal := (← getMission? store missionId).any (·.goalMode)
     let goalJobId? := if isGoal then some jobId else none
     let mut evidenceIntact := initialOffset == 0
-    let mut lineRem := initialRemainder
+    let mut lineRem := ""
     let mut acc : RemoteStreamAcc := {}
     let mut unreachableNotified : Bool := false
     if initialOffset > 0 then
@@ -2484,13 +2482,11 @@ def reattachActiveRemoteJobsOnStartup
           | .error _ => pure rawNode
         -- Resume from `remote_log_offsets.published_offset` (0 if no chunk was ingested before restart)
         let mut startOff : Nat := 0
-        let mut startRem := ""
         if let .ok offRows ← execParamQuery store.missionsDb
-            "SELECT COALESCE(published_offset,0),line_remainder FROM remote_log_offsets WHERE job_id=?1 LIMIT 1;" #[jobId] then
+            "SELECT COALESCE(published_offset,0) FROM remote_log_offsets WHERE job_id=?1 LIMIT 1;" #[jobId] then
           if offRows.size > 1 then
             startOff := cellNat offRows[1]! 0
-            startRem := cell offRows[1]! 1
-        spawnRemoteJobPoller store mc? relayHub? broadcastHub? sup coreWorkDir mid backend effNode jobId "" startOff startRem
+        spawnRemoteJobPoller store mc? relayHub? broadcastHub? sup coreWorkDir mid backend effNode jobId "" startOff
         count := count + 1
   return count + reconciled
 
