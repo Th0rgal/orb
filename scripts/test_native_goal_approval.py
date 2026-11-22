@@ -1,9 +1,11 @@
 """Offline ACP and MCP consent binding. No network, account or external subprocess."""
+import io
 import json
 import sqlite3
 from copy import deepcopy
 from pathlib import Path
-from native_job_relay.acp import delegated_call
+from types import SimpleNamespace
+from native_job_relay.acp import permission_choice, turn
 from native_job_relay.delegation import Delegation
 
 
@@ -57,8 +59,47 @@ def replay_current_goal():
     db.close()
 
 
+def replay_workspace_read():
+    session = "025004a4-8502-4d30-b7b2-43f1da2f1490"
+    model = "fixture"
+    def run(args, text="", tool="read_file", same_session=True, options=None):
+        raw = {"ServerName": "workspace", "ToolName": tool, "Arguments": args}
+        updates = [
+            {"id": 1, "result": {"protocolVersion": 1}},
+            {"id": 2, "result": {"sessionId": session, "models": {"currentModelId": model}}},
+            {"id": 17, "method": "session/request_permission", "params": {
+                "sessionId": session if same_session else "other", "toolCall": {"rawInput": raw},
+                "options": options if options is not None else [{"kind": "allow_once", "optionId": "one"}]}},
+            {"method": "session/update", "params": {"sessionId": session, "update": {
+                "sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": text}}}},
+            {"id": 3, "result": {"stopReason": "end_turn"}},
+        ]
+        wire = b"".join(json.dumps({"jsonrpc": "2.0", **msg}).encode() + b"\n" for msg in updates)
+        child = SimpleNamespace(stdin=io.BytesIO(), stdout=io.BytesIO(wire))
+        events = []
+        asked = []
+        turn(child, {"prompt": "fixture", "model": model}, asked.append, events.append)
+        replies = [json.loads(line) for line in child.stdin.getvalue().splitlines()]
+        assert not asked
+        return next(r["result"]["outcome"] for r in replies if r["id"] == 17), events[-1]["result"]
+
+    for args in ({"path": "notes/plan.md"}, '{"path":"notes/plan.md"}'):
+        choice, result = run(args, "Read complete")
+        assert choice == {"outcome": "selected", "optionId": "one"} and result["status"] == "SUCCESS"
+    for args in ({"path": "/etc/passwd"}, {"path": "../file"}, {"path": "file", "content": "x"}, {}):
+        choice, result = run(args)
+        assert choice == {"outcome": "cancelled"} and result["status"] == "FAILED" and "declined" in result["error"]
+    for extra in (dict(tool="write_file"), dict(same_session=False), dict(options=[]),
+                  dict(options=[{"kind": "allow_always", "optionId": "always"}]),
+                  dict(options=[{"kind": "allow_once", "optionId": "same"}, {"kind": "allow_always", "optionId": "same"}])):
+        assert run({"path": "file"}, **extra)[0] == {"outcome": "cancelled"}
+    assert run({"path": "file"}, "   ")[1] == {
+        "status": "FAILED", "error": "Antigravity ended the turn without an assistant response."}
+
+
 def main():
     replay_current_goal()
+    replay_workspace_read()
     session = "s"
     args = {"title": "Proof", "backend": "codex", "model_override": "fixture", "prompt": "Reply OK"}
     request = {
@@ -66,13 +107,13 @@ def main():
         "toolCall": {"rawInput": {"ServerName": "sandboxed", "ToolName": "start_mission", "Arguments": args}},
         "options": [{"kind": "allow_always", "optionId": "always"}, {"kind": "allow_once", "optionId": "once"}],
     }
-    assert delegated_call(request, session) == ("once", args)
+    assert permission_choice(request, session, lambda requested: requested == args) == "once"
     for key, value in (("ServerName", "other"), ("ToolName", "other"), ("Arguments", {})):
         bad = deepcopy(request)
         bad["toolCall"]["rawInput"][key] = value
-        assert delegated_call(bad, session) is None
-    assert delegated_call(request, "different") is None
-    assert delegated_call({**request, "options": request["options"][:1]}, session) is None
+        assert permission_choice(bad, session, lambda _: True) is None
+    assert permission_choice(request, "different", lambda _: True) is None
+    assert permission_choice({**request, "options": request["options"][:1]}, session, lambda _: True) is None
 
     dispatched = []
     decision = None
