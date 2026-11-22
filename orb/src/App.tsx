@@ -515,8 +515,9 @@ export default function App() {
    * until the first answer; "error" keeps the last capability but says so. */
   const [remoteLaunch, setRemoteLaunch] = createSignal<{ state: "loading" | "ready" | "error"; capability: RemoteLaunchCapability | null }>({ state: "loading", capability: null });
   const acceptFleet = (fleet: RemoteNodesResponse) => {
+    if (!Array.isArray(fleet?.nodes)) throw new Error("Invalid remote node list");
     setFleetNodes(fleet.nodes);
-    if (Array.isArray(fleet.nodes)) cachePut("machines:nodes", fleet.nodes);
+    cachePut("machines:nodes", fleet.nodes);
     recordFleet(fleet.nodes);
     setRemoteLaunch({ state: "ready", capability: fleet.remote_launch ?? null });
   };

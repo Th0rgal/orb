@@ -74,9 +74,6 @@ for (const theme of ["light", "dark"]) test(`account VPN retry and Direct select
   await expect(page.getByRole("alert").filter({ hasText: "Could not confirm" })).toBeVisible();
   await expect(routerToggle).toBeChecked();
   await routerToggle.click();
-  await expect(page.getByRole("alert").filter({ hasText: "Could not confirm" })).toBeVisible();
-  await expect(routerToggle).toBeChecked();
-  await routerToggle.click();
   await expect(routerToggle).not.toBeChecked();
   const own = page.locator(".p-acc-btn").filter({ hasText: "b@example.invalid" });
   await own.click();

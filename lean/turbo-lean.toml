@@ -30,6 +30,7 @@ allow = [
   "OrbBin.PosixExt=OrbBin.PosixExt.rawUdpRecvFromPoll=orb_bin_udp_recvfrom_poll",
   "OrbBin.PosixExt=OrbBin.PosixExt.udpSendTo=orb_bin_udp_sendto",
   "OrbBin.PosixExt=OrbBin.PosixExt.blake2s=orb_bin_blake2s",
+  "OrbBin.Sqlite=OrbBin.Sqlite.sqliteOpenReadOnlyRaw=orb_sqlite_open_readonly",
   "OrbBin.Sqlite=OrbBin.Sqlite.sqliteOpenRaw=orb_sqlite_open",
   "OrbBin.Sqlite=OrbBin.Sqlite.sqliteCloseRaw=orb_sqlite_close",
   "OrbBin.Sqlite=OrbBin.Sqlite.sqliteExecRaw=orb_sqlite_exec",
