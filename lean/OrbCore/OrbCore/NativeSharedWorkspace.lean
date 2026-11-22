@@ -111,7 +111,8 @@ def turnReadTimeoutSecs (goal : Bool) : Nat :=
 /-- Pump one process only. The stdin pipe ties the isolated route and profile to Core. -/
 def pumpTurn (store : CoreStore) (hub : ProviderRuntimeHub) (working grant job node owner prompt : String)
     (conversation : Option String) (expectedUid : Nat) (config : HolderConfig)
-    (goal : Bool) (fileCall delegateCall : Placement → JVal → IO JVal) (emit : ByteArray → IO Bool) : IO Bool := do
+    (goal : Bool) (fileCall : Placement → JVal → IO JVal)
+    (delegateCall : Placement → JVal → IO Bool → IO JVal) (emit : ByteArray → IO Bool) : IO Bool := do
   unless ← emit ByteArray.empty do return false
   let result ← withVerifiedProfile store hub working grant job node owner fun p token port => do
     unless ← claim store grant p.job do return .error "native_turn_already_claimed"
@@ -128,6 +129,7 @@ def pumpTurn (store : CoreStore) (hub : ProviderRuntimeHub) (working grant job n
       | return .error "native_holder_unavailable"
     let (input, running) ← child.takeStdin
     let stopping ← IO.mkRef false
+    let holderLive := stopping.get.map (!·)
     let approvalWait ← IO.mkRef ({} : ApprovalWait)
     let start ← IO.monoMsNow
     let watch ← IO.asTask (prio := .dedicated) do
@@ -143,9 +145,11 @@ def pumpTurn (store : CoreStore) (hub : ProviderRuntimeHub) (working grant job n
             valid := accounts.any fun hp => hp.id == p.account && hp.providerType == "antigravity" &&
               hp.enabled && hp.hasOAuth && hp.oauthToken == token && !(accountRoutingFile accounts hp).isEmpty
           if !valid || turnExpired start (← IO.monoMsNow) (← approvalWait.get) then
+            stopping.set true
             discard <| running.kill.toBaseIO
             break
       catch _ =>
+        stopping.set true
         discard <| running.kill.toBaseIO
     let reachedEof ← IO.mkRef false
     let exitCode ← IO.mkRef (1 : UInt32)
@@ -170,12 +174,14 @@ def pumpTurn (store : CoreStore) (hub : ProviderRuntimeHub) (working grant job n
               let before ← IO.monoMsNow
               approvalWait.modify fun w => {w with startedMs := some before}
               try
-                return .ok (← delegateCall p operation)
+                return .ok (← delegateCall p operation holderLive)
               finally
                 let afterWait ← IO.monoMsNow
                 approvalWait.modify fun w => ⟨w.totalMs afterWait, none⟩
-            return .ok (← (if delegated then delegateCall else fileCall) p operation)
+            if delegated then return .ok (← delegateCall p operation holderLive)
+            return .ok (← fileCall p operation)
           let .ok reply := checked | return .error "native_shared_workspace_denied"
+          unless ← holderLive do return .error "native_holder_closed"
           unless (← placement? store grant job node owner (← coreEpochSec)) == some p do
             return .error "native_shared_workspace_denied"
           input.putStr (renderCompact reply ++ "\n")

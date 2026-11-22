@@ -608,6 +608,31 @@ private def startupRecovery (root : String) : IO Unit := do
   finally
     closeCoreStore recovered
 
+private def verifyHolderClosedDuringApproval (root : String) : IO Unit := do
+  let .ok store ← openCoreStore s!"{root}/native-ticket" | throw (IO.userError "native approval fixture")
+  try
+    OrbCore.RemoteFleetAndRelay.ensureDurableJobsTable store
+    let db := store.missionsDb
+    let execute := fun sql => do
+      if let .error err ← execParamQuery db sql #[] then throw (IO.userError err)
+    execute "INSERT INTO missions(id,owner_user_id,placement_job_id,goal_mode,status,run_generation) VALUES('m','member','j',1,'active',8);"
+    execute "INSERT INTO remote_node_jobs(job_id,mission_id,state,payload_json) VALUES('j','m','running','{\"goal_claim\":\"c\",\"goal_generation\":7}');"
+    execute "INSERT INTO mission_runs(id,mission_id,remote_job_id,generation,execution_state) VALUES('r','m','j',8,'running');"
+    let placement : NativeSharedWorkspace.Placement :=
+      ⟨"m", "member", "orb-member", "j", "node", "account", "model", false, 8, 1, 1, "", 1, 200⟩
+    let args := JVal.obj #[("title", .str "test"), ("prompt", .str "test"),
+      ("model_override", .str "test"), ("backend", .str "codex")]
+    let closed ← IO.mkRef false
+    let result ← NativeGoalApproval.ask store placement args 100 (fun id _ => do
+      check ((← cellOf db "SELECT decision FROM native_goal_approvals WHERE id=?1;" #[id]) == "pending")
+        "permission was pending when the holder expired"
+      closed.set true) (closed.get.map (!·))
+    check ((← closed.get) && result == .null &&
+      (← cellOf db "SELECT COUNT(*) FROM native_goal_approvals;") == "0")
+      "holder closure withdraws the ticket before the permission timeout"
+  finally
+    closeCoreStore store
+
 def run : IO Unit := do
   -- Production Neon spent 158 seconds on one turn with three sequential permissions.
   let openWait : NativeSharedWorkspace.ApprovalWait := ⟨20000, some 130000⟩
@@ -626,6 +651,7 @@ def run : IO Unit := do
   let root := s!"/tmp/orb-turn-outcome-{← newUuidV4}"
   IO.FS.createDirAll s!"{root}/.sandboxed-sh"
   try
+    verifyHolderClosedDuringApproval root
     verifyManagedWorkerLoss root
     startupRecovery root
     let .ok store ← openCoreStore s!"{root}/.sandboxed-sh" | throw (IO.userError "turn outcome store open failed")
