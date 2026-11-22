@@ -116,7 +116,7 @@ GtkWidget *orb_leanui_new(GtkWidget *webview, OrbSidebarAction action, gpointer 
         ".orb-leanui > button {background:transparent;border:1px solid transparent;"
         "box-shadow:none;outline:none;min-width:0;min-height:0;margin:0;padding:0;}"
         ".orb-leanui > button:hover,.orb-leanui > button.orb-multi {background:rgba(140,140,140,.12);}"
-        ".orb-leanui > button:focus-visible {border-color:#757575;}", -1, NULL);
+        ".orb-keyboard-focus .orb-leanui > button:focus {border-color:#757575;}", -1, NULL);
     gtk_style_context_add_provider_for_screen(gtk_widget_get_screen(webview), GTK_STYLE_PROVIDER(css),
                                               GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
     g_object_unref(css);
