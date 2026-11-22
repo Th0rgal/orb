@@ -1778,6 +1778,19 @@ private def memberNativeCatalog (store : CoreStore) (root : String) : IO Unit :=
     let routed := { hub with
       resolveTransport? := some fun _ account => pure (.ok (if account == a.id then some 41001 else none)) }
     let list := fun (hub : ProviderRuntimeHub) user => memberAntigravityModels hub store root user true
+    let seen ← IO.mkRef (#[] : Array String)
+    let scopedHub ← newProviderRuntimeHub
+    let scopedHub := { scopedHub with resolveTransport? := some fun _ account => do
+      seen.modify (·.push account)
+      return .ok none }
+    let restricted := nativeCatalogForRequest (.selected "worker" "other" b.id) scopedHub store root
+    unless (← restricted "member" "/?node_id=worker" true true true).isEmpty &&
+        (← restricted "other" "/?node_id=elsewhere" false true false).isEmpty && (← seen.get).isEmpty do
+      throw (IO.userError "a catalog request probed outside the native canary")
+    let expected := #[("second-model", "Second model")]
+    unless (← restricted "other" "/?node_id=worker" false true false) == expected &&
+        (← restricted "other" "/" true false false) == expected && (← seen.get) == #[b.id] do
+      throw (IO.userError "native catalog failed to isolate the selected account before lookup")
     IO.ofExcept (← setUserProviderPref store "member" a.id false "fixture")
     unless (← list routed "member") == #[("second-model", "Second model")] do
       throw (IO.userError "member saw a disabled account or failed to discover the Direct account")
@@ -1800,7 +1813,25 @@ private def memberNativeCatalog (store : CoreStore) (root : String) : IO Unit :=
     for file in #[first, second] do
       try IO.FS.removeFile file catch _ => pure ()
 
+def checkNativeCanary : IO Unit := do
+  let permits := fun (scope : NativeCanary.Scope) node owner account => match scope.accountFor node owner with
+    | .ok only => only.all (· == account)
+    | .error _ => false
+  let specific := NativeCanary.parse (some "member/account") "worker"
+  unless permits specific "worker" "member" "account" &&
+      !permits specific "worker" "other" "account" && !permits specific "other" "member" "account" &&
+      !permits specific "worker" "member" "other" && specific.permitsNode "ordinary" "other" &&
+      !specific.permitsNode "worker" "other" && permits (NativeCanary.parse none "worker") "any" "any" "any" do
+    throw (IO.userError "native canary crossed its node, member or account fence")
+  for raw in #["", "member", "/account", "member/", "member/account/extra"] do
+    let incomplete := NativeCanary.parse (some raw) "worker"
+    unless !permits incomplete "worker" "member" "account" && !incomplete.permitsNode "worker" "member" do
+      throw (IO.userError "incomplete native canary setting admitted a member")
+  unless !permits (NativeCanary.parse (some "member/account") "") "worker" "member" "account" do
+    throw (IO.userError "native canary accepted a missing worker")
+
 def run : IO Unit := do
+  checkNativeCanary
   let fixtureRaw ← IO.FS.readFile "shared/orb-spec/fixtures/provider-response-contract.json"
   let .ok fixture := OrbBin.Json.parse fixtureRaw
     | throw (IO.userError "provider-response-contract fixture parse failed")

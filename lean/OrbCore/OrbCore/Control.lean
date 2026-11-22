@@ -3089,6 +3089,12 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
     let reason := if invalid then error else "message_enqueue_failed"
     mkJson (if invalid then 400 else 500) (renderCompact (.obj #[
       ("id", .str msgId), ("error", .str reason), ("message_accepted", .bool false), ("queued", .bool false)]))
+  -- A scoped workspace canary must not also enable the separate dedicated-owner APIs.
+  if (cleanPath == "/api/native/antigravity/relay-admission" ||
+      cleanPath.startsWith "/api/native/antigravity/v1internal:" ||
+      cleanPath == "/api/native-owner-enrollments" || cleanPath.startsWith "/api/native-owner-enrollments/") then
+    unless (← NativeCanary.load) == .unrestricted do return .ok (mkJson 404 "{}")
+
   if cleanPath == "/api/native/antigravity/workspace-turn" then
     let denied := mkJson 403 "{\"error\":\"native_shared_workspace_denied\"}"
     unless st.cfg.nativeSubscriptionEnabled && !st.cfg.devMode && req.method == "POST" do return .ok denied
@@ -6070,6 +6076,7 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
     if let some (_, rawNode) := (parseQueryParams rawTarget).find? (fun p => p.1 == "node_id") then
       let some node := percentDecodeStrict rawNode | return .ok (mkJson 400 "{}")
       let (_, nodes) ← loadStaticRemoteNodes
+      unless (← NativeCanary.load).permitsNode node caller.userId do return .ok (mkJson 403 "{\"error\":\"node_owner_required\"}")
       if let some owner ← nativeNodeOwner? st.store nodes node then
         if owner.isEmpty || caller.userId != owner then return .ok (mkJson 403 "{\"error\":\"node_owner_required\"}")
         unless ← hasCurrentNativeEnrollment st.store node owner do
@@ -6136,8 +6143,7 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
     let configured ← configuredOpenCodeOptions st.store caller.userId isAdm
     opencodeModels := opencodeModels ++ configured.map renderCompact
     let pHub ← match st.providerHub? with | some h => pure h | none => newProviderRuntimeHub
-    let pairs ← if isAdm then getCachedAntigravityModels pHub false else
-      memberAntigravityModels pHub st.store st.cfg.workingDir caller.userId false
+    let pairs ← nativeCatalogForRequest (← NativeCanary.load) pHub st.store st.cfg.workingDir caller.userId rawTarget isAdm false false
     let agyModels := pairs.map fun (mId, mLbl) => mkOpt mId mLbl ""
     let vibeModels : Array String := #[
       mkOpt "mistral/mistral-vibe-cli-latest" "Mistral Vibe" "Native Mistral Vibe CLI"

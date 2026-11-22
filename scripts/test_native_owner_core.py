@@ -155,6 +155,20 @@ def run(binary, root):
         status, body = request(port, alice, "GET", "/api/providers/antigravity-models?node_id=" + NODE_ID)
         assert (status, json.loads(body)["error"]) == (403, "node_owner_required")
         print("restart without roster owner: persisted reservation refused catalog access")
+    shared = "canary-worker"
+    env.update(ORB_NATIVE_WORKSPACE_NODE=shared,
+               ORB_NATIVE_SUBSCRIPTION_CANARY=f"{users['alice']}/first",
+               SANDBOXED_REMOTE_NODES=json.dumps([dict(id=shared, base_url="http://127.0.0.2:1")]))
+    with core(binary, env):
+        alice, bob = login("alice"), login("bob")
+        for user, visible in ((alice, True), (bob, False)):
+            status, body = request(port, user, "GET", "/api/remote-nodes")
+            assert status == 200 and (shared in {n["id"] for n in json.loads(body)["nodes"]}) == visible
+            assert request(port, user, "GET", "/api/native-owner-enrollments")[0] == 404
+        status, body = request(port, bob, "GET", "/api/providers/antigravity-models?node_id=" + shared)
+        assert (status, json.loads(body)["error"]) == (403, "node_owner_required")
+        print("scoped worker visible only to the canary member; separate owner enrollment disabled")
+
 
 
 if __name__ == "__main__":

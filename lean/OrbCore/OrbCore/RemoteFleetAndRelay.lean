@@ -20,6 +20,7 @@ import OrbBin.PosixExt
 import OrbBin.HttpClient
 import OrbCore.Store
 import OrbCore.RemoteGoal
+import OrbCore.NativeCanary
 import OrbCore.Managed
 import OrbCore.NodeLiveness
 import OrbCore.ManagedProvisioning
@@ -825,7 +826,9 @@ def buildComputeFleetJVal
   let probed ← probeAllStaticNodesParallel staticNodes persistedCordons effIso probeDeadlineMs isAdmin
   -- A node that did not answer keeps what its last heartbeat reported.
   let heartbeatCache ← loadNodeHeartbeatCache dataRoot
-  let staticItems ← probed.mapM fun sample => do
+  let canary ← NativeCanary.load
+  let visible := probed.filter fun sample => canary.permitsNode ((sample.fieldStr? "id").getD "") (callerUserId?.getD "")
+  let staticItems ← visible.mapM fun sample => do
     let item := NodeLiveness.applyCache heartbeatCache sample
     let id := (item.fieldStr? "id").getD ""
     if let some owner := (staticNodes.find? (fun n => n.id == id)).bind (·.dedicatedOwner?) then

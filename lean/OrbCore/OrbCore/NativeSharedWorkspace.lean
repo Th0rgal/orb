@@ -1,4 +1,5 @@
 import OrbCore.ProviderUsageAndLogin
+import OrbCore.NativeCanary
 
 namespace OrbCore.NativeSharedWorkspace
 
@@ -31,7 +32,8 @@ def placement? (store : CoreStore) (grant job node owner : String) (now : UInt64
       #[digest, job, node, owner, toString now] | return none
   let some #[mission, user, unixUser, jobId, nodeId, account, model, mode, runGen, epoch, revision,
       country, routeGen, expires] := rows[1]? | return none
-  unless Orb.Kernel.validUnixUsername unixUser do return none
+  let .ok allowed := (← NativeCanary.load).accountFor nodeId user | return none
+  unless allowed.all (· == account) && Orb.Kernel.validUnixUsername unixUser do return none
   return do
     return ⟨mission, user, unixUser, jobId, nodeId, account, model, mode == "readonly",
       ← runGen.toNat?, ← epoch.toNat?, ← revision.toNat?, country, ← routeGen.toNat?, ← expires.toNat?⟩

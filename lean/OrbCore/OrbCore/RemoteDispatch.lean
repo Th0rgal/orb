@@ -287,7 +287,8 @@ def resolveConcreteRemoteTargetNode
   if staticNodes.any (fun n => n.id == clean) then
     return .ok clean
   if clean == "auto" || clean.startsWith "auto:" then
-    if let some sn := staticNodes.find? (·.dedicatedOwner?.isNone) then
+    let canary ← NativeCanary.load
+    if let some sn := staticNodes.find? (fun n => n.dedicatedOwner?.isNone && !canary.reserves n.id) then
       return .ok sn.id
     if let some mc := mc? then
       if let some node ← scopedReadyManagedMachine? mc scope? then return .ok node
@@ -828,12 +829,15 @@ private def prepareRemoteHarnessCommand
     let readPrompt := "agy_prompt=\"$(cat <&3 && printf .)\" || exit 1; "
     if let some hub := sup.providerHub? then
       let .ok bound? ← nativeMissionAccount? store spec.missionId | return .error "antigravity_binding_unavailable"
-      let legacyAdmin := spec.ownerUserId == bootstrapAdminId && !bootstrapAdminId.isEmpty && bound?.isNone &&
+      let rollout ← NativeCanary.load
+      let legacyAdmin := rollout == .unrestricted && spec.ownerUserId == bootstrapAdminId && !bootstrapAdminId.isEmpty && bound?.isNone &&
         !(← loadHydratedProviders store coreWorkDir).any (·.providerType == "antigravity")
       if !legacyAdmin then
         unless (← NativeSharedWorkspace.executionEnabled) && !sup.devMode do return .error "native_subscription_disabled"
         let some holder ← NativeSharedWorkspace.holderFor? effNodeId | return .error "native_owner_executor_unavailable"
-        let catalogs ← (nativeAntigravityAccounts hub store coreWorkDir spec.ownerUserId true).toBaseIO
+        let .ok accountFilter := rollout.accountFor effNodeId spec.ownerUserId
+          | return .error "native_canary_unavailable"
+        let catalogs ← (nativeAntigravityAccounts hub store coreWorkDir spec.ownerUserId true accountFilter).toBaseIO
         let .ok offers := catalogs | return .error "antigravity_catalog_unavailable"
         let (nativeModel, _) := OrbBin.ClaudeControl.normalizeAntigravityCliModel spec.modelOverride (some spec.modelEffort)
         let group := (OrbBin.ClaudeControl.groupAntigravityModels #[(nativeModel, nativeModel)])[0]?.map Prod.fst
@@ -1949,6 +1953,7 @@ partial def submitRemoteMissionTurn
   let spec ← match ← bindRemoteTurnOwner store mc? spec effTarget staticNodes with
     | .ok owned => pure owned
     | .error error => return .error error
+  unless (← NativeCanary.load).permitsNode effTarget spec.ownerUserId do return .error "node_owner_required"
   if let some owner ← nativeNodeOwner? store staticNodes effTarget then
     if owner.isEmpty || spec.ownerUserId != owner then return .error "node_owner_required"
     return .error (← nativeOwnerLaunchBlock store effTarget owner)
