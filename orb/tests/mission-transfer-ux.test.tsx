@@ -160,6 +160,19 @@ describe("unified executionPhaseLabel & TurnRecap", () => {
     ).toBe("Waiting for a free slot");
   });
 
+  it("removes the terminal protocol marker from a flattened cached Goal recap", () => {
+    const stamp = "2026-10-29T02:00:00Z";
+    const raw = "11 + 8 = 19.\n\n19\n<!-- GOAL_COMPLETE -->";
+    vi.spyOn(inboxDigest, "getCachedInboxDigest").mockReturnValue({
+      updatedMs: Date.parse(stamp), verdict: "succeeded", outcome: raw.replace(/\s+/g, " "), task: "sum",
+    });
+    const mission: Mission = { id: "goal-recap", title: "Sum", status: "completed", history: [], created_at: stamp, updated_at: stamp };
+    const items: StreamItem[] = [{ kind: "text", key: "final", live: false, text: "11 + 8 = 19.\n\n19", goalMarkedText: raw }];
+    const rendered = render(() => <TurnRecap mission={mission} items={items} busy={false} onDraft={() => {}} />);
+    expect(rendered.container.querySelector(".turn-recap p")?.textContent).toBe("11 + 8 = 19. 19");
+    rendered.unmount();
+  });
+
   it("never renders WAITING or follow-up suggestion chips on a failed launch or failed turn", () => {
     const updatedAt = "2026-10-29T02:00:00Z";
     const updatedMs = Date.parse(updatedAt);

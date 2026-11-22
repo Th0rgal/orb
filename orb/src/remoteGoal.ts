@@ -43,3 +43,30 @@ export function remoteGoalStatusLabel(projection: RemoteGoalProjection): string 
   if (projection.phase === "paused") return "Goal paused";
   return projection.iteration > 0 ? `Goal in progress · iteration ${projection.iteration}` : "Goal in progress";
 }
+
+const completionLine = "<!-- GOAL_COMPLETE -->";
+
+/** Same standalone line and Markdown fence boundaries as Core's RemoteGoal.hasCompletionMarker. */
+export function confirmedGoalAnswer(raw: string): string | undefined {
+  const lines = raw.trimEnd().split(/\r?\n/);
+  if (lines.pop() !== completionLine) return undefined;
+  let fence = "";
+  for (const line of lines) {
+    const match = /^\s*(`{3,}|~{3,})(.*)$/.exec(line);
+    if (!match) continue;
+    const [, delimiter, tail] = match;
+    if (!fence) fence = delimiter;
+    else if (delimiter.startsWith(fence) && !tail.trim()) fence = "";
+  }
+  if (fence) return undefined;
+  const markerStart = raw.lastIndexOf(completionLine);
+  return raw.slice(0, markerStart).replace(/\r?\n$/, "");
+}
+
+/** Older summaries may flatten the same final response onto a single line. */
+export function confirmedGoalRecap(outcome: string, raw: string | undefined): string {
+  if (!raw) return outcome;
+  const flatten = (text: string) => text.trim().replace(/\s+/g, " ");
+  if (flatten(outcome) !== flatten(raw)) return outcome;
+  return outcome.trimEnd().slice(0, -completionLine.length).trimEnd();
+}
