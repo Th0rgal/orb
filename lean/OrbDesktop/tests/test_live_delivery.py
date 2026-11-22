@@ -541,7 +541,8 @@ class Delivery(unittest.TestCase):
                     if mode == 'idle-session' and paths.count(path) > 1:
                         self.send_error(401)
                         return
-                    ids = ('a',) if mode == 'idle-share' and paths.count(path) > 2 else ('a','b')
+                    ids = ('a',) if (mode == 'idle-share' and paths.count(path) > 2) or \
+                        (mode == 'share-403' and paths.count(path) > 1) else ('a','b')
                     if mode in ('page-two', 'idle-page-two') and paths.count(path) > 1:
                         ids = ['a'] + [f'new-{i}' for i in range(199)]
                     result = [dict(id=m, title=m, status='active') for m in ids]
@@ -626,13 +627,15 @@ class Delivery(unittest.TestCase):
                                        (json.dumps({'content': 'Ripened fruit'}),))
                     if mid == 'b' and ((mode == 'revoke' and paths.count(path) > 1) or mode == 'idle-share'):
                         db.execute('DELETE FROM mission_shares')
+                    if mid == 'b' and mode == 'share-403' and paths.count(path) > 1:
+                        # Permission revoked after one successful projection.
+                        self.send_error(403)
+                        return
                     row = db.execute(QUERY, {'1': mid, '2': '0', '3': 'owner', '4': '1' if presence else '0'}).fetchone()
                     if not row:
                         self.send_error(404)
                         return
                     result = dict(id=mid,title=row[0],status=row[1],text=row[2])
-                    if mode == 'access-loss' and mid == 'b' and paths.count(path) >= 5:
-                        result['text'] = 'third turn'
                     if mode == 'oversize' and mid == 'b' and paths.count(path) > 1:
                         result['text'] = 'x' * (5 << 20)
                 else:
@@ -686,6 +689,10 @@ class Delivery(unittest.TestCase):
                     # bubble is polled repeatedly and mission a stays unpolled.
                     self.assertGreaterEqual(paths.count(b + events), 5)
                     self.assertFalse(any(p.split('?')[0] == a + events for p in paths))
+                elif mode == 'share-403':
+                    # One success, then permission denial: the reader stops there and
+                    # never polls the revoked mission again.
+                    self.assertEqual(paths.count(b + events), 2)
                 elif mode in ('page-two', 'null-retry', 'start-running', 'project-lag'):
                     self.assertIn(b + events, paths)
                 elif mode in ('idle-identity', 'before-open', 'unavailable', 'denied', 'idle-session', 'project-first'):
@@ -712,8 +719,11 @@ class Delivery(unittest.TestCase):
     def test_revocation(self):
         self.run_wire('revoke')
 
-    def test_access_loss_clears_output_and_ignores_stale_replies(self):
+    def test_access_loss_replays_one_visible_copy(self):
         self.run_wire('access-loss')
+
+    def test_permission_loss_leaves_roster_without_earlier_text(self):
+        self.run_wire('share-403')
 
     def test_idle_share_loss(self):
         self.run_wire('idle-share')

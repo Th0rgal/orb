@@ -575,15 +575,31 @@ def main (args : List String) : IO Unit := do
       unless st.missionCards.isEmpty && st.accountUsername.isEmpty && st.accountEndpoint.isEmpty && (← slot.get).isNone do throw (IO.userError "roster outlived identity")
       return
     if args == ["access-loss"] then
-      -- Access loss is not a turn boundary: the earlier and current output clears
-      -- without archiving, stale retained replies never resurrect it while Core
-      -- stays unreachable, and a fresh projection re-renders without archiving.
+      -- Transient access loss is not a turn boundary: the output clears without
+      -- archiving, and the replayed identical text shows exactly one visible copy.
       let st ← clickMission st b
       let st ← awaitState slot st (fun s => streamedText s == "second\n\tλ🙂\n")
       let st ← awaitState slot st (fun s => s.liveTurns.isEmpty && (streamedText s).isEmpty)
-      let st ← awaitState slot st (fun s => streamedText s == "third turn")
-      unless st.liveTurns.isEmpty && st.openMission == some b.missionId do
-        throw (IO.userError "access loss archived or resurrected cleared output")
+      let st ← awaitState slot st (fun s => streamedText s == "second\n\tλ🙂\n")
+      let (rootBox, _) := renderScreen st "second\n\tλ🙂\n"
+      unless st.liveTurns.isEmpty && ((renderedBoxRoot rootBox).splitOn "λ🙂").length == 2 do
+        throw (IO.userError "replayed turn was archived or rendered more than once")
+      return
+    if args == ["share-403"] then
+      -- Permission denial leaves the mission: the roster keeps only accessible
+      -- missions and no earlier text survives from late frames.
+      let st ← clickMission st b
+      let st ← awaitState slot st (fun s => streamedText s == "second\n\tλ🙂\n")
+      let next ← awaitState slot st (·.openMission.isNone)
+      unless next.hasLiveConnection && (streamedText next).isEmpty && next.liveTurns.isEmpty &&
+          next.missionCards.length == 1 &&
+          !next.sidebarRows.any (·.widgetId == b.widgetId) do
+        throw (IO.userError "permission loss retained earlier text or roster entry")
+      let st ← clickMission next a
+      let st ← awaitState slot st (fun s => streamedText s == "canonical")
+      let (rootBox, _) := renderScreen st "canonical"
+      unless !((renderedBoxRoot rootBox).contains "second") do
+        throw (IO.userError "revoked mission text leaked into the new conversation")
       return
     let st ← clickMission st a
     let st ← awaitState slot st (fun s => streamedText s == "canonical")

@@ -577,9 +577,7 @@ def readLiveFrame (slot : IO.Ref (Option LiveSubscription)) (scale : Nat) (viewp
     let (st, histDamage) := applyHistoryTurns scale viewport st sub.mission history
     if let some .revoked := bubble then
       closeLiveSubscription slot
-      -- Revocation is access loss, not a turn boundary: clear the earlier and
-      -- current output explicitly (a racing late reply is never archived).
-      let next := clearLiveTranscript { st with
+      let next := { st with
         missionCards := cards.filter (·.missionId != sub.mission)
         sidebarRows := rows.filter (·.rowId != "mission:" ++ sub.mission) }
       return ((stepDesktopEvent scale viewport next (.activate 101)).1, some viewport)

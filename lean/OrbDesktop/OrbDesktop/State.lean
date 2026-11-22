@@ -1561,10 +1561,11 @@ def applyLiveText (scale : Nat) (viewport : Rect) (st : DesktopState) (mission t
       else st.liveTurns
     flushStreamFrame scale viewport { st with liveTurns, stream := { st.stream with shown := [], pending := [text] } }
 
-/-- Access loss (Core unreachable, an invalid projection or the mission revoked) is not
-a turn boundary: the shown content came from a stream the client can no longer read,
-so clear the earlier and current output instead of archiving it. A fresh cold-open
-history read or bubble frame repopulates from the timeline. -/
+/-- Access loss (Core unreachable or an invalid projection) is not a turn boundary: the
+shown content came from a stream the client can no longer read, so clear the earlier
+and current output instead of archiving it, and drop the retained reply so later
+roster frames cannot resurrect it. A fresh bubble read repopulates. Revocation is
+already distinct: it closes the subscription and leaves the mission. -/
 def clearLiveTranscript (st : DesktopState) : DesktopState :=
   { st with liveTurns := [], stream := { st.stream with shown := [], pending := [] } }
 
