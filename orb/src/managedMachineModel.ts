@@ -144,7 +144,7 @@ export interface CreateManagedMachine {
 /** `null` when the backend predates managed machines (404). */
 export async function listManagedMachines(): Promise<ManagedMachinesResponse | null> {
   try {
-    return await api<ManagedMachinesResponse>("/api/managed-machines", { method: "GET" });
+    return await api<ManagedMachinesResponse>("/api/managed-machines");
   } catch (error) {
     if (error instanceof ApiError && (error.status === 404 || error.status === 405)) return null;
     throw error;
