@@ -117,10 +117,12 @@ def pumpTurn (store : CoreStore) (hub : ProviderRuntimeHub) (working grant job n
             valid := accounts.any fun hp => hp.id == p.account && hp.providerType == "antigravity" &&
               hp.enabled && hp.hasOAuth && hp.oauthToken == token && !(accountRoutingFile accounts hp).isEmpty
           if !valid || (← IO.monoMsNow) > deadline then
-            if (← running.tryWait).isNone then running.kill
+            discard <| running.kill.toBaseIO
             break
       catch _ =>
-        if (← running.tryWait).isNone then running.kill
+        discard <| running.kill.toBaseIO
+    let reachedEof ← IO.mkRef false
+    let exitCode ← IO.mkRef (1 : UInt32)
     try
       input.putStr (renderCompact packet ++ "\n")
       input.flush
@@ -145,14 +147,14 @@ def pumpTurn (store : CoreStore) (hub : ProviderRuntimeHub) (working grant job n
           input.flush
         else
           return .error "native_holder_protocol"
-      -- Keep stdin open while the holder is alive; it watches EOF for Core loss.
-      input.flush
-      return .ok ((← running.wait) == 0)
+      reachedEof.set true
     finally
       stopping.set true
-      if (← running.tryWait).isNone then running.kill
-      discard running.wait
       discard <| IO.wait watch
+      unless ← reachedEof.get do discard <| running.kill.toBaseIO
+      -- Only this task reaps the holder. A second wait raises ECHILD on Linux.
+      exitCode.set (← running.wait)
+    return .ok ((← exitCode.get) == 0)
   if let .ok ok := result then return ok
   discard <| emit "{\"event\":\"error\",\"message\":\"Native turn unavailable\"}\n".toUTF8
   return false
