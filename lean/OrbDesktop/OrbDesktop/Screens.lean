@@ -413,7 +413,12 @@ prefix, or any inline marker character (`*`, backtick, `[`). Plain lines keep th
 pre-shaped fast path so stream frames paint their already-shaped runs as-is. -/
 private def needsMarkdownLite (line : String) : Bool :=
   let l := mermaidTrim line
-  l.startsWith "# " || l.startsWith "- " || l.startsWith "* " ||
+  let hashes := (l.toList.takeWhile (· == '#')).length
+  let rest := l.toList.drop hashes
+  -- Same 1..6-hash heading rule as `liveProseLine`, so `## Done` or `### Plan`
+  -- route to the markdown-lite pipeline instead of painting literal hashes.
+  (hashes >= 1 && hashes <= 6 && rest.length > 1 && rest.head? == some ' ') ||
+  l.startsWith "- " || l.startsWith "* " ||
   l.any (fun c => c == '*' || c == '`' || c == '[')
 
 /-- One markdown-lite line of the live transcript, synthesized from plain text; the runtime
