@@ -1,6 +1,7 @@
 /* linux_shell/gtk_icons.c — Cairo sidebar/topbar icons & mission status badges (<= 220 LOC). */
 #define _POSIX_C_SOURCE 200809L
 #include "gtk_icons.h"
+#include "gtk_menu.h"
 #include <cairo/cairo.h>
 #include <ctype.h>
 #include <math.h>
@@ -129,7 +130,7 @@ gboolean orb_button_enter(GtkWidget *row, GdkEventKey *event, gpointer data) {
  * native submenu indicator and add the leading glyph beside its label. */
 GtkWidget *orb_menu_row(GtkWidget *page, const char *label, const char *icon) {
     GtkWidget *button = gtk_model_button_new();
-    g_signal_connect(button, "key-press-event", G_CALLBACK(orb_button_enter), NULL);
+    g_signal_connect(button, "key-press-event", G_CALLBACK(orb_menu_key), NULL);
     g_object_set(button, "text", label, NULL);
     if (icon) { orb_add_menu_icon(button, icon); }
     gtk_box_pack_start(GTK_BOX(page), button, FALSE, FALSE, 0);
