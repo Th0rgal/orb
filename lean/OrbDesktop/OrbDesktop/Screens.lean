@@ -408,6 +408,14 @@ literal. -/
 private def mdSpans (line : String) : List (String × MdKind) :=
   mdScan [] [] line.toList
 
+/-- True when a single line needs the markdown-lite pipeline: a heading or bullet
+prefix, or any inline marker character (`*`, backtick, `[`). Plain lines keep the
+pre-shaped fast path so stream frames paint their already-shaped runs as-is. -/
+private def needsMarkdownLite (line : String) : Bool :=
+  let l := mermaidTrim line
+  l.startsWith "# " || l.startsWith "- " || l.startsWith "* " ||
+  l.any (fun c => c == '*' || c == '`' || c == '[')
+
 /-- One markdown-lite line of the live transcript, synthesized from plain text; the runtime
 `shapeWidgetTree` pass re-shapes synth runs with HarfBuzz on real displays. Blank lines
 produce no row, `#{1,6} ` headings reuse the rich-text heading recipe, unordered list
@@ -540,12 +548,27 @@ def buildMissionTranscriptBody (st : DesktopState) (mainW bodyH : SubPx)
       -- Multi-line stream text shares the completed-turn rendering so newline
       -- characters and markdown headings never rasterize as literal missing glyphs.
       liveProseLines theme colW width currentText
-    else
-      -- Single-line stream text shares the markdown-lite prose pipeline, so a
-      -- one-line `# Title` or `**bold**` never shows its literal markers.
+    else if needsMarkdownLite currentText then
+      -- Single-line stream text with markdown markers shares the markdown-lite
+      -- prose pipeline, so a one-line `# Title` or `**bold**` never shows its
+      -- literal markers.
       match liveProseLine theme colW width currentText with
       | some row => [row]
       | none => []
+    else
+      -- Plain single-line stream text keeps the pre-shaped fast path: the runs
+      -- arrive already shaped with the stream frame, so the renderer paints them
+      -- as-is instead of re-synthesizing from raw text (the viewport regression
+      -- pins the last atlas glyph's paint position on exactly this path).
+      Id.run do
+        let (_, _, height) := wrapInlineRuns width theme.typo.lineBase _runs.streamRuns
+        return [WidgetNode.box
+        (BoxStyle.row 0
+          |>.withPadding (Edges.xy (pxToSub 20) (pxToSub 6))
+          |>.withFixedSize colW (height + pxToSub 12))
+        [WidgetNode.text
+          (BoxStyle.row 0 |>.withFixedSize width height)
+          theme.typo.lineBase _runs.streamRuns (some 900)]]
 
   let liveRows := priorRows ++ liveStreamRow ++ (st.selectedCard.toList.map fun c =>
     screenTextLine theme colW (pxToSub 21) (pxToSub 12) (pxToSub 21) pal.textMuted (conversationStatusLabel c.status))

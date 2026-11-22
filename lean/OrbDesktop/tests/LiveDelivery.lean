@@ -262,13 +262,15 @@ private def awaitState (slot : IO.Ref (Option LiveSubscription)) (st : DesktopSt
   throw (IO.userError "poll timed out")
 
 /-- Lower `.vectorIcon` payloads the way Main.lean's shaping pass does, so driver scenes
-carry the icon-mask prims (the diamond outline) without the glyph atlas. The mask source
-rect mirrors the rasterized icon; driver assertions only inspect the destination. -/
+carry the icon-mask prims (the diamond outline) without the glyph atlas. The raster is a
+square of `style.minWidth` exactly like production (no floor: small arrowhead boxes must
+rasterize at their true size so the mask geometry matches the real renderer). Driver
+assertions only inspect the destination. -/
 private partial def lowerVectorIcons : WidgetNode → WidgetNode
   | .mk id focusable hit style payload children =>
     let payload := match payload with
       | .vectorIcon _paths color badgeBg _stroke =>
-        let size := if badgeBg.isSome then pxToSub 10 else max (pxToSub 16) style.minWidth
+        let size := if badgeBg.isSome then pxToSub 10 else style.minWidth
         .iconMask 0 { x := 0, y := 0, w := size, h := size } color badgeBg
       | p => p
     .mk id focusable hit style payload (children.map lowerVectorIcons)
@@ -732,14 +734,17 @@ def main (args : List String) : IO Unit := do
         | _ => none
       -- Arrowheads at opposite targets: the forward tip touches the Beta node's
       -- left edge at node height, the return tip is centered on the Alpha column
-      -- below the rank rows.
+      -- below the rank rows. Both tips must be full 8×8 masks — a clipped remnant
+      -- (shorter row or cropped wing) fails the extent reservation.
       unless smallMasks.any fun dst =>
+          dst.w == 8 && dst.h == 8 &&
           (dst.x + dst.w - (betaDev.x - 12)).natAbs ≤ 16 &&
           (dst.y + dst.h / 2 - betaCy).natAbs ≤ 10 do
-        throw (IO.userError "the forward edge has no arrowhead at the Beta (target) column at node height")
+        throw (IO.userError "the forward edge has no full-extent arrowhead at the Beta (target) column at node height")
       unless smallMasks.any fun dst =>
+          dst.w == 8 && dst.h == 8 &&
           (dst.x + dst.w / 2 - alphaCx).natAbs ≤ 16 && dst.y > betaDev.y + betaDev.h do
-        throw (IO.userError "the return edge has no arrowhead at the Alpha (target) column below the rows")
+        throw (IO.userError "the return edge has no full-extent arrowhead at the Alpha (target) column below the rows")
       -- Separate actual paths: the return lane is one wide continuous mask below the
       -- rows spanning both columns, while the forward shaft is a thin rect at node
       -- height between the columns.
@@ -752,14 +757,22 @@ def main (args : List String) : IO Unit := do
       unless (lanePath.x - min alphaCx betaCx).natAbs ≤ 2 &&
           (lanePath.x + lanePath.w - max alphaCx betaCx).natAbs ≤ 2 do
         throw (IO.userError "the lane path does not span the Alpha and Beta columns exactly")
-      let shafts := scene.prims.toList.filter fun p => match p with
+      let shafts := scene.prims.toList.filterMap fun p => match p with
         | .rrect r _ _ _ _ =>
-          r.h ≤ 3 && r.w ≥ 20 &&
-            (r.y + r.h / 2 - alphaCy).natAbs ≤ 10 &&
-            r.x ≥ alphaDev.x && r.x + r.w ≤ betaDev.x + betaDev.w
-        | _ => false
+          if r.h ≤ 3 && r.w ≥ 20 &&
+              (r.y + r.h / 2 - alphaCy).natAbs ≤ 10 &&
+              r.x ≥ alphaDev.x && r.x + r.w ≤ betaDev.x + betaDev.w then some r else none
+        | _ => none
       unless shafts.length ≥ 1 do
         throw (IO.userError "the forward edge has no shaft at node height between the columns")
+      let some (shaft) := shafts.head? | throw (IO.userError "unreachable")
+      -- Distinct screen-space strokes: the return lane's stroke band sits strictly
+      -- below the forward shaft's band (the two directions never overlap), and the
+      -- Return label rides clear below the lane run.
+      unless lanePath.y ≥ shaft.y + shaft.h do
+        throw (IO.userError "the return lane overlaps the forward shaft's stroke band")
+      unless ret.y ≥ lanePath.y + lanePath.h - 1 do
+        throw (IO.userError "the Return label is not clear below the lane run")
       unless !rendered.contains "```" && !rendered.contains "mermaid" do
         throw (IO.userError "Mermaid source was rendered as literal text")
       return

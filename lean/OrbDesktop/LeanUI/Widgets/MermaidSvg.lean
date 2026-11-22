@@ -376,7 +376,7 @@ def buildOrthogonalConnectorWidget (theme : Theme) (connW connH : SubPx) (label 
   let arrowTip : WidgetNode :=
     WidgetNode.mk none false true
       (BoxStyle.row 0 |>.withFixedSize arrowHeadW (pxToSub 8))
-      (.vectorIcon [[(28, 16), (132, 80), (28, 144)]] pal.accent none
+      (.vectorIcon [[(28, 24), (132, 80), (28, 136)]] pal.accent none
         (Text.iconStrokeTenthsForPxWidth 8))
       []
   let arrowRow : WidgetNode :=
@@ -428,15 +428,16 @@ def buildLaneEdgeWidget (theme : Theme) (laneW laneH : SubPx)
   let xMax := max xSource xTarget
   let spanPx : Nat := (xMax - xMin) / subPerPx
   let boxW : SubPx := pxToSub (spanPx + 2)
-  let tipRowH : SubPx := pxToSub 6
+  let tipRowH : SubPx := pxToSub 8
   let runRowH : SubPx := pxToSub 8
   let lblRowH : SubPx := pxToSub 12
   -- View-box conversion for the lane raster: it is `spanPx + 2` px square, drawn 1:1
   -- and clipped to the run row, so the visible vertical band is
-  -- `160 * runRowH / (spanPx + 2)` view units and the horizontal run sits at the
-  -- band's bottom with both stubs rising to the row's very top (the tip row, then
-  -- the node bottoms above).
-  let band : Int := max 3 (Int.ofNat (1600 / max 1 (spanPx + 2)) - 1)
+  -- `160 * runRowH / (spanPx + 2)` view units and the horizontal run sits at that
+  -- band's vertical center (half-up rounded so it always lands inside the visible
+  -- row) with both stubs rising to the row's very top (the tip row, then the node
+  -- bottoms above).
+  let band : Int := max 1 (Int.ofNat ((640 + (spanPx + 2) / 2) / max 1 (spanPx + 2)))
   let uOf (x : SubPx) : Int :=
     Int.ofNat ((x - xMin + subPerPx) * 160 / max 1 boxW)
   let xs := uOf xSource
@@ -450,11 +451,14 @@ def buildLaneEdgeWidget (theme : Theme) (laneW laneH : SubPx)
       (.vectorIcon path pal.textSecondary none strokeTenths)
       []
   -- Directional tip: a chevron pointing up into the target node, centered on the
-  -- target column so it caps the rising stub exactly.
+  -- target column so it caps the rising stub exactly. The vector box is square
+  -- (8×8, matching the raster) and the polyline reserves the stroke's full extent
+  -- inside it — wings 1.4px from the side edges, ink within 0.2px of top and
+  -- bottom — so neither wing is clipped by the view box.
   let laneTip : WidgetNode :=
     WidgetNode.mk none false true
       (BoxStyle.row 0 |>.withFixedSize (pxToSub 8) tipRowH)
-      (.vectorIcon [[(20, 150), (80, 10), (140, 150)]] pal.accent none
+      (.vectorIcon [[(28, 132), (80, 24), (132, 132)]] pal.accent none
         (Text.iconStrokeTenthsForPxWidth 8))
       []
   let tipRow : WidgetNode :=
@@ -506,7 +510,7 @@ def buildMermaidDiagramWidget (theme : Theme) (availW : SubPx) (spec : DiagramSp
     let t ← spec.nodes.find? (fun n => n.id == e.toId)
     some (e, rankPos ranks s.rank, rankPos ranks t.rank)
   let laneEdges := resolved.filter (fun (_, ps, pt) => pt != ps + 1)
-  let laneH : SubPx := laneEdges.length * pxToSub 26
+  let laneH : SubPx := laneEdges.length * pxToSub 28
   let totalH : SubPx := headerH + canvasH + laneH + pxToSub 8
 
   let buildConnBand (pos : Nat) : WidgetNode :=
@@ -557,7 +561,7 @@ def buildMermaidDiagramWidget (theme : Theme) (availW : SubPx) (spec : DiagramSp
       [WidgetNode.box
         (BoxStyle.col 0 |>.withFixedSize (availW - pxToSub 8) laneH)
         (laneEdges.map fun (e, ps, pt) =>
-          buildLaneEdgeWidget theme (availW - pxToSub 8) (pxToSub 22) (xOf ps) (xOf pt) e.label)]
+          buildLaneEdgeWidget theme (availW - pxToSub 8) (pxToSub 28) (xOf ps) (xOf pt) e.label)]
 
   let children : List WidgetNode :=
     (if spec.title.isEmpty then [graphCanvas] else
