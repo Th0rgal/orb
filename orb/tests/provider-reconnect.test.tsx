@@ -261,7 +261,7 @@ it("returns to subscriptions when the selected OpenAI credential cannot be recon
   fireEvent.click(screen.getByRole("menuitem", { name: "Reconnect" }));
   expect(await screen.findByText(message)).toBeTruthy();
   expect(screen.queryByRole("button", { name: "Try again" })).toBeNull();
-  fireEvent.click(screen.getByRole("button", { name: "View subscriptions" }));
+  fireEvent.click(screen.getByText("Close", { selector: "button" }));
   await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
   expect(screen.getByRole("button", { name: "Add subscription account" })).toBeTruthy();
   expect(open).not.toHaveBeenCalled();

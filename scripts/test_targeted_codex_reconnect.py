@@ -17,6 +17,7 @@ from test_native_owner_core import core, request
 
 def replay(binary):
     seen = []
+    targeted_supported = False
     name = "original-account.json"
     calls = "/api/ai/providers/cli-proxy-login"
 
@@ -32,7 +33,8 @@ def replay(binary):
             if self.path.endswith("auth-url"):
                 result = dict(url="https://fixture.invalid/consent", state="fixture", target_auth_id=name)
             wire = json.dumps(result).encode()
-            self.send_response(200)
+            unsupported = self.path == "/v8/management/oauth/auth-url" and not targeted_supported
+            self.send_response(404 if unsupported else 200)
             self.send_header("Content-Length", str(len(wire)))
             self.end_headers()
             self.wfile.write(wire)
@@ -81,6 +83,10 @@ def replay(binary):
                 assert not any(path.endswith("auth-url") for _, path, _ in seen), seen
                 original = directory / name
                 original.write_text(json.dumps(credential))
+                code, raw = start()
+                assert code == 502 and "targeted OAuth" in raw, (code, raw)
+                assert not any(path.endswith("codex-auth-url") for _, path, _ in seen), seen
+                targeted_supported = True
                 code, raw = start()
                 assert code == 200, (code, raw)
                 sid = json.loads(raw)["session_id"]

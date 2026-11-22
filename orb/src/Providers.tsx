@@ -985,7 +985,7 @@ function ReAuthDialog(p: { provider: AIProvider; onClose: () => void; onDone: ()
         <>
           <Show when={phase() === "failed" && !unlinked()}><DialogButton disabled={resetting()} onClick={() => void retryLogin()}>Try again</DialogButton></Show>
           <DialogButton disabled={phase() === "finishing" || closing()} onClick={requestClose}>
-            {unlinked() ? "View subscriptions" : phase() === "failed" ? "Close" : "Cancel"}
+            {phase() === "failed" ? "Close" : "Cancel"}
           </DialogButton>
           <Show when={(phase() === "awaiting" || phase() === "finishing" || phase() === "failed") && !!session() && session()?.flow !== "device"}>
             <DialogButton variant="primary" disabled={phase() === "finishing" || closing() || !paste().trim()} onClick={submitPaste}>
