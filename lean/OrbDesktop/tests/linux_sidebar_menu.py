@@ -101,7 +101,11 @@ def exercise(root, tmp, api, graphical, click, process, wait, stack, client_kind
         def rows():
             return next((hits for region in regions if (hits := actions_in(region))), None)
         hits = wait('ordered context actions ' + ', '.join(expected), rows)
-        click(*hits[choose])
+        if client_kind == 'webkit' and choose == 'rename':
+            # Rename receives focus when the GTK menu opens.
+            subprocess.run(['wtype', '-k', 'Return'], env=graphical, check=True)
+        else:
+            click(*hits[choose])
     if client_kind == "leanui":
         def needs_connection():
             labels = {word for word, _, _ in words('0,0 1000x700')}
