@@ -1,6 +1,7 @@
-import { Show, createResource, createSignal } from "solid-js";
+import { Show, createEffect, createResource, createSignal, onCleanup } from "solid-js";
 import { api, connectionVersion } from "./api";
 import { AccountSettingReadError } from "./AccountSettingReadError";
+import { pollWhileVisible } from "./poll";
 import { SettingsRow } from "./SettingsCard";
 import { Toggle } from "./Toggle";
 
@@ -18,6 +19,10 @@ export function AlternativeRouterSettings(p: { account: string }) {
   const [setting, { mutate, refetch }] = createResource(source, ([, id]) => access(id));
   const [saving, setSaving] = createSignal(false);
   const [error, setError] = createSignal("");
+  createEffect(() => {
+    if (saving() || setting.state !== "ready") return;
+    onCleanup(pollWhileVisible(async () => { await refetch(); }, null, "alternative-routers"));
+  });
   async function save(allowed: boolean) {
     const [version, id] = source();
     const current = () => version === connectionVersion() && p.account === id;

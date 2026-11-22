@@ -63,6 +63,13 @@ for (const theme of ["light", "dark"]) test(`account VPN retry and Direct select
   await shared.click();
   await page.locator(".p-acc-btn").filter({ hasText: "b@example.invalid" }).click();
   await expect(routerToggle).toBeChecked();
+  routersAllowed = false;
+  await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+  await expect(routerToggle).not.toBeChecked();
+  routersAllowed = true;
+  await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+  await expect(routerToggle).toBeChecked();
+  expect(routerWrites).toEqual([]);
   await routerToggle.click();
   await expect(page.getByRole("alert").filter({ hasText: "Could not confirm" })).toBeVisible();
   await expect(routerToggle).toBeChecked();
