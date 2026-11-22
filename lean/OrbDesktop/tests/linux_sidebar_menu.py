@@ -99,8 +99,9 @@ def exercise(root, tmp, api, graphical, click, process, wait, stack, client_kind
         if client_kind == 'leanui':
             regions = [f'{x+20},{min(y,535)} 165x175']
         else:
-            # WebKit opens its menu at the pointer. The GTK popover can open above the row.
-            regions = [f'{max(0,x-12)},{min(y-8,510)} 220x185', f'{max(0,x-38)},{max(0,y-207)} 170x185']
+            # GTK clamps a pointer-anchored popover near either edge of the sidebar.
+            # Include its full width so the crop preserves the first letter of each action.
+            regions = [f'0,{min(y-8,510)} 320x185', f'0,{max(0,y-207)} 320x200']
         labels = {'rename':'rename', 'move':'move', 'archive':'archive', 'restore':'restore',
                   'copy-id':'copy', 'settings':'settings'}
         def actions_in(geo, contrast):
