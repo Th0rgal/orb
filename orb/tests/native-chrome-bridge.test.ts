@@ -266,6 +266,37 @@ describe("nativeChromeBridge", () => {
     expect(fakeWin.__ORB_NATIVE_MISSION_ACTION__).toBeUndefined();
   });
 
+  it("routes native project context-menu actions through __ORB_NATIVE_PROJECT_ACTION__", () => {
+    const calls: Array<[string, string]> = [];
+    const fakeWin = { dispatchEvent: () => true } as unknown as Window & {
+      __ORB_NATIVE_PROJECT_ACTION__?: (a: string, slug: string) => boolean;
+    };
+    const cleanup = installNativeChromeWindowHandlers({
+      open: () => true, leaveSettings: () => {}, getSidebarOpen: () => true, setSidebarOpen: () => {},
+      projectAction: (action, slug) => { calls.push([action, slug]); return true; },
+    }, fakeWin);
+    expect(fakeWin.__ORB_NATIVE_PROJECT_ACTION__?.("new-agent", "project:verity")).toBe(true);
+    expect(fakeWin.__ORB_NATIVE_PROJECT_ACTION__?.("new-cloud-agent", "verity")).toBe(true);
+    expect(fakeWin.__ORB_NATIVE_PROJECT_ACTION__?.("new-folder", "verity")).toBe(true);
+    expect(fakeWin.__ORB_NATIVE_PROJECT_ACTION__?.("settings", "verity")).toBe(true);
+    expect(fakeWin.__ORB_NATIVE_PROJECT_ACTION__?.("rename", "verity")).toBe(true);
+    expect(fakeWin.__ORB_NATIVE_PROJECT_ACTION__?.("archive", "verity")).toBe(true);
+    expect(fakeWin.__ORB_NATIVE_PROJECT_ACTION__?.("delete", "verity")).toBe(true);
+    expect(fakeWin.__ORB_NATIVE_PROJECT_ACTION__?.("unknown", "verity")).toBe(false);
+    expect(fakeWin.__ORB_NATIVE_PROJECT_ACTION__?.("delete", "  ")).toBe(false);
+    expect(calls).toEqual([
+      ["new-agent", "verity"],
+      ["new-cloud-agent", "verity"],
+      ["new-folder", "verity"],
+      ["settings", "verity"],
+      ["rename", "verity"],
+      ["archive", "verity"],
+      ["delete", "verity"],
+    ]);
+    cleanup();
+    expect(fakeWin.__ORB_NATIVE_PROJECT_ACTION__).toBeUndefined();
+  });
+
   it("coalesces rapid schedule calls with strictly monotonic revisions", async () => {
     vi.useFakeTimers();
     try {

@@ -128,3 +128,67 @@ test("native project menu confirms deletion before retiring the project", async 
   await expect(dialog).toHaveCount(0);
   expect(writes).toEqual([{ action: "delete" }]);
 });
+
+test("native project action bridge executes all project actions in hybrid mode", async ({ page }) => {
+  await openHybridApp(page);
+  const actions: unknown[] = [];
+  await page.route("**/api/projects/verity/action", (route) => {
+    actions.push(route.request().postDataJSON());
+    return route.fulfill({ json: { ok: true } });
+  });
+  await page.route("**/api/projects", (route) => {
+    if (route.request().method() === "PUT") {
+      actions.push(route.request().postDataJSON());
+      return route.fulfill({ json: { slug: "verity", title: "Verity Renamed" } });
+    }
+    return route.fallback();
+  });
+
+  const invokeProjectAction = (action: string, slug: string) =>
+    page.evaluate(
+      ([a, s]) =>
+        (window as unknown as { __ORB_NATIVE_PROJECT_ACTION__: (action: string, slug: string) => boolean }).__ORB_NATIVE_PROJECT_ACTION__(a, s),
+      [action, slug],
+    );
+
+  // new-agent
+  expect(await invokeProjectAction("new-agent", "verity")).toBe(true);
+  await expect(page.locator(".composer").first()).toBeVisible();
+  await expect(page.locator(".titlebar")).toContainText("New Agent");
+
+  // new-cloud-agent
+  expect(await invokeProjectAction("new-cloud-agent", "verity")).toBe(true);
+  await expect(page.locator(".titlebar")).toContainText(/Cloud [Aa]gent/);
+
+  // settings
+  expect(await invokeProjectAction("settings", "verity")).toBe(true);
+  await expect(page.locator(".titlebar")).toContainText("Settings");
+
+  // new-folder opens NameDialog
+  expect(await invokeProjectAction("new-folder", "verity")).toBe(true);
+  const folderDialog = page.getByRole("dialog").filter({ hasText: "New folder" });
+  await expect(folderDialog).toBeVisible();
+  await folderDialog.getByRole("button", { name: "Cancel" }).click();
+  await expect(folderDialog).toHaveCount(0);
+
+  // rename opens NameDialog and saves
+  expect(await invokeProjectAction("rename", "verity")).toBe(true);
+  const renameDialog = page.getByRole("dialog").filter({ hasText: "Rename" });
+  await expect(renameDialog).toBeVisible();
+  await renameDialog.getByRole("textbox").fill("Verity Renamed");
+  await renameDialog.getByRole("button", { name: "Rename" }).click();
+  await expect(renameDialog).toHaveCount(0);
+  await expect.poll(() => actions).toContainEqual({ slug: "verity", title: "Verity Renamed" });
+
+  // delete opens ConfirmDialog and confirms
+  expect(await invokeProjectAction("delete", "verity")).toBe(true);
+  const deleteDialog = page.getByRole("dialog").filter({ hasText: "Delete Verity" });
+  await expect(deleteDialog).toBeVisible();
+  await deleteDialog.getByRole("button", { name: "Delete project" }).click();
+  await expect(deleteDialog).toHaveCount(0);
+  expect(actions).toContainEqual({ action: "delete" });
+
+  // archive calls retire endpoint directly
+  expect(await invokeProjectAction("archive", "verity")).toBe(true);
+  await expect.poll(() => actions).toContainEqual({ action: "archive" });
+});

@@ -24,6 +24,7 @@ import {
   buildOverviewSankeyInput,
   computeMonotoneCurve,
   computeSankeyLayout,
+  fitSankeyText,
   formatDurationCompact,
   formatLargeNumber,
   formatResourceRate,
@@ -96,6 +97,7 @@ function eqIds(a: string[], b: string[]): boolean {
 
 const MIN_SANKEY_CANVAS_HEIGHT = 330;
 const CARD_HEAD_HEIGHT = 38;
+export const COMPACT_SANKEY_WIDTH = 760;
 
 export default function Resources(props: {
   missionId?: string | null;
@@ -376,6 +378,7 @@ export default function Resources(props: {
   function buildGraph(l: ResourceLens, w: number) {
     const m = metric();
     const h = sankeyHeight();
+    const marginX = w < COMPACT_SANKEY_WIDTH ? 10 : 204;
     if (isMissionMode()) {
       const det = detail();
       if (!det) return null;
@@ -386,7 +389,7 @@ export default function Resources(props: {
           width: w,
           height: h,
           metric: m,
-          marginX: 204,
+          marginX,
           marginY: 16,
         }),
       };
@@ -400,7 +403,7 @@ export default function Resources(props: {
         width: w,
         height: h,
         metric: m,
-        marginX: 204,
+        marginX,
         marginY: 16,
       }),
     };
@@ -1097,12 +1100,29 @@ export default function Resources(props: {
                   };
                   let wrap: HTMLDivElement | undefined;
                   onMount(() => {
+                    if (wrap && wrap.clientWidth > 40) setWidth(Math.floor(wrap.clientWidth));
                     const observer = new ResizeObserver(([entry]) => {
                       if (entry.contentRect.width > 40) setWidth(Math.floor(entry.contentRect.width));
                     });
                     if (wrap) observer.observe(wrap);
                     onCleanup(() => observer.disconnect());
                   });
+                  const compact = () => sankeyWidth() < COMPACT_SANKEY_WIDTH;
+                  const cols = () => Math.max(2, sankeyGraph()?.layout.columns ?? 2);
+                  const span = () => {
+                    const nodes = sankeyGraph()?.layout.nodes ?? [];
+                    const last = cols() - 1;
+                    const leftEdge = nodes.reduce((m, n) => (n.column === 0 ? Math.max(m, n.x1) : m), 22);
+                    const rightEdge = nodes.reduce(
+                      (m, n) => (n.column === last ? Math.min(m, n.x0) : m),
+                      Math.max(102, sankeyWidth() - 22),
+                    );
+                    return Math.max(80, rightEdge - leftEdge);
+                  };
+                  const maxPillW = () =>
+                    cols() <= 2
+                      ? Math.max(80, span() * 0.46)
+                      : Math.max(64, span() / (cols() - 1) - 86);
                   return <div class="res-card res-card-main" data-testid={`res-flow-${flowLens}`}>
                 <div class="res-card-head">
                   <div class="res-card-head-left">
@@ -1216,6 +1236,7 @@ export default function Resources(props: {
                                   const isRight = () =>
                                     nd().column === (sankeyGraph()?.layout.columns ?? 2) - 1;
                                   const isMiddle = () => !isLeft() && !isRight();
+                                  const isCompactEdge = () => compact() && !isMiddle();
                                   const centerY = () => (nd().y0 + nd().y1) / 2;
                                   const barH = () => Math.max(5, nd().y1 - nd().y0);
                                   const valStr = () =>
@@ -1225,35 +1246,113 @@ export default function Resources(props: {
                                       metric(),
                                       true,
                                     );
-                                  const labelText = () => {
+                                  const maxTextW = () => Math.max(28, maxPillW() - 12);
+                                  const labelFit = () => {
                                     const maxLen = isMiddle() ? 18 : 24;
-                                    return nd().label.length > maxLen
-                                      ? `${nd().label.slice(0, maxLen - 1)}…`
-                                      : nd().label;
+                                    const base =
+                                      nd().label.length > maxLen
+                                        ? `${nd().label.slice(0, maxLen - 1)}…`
+                                        : nd().label;
+                                    if (!isCompactEdge()) {
+                                      return { text: base, width: base.length * 6.8 };
+                                    }
+                                    return fitSankeyText(
+                                      base,
+                                      maxTextW(),
+                                      "500 12px -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
+                                      7.2,
+                                    );
                                   };
-                                  const subText = () => {
-                                    if (!nd().sub) return valStr();
-                                    const rawSub =
-                                      nd().sub.length > 18
-                                        ? `${nd().sub.slice(0, 17)}…`
-                                        : nd().sub;
-                                    const text = `${valStr()} · ${rawSub}`;
-                                    return text.length > 28 ? `${text.slice(0, 27)}…` : text;
+                                  const labelText = () => labelFit().text;
+                                  const subFit = () => {
+                                    let base: string;
+                                    if (!nd().sub) {
+                                      base = valStr();
+                                    } else {
+                                      const rawSub =
+                                        nd().sub.length > 18
+                                          ? `${nd().sub.slice(0, 17)}…`
+                                          : nd().sub;
+                                      const text = `${valStr()} · ${rawSub}`;
+                                      base = text.length > 28 ? `${text.slice(0, 27)}…` : text;
+                                    }
+                                    if (!isCompactEdge()) {
+                                      return { text: base, width: base.length * 6.4 };
+                                    }
+                                    return fitSankeyText(
+                                      base,
+                                      maxTextW(),
+                                      "10.5px ui-monospace, SFMono-Regular, Menlo, monospace",
+                                      6.4,
+                                    );
                                   };
+                                  const subText = () => subFit().text;
+                                  const pillW = () =>
+                                    Math.min(
+                                      maxPillW(),
+                                      Math.ceil(
+                                        Math.max(labelFit().width, nd().showSub ? subFit().width : 0),
+                                      ) + 12,
+                                    );
+                                  const pillX = () =>
+                                    isLeft() ? nd().x1 + 6 : nd().x0 - 6 - pillW();
+                                  const pillY = () => (nd().showSub ? centerY() - 16 : centerY() - 9);
+                                  const pillH = () => (nd().showSub ? 30 : 18);
+                                  const labelX = () =>
+                                    isCompactEdge()
+                                      ? isLeft()
+                                        ? nd().x1 + 12
+                                        : nd().x0 - 12
+                                      : isLeft()
+                                        ? nd().x0 - 10
+                                        : isRight()
+                                          ? nd().x1 + 10
+                                          : (nd().x0 + nd().x1) / 2;
+                                  const anchor = () =>
+                                    isCompactEdge()
+                                      ? isLeft()
+                                        ? "start"
+                                        : "end"
+                                      : isLeft()
+                                        ? "end"
+                                        : isRight()
+                                          ? "start"
+                                          : "middle";
                                   const hitX = () =>
-                                    isLeft()
-                                      ? Math.max(0, nd().x0 - (nd().showLabel ? 192 : 18))
-                                      : isMiddle()
-                                        ? nd().x0 - (nd().showLabel ? 72 : 10)
-                                        : nd().x0 - 6;
+                                    isCompactEdge()
+                                      ? isLeft()
+                                        ? Math.max(0, nd().x0 - 6)
+                                        : Math.max(0, nd().showLabel ? pillX() - 4 : nd().x0 - 6)
+                                      : isLeft()
+                                        ? Math.max(0, nd().x0 - (nd().showLabel ? 192 : 18))
+                                        : isMiddle()
+                                          ? nd().x0 - (nd().showLabel ? 72 : 10)
+                                          : nd().x0 - 6;
                                   const hitW = () =>
-                                    isLeft()
-                                      ? nd().x1 - hitX() + 6
-                                      : isRight()
-                                        ? (nd().showLabel ? 196 : 22) + (nd().x1 - nd().x0)
-                                        : nd().showLabel
-                                          ? 156
-                                          : nd().x1 - nd().x0 + 20;
+                                    isCompactEdge()
+                                      ? isLeft()
+                                        ? (nd().showLabel ? pillX() + pillW() + 4 : nd().x1 + 6) -
+                                          hitX()
+                                        : nd().x1 + 6 - hitX()
+                                      : isLeft()
+                                        ? nd().x1 - hitX() + 6
+                                        : isRight()
+                                          ? (nd().showLabel ? 196 : 22) + (nd().x1 - nd().x0)
+                                          : nd().showLabel
+                                            ? 156
+                                            : nd().x1 - nd().x0 + 20;
+                                  const hitY = () =>
+                                    isCompactEdge() && nd().showLabel
+                                      ? Math.min(nd().y0 - 3, pillY())
+                                      : nd().y0 - 3;
+                                  const hitH = () =>
+                                    Math.max(
+                                      12,
+                                      barH() + 6,
+                                      isCompactEdge() && nd().showLabel
+                                        ? Math.max(nd().y1 + 3, pillY() + pillH()) - hitY()
+                                        : 0,
+                                    );
                                   return (
                                     <g
                                       class="res-sankey-node-group"
@@ -1269,9 +1368,9 @@ export default function Resources(props: {
                                       </title>
                                       <rect
                                         x={hitX()}
-                                        y={nd().y0 - 3}
+                                        y={hitY()}
                                         width={hitW()}
-                                        height={Math.max(12, barH() + 6)}
+                                        height={hitH()}
                                         fill="transparent"
                                       />
                                       <rect
@@ -1303,19 +1402,21 @@ export default function Resources(props: {
                                             rx={5}
                                           />
                                         </Show>
+                                        <Show when={isCompactEdge()}>
+                                          <rect
+                                            class="res-sankey-node-pill"
+                                            x={pillX()}
+                                            y={pillY()}
+                                            width={pillW()}
+                                            height={pillH()}
+                                            rx={5}
+                                          />
+                                        </Show>
                                         <text
                                           class={`res-sankey-node-label ${isMiddle() ? "is-middle" : ""}`}
-                                          x={
-                                            isLeft()
-                                              ? nd().x0 - 10
-                                              : isRight()
-                                                ? nd().x1 + 10
-                                                : (nd().x0 + nd().x1) / 2
-                                          }
+                                          x={labelX()}
                                           y={nd().showSub ? centerY() - 5 : centerY() + 4}
-                                          text-anchor={
-                                            isLeft() ? "end" : isRight() ? "start" : "middle"
-                                          }
+                                          text-anchor={anchor()}
                                         >
                                           {labelText()}
                                         </text>
@@ -1323,17 +1424,9 @@ export default function Resources(props: {
                                       <Show when={nd().showSub}>
                                         <text
                                           class="res-sankey-node-sub"
-                                          x={
-                                            isLeft()
-                                              ? nd().x0 - 10
-                                              : isRight()
-                                                ? nd().x1 + 10
-                                                : (nd().x0 + nd().x1) / 2
-                                          }
+                                          x={labelX()}
                                           y={centerY() + 9}
-                                          text-anchor={
-                                            isLeft() ? "end" : isRight() ? "start" : "middle"
-                                          }
+                                          text-anchor={anchor()}
                                         >
                                           {subText()}
                                         </text>

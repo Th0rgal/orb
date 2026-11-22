@@ -876,3 +876,168 @@ test("Resources page handles dense 30+ mission fleet and 500-span mission Flow c
   const dagScrollBox = (await page.getByTestId("res-dag-view").boundingBox())!;
   expect(Math.abs(dagScrollBox.height - (cardMainBox.height - 38))).toBeLessThanOrEqual(3);
 });
+
+test("Compact full-width Sankey renders inward pills without overlap at 1024x621 in dark and light themes", async ({
+  page,
+}) => {
+  const missionId = "11111111-1111-4111-8111-111111111111";
+  await page.addInitScript(() => {
+    localStorage.setItem("orb.apiUrl", location.origin);
+    localStorage.setItem("orb.jwt", "test");
+  });
+  await page.route("**/api/**", async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (path === "/api/control/stream") {
+      return route.fulfill({ contentType: "text/event-stream", body: "" });
+    }
+    if (path === "/api/resources/overview") {
+      const now = Date.now();
+      return route.fulfill({
+        json: {
+          as_of: new Date(now).toISOString(),
+          range: "6h",
+          bucket_seconds: 300,
+          timestamps_ms: [now - 3600_000, now],
+          compute: {
+            total_vcpu: 32,
+            active_vcpu: 24,
+            idle_leased_vcpu: 0,
+            hourly_burn_usd: 2.4,
+            sources: [
+              { id: "boat:large", label: "Boat · large", sublabel: "2 VMs", total_vcpu: 24, active_vcpu: 24, idle_leased_vcpu: 0, est_usd_per_h: 2.4, health: "ok", series_vcpu: [24, 24], series_usd_per_h: [2.4, 2.4] },
+            ],
+          },
+          inference: {
+            current_b_tok_per_h: 0.022,
+            est_usd_per_h: 1.1,
+            window_total_tokens: 22_000_000,
+            window_est_usd: 1.1,
+            throttled_429_count: 0,
+            pools: [
+              { id: "ethereumfoundation:pool", label: "Ethereumfoundation", sublabel: "metered", current_b_tok_per_h: 0.022, est_usd_per_h: 1.1, quota_pct_remaining: null, health: "ok", series_b_tok_per_h: [0.022, 0.022], series_usd_per_h: [1.1, 1.1] },
+            ],
+          },
+          missions: [
+            { id: missionId, title: "Compact Sankey Verification Mission With Long Name", status: "active", subagent_total: 2, subagent_running: 1, vcpu: 24, compute_usd_per_h: 2.4, b_tok_per_h: 0.022, inference_usd_per_h: 1.1, series_vcpu: [24, 24], series_compute_usd_per_h: [2.4, 2.4], series_b_tok_per_h: [0.022, 0.022], series_inference_usd_per_h: [1.1, 1.1] },
+          ],
+          links: [
+            { lens: "compute", source_id: "boat:large", target_id: missionId, value: 24, est_usd_per_h: 2.4, degraded: false },
+            { lens: "inference", source_id: "ethereumfoundation:pool", target_id: missionId, value: 0.022, est_usd_per_h: 1.1, degraded: false },
+          ],
+        },
+      });
+    }
+    if (path === `/api/resources/missions/${missionId}`) {
+      return route.fulfill({
+        json: {
+          as_of: new Date().toISOString(),
+          mission: { id: missionId, title: "Compact Sankey Verification Mission", status: "active", started_at: new Date().toISOString(), elapsed_secs: 600, eta_remaining_secs: null, subagent_count: 1, track_count: 1 },
+          available_horizons: ["6h"],
+          active_horizon: "6h",
+          flow: {
+            inputs: [
+              { id: "ethereumfoundation:pool", lens: "inference", label: "EF", sublabel: "metered", value: 0.022, est_usd_per_h: 1.1 },
+              { id: "boat:large", lens: "compute", label: "Boat · large", sublabel: "2 VMs", value: 24, est_usd_per_h: 2.4 },
+            ],
+            tracks: [{ id: "track:main", label: "Main Track", status: "active", vcpu: 24, compute_usd_per_h: 2.4, b_tok_per_h: 0.022, inference_usd_per_h: 1.1 }],
+            subagents: [{ id: "sub:1", mission_id: missionId, label: "Worker 01", status: "active", vcpu: 24, compute_usd_per_h: 2.4, b_tok_per_h: 0.022, inference_usd_per_h: 1.1 }],
+            input_to_track: [
+              { lens: "inference", source_id: "ethereumfoundation:pool", target_id: "track:main", weight: 0.022, est_usd_per_h: 1.1, degraded: false },
+              { lens: "compute", source_id: "boat:large", target_id: "track:main", weight: 24, est_usd_per_h: 2.4, degraded: false },
+            ],
+            track_to_subagent: [
+              { lens: "inference", source_id: "track:main", target_id: "sub:1", weight: 0.022, est_usd_per_h: 1.1, degraded: false },
+              { lens: "compute", source_id: "track:main", target_id: "sub:1", weight: 24, est_usd_per_h: 2.4, degraded: false },
+            ],
+          },
+          dag: { origin_unix_secs: 0, horizon_secs: 3600, now_offset_secs: 600, bars: [] },
+          timeline: { offsets_secs: [0, 600], observed_vcpu: [24, 24], projected_vcpu: [24, 24], observed_compute_usd_per_h: [2.4, 2.4], projected_compute_usd_per_h: [2.4, 2.4], observed_b_tok_per_h: [0.022, 0.022], projected_b_tok_per_h: [0.022, 0.022], observed_inference_usd_per_h: [1.1, 1.1], projected_inference_usd_per_h: [1.1, 1.1] },
+        },
+      });
+    }
+    if (path === "/api/projects") return route.fulfill({ json: { projects: [] } });
+    if (path === "/api/control/missions" || path === "/api/control/queue" || path === "/api/backends" || path === "/api/cloud/accounts") {
+      return route.fulfill({ json: [] });
+    }
+    return route.fulfill({ json: {} });
+  });
+
+  await page.setViewportSize({ width: 1024, height: 621 });
+  await page.goto("/");
+  await page.getByTestId("sb-resources").click();
+  await expect(page.getByTestId("resources-page")).toBeVisible();
+
+  for (const theme of ["dark", "light"]) {
+    await page.evaluate((t) => document.documentElement.setAttribute("data-theme", t), theme);
+    for (const currentLens of ["inference", "compute"] as const) {
+      await page.getByTestId(`res-lens-${currentLens}`).click();
+      const svg = page.getByTestId("res-sankey-svg");
+      await expect(svg).toBeVisible();
+      const svgBox = (await svg.boundingBox())!;
+      expect(svgBox.width).toBeLessThan(760);
+
+      // Verify bars span nearly the full card width and inward pills sit cleanly inside without collision.
+      const geometry = await svg.evaluate((el) => {
+        const svgRect = el.getBoundingClientRect();
+        const groups = Array.from(el.querySelectorAll(".res-sankey-node-group"));
+        const bars: Array<{ testid: string; x0: number; x1: number; y0: number; y1: number }> = [];
+        const pills: Array<{ testid: string; x0: number; x1: number; y0: number; y1: number; fill: string }> = [];
+        for (const g of groups) {
+          const testid = g.getAttribute("data-testid") ?? "";
+          const rects = Array.from(g.querySelectorAll("rect"));
+          const bar = rects.find((r) => !r.classList.contains("res-sankey-node-pill") && !r.classList.contains("res-sankey-mid-pill") && r.getAttribute("fill") !== "transparent");
+          const pill = rects.find((r) => r.classList.contains("res-sankey-node-pill"));
+          if (bar) {
+            const br = bar.getBoundingClientRect();
+            bars.push({ testid, x0: br.left - svgRect.left, x1: br.right - svgRect.left, y0: br.top - svgRect.top, y1: br.bottom - svgRect.top });
+          }
+          if (pill) {
+            const pr = pill.getBoundingClientRect();
+            pills.push({ testid, x0: pr.left - svgRect.left, x1: pr.right - svgRect.left, y0: pr.top - svgRect.top, y1: pr.bottom - svgRect.top, fill: getComputedStyle(pill).fill });
+          }
+        }
+        const texts = Array.from(el.querySelectorAll("text")).map((t) => {
+          const tr = t.getBoundingClientRect();
+          return { text: t.textContent ?? "", x0: tr.left - svgRect.left, x1: tr.right - svgRect.left, y0: tr.top - svgRect.top, y1: tr.bottom - svgRect.top, fill: getComputedStyle(t).fill };
+        });
+        return { width: svgRect.width, bars, pills, texts };
+      });
+
+      const minX0 = Math.min(...geometry.bars.map((b) => b.x0));
+      const maxX1 = Math.max(...geometry.bars.map((b) => b.x1));
+      expect(minX0).toBeLessThanOrEqual(16);
+      expect(maxX1).toBeGreaterThanOrEqual(geometry.width - 16);
+      expect(geometry.pills.length).toBeGreaterThanOrEqual(2);
+
+      // Left pills and right pills must never overlap horizontally.
+      const leftPills = geometry.pills.filter((p) => p.x0 < geometry.width / 2);
+      const rightPills = geometry.pills.filter((p) => p.x0 >= geometry.width / 2);
+      expect(leftPills.length).toBeGreaterThan(0);
+      expect(rightPills.length).toBeGreaterThan(0);
+      const maxLeftPillX1 = Math.max(...leftPills.map((p) => p.x1));
+      const minRightPillX0 = Math.min(...rightPills.map((p) => p.x0));
+      expect(maxLeftPillX1).toBeLessThan(minRightPillX0);
+
+      // Every text stays within the SVG horizontally and is legible.
+      for (const t of geometry.texts) {
+        if (!t.text.trim()) continue;
+        expect(t.x0).toBeGreaterThanOrEqual(-1);
+        expect(t.x1).toBeLessThanOrEqual(geometry.width + 1);
+      }
+
+      // Theme-aware pill fill should differ between dark and light themes.
+      expect(geometry.pills[0].fill).not.toBe("none");
+      expect(geometry.pills[0].fill).not.toBe("rgba(0, 0, 0, 0)");
+    }
+  }
+
+  // Hovering an inward pill / node still triggers the header hover readout and clicking drills down.
+  await page.getByTestId("res-lens-inference").click();
+  const firstPill = page.locator(".res-sankey-node-group").first().locator(".res-sankey-node-pill");
+  const pillBox = (await firstPill.boundingBox())!;
+  await page.mouse.move(pillBox.x + pillBox.width / 2, pillBox.y + pillBox.height / 2);
+  await expect(page.locator(".res-hover-pill")).toBeVisible();
+
+  await page.getByTestId(`res-node-${missionId}`).click();
+  await expect(page.getByTestId("res-submode-flow")).toBeVisible();
+});

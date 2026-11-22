@@ -72,6 +72,7 @@ type NativeChromeWindow = Window & {
   __ORB_NATIVE_EXPAND__?: (rowId: string) => boolean;
   __ORB_TOGGLE_NATIVE_SIDEBAR__?: (open?: boolean) => boolean;
   __ORB_NATIVE_MISSION_ACTION__?: (action: string, missionId: string, arg?: string) => boolean;
+  __ORB_NATIVE_PROJECT_ACTION__?: (action: string, slug: string) => boolean;
   webkit?: {
     messageHandlers?: {
       orbNative?: {
@@ -188,6 +189,9 @@ export type NativeChromeBridgeHandlers = {
   /** Native sidebar context menu: `rename` (arg = new title), `move` (arg = project slug),
    *  `archive`, `restore`, `copy-id`, `settings`, `delete` (arg = space-separated ids or "current"). */
   missionAction?: (action: NativeMissionAction, missionId: string, arg: string) => boolean;
+  /** Native sidebar project context menu: `new-agent`, `new-cloud-agent`, `new-folder`,
+   *  `settings`, `rename`, `archive`, `delete`. */
+  projectAction?: (action: NativeProjectAction, slug: string) => boolean;
 };
 
 /** Mission ids a native action applies to: `delete` lists them in `arg` ("current" = the open
@@ -200,6 +204,24 @@ export function nativeActionTargets(action: NativeMissionAction, id: string, arg
 
 export type NativeMissionAction = "rename" | "move" | "archive" | "restore" | "copy-id" | "settings" | "delete";
 const NATIVE_MISSION_ACTIONS: readonly string[] = ["rename", "move", "archive", "restore", "copy-id", "settings", "delete"];
+
+export type NativeProjectAction =
+  | "new-agent"
+  | "new-cloud-agent"
+  | "new-folder"
+  | "settings"
+  | "rename"
+  | "archive"
+  | "delete";
+const NATIVE_PROJECT_ACTIONS: readonly string[] = [
+  "new-agent",
+  "new-cloud-agent",
+  "new-folder",
+  "settings",
+  "rename",
+  "archive",
+  "delete",
+];
 
 /** Notify native macOS/Linux shell when the titlebar sidebar toggle, history state, or Cmd+K shortcut fires inside WebView. */
 export function notifyNativeChromeShell(
@@ -309,7 +331,14 @@ export function installNativeChromeWindowHandlers(
     return handlers.missionAction(action as NativeMissionAction, id, (arg ?? "").trim());
   };
   nw.__ORB_NATIVE_MISSION_ACTION__ = missionAction;
+  const projectAction = (action: string, slug: string): boolean => {
+    const clean = (slug ?? "").trim().replace(/^project:/, "");
+    if (!clean || !NATIVE_PROJECT_ACTIONS.includes(action) || !handlers.projectAction) return false;
+    return handlers.projectAction(action as NativeProjectAction, clean);
+  };
+  nw.__ORB_NATIVE_PROJECT_ACTION__ = projectAction;
   return () => {
+    if (nw.__ORB_NATIVE_PROJECT_ACTION__ === projectAction) delete nw.__ORB_NATIVE_PROJECT_ACTION__;
     if (nw.__ORB_NATIVE_MISSION_ACTION__ === missionAction) delete nw.__ORB_NATIVE_MISSION_ACTION__;
     if (nw.__ORB_SELECT_MISSION__ === selectMission) delete nw.__ORB_SELECT_MISSION__;
     if (nw.__ORB_NATIVE_NAV__ === nativeNav) delete nw.__ORB_NATIVE_NAV__;

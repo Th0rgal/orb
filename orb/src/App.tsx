@@ -190,6 +190,7 @@ import {
   createNativeChromeSyncer,
   installNativeChromeWindowHandlers,
   type NativeMissionAction,
+  type NativeProjectAction,
   withLiveExecution,
   nativeActionTargets,
   isNativeChromeEnabled,
@@ -1082,6 +1083,7 @@ export default function App() {
   // native Archived section is fed from here.
   const [nativeArchived, setNativeArchived] = createSignal<Mission[]>([]);
   const [archiveRequests, setArchiveRequests] = createSignal<{ mission: Mission; restore: boolean }[]>([]);
+  const [projectActionRequests, setProjectActionRequests] = createSignal<{ action: NativeProjectAction; slug: string }[]>([]);
   const [nativeApprovalPrompt, setNativeApprovalPrompt] = createSignal<ApprovalConfirmationPrompt | null>(null);
   createEffect(on(connectionVersion, () => setNativeApprovalPrompt(null), { defer: true }));
   const loadNativeArchived = () => {
@@ -1157,6 +1159,27 @@ export default function App() {
     setNewProject(slug);
     open(null);
   };
+  const nativeProjectAction = (action: NativeProjectAction, slug: string): boolean => {
+    if (!slug) return false;
+    switch (action) {
+      case "new-agent":
+        newAgentIn(slug, "");
+        return true;
+      case "new-cloud-agent":
+        setNewProject(slug);
+        setNewFolder(null);
+        open("cloud-agent");
+        return true;
+      case "settings":
+        return open(`ps:${slug}`);
+      case "new-folder":
+      case "rename":
+      case "archive":
+      case "delete":
+        setProjectActionRequests(q => [...q, { action, slug }]);
+        return true;
+    }
+  };
   const startNewProject = (anchor?: HTMLElement) => {
     setProjectCreationAnchor(anchor);
     setNewProjectDraft(true);
@@ -1177,6 +1200,7 @@ export default function App() {
       newProject: () => startNewProject(),
       getScope: historyScope,
       missionAction: nativeMissionAction,
+      projectAction: nativeProjectAction,
     });
     onCleanup(() => {
       disposeHandlers();
@@ -1726,6 +1750,8 @@ export default function App() {
       deleteRequest={deleteMissionRequest()}
       archiveRequests={archiveRequests()}
       onArchiveRequestsHandled={n => setArchiveRequests(q => q.slice(n))}
+      projectActionRequests={projectActionRequests()}
+      onProjectActionRequestsHandled={n => setProjectActionRequests(q => q.slice(n))}
       onArchiveStatus={headless ? changed => {
         const ids = new Set(changed.map(m => m.id));
         setNativeArchived(rows => [...changed.filter(m => m.status === "acknowledged"), ...rows.filter(m => !ids.has(m.id))]);

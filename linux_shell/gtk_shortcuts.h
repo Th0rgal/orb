@@ -8,8 +8,9 @@ static gboolean orb_gtk_window_shortcut(GtkWindow *window, GdkEventKey *event,
     guint modifiers = event->state & gtk_accelerator_get_default_mod_mask();
     gboolean menu_key = (event->keyval == GDK_KEY_Menu && modifiers == 0) ||
         (event->keyval == GDK_KEY_F10 && modifiers == GDK_SHIFT_MASK);
-    if (menu_key && focus && !gtk_grab_get_current() &&
-        g_strcmp0(g_object_get_data(G_OBJECT(focus), "orb-kind"), "mission") == 0)
+    const char *kind = focus ? g_object_get_data(G_OBJECT(focus), "orb-kind") : NULL;
+    if (menu_key && kind && !gtk_grab_get_current() &&
+        (g_strcmp0(kind, "mission") == 0 || g_strcmp0(kind, "project") == 0))
         return orb_gtk_row_context_menu(webview, gtk_widget_get_parent(focus), focus, NULL);
     gboolean primary = (modifiers & (GDK_CONTROL_MASK | GDK_SUPER_MASK | GDK_META_MASK)) != 0;
     if (primary && (event->keyval == GDK_KEY_Delete || event->keyval == GDK_KEY_KP_Delete) &&
