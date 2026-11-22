@@ -236,3 +236,12 @@ Before confirming a native-only Antigravity setting, Core checks both the saved 
 When Core reports `vpn_awaiting_verification`, an open desktop account row periodically reads the route while visible and checks again when the window regains visibility. Verification may finish independently after a Core restart. Observing this transition requires only a read. Closing the row or changing its account or route discards any older pending observation.
 
 An open account row rereads a settled route when the desktop window regains focus or visibility. This reflects a VPN change made by another user without a periodic timer or a write from the observing client.
+
+### Desktop client connected to an older Core
+
+When Core returns its missing-endpoint response (HTTP 404, `not_found`,
+and the requested path), the account row explains which setting requires
+a Core update. The user can retry the read after an update without
+closing the account. A missing account or a transient service failure
+keeps the ordinary retry action. A failed read never implies Direct or
+permission to use an alternative router.
