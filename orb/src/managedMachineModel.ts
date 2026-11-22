@@ -144,7 +144,7 @@ export interface CreateManagedMachine {
 /** `null` when the backend predates managed machines (404). */
 export async function listManagedMachines(): Promise<ManagedMachinesResponse | null> {
   try {
-    return await api<ManagedMachinesResponse>("/api/managed-machines", { method: "GET" });
+    return await api<ManagedMachinesResponse>("/api/managed-machines");
   } catch (error) {
     if (error instanceof ApiError && (error.status === 404 || error.status === 405)) return null;
     throw error;
@@ -209,8 +209,8 @@ export const putManagedSettings = async (body: ManagedSettings) => {
 /** `null` when the backend predates per-provider configuration (404). */
 export async function listManagedProviders(): Promise<ManagedProviderInfo[] | null> {
   try {
-    const r = await api<{ providers: ManagedProviderInfo[] }>("/api/managed-machines/providers", { method: "GET" });
-    return r.providers ?? [];
+    const result = await api<ManagedProviderInfo[] | { providers: ManagedProviderInfo[] }>("/api/managed-machines/providers", { method: "GET" });
+    return Array.isArray(result) ? result : result.providers ?? [];
   } catch (error) {
     if (error instanceof ApiError && (error.status === 404 || error.status === 405)) return null;
     throw error;

@@ -29,8 +29,7 @@ test(`Antigravity quota chips never clip: ${theme} ${size}`, async ({ page }, in
   await expect(row).not.toContainText(/^Quota exhausted/);
   await expect(row).toHaveAttribute('aria-expanded', 'false');
   await page.setViewportSize({ width, height: 700 });
-  const toggle = page.getByRole('button', { name: 'Toggle sidebar' });
-  if (size === 'narrow' && await toggle.getAttribute('aria-expanded') === 'true') await toggle.click();
+  if (size === 'narrow') await expect(page.locator('#orb-sidebar')).toBeHidden();
   const chips = row.locator('.p-usage.compact');
   await expect(chips).toBeVisible();
   const header = page.locator('.p-account-header', { has: row });

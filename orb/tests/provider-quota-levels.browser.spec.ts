@@ -35,8 +35,7 @@ async function open(page: Page, theme: string, width: number) {
   await page.goto('/');
   await page.getByRole('button', { name: 'Inference', exact: true }).click();
   await page.setViewportSize({ width, height: 900 });
-  const toggle = page.getByRole('button', { name: 'Toggle sidebar' });
-  if (width < 700 && await toggle.getAttribute('aria-expanded') === 'true') await toggle.click();
+  if (width < 700) await expect(page.locator('#orb-sidebar')).toBeHidden();
   const group = page.locator('.p-group-head');
   await expect(group).toContainText('2 limit reached');
   await expect(group).toHaveAttribute('aria-expanded', 'false');

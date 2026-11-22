@@ -7,6 +7,7 @@
  * (the old title returns and an error toast explains why).
  */
 import { createSignal } from "solid-js";
+import { seenMission } from "./missionHierarchy";
 import { notify } from "./toast";
 import { errorText, log } from "./log";
 
@@ -32,13 +33,26 @@ function clearIf(key: string, entry: Pending) {
 export function renamedTitle<T extends string | null | undefined>(kind: RenameKind, id: string, server: T): string | T {
   const key = keyOf(kind, id);
   const entry = pending().get(key);
-  if (!entry) return server;
-  if (entry.acceptedAt !== undefined && server === entry.title) {
+  if (!entry) {
+    const known = kind === "mission" ? seenMission(id) : undefined;
+    return known?.metadata_updated_at && typeof known.title === "string" ? known.title : server;
+  }
+  if (kind === "project" && entry.acceptedAt !== undefined && server === entry.title) {
     // The server confirmed it; later renames elsewhere must show again.
     queueMicrotask(() => clearIf(key, entry));
     return server;
   }
   return entry.title;
+}
+
+/** Only a Core response can confirm a mission rename. Views can read a row
+ * whose title has already been projected optimistically by another view. */
+export function observeCoreMissionTitle(id: string, title: string | null | undefined): void {
+  const key = keyOf("mission", id);
+  const entry = pending().get(key);
+  if (entry?.acceptedAt !== undefined && title === entry.title) {
+    queueMicrotask(() => clearIf(key, entry));
+  }
 }
 
 /** `rows` with pending renames applied; unchanged rows keep their identity. */

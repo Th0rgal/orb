@@ -21,6 +21,10 @@ the open conversation:
    `aria-selected="true"`) while the menu or picker remains open, without mutating
    `selectionActive` or opening the row.
 
+## Resizing the WebView sidebar
+
+At 720 px and below, the web sidebar opens as a drawer. Entering that layout keeps the current page visible with the drawer closed. The user can then open the drawer explicitly. Widening the window restores the previous wide-layout sidebar preference. Native sidebars use the host window geometry independently of the width of the embedded WebView.
+
 ## Live native desktop hierarchy
 
 On the first live roster, a sole project opens automatically. Its folder icon uses the project color from Core, with the theme’s muted icon color for a missing or unknown value. Multiple projects start collapsed when no mission is selected.

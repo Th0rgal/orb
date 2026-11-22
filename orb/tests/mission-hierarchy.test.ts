@@ -23,7 +23,7 @@ test("a partial patch changes only the fields it names", () => {
   expect(next).toMatchObject({ status: "running", status_message: "x", callback_parent_mission_id: "p" });
 });
 
-test("a stale full detail response cannot restore an older renamed title", () => {
+test.each(["2026-11-18T07:00:00Z", undefined])("a stale full detail response (%s) cannot restore an older renamed title", metadata_updated_at => {
   const renamed = mergeMission(undefined, row("c", {
     title: "Final title",
     metadata_updated_at: "2026-11-18T08:00:00Z",
@@ -31,10 +31,32 @@ test("a stale full detail response cannot restore an older renamed title", () =>
   const stale = mergeMission(renamed, {
     id: "c",
     title: "Draft title",
-    metadata_updated_at: "2026-11-18T07:00:00Z",
+    metadata_updated_at,
   });
   expect(stale.title).toBe("Final title");
   expect(stale.metadata_updated_at).toBe("2026-11-18T08:00:00Z");
+});
+
+test.each(["full", "partial"] as const)("a %s pre-rename row with no metadata clock can update status but cannot restore its title", mode => {
+  const draft = row("m", { title: "Draft title", status: "active" });
+  const renamed = mergeMission(draft, {
+    id: "m", title: "Final title", metadata_updated_at: "2026-11-18T08:00:00Z",
+  }, "partial");
+  const late = mergeMission(renamed, { ...draft, status: "paused" }, mode);
+  expect(late).toMatchObject({ title: "Final title", metadata_updated_at: renamed.metadata_updated_at, status: "paused" });
+  const renamedBack = mergeMission(late, {
+    id: "m", title: "Draft title", metadata_updated_at: "2026-11-18T09:00:00Z",
+  }, mode);
+  expect(renamedBack.title).toBe("Draft title");
+});
+
+test("an independent pre-rename read reuses the latest Core title within its connection", () => {
+  const old = row("m", { title: "Original" });
+  stickHierarchy({ ...old, title: "Renamed", metadata_updated_at: "2026-11-18T08:00:00Z" });
+  expect(stickHierarchy(old).title).toBe("Renamed");
+  resetMissionHierarchy();
+  expect(stickHierarchy(old).title).toBe("Original");
+  expect(stickHierarchy({ ...old, title: "Legacy rename" }).title).toBe("Legacy rename");
 });
 
 test("the derived callback link Core puts only on list/read answers sticks to later answers", () => {

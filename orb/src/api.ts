@@ -1,3 +1,4 @@
+import { observeCoreMissionTitle } from "./renames";
 import projectHistoryRules from "./projectHistoryRules.json";
 import modelCatalogRules from "./modelSuccessors.json";
 import { nativeInvoke } from "./native";
@@ -940,8 +941,12 @@ const isMissionRow = (row: unknown): row is Mission => !!row && typeof row === "
  * remembered and restored where a response omits them (sidebar-hierarchy.md). */
 function stickMissionRows<T>(path: string, result: T): T {
   if (!path.startsWith("/api/control/missions")) return result;
-  if (Array.isArray(result)) return (result.some(isMissionRow) ? result.map(row => isMissionRow(row) ? stickHierarchy(row) : row) : result) as T;
-  return (isMissionRow(result) ? stickHierarchy(result) : result) as T;
+  const observe = (row: Mission) => {
+    observeCoreMissionTitle(row.id, row.title);
+    return stickHierarchy(row);
+  };
+  if (Array.isArray(result)) return (result.some(isMissionRow) ? result.map(row => isMissionRow(row) ? observe(row) : row) : result) as T;
+  return (isMissionRow(result) ? observe(result) : result) as T;
 }
 function isFastRetryableError(error: unknown, init?: RequestInit): boolean {
   const method = (init?.method ?? "GET").toUpperCase();
