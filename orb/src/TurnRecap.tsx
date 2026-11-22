@@ -5,10 +5,21 @@ import { getCachedInboxDigest, requestInboxDigest, inboxDigestVersion } from "./
 import { DONE_STATUSES, isFailedStatus } from "./missionStatus";
 import { missionResponseTimestampMs } from "./missionUnread";
 import { inboxConfig } from "./inboxSettings";
+import { isMermaidLang, parseMarkdownRaw } from "./markdownAst";
 import { confirmedGoalRecap } from "./remoteGoal";
 import { shouldRequestInboxDigest } from "./inboxPolicy";
 
 const tone: Record<string, string> = { succeeded: "Done", failed: "Failed", interrupted: "Interrupted", waiting: "Waiting", needs_input: "Needs you" };
+
+/** Core's fallback digest flattens reply lines and keeps at most 400 Unicode
+ * characters. It can stop inside a diagram whose closing fence is still in the transcript. */
+function repeatsDiagram(outcome: string, reply: string): boolean {
+  if (!/```\s*mermaid\b/i.test(outcome)) return false;
+  const flat = reply.split("\n").map(line => line.trim()).filter(Boolean).join(" ");
+  if (!flat.startsWith(outcome)) return false;
+  if (outcome !== flat && outcome !== Array.from(flat).slice(0, 400).join("").trimEnd()) return false;
+  return parseMarkdownRaw(reply).some(block => block.t === "pre" && !block.open && isMermaidLang(block.lang));
+}
 
 /** End-of-turn recap under the last answer (Claude Code's next-step box), reusing the
  * Inbox AI summary for this exact response so it costs no extra model call when cached. */
@@ -36,7 +47,10 @@ export function TurnRecap(p: { mission?: Mission; items: StreamItem[]; busy: boo
     const turn = latestTurn();
     for (let i = turn.length - 1; i >= 0; i--) {
       const item = turn[i];
-      if (item.kind === "text") return confirmedGoalRecap(summary, item.goalMarkedText);
+      if (item.kind === "text") {
+        const prose = confirmedGoalRecap(summary, item.goalMarkedText);
+        return repeatsDiagram(prose, item.text) ? "" : prose;
+      }
     }
     return summary;
   });
@@ -59,7 +73,7 @@ export function TurnRecap(p: { mission?: Mission; items: StreamItem[]; busy: boo
     <Show when={enabled() && !p.busy && answered() && current()}>{(d) => (
       <aside class={`turn-recap verdict-${verdict()}`} aria-label="Turn summary">
         <div class="turn-recap-head"><span class="turn-recap-dot" aria-hidden="true" />{tone[verdict()] ?? verdict()}</div>
-        <p>{outcome()}</p>
+        <Show when={outcome()}>{text => <p>{text()}</p>}</Show>
         <Show when={d().unresolved || d().decision}><p class="dim">{d().decision || d().unresolved}</p></Show>
         <Show when={verdict() !== "failed" && verdict() !== "interrupted" && d().suggestions?.length}>
           <div class="turn-recap-actions"><For each={d().suggestions!.slice(0, 2)}>{(s) => <button type="button" class="s-btn sm" title="Put in the message box" onClick={() => p.onDraft(s)}>{s}</button>}</For></div>
