@@ -271,8 +271,23 @@ export default function App() {
     registerTranscriptWarmer(warmTranscriptMarkdown);
     onCleanup(() => registerTranscriptWarmer(null));
   });
-  const narrowSidebar = () => shouldAutoCollapseSidebar(window.matchMedia("(max-width: 720px)").matches, nativeChromeActive);
+  const sidebarViewport = window.matchMedia("(max-width: 720px)");
+  const narrowSidebar = () => shouldAutoCollapseSidebar(sidebarViewport.matches, nativeChromeActive);
   const [sidebar, setSidebar] = createSignal(!narrowSidebar());
+  onMount(() => {
+    if (nativeChromeActive) return;
+    let wideSidebarOpen = true;
+    const onLayoutChange = (event: MediaQueryListEvent) => {
+      if (event.matches) {
+        wideSidebarOpen = sidebar();
+        setSidebar(false);
+      } else {
+        setSidebar(wideSidebarOpen);
+      }
+    };
+    sidebarViewport.addEventListener("change", onLayoutChange);
+    onCleanup(() => sidebarViewport.removeEventListener("change", onLayoutChange));
+  });
   const setSidebarWithNative = setSidebar;
   // The WebView's sidebar signal is the single owner of sidebar visibility. The native pane
   // mirrors every change, including the initial value, so its toolbar and the WebView's are

@@ -1,8 +1,9 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { createRoot, createMemo } from "solid-js";
-import { RENAME_CONFIRM_MS, renamedTitle, renameOptimistically, resetRenames, withRenamedTitles } from "../src/renames";
+import { resetMissionHierarchy, stickHierarchy } from "../src/missionHierarchy";
+import { RENAME_CONFIRM_MS, observeCoreMissionTitle, renamedTitle, renameOptimistically, resetRenames, withRenamedTitles } from "../src/renames";
 
-beforeEach(() => resetRenames());
+beforeEach(() => { resetRenames(); resetMissionHierarchy(); });
 afterEach(() => { vi.useRealTimers(); resetRenames(); });
 
 const deferred = () => { let resolve!: () => void, reject!: (e: unknown) => void; const promise = new Promise<void>((a, b) => { resolve = a; reject = b; }); return { promise, resolve, reject }; };
@@ -39,10 +40,25 @@ it("ignores a stale poll that still carries the old name until the server confir
   // A list fetched before the rename landed still says "Old title".
   expect(renamedTitle("mission", "m1", "Old title")).toBe("New title");
   expect(withRenamedTitles("mission", [{ id: "m1", title: "Old title" }], m => m.id)[0].title).toBe("New title");
-  // The server reports the new title: the pending entry is cleared.
+  // Rendering an already-projected row cannot acknowledge a remote write.
+  expect(renamedTitle("mission", "m1", "New title")).toBe("New title");
+  await Promise.resolve();
+  expect(renamedTitle("mission", "m1", "Old title")).toBe("New title");
+  observeCoreMissionTitle("m1", "New title");
   expect(renamedTitle("mission", "m1", "New title")).toBe("New title");
   await Promise.resolve();
   expect(renamedTitle("mission", "m1", "Renamed elsewhere")).toBe("Renamed elsewhere");
+});
+
+it("shows the accepted title in a cached row as Core acknowledges the rename", async () => {
+  vi.useFakeTimers();
+  await renameOptimistically("mission", "m1", "New", "Old", async () => {});
+  stickHierarchy({ id: "m1", title: "New", metadata_updated_at: "2026-11-18T08:00:00Z" });
+  observeCoreMissionTitle("m1", "New");
+  await Promise.resolve();
+  expect(renamedTitle("mission", "m1", "Old")).toBe("New");
+  stickHierarchy({ id: "m1", title: "Old", metadata_updated_at: "2026-11-18T09:00:00Z" });
+  expect(renamedTitle("mission", "m1", "New")).toBe("Old");
 });
 
 it("stops overriding the server after the confirmation timeout", async () => {

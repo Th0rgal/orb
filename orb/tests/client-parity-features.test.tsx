@@ -491,7 +491,7 @@ describe("Settings multi-user login & GitHub integration", () => {
 
     render(() => <Settings />);
     const usernameInput = await screen.findByLabelText("Username");
-    expect(screen.getByRole("button", { name: "Sign in with GitHub" })).toBeTruthy();
+    expect(await screen.findByRole("button", { name: "Sign in with GitHub" })).toBeTruthy();
 
     fireEvent.input(usernameInput, { target: { value: "alice" } });
     const pwInput = document.querySelector('input[type="password"]') as HTMLInputElement;

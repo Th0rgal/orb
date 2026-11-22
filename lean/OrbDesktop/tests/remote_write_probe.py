@@ -83,4 +83,11 @@ def check_scoped_queue_replay(tmp, api, mid, submissions, restart):
 
     restart(finish_original_turn)
     assert api(route, body) == first
+    with contextlib.closing(sqlite3.connect(db_path)) as db:
+        db.execute("UPDATE missions SET tags='[]',placement_kind='managed',status='active' WHERE id=?", (mid,))
+        db.commit()
+        assert api(route, body) == first
+        count, = db.execute("SELECT count(*) FROM mission_events WHERE mission_id=? AND event_type='user_message' "
+                            "AND json_extract(payload,'$.id')=?", (mid, body["client_message_id"])).fetchone()
+        assert count == 0
     assert not submissions

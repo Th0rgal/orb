@@ -60,7 +60,7 @@ async function mock(page: Page, opts: Opts = {}) {
     if (path === "/api/managed-machines/snapshots") return route.fulfill({ json: { snapshots } });
     if (path === "/api/managed-machines/providers" && method === "GET") {
       if (!providers) return route.fulfill({ status: 404, body: "" });
-      return route.fulfill({ json: { providers } });
+      return route.fulfill({ json: providers });
     }
     if (path.startsWith("/api/managed-machines/providers/") && method === "PUT") {
       state.calls.push(`${method} ${path} ${req.postData() ?? ""}`);
@@ -357,7 +357,7 @@ for (const theme of ["dark", "light"] as const) test(`row layout: aligned, unlim
   await expect(dialog.getByText(/Exceeds today/)).toHaveCount(0);
   await page.keyboard.press("Escape");
   await page.setViewportSize({ width: 560, height: 900 });
-  if (await page.locator(".sidebar-backdrop").isVisible()) await page.locator(".sidebar-backdrop").click();
+  await expect(page.locator("#orb-sidebar")).toBeHidden();
   await expect(online.getByRole("button", { name: "Destroy" })).toBeHidden();
   const before = (await online.boundingBox())!.height;
   expect(before).toBeLessThan(80);

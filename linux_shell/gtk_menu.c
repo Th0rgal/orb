@@ -22,9 +22,10 @@ static void run_action(GtkWidget *wv, const char *action, const char *id, const 
     free(a); free(i); free(g);
 }
 static gboolean rename_key(GtkWidget *dialog, GdkEventKey *event, gpointer data) {
-    (void)data;
-    if (event->keyval != GDK_KEY_Escape) return FALSE;
-    gtk_dialog_response(GTK_DIALOG(dialog), GTK_RESPONSE_CANCEL);
+    if (event->keyval == GDK_KEY_Escape) gtk_dialog_response(GTK_DIALOG(dialog), GTK_RESPONSE_CANCEL);
+    else if ((event->keyval == GDK_KEY_Return || event->keyval == GDK_KEY_KP_Enter) && gtk_widget_has_focus(GTK_WIDGET(data)))
+        gtk_dialog_response(GTK_DIALOG(dialog), GTK_RESPONSE_ACCEPT);
+    else return FALSE;
     return TRUE;
 }
 static void prompt_rename(GtkWidget *wv, const char *id, const char *title) {
@@ -33,7 +34,7 @@ static void prompt_rename(GtkWidget *wv, const char *id, const char *title) {
                                                  GTK_DIALOG_MODAL | GTK_DIALOG_DESTROY_WITH_PARENT,
                                                  "_Cancel", GTK_RESPONSE_CANCEL, "_Rename", GTK_RESPONSE_ACCEPT, NULL);
     GtkWidget *entry = gtk_entry_new(), *area = gtk_dialog_get_content_area(GTK_DIALOG(dlg));
-    g_signal_connect(dlg, "key-press-event", G_CALLBACK(rename_key), NULL);
+    g_signal_connect(dlg, "key-press-event", G_CALLBACK(rename_key), entry);
     gtk_entry_set_text(GTK_ENTRY(entry), title ? title : ""); gtk_entry_set_max_length(GTK_ENTRY(entry), 200); gtk_entry_set_activates_default(GTK_ENTRY(entry), TRUE);
     gtk_dialog_set_default_response(GTK_DIALOG(dlg), GTK_RESPONSE_ACCEPT); gtk_container_set_border_width(GTK_CONTAINER(area), 12);
     gtk_box_pack_start(GTK_BOX(area), entry, TRUE, TRUE, 0); gtk_widget_set_size_request(dlg, 380, -1); gtk_widget_show_all(dlg);
@@ -213,7 +214,6 @@ gboolean orb_gtk_row_context_menu(GtkWidget *wv, GtkWidget *list, GtkWidget *row
     return TRUE;
 }
 #endif
-
 int orb_gtk_menu_self_test(void) {
     const char *core = orb_menu_project_slug("project:core");
     return core && strcmp(core, "core") == 0 && !orb_menu_project_slug("project:") && !orb_menu_project_slug("m:1") && !orb_menu_project_slug(NULL);

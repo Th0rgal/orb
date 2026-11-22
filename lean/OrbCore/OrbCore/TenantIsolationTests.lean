@@ -790,6 +790,30 @@ def run (root : String) : IO Unit := do
       let .ok request := parseRequest wire.toUTF8 none | throw (IO.userError "isolation request")
       let .ok response ← dispatchCoreRequest app request now | throw (IO.userError "isolation dispatch")
       return (response.status, (parseBytes response.body).toOption.getD .null)
+    -- A storage refusal must leave a remote follow-up retryable through either desktop endpoint.
+    let queueMid := "remote-queue-write-test"
+    let .ok () ← upsertMission store {
+      id := queueMid, ownerUserId := "member", title := "queue fixture", status := "active",
+      backend := "opencode", modelOverride := "", workingDirectory := path, updatedAt := "",
+      tagsJson := "[\"remote-node:fixture\"]" } | throw (IO.userError "remote queue fixture")
+    let queueApp := { st with remoteSup? := some (← OrbCore.RemoteDispatch.newRemoteJobSupervisor st.cfg.jwtSecret) }
+    for (route, key) in #[("/api/control/message", "retry-native"), (s!"/api/control/missions/{queueMid}/message", "retry-scoped")] do
+      let body := JVal.obj #[("mission_id", .str queueMid), ("content", .str "follow up"), ("client_message_id", .str key)]
+      sql store.missionsDb "CREATE TRIGGER refuse_test_followup BEFORE INSERT ON remote_message_queue BEGIN SELECT RAISE(ABORT,'synthetic queue write failure'); END;"
+      let (failed, refusal) ← send "POST" route member body queueApp
+      check (failed == 500 && refusal.fieldStr? "error" == some "message_enqueue_failed" &&
+        refusal.fieldBool? "queued" == some false && refusal.fieldBool? "message_accepted" == some false) "queue write failure is visible"
+      sql store.missionsDb "DROP TRIGGER refuse_test_followup;"
+      for _ in [0:2] do
+        let (ok, receipt) ← send "POST" route member body queueApp
+        check (ok == 200 && receipt.fieldBool? "queued" == some true) "failed queue write can be retried"
+      let .ok rows ← execParamQuery store.missionsDb
+        "SELECT COUNT(*) FROM remote_message_queue WHERE mission_id=?1 AND message_id=?2;" #[queueMid, key]
+        | throw (IO.userError "query queued follow-up")
+      check ((rows[1]?.bind (·[0]?)) == some "1") "retry persisted one follow-up"
+    sql store.missionsDb "DELETE FROM remote_message_queue WHERE mission_id=?1;" #[queueMid]
+    sql store.missionsDb "DELETE FROM queue_item_receipts WHERE mission_id=?1;" #[queueMid]
+    sql store.missionsDb "DELETE FROM missions WHERE id=?1;" #[queueMid]
     -- The desktop's bounded read must pass the same mission guard as /events,
     -- including zero-oracle denial to an unrelated administrator.
     let bubblePath := "/api/control/missions/member-other/current-bubble"
@@ -827,6 +851,9 @@ def run (root : String) : IO Unit := do
     sql store.missionsDb "DELETE FROM remote_message_queue WHERE mission_id=?1 AND message_id='scoped-replay';" #[placementMid]
     let replayed ← send "POST" scopedRoute member scopedBody placementApp
     check (replayed == original) "scoped endpoint replays the authorized acknowledgment after the live queue row disappears"
+    sql store.missionsDb "UPDATE missions SET tags='[]',placement_kind='managed',status='active' WHERE id=?1;" #[placementMid]
+    check ((← send "POST" scopedRoute member scopedBody placementApp) == original)
+      "an active local mission replays its original remote queue acknowledgment"
     let foreignReplay ← send "POST" scopedRoute admin scopedBody placementApp
     let unknownReplay ← send "POST" "/api/control/missions/unknown-scoped-replay/message" admin scopedBody placementApp
     check (foreignReplay == unknownReplay && foreignReplay.1 == 404) "a queue receipt cannot expose another user's mission"
