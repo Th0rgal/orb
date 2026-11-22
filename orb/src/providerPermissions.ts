@@ -54,3 +54,12 @@ export function providerWriteError(error: unknown, fallback: string): string {
     default: return fallback;
   }
 }
+
+/** A missing credential cannot be repaired by retrying the same consent dialog. */
+export function unlinkedSubscriptionMessage(error: unknown): string | undefined {
+  if (!(error instanceof ApiError) || error.status !== 409) return;
+  try {
+    const body = JSON.parse(error.detail);
+    if (body.code === "unlinked_subscription" && typeof body.error === "string") return body.error;
+  } catch { /* Older servers can return unstructured conflicts. */ }
+}

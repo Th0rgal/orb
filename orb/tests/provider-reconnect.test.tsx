@@ -239,3 +239,30 @@ it("connects Muse Code through device login and reports an inactive subscription
   expect(calls.filter(c => c.options?.method === "POST" && c.url.endsWith("/providers"))).toHaveLength(0);
   expect(JSON.parse(calls.find(c => c.options?.method === "POST" && c.url.endsWith("/cli-proxy-login"))!.options!.body as string)).toEqual({provider:"muse-code"});
 }, 10000);
+
+it("returns to subscriptions when the selected OpenAI credential cannot be reconnected", async () => {
+  setConnection("http://core.test", "test-token");
+  const open = vi.spyOn(window, "open").mockReturnValue(null);
+  const message = "In Inference, use the connected account under Subscriptions or choose Add subscription account.";
+  vi.stubGlobal("fetch", vi.fn(async (url: string, options?: RequestInit) => {
+    if (url.endsWith("/cli-proxy-login")) {
+      if (options?.method === "POST") {
+        expect(JSON.parse(String(options.body))).toEqual({ provider: "openai", provider_id: "reserved" });
+        return new Response(JSON.stringify({ code: "unlinked_subscription", error: message }), { status: 409 });
+      }
+      return new Response(JSON.stringify({available: true, providers: [{id: "openai", name: "OpenAI"}]}));
+    }
+    const row = { id: "reserved", name: "Reserved OpenAI", provider_type: "openai", enabled: true,
+      uses_oauth: true, credential_owner: "cli_proxy", status: { type: "needs_reauth" } };
+    return new Response(JSON.stringify(url.endsWith("/providers") ? [row] : url.endsWith("/cloud/accounts") ? [] : {}));
+  }));
+  render(() => <Providers />);
+  fireEvent.click(await screen.findByRole("button", { name: "Actions for Reserved OpenAI" }));
+  fireEvent.click(screen.getByRole("menuitem", { name: "Reconnect" }));
+  expect(await screen.findByText(message)).toBeTruthy();
+  expect(screen.queryByRole("button", { name: "Try again" })).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "View subscriptions" }));
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  expect(screen.getByRole("button", { name: "Add subscription account" })).toBeTruthy();
+  expect(open).not.toHaveBeenCalled();
+});
