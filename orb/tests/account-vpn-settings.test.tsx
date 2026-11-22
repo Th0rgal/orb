@@ -20,3 +20,65 @@ it("saves only the expanded account and retries a saved route when a slot opens"
   fireEvent.click(screen.getByRole("button", { name: "Retry verification" }));
   await screen.findByText("Verified exit · west · 192.0.2.20");
 });
+
+it("shows why the selected account cannot route and rereads it after reconnection", async () => {
+  const direct = { countries: ["NL"], mode: "direct", status: "direct" };
+  vi.mocked(api).mockClear().mockResolvedValueOnce({ ...direct, can_configure: false,
+    configuration_message: "Check the account connection, then refresh." })
+    .mockResolvedValueOnce({ ...direct, can_configure: true });
+  render(() => <AccountVpnSettings account="second" />);
+  await screen.findByText("Check the account connection, then refresh.");
+  expect((screen.getByLabelText("Account connection") as HTMLSelectElement).disabled).toBe(true);
+  fireEvent.click(screen.getByRole("button", { name: "Refresh connection settings" }));
+  await vi.waitFor(() => expect((screen.getByLabelText("Account connection") as HTMLSelectElement).disabled).toBe(false));
+  expect(vi.mocked(api).mock.calls).toEqual(Array(2).fill(["/api/ai/providers/second/vpn", undefined]));
+});
+
+it("rereads a pending exit on visibility and stops when the row closes", async () => {
+  const route = { can_configure: true, countries: ["NL"], mode: "vpn", country: "NL" };
+  vi.mocked(api).mockClear().mockResolvedValueOnce({ ...route, status: "blocked",
+    reason: "vpn_awaiting_verification", message: "Waiting for exit verification." })
+    .mockResolvedValueOnce({ ...route, status: "verified", server: "west", exits: ["192.0.2.20"] });
+  const { unmount } = render(() => <AccountVpnSettings account="pending" />);
+  await screen.findByText("Waiting for exit verification.");
+  document.dispatchEvent(new Event("visibilitychange"));
+  await screen.findByText("Verified exit · west · 192.0.2.20");
+  unmount();
+  document.dispatchEvent(new Event("visibilitychange"));
+  await Promise.resolve();
+  expect(vi.mocked(api).mock.calls).toEqual(Array(2).fill(["/api/ai/providers/pending/vpn", undefined]));
+});
+
+it("keeps a newer Direct selection when an older verification read finishes", async () => {
+  const pending = { mode: "vpn", country: "NL", countries: ["NL"], can_configure: true,
+    status: "blocked", reason: "vpn_awaiting_verification", message: "Waiting for exit verification." };
+  let finishRead!: (r: unknown) => void;
+  vi.mocked(api).mockClear().mockResolvedValueOnce(pending)
+    .mockImplementationOnce(() => new Promise(resolve => { finishRead = resolve; }))
+    .mockResolvedValueOnce({ mode: "direct", countries: ["NL"], status: "direct", can_configure: true });
+  render(() => <AccountVpnSettings account="switching" />);
+  await screen.findByText("Waiting for exit verification.");
+  document.dispatchEvent(new Event("visibilitychange"));
+  await vi.waitFor(() => expect(api).toHaveBeenCalledTimes(2));
+  const select = screen.getByLabelText("Account connection") as HTMLSelectElement;
+  fireEvent.change(select, { target: { value: "" } });
+  await vi.waitFor(() => expect(screen.queryByRole("status")).toBeNull());
+  finishRead({ ...pending, status: "verified", reason: undefined, server: "west" });
+  await new Promise(resolve => setTimeout(resolve, 0));
+  expect(select.value).toBe("");
+  expect(screen.queryByText(/Verified exit/)).toBeNull();
+});
+
+it("rereads a shared account when returning to its window after another user changes the VPN", async () => {
+  const direct = { mode: "direct", status: "direct", countries: ["NL"], can_configure: true };
+  vi.mocked(api).mockClear().mockResolvedValueOnce(direct).mockResolvedValueOnce({
+    ...direct, mode: "vpn", status: "verified", country: "NL", server: "west", exits: ["192.0.2.20"],
+  });
+  render(() => <AccountVpnSettings account="shared" />);
+  const select = await screen.findByLabelText("Account connection") as HTMLSelectElement;
+  expect(select.value).toBe("");
+  window.dispatchEvent(new Event("focus"));
+  await screen.findByText("Verified exit · west · 192.0.2.20");
+  expect(select.value).toBe("NL");
+  expect(vi.mocked(api).mock.calls).toEqual(Array(2).fill(["/api/ai/providers/shared/vpn", undefined]));
+});

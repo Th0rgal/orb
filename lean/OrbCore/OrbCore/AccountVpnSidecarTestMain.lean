@@ -37,6 +37,13 @@ def main (args : List String) : IO UInt32 := do
         discard input.getLine
       return 0
     finally listener.stop
+  if let ["routers", base, file, mode] := args then
+    let desired := mode == "allow"
+    if !desired && mode != "restrict" then return 2
+    let key := (← (← IO.getStdin).getLine).trimAscii.toString
+    let outcome ← OrbCore.AccountVpnSidecar.alternativeRouterAccess base key file (some desired)
+    if outcome.toOption == some desired then return 0
+    return 1
   if let ["confirm", base, file, relay, modelPrefix] := args then
     let key := (← (← IO.getStdin).getLine).trimAscii.toString
     if (← OrbCore.AccountVpnSidecar.confirm base key file relay modelPrefix).isOk then return 0

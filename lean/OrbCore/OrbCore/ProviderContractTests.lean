@@ -1745,6 +1745,19 @@ def run : IO Unit := do
       unless viaOwner.any (fun t => t.modelId == "selected/gpt-5" &&
           t.sidecarCredential?.any (fun c => c.file == "selected.json" && c.modelPrefix == "selected")) do
         failures := failures.push "A pinned sidecar account must use the selected credential’s model namespace"
+      let nativeOnly := { sidecarAccount with providerType := "antigravity", nativeOnly := true }
+      let routedGoogle := { nativeOnly with id := "other-google", nativeOnly := false }
+      let emptyGoogle := { routedGoogle with hasOAuth := false, oauthFile := "", boundOauthFile := "" }
+      let googleEntry := "[{\"provider_id\":\"antigravity\",\"model_id\":\"agy-model-high\"}]"
+      let selectedGoogle := "[{\"provider_id\":\"antigravity\",\"account_id\":\"fixture-b\",\"model_id\":\"agy-model-high\"}]"
+      let targetsFor := fun entry accounts => parseChainTargetsJson entry #[] accounts "http://127.0.0.1:8317" "fixture-sidecar"
+      unless (targetsFor selectedGoogle #[nativeOnly, routedGoogle]).isEmpty &&
+          (targetsFor googleEntry #[nativeOnly]).isEmpty &&
+          (targetsFor googleEntry #[nativeOnly, emptyGoogle]).isEmpty &&
+          (targetsFor googleEntry #[{ nativeOnly with enabled := false }, emptyGoogle]).isEmpty &&
+          !(targetsFor googleEntry #[]).isEmpty &&
+          !(targetsFor googleEntry #[nativeOnly, routedGoogle]).isEmpty do
+        failures := failures.push "A restricted Antigravity account must stay out of explicit and fallback proxy chains"
       let duplicate := { sidecarAccount with id := "fixture-c" }
       unless (accountRoutingFile #[sidecarAccount, duplicate] sidecarAccount).isEmpty do
         failures := failures.push "Two accounts claiming one file must lose routing authority"
@@ -1754,7 +1767,7 @@ def run : IO Unit := do
         failures := failures.push "A display-only OAuth file must never authorize account VPN routing"
       let vpnSettings := "/api/settings/airvpn"
       let accountRoute := "/api/ai/providers/missing-account/vpn"
-      for path in [vpnSettings, accountRoute] do
+      for path in [vpnSettings, accountRoute, "/api/ai/providers/missing-account/alternative-routers"] do
         let (anonymous, _) ← putJson app "" path "{}" now
         let (memberCode, _) ← putJson app memberJwt path "{}" now
         if anonymous != 401 || memberCode != 403 then
@@ -1766,6 +1779,11 @@ def run : IO Unit := do
         apiKey := "fixture-only"
       }
       IO.ofExcept (← upsertAIProvider store ownerRow)
+      let routerRoute := s!"/api/ai/providers/{ownerRow.id}/alternative-routers"
+      let (notOwner, _) ← putJson app memberJwt routerRoute "{\"allowed\":false}" now
+      if notOwner != 403 then failures := failures.push s!"A shared VPN does not confer router ownership: {notOwner}"
+      let (wrongType, _) ← putJson app jwt routerRoute "{\"allowed\":false}" now
+      if wrongType != 409 then failures := failures.push s!"Router access rejects an authorized write for an unrelated provider type: {wrongType}"
       let ownerRoute := s!"/api/ai/providers/{ownerRow.id}/vpn"
       let ownRoute ← getJson app memberJwt ownerRoute now
       unless ownRoute.fieldBool? "can_configure" == some true do

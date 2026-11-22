@@ -1,21 +1,24 @@
 import { swallow } from "./log";
 /** Interval polling that respects the window: skipped while the document is
  * hidden, never overlaps an in-flight run, and fires once as soon as the
- * window becomes visible again. Returns a stop function. */
-export function pollWhileVisible(run: () => void | Promise<unknown>, ms: number, name = "poll"): () => void {
+ * window becomes visible again. With a null interval, refresh only on window
+ * focus or visibility. Returns a stop function. */
+export function pollWhileVisible(run: () => void | Promise<unknown>, ms: number | null, name = "poll"): () => void {
   let busy = false, stopped = false;
   const tick = () => {
     if (stopped || busy || document.visibilityState === "hidden") return;
     busy = true;
     // A failed refresh must neither overlap nor create an unhandled rejection.
-    void Promise.resolve().then(run).catch(swallow(`${name}.run`, { ms })).finally(() => { busy = false; });
+    void Promise.resolve().then(run).catch(swallow(`${name}.run`, { ms: ms ?? 0 })).finally(() => { busy = false; });
   };
-  const timer = window.setInterval(tick, ms);
+  const timer = ms === null ? undefined : window.setInterval(tick, ms);
+  if (ms === null) window.addEventListener("focus", tick);
   const onVisible = () => { if (document.visibilityState === "visible") tick(); };
   document.addEventListener("visibilitychange", onVisible);
   return () => {
     stopped = true;
-    clearInterval(timer);
+    if (timer !== undefined) clearInterval(timer);
+    if (ms === null) window.removeEventListener("focus", tick);
     document.removeEventListener("visibilitychange", onVisible);
   };
 }

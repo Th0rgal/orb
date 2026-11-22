@@ -269,6 +269,9 @@ struct OrbProvidersSettings: View {
                                 .font(.caption).foregroundStyle(.orange)
                         }
                         let manages = Self.canManageProvider(provider, isAdmin: isAdmin)
+                        if manages && provider["provider_type"].text == "antigravity" {
+                            AlternativeRouterSettings(client: client, account: provider["id"].text).id(provider["id"].text)
+                        }
                         OrbAccountVpnSettings(client: client, account: provider["id"].text).id(provider["id"].text)
                         let unverified = detail["status"].text == "needs_verification"
                         if unverified && manages {
@@ -1135,7 +1138,53 @@ struct OrbCloudAccountsSettings: View {
 }
 
 
+private struct AlternativeRouterSettings: View {
+    @Environment(\.scenePhase) private var scenePhase
+    let client: OrbSettingsClient
+    let account: String
+    @State private var allowed: Bool?
+    @State private var busy = false
+    @State private var error = ""
+
+    private func update(_ value: Bool? = nil) async {
+        guard !busy else { return }
+        busy = true
+        defer { busy = false }
+        let path = "/api/ai/providers/\(OrbCore.escape(account))/alternative-routers"
+        do {
+            let result: OrbJSON
+            if let value {
+                result = try await client.call(path, method: "PUT", body: .object(["allowed": .bool(value)]))
+            } else {
+                result = try await client.call(path)
+            }
+            guard case let .bool(current) = result["allowed"] else { throw URLError(.cannotParseResponse) }
+            allowed = current
+            error = ""
+        } catch {
+            allowed = nil
+            self.error = "Router settings are unavailable."
+        }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading) {
+            if let allowed {
+                Toggle("Allow alternative routers", isOn: Binding(get: { allowed }, set: { next in
+                    Task { await update(next) }
+                })).disabled(busy)
+            }
+            if !error.isEmpty {
+                Text(error).font(.caption)
+                Button("Retry router settings") { Task { await update() } }.disabled(busy)
+            }
+        }.task(id: account) { await update() }
+        .onChange(of: scenePhase) { _, phase in if phase == .active { Task { await update() } } }
+    }
+}
+
 private struct OrbAccountVpnSettings: View {
+    @Environment(\.scenePhase) private var scenePhase
     let client: OrbSettingsClient
     let account: String
     @State private var route: OrbJSON = .null
@@ -1189,5 +1238,6 @@ private struct OrbAccountVpnSettings: View {
                 Button("Retry connection settings") { Task { await update() } }.disabled(busy)
             }
         }.task(id: account) { await update() }
+        .onChange(of: scenePhase) { _, phase in if phase == .active { Task { await update() } } }
     }
 }
