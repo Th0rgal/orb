@@ -230,3 +230,6 @@ active for another bounded poll. Each poll checks for cancellation. A stalled
 read cannot prove Goal completion. Core checkpoints the byte offset immediately after each batch of
 complete records. On recovery it rereads the unfinished record from the worker. A verified terminal EOF closes the last record even if the
 worker omitted its final newline.
+
+Run `python3 scripts/test_remote_acp_ingest.py /path/to/orb-core` to replay a
+split record across a Core restart and a terminal backlog spanning multiple polls.
