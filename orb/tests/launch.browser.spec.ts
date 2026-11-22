@@ -51,7 +51,7 @@ async function setup(page:Page, options:{nativeOwner?:boolean;memberFleetGate?:P
    if(path==="/api/control/missions/accepted/cancel" || path==="/api/control/missions/accepted/stop") {
     stops++;
     const stopped=goalFixtures.projection_cases.find(f=>f.name==="stop-between-turns")!;
-    Object.assign(m,{status:stopped.status,terminal_reason:stopped.reason,state_revision:3});
+    Object.assign(m,{status:stopped.status,terminal_reason:stopped.reason,state_revision:3,run_generation:8});
     return route.fulfill({json:{ok:true}});
    }
   if(path==="/api/auth/me" && options.memberFleetGate)
@@ -383,6 +383,16 @@ test("capability read failure refuses before POST and reports support as last kn
   await page.getByTitle("Stop",{exact:true}).click();
   await expect.poll(state.stops).toBe(1);
   await expect(page.getByText("Goal stopped",{exact:true})).toBeVisible();
+  const resumes: unknown[] = [];
+  await page.route("**/api/control/missions/accepted/resume-goal", async route => {
+    expect(route.request().method()).toBe("POST");
+    resumes.push(route.request().postDataJSON());
+    await route.fulfill({status:409,json:{error:"remote_goal_resume_conflict"}});
+  });
+  await page.getByRole("button",{name:"Resume Goal",exact:true}).click();
+  await expect.poll(()=>resumes).toEqual([{run_generation:8}]);
+  await expect(page.getByText("Goal stopped",{exact:true})).toBeVisible();
+  expect(state.posts).toHaveLength(1);
  });
 
  test("proxy URL not configured blocks Claude Code before POST without env jargon",async({page})=>{
