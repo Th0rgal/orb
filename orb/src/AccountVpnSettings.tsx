@@ -9,6 +9,7 @@ interface Route {
   country?: string;
   countries: string[];
   can_configure: boolean;
+  saved?: boolean;
   configuration_message?: string;
   status: "direct" | "verified" | "blocked";
   reason?: string;
@@ -17,7 +18,7 @@ interface Route {
   message?: string;
 }
 
-export function AccountVpnSettings(p: { account: string }) {
+export function AccountVpnSettings(p: { account: string; nativeAccount?: boolean }) {
   const source = () => [connectionVersion(), p.account] as const;
   const uri = (id: string) => `/api/ai/providers/${encodeURIComponent(id)}/vpn`;
   async function readRoute(id: string, options?: RequestInit) {
@@ -52,7 +53,7 @@ export function AccountVpnSettings(p: { account: string }) {
       const result = await readRoute(id, { method: "PUT", body: JSON.stringify(
         value ? { mode: "vpn", country: value } : { mode: "direct" }
       ) });
-      if (current()) mutate(result);
+      if (current()) mutate({ ...result, saved: true });
     } catch (e) {
       if (current()) setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -73,6 +74,9 @@ export function AccountVpnSettings(p: { account: string }) {
           {Array.from(new Set([...(r().country ? [r().country!] : []), ...r().countries])).map(c =>
             <option value={c}>AirVPN · {c}</option>)}
         </select>
+        <Show when={p.nativeAccount && r().can_configure && r().mode === "direct" && r().saved !== true}>
+          <button class="s-btn" disabled={busy()} onClick={() => void save("")}>Confirm Direct route</button>
+        </Show>
         <Show when={!r().can_configure}><span>{r().configuration_message ?? "VPN routing is unavailable for this credential."}</span>
           <button class="s-btn" disabled={route.loading} onClick={() => void refetch()}>Refresh connection settings</button></Show>
         <Show when={r().can_configure && !r().countries.length}><span>Import a named server profile in AirVPN Settings to enable VPN routing.</span></Show>

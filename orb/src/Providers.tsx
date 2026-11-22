@@ -1358,7 +1358,7 @@ function LiveRow(p: { a: AIProvider; open?: boolean; onOpenChange?: (open: boole
     ];
   };
   return (
-    <div class="p-acc-wrap" classList={{ "p-drop": dropping(), "is-disabled": rowDisabled() }}
+    <div class="p-acc-wrap" data-provider-id={a.id} classList={{ "p-drop": dropping(), "is-disabled": rowDisabled() }}
       onDragOver={e => { if (p.rank && e.dataTransfer?.types.includes(RANK_DRAG_TYPE)) { e.preventDefault(); setDropping(true); } }}
       onDragLeave={() => setDropping(false)}
       onDrop={e => { setDropping(false); const from = e.dataTransfer?.getData(RANK_DRAG_TYPE); if (p.rank && from) { e.preventDefault(); if (Number(from) !== p.rank.index) p.rank.move(p.rank.index); } }}>
@@ -1401,7 +1401,7 @@ function LiveRow(p: { a: AIProvider; open?: boolean; onOpenChange?: (open: boole
       <Show when={menu()}><Menu label="Actions" anchor={menuBtn} placement="bottom-end" width={196} class="popup-menu" onClose={() => setMenu(false)}><MenuList items={menuItems()} onPick={() => setMenu(false)} /></Menu></Show>
       <Show when={open()}>
         <div class="p-acc-body">
-          <AccountVpnSettings account={a.id} />
+          <AccountVpnSettings account={a.id} nativeAccount={a.provider_type === "antigravity"} />
           <Show when={a.added_by_me && a.provider_type === "antigravity"}>
             <NativeOwnerEnrollment account={a.id} />
           </Show>
