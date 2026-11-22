@@ -98,4 +98,12 @@ it("Antigravity offers only native efforts and makes the required default explic
  expect(antigravityBaseModel("gemini-4-carbon-eap")).toBe("gemini-4-carbon");
  expect(antigravityBaseModel("gemini-4-argon-low")).toBe("gemini-4-argon");
  expect(antigravityBaseModel("agy-demo-low")).toBe("gemini-4-argon");
+ expect(effortLabel(null,"antigravity","gemini-4-neon")).toBe("Default (High)");
+ expect(effortLabel(null,"antigravity","gemini-4-neon-eap")).toBe("Default (High)");
+ expect(effortLabel(null,"antigravity","gemini-4-neon-medium")).toBe("Default (Medium)");
+ expect(effortLabel("low","antigravity","gemini-4-neon")).toBe("Low");
+ expect(antigravityBaseModel("gemini-4-neon")).toBe("gemini-4-neon");
+ expect(antigravityBaseModel("gemini-4-neon-eap")).toBe("gemini-4-neon");
+ expect(antigravityBaseModel("gemini-4-neon-high")).toBe("gemini-4-neon");
+ expect(antigravityBaseModel("gemini-4-neon-low")).toBe("gemini-4-neon");
 });

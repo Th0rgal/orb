@@ -643,6 +643,133 @@ private def startupRecovery (root : String) : IO Unit := do
   finally
     closeCoreStore recovered
 
+private def verifyNativeOAuthRotation (root : String) : IO Unit := do
+  let workRoot := s!"{root}/native-oauth-rot"
+  let authDir := s!"{workRoot}/auth"
+  IO.FS.createDirAll s!"{workRoot}/.sandboxed-sh"
+  IO.FS.createDirAll authDir
+  let prevAuthDir ← IO.getEnv "CLI_PROXY_AUTH_DIR"
+  let prevCanary ← IO.getEnv "ORB_NATIVE_SUBSCRIPTION_CANARY"
+  let prevWsNode ← IO.getEnv "ORB_NATIVE_WORKSPACE_NODE"
+  setenvVar "CLI_PROXY_AUTH_DIR" authDir
+  unsetenvVar "ORB_NATIVE_SUBSCRIPTION_CANARY"
+  unsetenvVar "ORB_NATIVE_WORKSPACE_NODE"
+  try
+    let .ok store ← openCoreStore s!"{workRoot}/.sandboxed-sh"
+      | throw (IO.userError "native oauth rotation store open failed")
+    try
+      OrbCore.RemoteFleetAndRelay.ensureDurableJobsTable store
+      let db := store.missionsDb
+      let execute (sql : String) (params : Array String := #[]) : IO Unit := do
+        if let .error err ← execParamQuery db sql params then throw (IO.userError err)
+      execute "INSERT INTO users(id,username,password_hash,role,unix_username,disabled) VALUES('u-oauth','u-oauth','x','member','orb-oauth',0);"
+      execute "INSERT INTO missions(id,owner_user_id,placement_job_id,backend,authority_mode,status,run_generation,owner_epoch,placement_revision) VALUES('m-oauth','u-oauth','j-oauth','antigravity','writer','active',1,1,1);"
+      execute "INSERT INTO remote_node_jobs(job_id,mission_id,node_id,state,payload_json) VALUES('j-oauth','m-oauth','node-oauth','running','{}');"
+      IO.ofExcept (← upsertAIProvider store {
+        id := "acct-oauth", name := "Antigravity", providerType := "antigravity",
+        apiKey := "cli-proxy-managed", enabled := true
+      })
+      IO.ofExcept (← OrbCore.AccountVpnRoutes.set db "acct-oauth" none)
+      let authFile := s!"{authDir}/antigravity-alice.json"
+      let writeAuth := fun (path token email : String) (disabled : Bool) =>
+        IO.FS.writeFile path (renderCompact (.obj #[
+          ("type", .str "antigravity"), ("prefix", .str "acct-oauth"),
+          ("access_token", .str token), ("email", .str email), ("disabled", .bool disabled)
+        ]))
+      writeAuth authFile "tok-1" "alice@example.test" false
+      let now ← coreEpochSec
+      let grant ← IO.ofExcept (← mintNativeAntigravityToken store "m-oauth" "u-oauth" "j-oauth" "acct-oauth" "gemini-4-neon" (now + 300) (some "node-oauth"))
+      let portRef ← IO.mkRef (none : Option UInt16)
+      let baseHub ← OrbCore.ProviderUsageAndLogin.newProviderRuntimeHub
+      let hub := { baseHub with resolveTransport? := some fun _ _ => .ok <$> portRef.get }
+      let .ok initTuple ← NativeSharedWorkspace.withVerifiedProfile store hub workRoot grant "j-oauth" "node-oauth" "u-oauth"
+          fun p tok binding port => pure (.ok (p, tok, binding, port))
+        | throw (IO.userError "initial native OAuth profile verification failed")
+      let (p0, tok0, binding0, port0) := initTuple
+      check (tok0 == "tok-1" && binding0.accountId == "acct-oauth" &&
+        binding0.routingFile == "antigravity-alice.json" && binding0.email == "alice@example.test")
+        "initial account binding captures accountId, routingFile, and email"
+      check ((← NativeSharedWorkspace.authorize store hub workRoot grant "j-oauth" "node-oauth" "u-oauth").toOption == some p0)
+        "authorize remains compatible and returns initial placement"
+
+      let verifyCurrent := do
+        let accounts ← OrbCore.ProviderUsageAndLogin.loadHydratedProviders store workRoot
+        let watchOk := (← NativeSharedWorkspace.placement? store grant "j-oauth" "node-oauth" "u-oauth" (← coreEpochSec)) == some p0 &&
+          NativeSharedWorkspace.accountBinding? accounts p0.account == some binding0
+        let rpcRes ← NativeSharedWorkspace.withVerifiedProfile store hub workRoot grant "j-oauth" "node-oauth" "u-oauth"
+          fun current _ currentBinding currentPort => do
+            unless current == p0 && currentBinding == binding0 && currentPort == port0 do
+              return .error "native_shared_workspace_denied"
+            pure (.ok ())
+        return (watchOk && rpcRes.isOk)
+
+      -- 1. Routine access_token rotation on disk preserves accountBinding? and allows turn continuation.
+      writeAuth authFile "tok-2-rotated" "alice@example.test" false
+      let rotatedAccounts ← OrbCore.ProviderUsageAndLogin.loadHydratedProviders store workRoot
+      check (NativeSharedWorkspace.accountBinding? rotatedAccounts "acct-oauth" == some binding0)
+        "routine access_token rotation preserves accountBinding?"
+      check (← verifyCurrent) "routine access_token rotation allows watch and RPC verification to continue"
+
+      -- 2a. disabled: true immediately fails verification.
+      writeAuth authFile "tok-2-rotated" "alice@example.test" true
+      check (!(← verifyCurrent)) "disabled: true on auth file fails mid-turn verification"
+      writeAuth authFile "tok-2-rotated" "alice@example.test" false
+      check (← verifyCurrent) "restored auth file verifies again"
+
+      -- 2b. Emptied access_token immediately fails verification.
+      writeAuth authFile "" "alice@example.test" false
+      check (!(← verifyCurrent)) "emptied access_token fails mid-turn verification"
+      writeAuth authFile "tok-3" "alice@example.test" false
+      check (← verifyCurrent) "non-empty access_token verifies again"
+
+      -- 2c. SQLite enabled = 0 immediately fails verification.
+      execute "UPDATE ai_providers SET enabled=0 WHERE id='acct-oauth';"
+      check (!(← verifyCurrent)) "enabled = 0 in ai_providers fails mid-turn verification"
+      execute "UPDATE ai_providers SET enabled=1 WHERE id='acct-oauth';"
+      check (← verifyCurrent) "re-enabled ai_providers verifies again"
+
+      -- 2d. Duplicate claim / file rebinding immediately fails verification.
+      IO.ofExcept (← upsertAIProvider store {
+        id := "acct-oauth-dup", name := "Antigravity Dup", providerType := "antigravity",
+        apiKey := "cli-proxy-managed", enabled := true
+      })
+      IO.FS.writeFile s!"{workRoot}/.sandboxed-sh/ai_providers.json"
+        (renderCompact (.arr #[.obj #[("id", .str "acct-oauth-dup"), ("provider_type", .str "antigravity"), ("cli_proxy_auth_file", .str "antigravity-alice.json")]]))
+      check (!(← verifyCurrent)) "duplicate claim on routing file fails mid-turn verification"
+      IO.FS.removeFile s!"{workRoot}/.sandboxed-sh/ai_providers.json"
+      execute "DELETE FROM ai_providers WHERE id='acct-oauth-dup';"
+      check (← verifyCurrent) "clearing duplicate claim verifies again"
+
+      let altFile := s!"{authDir}/antigravity-bob.json"
+      writeAuth altFile "tok-3" "alice@example.test" false
+      IO.FS.removeFile authFile
+      check (!(← verifyCurrent)) "routing file rebinding fails mid-turn verification"
+      writeAuth authFile "tok-3" "alice@example.test" false
+      IO.FS.removeFile altFile
+      check (← verifyCurrent) "restored routing file verifies again"
+
+      -- 2e. Email change immediately fails verification.
+      writeAuth authFile "tok-3" "changed@example.test" false
+      check (!(← verifyCurrent)) "email change on auth file fails mid-turn verification"
+      writeAuth authFile "tok-3" "alice@example.test" false
+      check (← verifyCurrent) "restored email verifies again"
+
+      -- 2f. Placement / country / port change immediately fails verification.
+      portRef.set (some 41001)
+      check (!(← verifyCurrent)) "transport port mismatch fails mid-turn verification"
+      portRef.set none
+      execute "UPDATE account_vpn_routes SET country='DE', generation=2 WHERE account_id='acct-oauth';"
+      check (!(← verifyCurrent)) "country / route_generation change fails mid-turn verification"
+      execute "UPDATE account_vpn_routes SET country='', generation=1 WHERE account_id='acct-oauth';"
+      execute "UPDATE missions SET run_generation=2 WHERE id='m-oauth';"
+      check (!(← verifyCurrent)) "mission run_generation placement change fails mid-turn verification"
+    finally
+      closeCoreStore store
+  finally
+    match prevAuthDir with | some v => setenvVar "CLI_PROXY_AUTH_DIR" v | none => unsetenvVar "CLI_PROXY_AUTH_DIR"
+    match prevCanary with | some v => setenvVar "ORB_NATIVE_SUBSCRIPTION_CANARY" v | none => unsetenvVar "ORB_NATIVE_SUBSCRIPTION_CANARY"
+    match prevWsNode with | some v => setenvVar "ORB_NATIVE_WORKSPACE_NODE" v | none => unsetenvVar "ORB_NATIVE_WORKSPACE_NODE"
+
 private def verifyNativeApprovalBudget (root : String) : IO Unit := do
   -- Production Neon spent 158 seconds on one turn with three sequential permissions.
   let openWait : NativeSharedWorkspace.ApprovalWait := ⟨20000, some 130000⟩
@@ -717,6 +844,7 @@ def run : IO Unit := do
   IO.FS.createDirAll s!"{root}/.sandboxed-sh"
   try
     verifyNativeApprovalBudget root
+    verifyNativeOAuthRotation root
     verifyManagedWorkerLoss root
     startupRecovery root
     let .ok store ← openCoreStore s!"{root}/.sandboxed-sh" | throw (IO.userError "turn outcome store open failed")

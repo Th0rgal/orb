@@ -463,27 +463,28 @@ def parseClaudeInitializeModels? (jv : JVal) (expectedReqId : String := "orb-mod
     if r1 != r2 then r1 < r2 else m1 < m2
   return sorted.map fun (_, _, modelId) => (modelId, formatClaudeModelDisplayName modelId)
 
-/-- Group Antigravity Carbon (`gemini-4-carbon-{low,medium,high}` / legacy `agy-model-{low,medium,high}`)
-    and Argon (`gemini-4-argon-{low,medium,high}` / legacy `agy-demo-{low,medium,high}`) variants into base `(id, label)` pairs. -/
+private def antigravityTierVariant? (m : String) : Option (String × String) :=
+  let validTier (s : String) : Bool := s == "low" || s == "medium" || s == "high"
+  #[
+    ("gemini-4-carbon-", "gemini-4-carbon"),
+    ("agy-model-", "gemini-4-carbon"),
+    ("gemini-4-argon-", "gemini-4-argon"),
+    ("agy-demo-", "gemini-4-argon"),
+    ("gemini-4-neon-", "gemini-4-neon")
+  ].findSome? fun (pfx, base) =>
+    if m.startsWith pfx then
+      let lvl := (m.drop pfx.length).toString
+      if validTier lvl then some (base, lvl) else none
+    else none
+
+/-- Group Antigravity Carbon (`gemini-4-carbon-{low,medium,high}` / legacy `agy-model-{low,medium,high}`),
+    Argon (`gemini-4-argon-{low,medium,high}` / legacy `agy-demo-{low,medium,high}`),
+    and Neon (`gemini-4-neon-{low,medium,high}`) variants into base `(id, label)` pairs. -/
 def groupAntigravityModels (raw : Array (String × String)) : Array (String × String) := Id.run do
   let mut seen : Array String := #[]
   let mut out : Array (String × String) := #[]
   for (rawId, rawLabel) in raw do
-    let grouped? : Option (String × String) :=
-      if rawId.startsWith "gemini-4-carbon-" then
-        let lvl := (rawId.drop 16).toString
-        if lvl == "low" || lvl == "medium" || lvl == "high" then some ("gemini-4-carbon", lvl) else none
-      else if rawId.startsWith "agy-model-" then
-        let lvl := (rawId.drop 10).toString
-        if lvl == "low" || lvl == "medium" || lvl == "high" then some ("gemini-4-carbon", lvl) else none
-      else if rawId.startsWith "gemini-4-argon-" then
-        let lvl := (rawId.drop 15).toString
-        if lvl == "low" || lvl == "medium" || lvl == "high" then some ("gemini-4-argon", lvl) else none
-      else if rawId.startsWith "agy-demo-" then
-        let lvl := (rawId.drop 9).toString
-        if lvl == "low" || lvl == "medium" || lvl == "high" then some ("gemini-4-argon", lvl) else none
-      else none
-    let (id, label) := match grouped? with
+    let (id, label) := match antigravityTierVariant? rawId with
       | some (base, lvl) =>
         let suf := if lvl == "low" then " (Low)" else if lvl == "medium" then " (Medium)" else " (High)"
         let stripped := if rawLabel.endsWith suf then (rawLabel.dropEnd suf.length).toString else rawLabel
@@ -1460,28 +1461,22 @@ private def launchOrReuseWarmClaude
     return .error "Claude Code closed stdin before receiving prompt"
   return .ok ()
 
-/-- Normalize an Antigravity model + optional effort for `agy` CLI 1.5+ (where Carbon and Argon
-    bake effort into `gemini-4-carbon-{low,medium,high}` and `gemini-4-argon-{low,medium,high}`). -/
+/-- Normalize an Antigravity model + optional effort for `agy` CLI 1.5+ (where Carbon, Argon,
+    and Neon bake effort into `gemini-4-{carbon,argon,neon}-{low,medium,high}`). -/
 def normalizeAntigravityCliModel (rawModel : String) (eff? : Option String) : String × Option String :=
   let m0 := rawModel.trimAscii.toString
   let m := if m0.startsWith "antigravity/" then (m0.drop 12).toString else m0
   let cleanEff? := eff?.map (·.trimAscii.toString.toLower) |>.filter (fun s => !s.isEmpty)
-  let validTier (s : String) : Bool := s == "low" || s == "medium" || s == "high"
   let (baseKind?, variantLvl?) : Option String × Option String :=
     if m == "gemini-4-carbon" || m == "gemini-4-carbon-eap" || m == "agy-model" then
       (some "gemini-4-carbon", none)
-    else if m.startsWith "gemini-4-carbon-" && validTier (m.drop 16).toString then
-      (some "gemini-4-carbon", some (m.drop 16).toString)
-    else if m.startsWith "agy-model-" && validTier (m.drop 10).toString then
-      (some "gemini-4-carbon", some (m.drop 10).toString)
     else if m == "gemini-4-argon" || m == "gemini-4-argon-eap" || m == "agy-demo" then
       (some "gemini-4-argon", none)
-    else if m.startsWith "gemini-4-argon-" && validTier (m.drop 15).toString then
-      (some "gemini-4-argon", some (m.drop 15).toString)
-    else if m.startsWith "agy-demo-" && validTier (m.drop 9).toString then
-      (some "gemini-4-argon", some (m.drop 9).toString)
-    else
-      (none, none)
+    else if m == "gemini-4-neon" || m == "gemini-4-neon-eap" then
+      (some "gemini-4-neon", none)
+    else match antigravityTierVariant? m with
+      | some (base, lvl) => (some base, some lvl)
+      | none => (none, none)
   match baseKind? with
   | some base =>
     let lvl := match cleanEff?.orElse (fun _ => variantLvl?) with

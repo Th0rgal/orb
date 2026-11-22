@@ -163,7 +163,7 @@ def releaseTargetSlot (tracker : ProxyPacingTracker) (tgt : ProviderTarget) : IO
     }
 
 /-- Canonicalize Antigravity proxy model IDs so retired `agy-model*` / `agy-demo*` and base
-    `gemini-4-carbon` / `gemini-4-argon` identifiers resolve to CLIProxyAPI's effort-baked Carbon/Argon IDs. -/
+    `gemini-4-{carbon,argon,neon}` identifiers resolve to CLIProxyAPI's effort-baked IDs. -/
 def canonicalAntigravityProxyModelId (raw : String) : String :=
   let m0 := raw.trimAscii.toString
   let m := if m0.startsWith "antigravity/" then (m0.drop 12).toString else m0
@@ -179,6 +179,12 @@ def canonicalAntigravityProxyModelId (raw : String) : String :=
     "gemini-4-argon-medium"
   else if m == "agy-demo-low" || m == "gemini-4-argon-low" then
     "gemini-4-argon-low"
+  else if m == "gemini-4-neon" || m == "gemini-4-neon-eap" || m == "gemini-4-neon-high" then
+    "gemini-4-neon-high"
+  else if m == "gemini-4-neon-medium" then
+    "gemini-4-neon-medium"
+  else if m == "gemini-4-neon-low" then
+    "gemini-4-neon-low"
   else
     m0
 
@@ -338,6 +344,18 @@ def quotaHint (body : String) : Bool :=
   containsSubstring low "quota" || containsSubstring low "insufficient_quota" ||
   containsSubstring low "billing" || containsSubstring low "exhausted"
 
+/-- Per-model sidecar cooldown (`503 model_cooldown` / `"cooling down"`), scoped to one model
+    rather than the entire shared `cliproxyapi:*` provider account. -/
+def modelCooldownHint (body : String) : Bool :=
+  let low := body.toLower
+  containsSubstring low "model_cooldown" || containsSubstring low "cooling down"
+
+/-- Shared CLIProxyAPI sidecar accounts serve multiple models under one `accountId`; per-model
+    `model_cooldown` must not park the shared account globally for unrelated models. -/
+def isSharedCliProxyAccount (accountId : String) : Bool :=
+  (accountId == "cliproxyapi" || accountId.startsWith "cliproxyapi:") &&
+  !accountId.startsWith "cliproxyapi:antigravity:"
+
 def authHint (body : String) : Bool :=
   let low := body.toLower
   containsSubstring low "invalid api key" || containsSubstring low "invalid_api_key" ||
@@ -412,12 +430,13 @@ def providerDisabledMessage? (status : Nat) (body : String) : Option String :=
 def providerFailureReasonCode (status : Nat) (body : String) : UInt8 :=
   if status ≥ 200 && status < 300 then 0
   else if status == 429 then
-    if quotaHint body then 2 else 1
+    if quotaHint body || modelCooldownHint body then 2 else 1
   else if status == 402 then 3
   else if status == 401 then 5
   else if status == 403 then
     if providerDisabledHint body then 6
     else if authHint body then 5 else 0
+  else if status == 503 && (modelCooldownHint body || quotaHint body) then 2
   else if status ≥ 500 && status < 600 then 4
   else 0
 
@@ -440,9 +459,11 @@ def cooldownForOutcomeWithBreaker
     (consecutive : UInt32 := 1)
     (transientStreak : UInt32 := 1)
     (transientThreshold : UInt32 := 1) : Option AccountCooldown :=
-  if out.selectedAccount.isEmpty then none
+  let body := (String.fromUTF8? out.body).getD ""
+  if out.selectedAccount.isEmpty ||
+      (isSharedCliProxyAccount out.selectedAccount &&
+       (out.status == 503 || out.status == 429) && modelCooldownHint body) then none
   else
-    let body := (String.fromUTF8? out.body).getD ""
     let failCode := providerFailureReasonCode out.status body
     if failCode == 0 then none
     else
@@ -652,6 +673,9 @@ def stepHealthAttemptPure
   let (sliceOut, effs) := stepProviderAttemptSlice sliceIn ev
   if verdict == 0 || verdict == 8 then
     (hst, sliceIn, verdict, effs)
+  else if verdict != 4 && isSharedCliProxyAccount accountId &&
+      (status == 503 || status == 429) && modelCooldownHint respBody then
+    (hst, { sliceOut with cooldownUntilEpoch := sliceIn.cooldownUntilEpoch }, verdict, effs)
   else
     let breakerWord := Orb.Kernel.breakerStep failCode sliceOut.transientStreak hst.transientThreshold
     let parkAcct := (breakerWord &&& 0xFF) == 1
@@ -914,17 +938,26 @@ private def isForbiddenResponseHeader (name : String) : Bool :=
 private def hasHeaderCtl (s : String) : Bool :=
   s.toList.any (fun ch => ch == '\r' || ch == '\n' || ch.toNat == 0)
 
-/-- Strip hop-by-hop / framing headers (`Transfer-Encoding`, `Content-Length`, `Connection`, etc.)
-    and extract safe upstream `Content-Type` so downstream HTTP/1.1 framing never suffers CL.TE desync. -/
+/-- Strip hop-by-hop / framing headers (`Transfer-Encoding`, `Content-Length`, `Connection`, etc.),
+    clamp numeric `Retry-After` delays to `maxCooldownRetryAfterSecs`, and extract safe upstream
+    `Content-Type` so downstream HTTP/1.1 framing never suffers CL.TE desync. -/
 def sanitizeUpstreamHeaders (hdrs : Array (String × String)) : String × Array (String × String) := Id.run do
   let mut ctype := "application/json"
   let mut safe : Array (String × String) := #[]
   for (k, v) in hdrs do
     if !hasHeaderCtl k && !hasHeaderCtl v then
-      if k.trimAscii.toString.toLower == "content-type" && !v.trimAscii.toString.isEmpty then
-        ctype := v.trimAscii.toString
-      else if !isForbiddenResponseHeader k && !k.trimAscii.toString.isEmpty then
-        safe := safe.push (k.trimAscii.toString, v.trimAscii.toString)
+      let kClean := k.trimAscii.toString
+      let vClean := v.trimAscii.toString
+      if kClean.toLower == "content-type" && !vClean.isEmpty then
+        ctype := vClean
+      else if !isForbiddenResponseHeader kClean && !kClean.isEmpty then
+        let outVal :=
+          if kClean.toLower == "retry-after" then
+            match vClean.toNat? with
+            | some secs => toString (clampCooldownRetryAfter secs.toUInt64)
+            | none => vClean
+          else vClean
+        safe := safe.push (kClean, outVal)
   return (ctype, safe)
 
 private def parseBoundedPort? (s : String) : Option UInt16 := do

@@ -1124,6 +1124,23 @@ def runAllTests : IO UInt32 := do
   let authFailure := agEvent (renderCompact (.obj #[("event", .str "result"),
     ("result", .obj #[("status", .str "ERROR"), ("error", .str authLine)])]))
   assertEq "Structured Antigravity login failures use the same diagnostic" authFailure.errorMsg? authMessage
+  let agGrouped := OrbBin.ClaudeControl.groupAntigravityModels #[
+    ("gemini-4-carbon-low", "Carbon (Low)"),
+    ("agy-model-high", "Carbon (High)"),
+    ("gemini-4-argon-high", "Argon (High)"),
+    ("agy-demo-medium", "Argon (Medium)"),
+    ("gemini-4-neon-low", "Neon (Low)"),
+    ("gemini-4-neon-high", "Neon (High)"),
+    ("custom-v1", "Custom Model")
+  ]
+  assertEq "groupAntigravityModels deduplicates Carbon/Argon/Neon effort tiers"
+    agGrouped #[("gemini-4-carbon", "Carbon"), ("gemini-4-argon", "Argon"), ("gemini-4-neon", "Neon"), ("custom-v1", "Custom Model")]
+  assertEq "normalizeAntigravityCliModel defaults gemini-4-neon to high"
+    (OrbBin.ClaudeControl.normalizeAntigravityCliModel "gemini-4-neon" none) ("gemini-4-neon-high", none)
+  assertEq "normalizeAntigravityCliModel maps gemini-4-neon-eap + medium"
+    (OrbBin.ClaudeControl.normalizeAntigravityCliModel "gemini-4-neon-eap" (some "medium")) ("gemini-4-neon-medium", none)
+  assertEq "normalizeAntigravityCliModel keeps explicit variant when effort is none"
+    (OrbBin.ClaudeControl.normalizeAntigravityCliModel "antigravity/gemini-4-neon-low" none) ("gemini-4-neon-low", none)
   testAntigravityProviderDenial
   runOpenCodeAcpTests
   IO.println "=== OrbBin Wave 1 Companion Binaries Self-Test ==="

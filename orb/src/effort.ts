@@ -47,10 +47,10 @@ export function effortLabel(effort: string | null | undefined, backend?: string 
   return LABELS[value] ?? defaultEffortLabel(backend, model);
 }
 
-/** Native Carbon (`gemini-4-carbon` / legacy `agy-model`) and Argon (`gemini-4-argon` / legacy `agy-demo`) require an effort; unset uses our explicit High default. */
+/** Native Carbon (`gemini-4-carbon` / legacy `agy-model`), Argon (`gemini-4-argon` / legacy `agy-demo`), and Neon (`gemini-4-neon`) require an effort; unset uses our explicit High default. */
 export function defaultEffortLabel(backend?:string|null, model?:string|null):string {
   if (backend !== "antigravity" || !model) return DEFAULT_EFFORT_LABEL;
-  const variant = model.match(/^(?:gemini-4-carbon|agy-model|gemini-4-argon|agy-demo)-(low|medium|high)$/)?.[1];
+  const variant = model.match(/^(?:gemini-4-carbon|agy-model|gemini-4-argon|agy-demo|gemini-4-neon)-(low|medium|high)$/)?.[1];
   if (variant) return `Default (${LABELS[variant as Effort]})`;
   if (
     model === "gemini-4-carbon" ||
@@ -58,17 +58,20 @@ export function defaultEffortLabel(backend?:string|null, model?:string|null):str
     model === "agy-model" ||
     model === "gemini-4-argon" ||
     model === "gemini-4-argon-eap" ||
-    model === "agy-demo"
+    model === "agy-demo" ||
+    model === "gemini-4-neon" ||
+    model === "gemini-4-neon-eap"
   ) {
     return "Default (High)";
   }
   return DEFAULT_EFFORT_LABEL;
 }
 
-/** Compatibility for missions saved with legacy `agy-*` or CLI effort-specific Carbon/Argon IDs. */
+/** Compatibility for missions saved with legacy `agy-*` or CLI effort-specific Carbon/Argon/Neon IDs. */
 export function antigravityBaseModel(model?: string | null): string | undefined {
   if (!model) return undefined;
   if (/^(?:gemini-4-carbon|agy-model)(?:-(?:low|medium|high)|-eap)?$/.test(model)) return "gemini-4-carbon";
   if (/^(?:gemini-4-argon|agy-demo)(?:-(?:low|medium|high)|-eap)?$/.test(model)) return "gemini-4-argon";
+  if (/^gemini-4-neon(?:-(?:low|medium|high)|-eap)?$/.test(model)) return "gemini-4-neon";
   return model;
 }

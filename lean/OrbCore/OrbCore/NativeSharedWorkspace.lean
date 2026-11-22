@@ -39,27 +39,42 @@ def placement? (store : CoreStore) (grant job node owner : String) (now : UInt64
     return ⟨mission, user, unixUser, jobId, nodeId, account, model, mode == "readonly",
       ← runGen.toNat?, ← epoch.toNat?, ← revision.toNat?, country, ← routeGen.toNat?, ← expires.toNat?⟩
 
+/-- Bound shared account identity that must remain unchanged across mid-turn OAuth refreshes. -/
+structure AccountBinding where
+  accountId   : String
+  routingFile : String
+  email       : String
+  deriving BEq, Repr
+
+/-- Resolve the unambiguously bound Antigravity account if it is enabled, carries an OAuth
+    token, and owns a unique CLIProxyAPI routing file. -/
+def accountBinding? (accounts : Array HydratedProvider) (accountId : String) : Option AccountBinding := do
+  let hp ← accounts.find? (·.id == accountId)
+  let routingFile := accountRoutingFile accounts hp
+  guard (hp.providerType == "antigravity" && hp.enabled && hp.hasOAuth &&
+    !hp.oauthToken.isEmpty && !routingFile.isEmpty)
+  return { accountId := hp.id, routingFile := routingFile, email := hp.accountEmail }
+
 /-- Resolve the saved route and uniquely bound shared subscription inside Core.
     A concurrent revoke, move or route change invalidates the snapshot before
     Core can start a profile or return a successful admission. -/
 def withVerifiedProfile {α : Type} (store : CoreStore) (hub : ProviderRuntimeHub) (workingDir grant job node owner : String)
-    (consume : Placement → String → Option UInt16 → IO (Except String α)) : IO (Except String α) := do
+    (consume : Placement → String → AccountBinding → Option UInt16 → IO (Except String α)) : IO (Except String α) := do
   let denied := Except.error "native_shared_workspace_denied"
   let some before ← placement? store grant job node owner (← coreEpochSec) | return denied
   let accounts ← loadHydratedProviders store workingDir
+  let some binding := accountBinding? accounts before.account | return denied
   let some hp := accounts.find? (·.id == before.account) | return denied
-  unless hp.providerType == "antigravity" && hp.enabled && hp.hasOAuth && !hp.oauthToken.isEmpty &&
-      !((accountRoutingFile accounts hp).isEmpty) do return denied
   let some resolve := hub.resolveTransport? | return denied
   let .ok port? ← resolve hp.providerType hp.id | return denied
   if before.country.isEmpty != port?.isNone || port? == some 0 then return denied
   unless (← placement? store grant job node owner (← coreEpochSec)) == some before do return denied
-  consume before hp.oauthToken port?
+  consume before hp.oauthToken binding port?
 
 /-- Admission reports only the current placement to the requesting node. -/
 def authorize (store : CoreStore) (hub : ProviderRuntimeHub) (workingDir grant job node owner : String) :
     IO (Except String Placement) :=
-  withVerifiedProfile store hub workingDir grant job node owner fun placement _ _ => pure (.ok placement)
+  withVerifiedProfile store hub workingDir grant job node owner fun placement _ _ _ => pure (.ok placement)
 
 /-- Explicit operator opt-in for authenticated native subscription execution. -/
 def executionEnabled : IO Bool := do
@@ -129,7 +144,7 @@ def pumpTurn (store : CoreStore) (hub : ProviderRuntimeHub) (working grant job n
     (goal : Bool) (fileCall : Placement → JVal → IO JVal)
     (delegateCall : Placement → JVal → IO Bool → IO JVal) (emit : ByteArray → IO Bool) : IO Bool := do
   unless ← emit ByteArray.empty do return false
-  let result ← withVerifiedProfile store hub working grant job node owner fun p token port => do
+  let result ← withVerifiedProfile store hub working grant job node owner fun p token binding port => do
     unless ← claim store grant p.job do return .error "native_turn_already_claimed"
     let turnPrompt ← if goal then do
       let context ← childContext store p
@@ -162,8 +177,7 @@ def pumpTurn (store : CoreStore) (hub : ProviderRuntimeHub) (working grant job n
           ticks := ticks + 1
           if valid && ticks % 8 == 0 then
             let accounts ← loadHydratedProviders store working
-            valid := accounts.any fun hp => hp.id == p.account && hp.providerType == "antigravity" &&
-              hp.enabled && hp.hasOAuth && hp.oauthToken == token && !(accountRoutingFile accounts hp).isEmpty
+            valid := accountBinding? accounts p.account == some binding
           if !valid || turnExpired start (← IO.monoMsNow) (← approvalWait.get) then
             watchdogError.set (some (if valid then "native_turn_timeout" else "native_shared_workspace_denied"))
             stopping.set true
@@ -189,8 +203,8 @@ def pumpTurn (store : CoreStore) (hub : ProviderRuntimeHub) (working grant job n
           let action := operation.fieldStr? "action"
           unless (delegated && goal) || (!delegated && (action == some "read_file" || (action == some "write_file" && !p.readonly && !goal))) do
             return .error "native_holder_protocol"
-          let checked ← withVerifiedProfile store hub working grant job node owner fun current currentToken _ => do
-            unless current == p && currentToken == token do return .error "native_shared_workspace_denied"
+          let checked ← withVerifiedProfile store hub working grant job node owner fun current _ currentBinding currentPort => do
+            unless current == p && currentBinding == binding && currentPort == port do return .error "native_shared_workspace_denied"
             if delegated && action == some "ask" then
               let before ← IO.monoMsNow
               approvalWait.modify fun w => {w with startedMs := some before}
