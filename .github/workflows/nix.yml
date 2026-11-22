@@ -85,13 +85,24 @@ jobs:
           export ORB_PACKAGED_TEST_BINARY="$PWD/result/bin/orb-desktop"
           export ORB_CORE_TEST_BINARY="$(nix build .#orb-desktop.core --no-link --print-out-paths)/bin/orb-core"
           nix shell --inputs-from . nixpkgs#sway nixpkgs#swaybg nixpkgs#grim nixpkgs#wtype nixpkgs#imagemagick nixpkgs#tesseract nixpkgs#dbus --command bash -euc '
+            set -o pipefail
+            results="$RUNNER_TEMP/sidebar-replay"
+            mkdir -p "$results"
+            export TMPDIR="$(mktemp -d)"
+            status=0
             for client in webkit hybrid leanui; do
-              dbus-run-session -- python3 -B lean/OrbDesktop/tests/live_writes.py --sidebar-menu "$client"
+              dbus-run-session -- python3 -Bu lean/OrbDesktop/tests/live_writes.py --sidebar-menu "$client" 2>&1 | tee "$results/$client.log" || status=1
             done
+            for frame in "$TMPDIR"/orb-{webkit,hybrid,leanui}-{sidebar,refusal}-*.png; do
+              if [[ -f "$frame" ]]; then cp "$frame" "$results/"; fi
+            done
+            exit "$status"
           '
       - uses: actions/upload-artifact@v4
-        if: failure()
+        if: ${{ !cancelled() && steps.package.outcome == 'success' }}
         with:
-          name: hybrid-desktop-screenshot
-          path: ${{ runner.temp }}/hybrid-desktop.png
+          name: desktop-parity-receipts
+          path: |
+            ${{ runner.temp }}/hybrid-desktop.png
+            ${{ runner.temp }}/sidebar-replay
           if-no-files-found: ignore

@@ -57,12 +57,16 @@ def exercise(root, tmp, api, graphical, click, process, wait, stack, client_kind
     launch()
     sidebar = '10,100 200x560'
     header = '220,0 630x43'
-    def words(geometry):
+    def words(geometry, binarize=False):
         image = subprocess.check_output(['grim', '-t', 'ppm', '-g', geometry, '-'], env=graphical)
-        return read_words(image, geometry)
+        return read_words(image, geometry, binarize=binarize)
 
     def locate(label, geometry):
-        return next(((x, y) for word, x, y in words(geometry) if word == label.lower()), None)
+        for binarize in (False, True):
+            hit = next(((x, y) for word, x, y in words(geometry, binarize) if word == label.lower()), None)
+            if hit:
+                return hit
+        return None
     def capture_failure():
         with tempfile.NamedTemporaryFile(prefix=f'orb-{client_kind}-sidebar-', suffix='.png', delete=False) as frame:
             subprocess.run(['grim', '-t', 'png', '-'], stdout=frame, env=graphical, check=True)
@@ -99,8 +103,8 @@ def exercise(root, tmp, api, graphical, click, process, wait, stack, client_kind
             regions = [f'{max(0,x-12)},{min(y-8,510)} 220x185', f'{max(0,x-38)},{max(0,y-207)} 170x185']
         labels = {'rename':'rename', 'move':'move', 'archive':'archive', 'restore':'restore',
                   'copy-id':'copy', 'settings':'settings'}
-        def actions_in(geo):
-            visible = words(geo)
+        def actions_in(geo, binarize):
+            visible = words(geo, binarize)
             first = next((i for i, (word, _, _) in enumerate(visible) if word == 'rename'), None)
             if first is None:
                 return None
@@ -119,7 +123,12 @@ def exercise(root, tmp, api, graphical, click, process, wait, stack, client_kind
                 first = match + 1
             return hits
         def rows():
-            return next((hits for region in regions if (hits := actions_in(region))), None)
+            for binarize in (False, True):
+                for region in regions:
+                    hits = actions_in(region, binarize)
+                    if hits:
+                        return hits
+            return None
         try:
             hits = wait('ordered context actions ' + ', '.join(expected), rows)
         except TimeoutError as error:
@@ -243,7 +252,10 @@ def exercise(root, tmp, api, graphical, click, process, wait, stack, client_kind
                                    (sidebar, fixture['contextMission'].lower())]:
                 observed[region] = ' '.join(word for word, _, _ in read_words(pixels, region, full_frame=True))
                 if phrase not in observed[region]:
-                    return False
+                    observed[region] = ' '.join(word for word, _, _ in read_words(
+                        pixels, region, full_frame=True, binarize=True))
+                    if phrase not in observed[region]:
+                        return False
             return True
         try:
             wait('visible refusal: ' + expected, refusal_visible)
