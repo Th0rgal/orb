@@ -109,6 +109,20 @@ def turnExpired (start now : Nat) (wait : ApprovalWait) : Bool :=
 def turnReadTimeoutSecs (goal : Bool) : Nat :=
   (modelBudgetMs + (if goal then approvalBudgetMs else 0)) / 1000 + 5
 
+/-- Supply fresh, owner-scoped delegation state even when ACP loads an older conversation. -/
+def childContext (store : CoreStore) (p : Placement) : IO String := do
+  let unknown := "Orb could not verify this mission’s children. Do not assume a child exists or retry a delegation with a different key."
+  let .ok rows ← execParamQuery store.missionsDb (include_str "native_direct_child_ids.sql") #[p.mission, p.owner]
+    | return unknown
+  let children := rows.extract 1 rows.size
+  if children.isEmpty then
+    return "Orb has no direct child missions for this Goal. If the task calls for delegation, use sandboxed/start_mission with title, prompt, backend and model_override. Read a child only after its mission UUID is known."
+  let ids := (children.extract 0 16).filterMap fun row => row[0]? >>= OrbBin.PosixExt.parseUuidCanonical?
+  if ids.size != min children.size 16 then return unknown
+  let label := if children.size > 16 then "Orb’s 16 newest direct child mission IDs (additional children exist)" else "Orb’s direct child mission IDs"
+  return label ++ ": " ++ String.intercalate ", " ids.toList ++
+    ". Use sandboxed/get_mission with mission_id for the child you want to check before repeating delegated work."
+
 /-- Pump one process only. The stdin pipe ties the isolated route and profile to Core. -/
 def pumpTurn (store : CoreStore) (hub : ProviderRuntimeHub) (working grant job node owner prompt : String)
     (conversation : Option String) (expectedUid : Nat) (config : HolderConfig)
@@ -117,11 +131,15 @@ def pumpTurn (store : CoreStore) (hub : ProviderRuntimeHub) (working grant job n
   unless ← emit ByteArray.empty do return false
   let result ← withVerifiedProfile store hub working grant job node owner fun p token port => do
     unless ← claim store grant p.job do return .error "native_turn_already_claimed"
+    let turnPrompt ← if goal then do
+      let context ← childContext store p
+      pure (context ++ "\n\n" ++ prompt)
+    else pure prompt
     let packet := JVal.obj #[("unix_user", .str p.unixUser), ("owner", .str p.owner),
       ("mission", .str p.mission), ("account", .str p.account), ("model", .str p.model), ("exec_uid", .nat expectedUid),
       ("access_token", .str token), ("direct", .bool p.country.isEmpty), ("remote", .bool config.remote),
       ("port", (port.map (fun n => JVal.nat n.toNat)).getD .null), ("readonly", .bool p.readonly),
-      ("goal", .bool goal), ("prompt", .str prompt), ("conversation", (conversation.map JVal.str).getD .null)]
+      ("goal", .bool goal), ("prompt", .str turnPrompt), ("conversation", (conversation.map JVal.str).getD .null)]
     let .ok child ← (IO.Process.spawn {
       cmd := "/usr/bin/python3", args := #["-I", config.runtime ++ "/native_job_relay/main.py",
         config.runtime, config.profileUser], inheritEnv := false,

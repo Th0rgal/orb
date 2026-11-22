@@ -136,3 +136,10 @@ of its latest final assistant reply. A newer user turn or active child has no
 final reply yet. The projection omits objectives, prompts, tool logs, credential
 fields and provider metadata. A missing child and an inaccessible mission return
 the same error.
+
+Core prepends a current, owner-scoped child inventory to each native Goal turn,
+including a restored ACP session. An empty inventory directs a parent that needs
+delegation to request a child. With existing children the parent receives up to
+16 verified direct-child UUIDs and can inspect their results. A failed inventory
+lookup is reported as unavailable. This execution context leaves the stored
+objective and the original continuation text intact.
