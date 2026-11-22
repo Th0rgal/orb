@@ -30,6 +30,8 @@ def replay(binary):
             body = json.loads(self.rfile.read(size)) if size else None
             seen.append((self.command, self.path, body))
             result = {"status": "ok"}
+            if self.path.startswith("/v8/management/oauth/status?"):
+                result.update(auth_id=name, adopted=True)
             if self.path.endswith("auth-url"):
                 result = dict(url="https://fixture.invalid/consent", state="fixture", target_auth_id=name)
             wire = json.dumps(result).encode()
@@ -74,7 +76,10 @@ def replay(binary):
             with closing(sqlite3.connect(state / "missions.db")) as db:
                 db.execute("INSERT OR IGNORE INTO ai_providers(id, provider_type, name) VALUES(?,'openai','reserved')", (account,))
                 db.execute("INSERT INTO provider_auth_health(account_key,code,observed_at) VALUES(?,'auth_unavailable','t0')", (peer,))
+                db.execute("INSERT INTO account_vpn_routes(account_id,country,generation) VALUES(?,'',7)", (account,))
+                db.execute("INSERT INTO user_provider_prefs(user_id,provider_id,enabled) VALUES('fixture-member',?,0)", (account,))
                 db.commit()
+
                 def start():
                     return request(port, token, "POST", calls, dict(provider="openai", provider_id=account))
 
@@ -101,6 +106,10 @@ def replay(binary):
                 assert status() == "completed"
                 assert db.execute("SELECT code FROM provider_auth_health WHERE account_key=?", (peer,)).fetchone() == ("auth_unavailable",)
                 assert db.execute("SELECT enabled FROM ai_providers WHERE id=?", (account,)).fetchone() == (1,)
+                assert db.execute("SELECT country,generation FROM account_vpn_routes WHERE account_id=?",
+                                  (account,)).fetchone() == ("", 7)
+                assert db.execute("SELECT enabled FROM user_provider_prefs WHERE user_id='fixture-member' AND provider_id=?",
+                                  (account,)).fetchone() == (0,)
                 print("Stale target rejected before consent. Only the original file completed the bound Direct session; peer health retained.")
 
 
