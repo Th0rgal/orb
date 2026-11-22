@@ -69,6 +69,7 @@ static void free_proj_act(gpointer p, GClosure *cl) { (void)cl; ProjAct *a = p; 
 static void on_proj_item(GtkButton *mi, gpointer ud) {
     (void)mi;
     ProjAct *a = ud;
+    if (!a || !a->wv) return;
     char *act = orb_json_escape_string(a->action), *slug = orb_json_escape_string(a->slug);
     if (act && slug) {
         char *js = g_strdup_printf(

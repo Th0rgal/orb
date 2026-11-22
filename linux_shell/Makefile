@@ -13,7 +13,7 @@ endif
 
 ifeq ($(HAS_WEBKIT),1)
   CFLAGS += -DORB_HAS_WEBKITGTK $(shell $(PKG_CONFIG) --cflags $(WEBKIT_PKGS))
-  LDFLAGS += $(shell $(PKG_CONFIG) --libs $(WEBKIT_PKGS))
+  LDFLAGS += $(shell $(PKG_CONFIG) --libs $(WEBKIT_PKGS)) -lm
 endif
 
 orb-desktop: main.c gtk_chrome.c gtk_icons.c gtk_menu.c gtk_menu_layout.c $(wildcard *.h)
