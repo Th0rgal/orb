@@ -7044,12 +7044,13 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
     return .ok (mkJson 200 receipt)
 
   -- Mission Resume (`POST /api/control/missions/:id/resume`)
-  if let some params := matchRoutePattern? "/api/control/missions/:id/resume" rawTarget then
+  let goalResumeRoute := matchRoutePattern? "/api/control/missions/:id/resume-goal" rawTarget
+  if let some params := goalResumeRoute.orElse (fun _ => matchRoutePattern? "/api/control/missions/:id/resume" rawTarget) then
     if req.method == "POST" then
       let mid := (params.find? (fun p => p.1 == "id")).map Prod.snd |>.getD ""
       if !isSafeMissionId mid then
         return .ok (mkJson 400 "{\"error\":\"invalid_mission_id\"}")
-      if let some (cCode, cBody) := (← authorizeMissionOp st caller mid false) then
+      if let some (cCode, cBody) := (← authorizeMissionOp st caller mid goalResumeRoute.isSome) then
         return .ok (mkJson cCode cBody)
       let some m ← getMission? st.store mid
         | return .ok (mkJson 404 "{\"error\":\"Mission not found\"}")
@@ -7076,13 +7077,23 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
         let effectiveModel := if m.modelOverride.isEmpty then defaultCodexModel else m.modelOverride
         if let .error e := saved.mode.program effectiveModel then
           return .ok (mkJson 400 s!"\{\"error\":{jsonEscape e}}")
-        let resumesGoal := (content?.bind parseGoalPrefix?).isSome ||
+        let resumesGoal := goalResumeRoute.isSome || (content?.bind parseGoalPrefix?).isSome ||
           ((bodyJv.fieldBool? "goal_mode").getD false && content?.isNone)
         if resumesGoal then
           if let .error e := validateGoalSelection saved.mode true then
             return .ok (mkJson 400 s!"\{\"error\":{jsonEscape e}}")
         if (← isMissionIdleForCyberChange st m) && saved.revision != nilRevision then
           promoteCyber? := some (saved, effectiveModel)
+      if goalResumeRoute.isSome then
+        let some generation := bodyJv.fieldUInt64? "run_generation"
+          | return .ok (mkJson 400 "{\"error\":\"goal_generation_required\"}")
+        unless content?.isNone && st.remoteSup?.isSome && RemoteGoal.harnesses.contains m.backend &&
+            (← resolveMissionRemoteNode? st.store st.managedStore? mid).isSome do
+          return .ok (mkJson 400 "{\"error\":\"remote_goal_unsupported\"}")
+        match ← resumeStoppedRemoteGoal st.store mid generation nowEpochSec with
+        | .ok true => return .ok (mkJson 202 "{\"status\":\"awaiting_user\",\"terminal_reason\":\"remote_goal_continuation\"}")
+        | .ok false => return .ok (mkJson 409 "{\"error\":\"remote_goal_resume_conflict\"}")
+        | .error e => return .ok (mkJson (if e == "remote_goal_session_missing" then 409 else 500) s!"\{\"error\":{jsonEscape e}}")
       let mut selectedSkills : Array SelectedSkill := #[]
       if let some content := content? then
         if !(references content).isEmpty then

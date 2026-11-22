@@ -2812,6 +2812,13 @@ export async function moveMissionsBatch(body: MoveMissionsRequest): Promise<Move
   }
 }
 
+export async function resumeStoppedRemoteGoal(id: string, generation: number): Promise<void> {
+  await api(`/api/control/missions/${encodeURIComponent(id)}/resume-goal`, {
+    method: "POST", body: JSON.stringify({ run_generation: generation }),
+  });
+  noteMissionMutated(id);
+}
+
 export async function cancelMission(id: string): Promise<void> {
   noteMissionMutated(id);
   await api<void>(`/api/control/missions/${id}/cancel`, withIdempotencyKey({ method: "POST" }));

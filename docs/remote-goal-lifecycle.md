@@ -252,3 +252,9 @@ supplies that confirmation when the completion event lies outside a fetched
 page. The same rule applies to a cached Done summary that reproduces the
 answer with whitespace flattened. The raw events retain their original text.
 A quoted marker, fenced example or ordinary assistant response remains visible.
+
+An owner can resume a stopped remote Goal from its conversation. The action posts
+the displayed `run_generation` to `/api/control/missions/:id/resume-goal`. Core checks the saved session and atomically arms one continuation of
+the saved objective. A second click or stale generation receives a conflict.
+Sending a normal follow-up after stopping starts an ordinary turn, as it does
+after Goal completion. The previous objective remains in history.
