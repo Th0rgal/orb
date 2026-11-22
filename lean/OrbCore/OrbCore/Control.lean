@@ -2557,6 +2557,9 @@ def updateMissionBoundManagedNode (store : CoreStore) (missionId concreteNode no
 /-- Launch a read-only `/btw` side mission that answers `jv.side_question` about `srcMid`.
     Shared by `POST /api/control/missions/:id/btw/agent` and the `ask_mission` MCP tool.
     The caller has already been authorized for `srcMid`. Returns (HTTP status, JSON body). -/
+private def remoteDispatchHttpStatus (error : String) : Nat :=
+  if error == "node_owner_required" then 403 else 502
+
 private def launchBtwSideAgent (st : CoreAppState) (caller : CallerPrincipal) (srcMid : String)
     (jv : JVal) (hdrIdemKey : String) (nowEpochSec : UInt64) : IO (Nat × String) := do
   let bodyIdemKey := ((jv.fieldStr? "idempotency_key").getD "").trimAscii.toString
@@ -2675,7 +2678,7 @@ private def launchBtwSideAgent (st : CoreAppState) (caller : CallerPrincipal) (s
                 discard <| runConfiguredManagedLifecycle mst
                   { store := st.store, fleet := mf0, override? := st.managedProvisioningOverride? } rentedVmId "destroy" nowEpochSec
             cleanupUnbornBtw
-            return (502, s!"\{\"error\":{jsonEscape dispErr}}")
+            return (remoteDispatchHttpStatus dispErr, s!"\{\"error\":{jsonEscape dispErr}}")
       | none =>
         if st.warmMgr?.isSome then
           let effModel :=
@@ -5383,7 +5386,7 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
                       discard <| runConfiguredManagedLifecycle mst
                         { store := st.store, fleet := mf0, override? := st.managedProvisioningOverride? } rentedVmId "destroy" nowEpochSec
                   rollbackUnbornCreate
-                  return .ok (mkJson 502 s!"\{\"error\":{jsonEscape dispErr}}")
+                  return .ok (mkJson (remoteDispatchHttpStatus dispErr) s!"\{\"error\":{jsonEscape dispErr}}")
         if controller then
           let ownerId := if caller.isLegacyUnscoped then st.bootstrapAdminId else caller.userId
           if let .error e ← nominateCreatedProjectController st.store projSlug rawProjSlug mid nowIso ownerId then
@@ -5767,7 +5770,7 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
               sideQuestion     := isSide
             }
             if let .error dispErr ← submitRemoteMissionTurn st.store st.managedStore? st.relayHub? st.broadcastHub? sup st.cfg.workingDir spec nowEpochSec then
-              return .ok (mkJson 502 s!"\{\"error\":{jsonEscape dispErr}}")
+              return .ok (mkJson (remoteDispatchHttpStatus dispErr) s!"\{\"error\":{jsonEscape dispErr}}")
         | _, _ =>
           discard <| appendMissionEvent st.store mid "user_message" pl nowIso
           if let some tSink := st.telemetrySink? then
@@ -6984,7 +6987,7 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
             sideQuestion     := isSide
           }
           if let .error dispErr ← submitRemoteMissionTurn st.store st.managedStore? st.relayHub? st.broadcastHub? sup st.cfg.workingDir spec nowEpochSec then
-            return .ok (mkJson 502 s!"\{\"error\":{jsonEscape dispErr}}")
+            return .ok (mkJson (remoteDispatchHttpStatus dispErr) s!"\{\"error\":{jsonEscape dispErr}}")
       else
         if let some m := mission? then
           let localSend := (bodyJv.fieldBool? "spawn_harness").getD (m.placementKind == "managed" && !isCloudBackendName m.backend)
@@ -7143,7 +7146,7 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
             resumeSessionId? := resumeSid?
           }
           if let .error dispErr ← submitRemoteMissionTurn st.store st.managedStore? st.relayHub? st.broadcastHub? sup st.cfg.workingDir spec nowEpochSec then
-            return .ok (mkJson 502 s!"\{\"error\":{jsonEscape dispErr}}")
+            return .ok (mkJson (remoteDispatchHttpStatus dispErr) s!"\{\"error\":{jsonEscape dispErr}}")
       else
         let spawnWanted := (bodyJv.fieldBool? "spawn_harness").getD false
         if spawnWanted then
