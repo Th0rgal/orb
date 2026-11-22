@@ -230,3 +230,13 @@ Reconnecting an existing Antigravity account targets its exact credential in bot
 The isolated sidecar test sends buffered and streaming requests before restricting the account. It then requests the model by its account prefix and its unqualified ID, checks that neither request reaches the simulated Google generation endpoint, and checks another provider during the restriction. Refresh and targeted reconnect must preserve the exclusion before the operator can restore access.
 
 Before confirming a native-only Antigravity setting, Core checks both the saved wildcard and the sidecar’s live model registry for the selected credential. If any model is still registered or the registry cannot be queried, the client must surface an unconfirmed setting. A sibling credential may continue serving the same model.
+
+
+An open desktop account rereads the shared VPN and alternative-router settings
+when the window regains focus or visibility. The observing window performs a
+read. A member’s enabled-account preference stays personal across reorder and
+reload. Credential owners and administrators control the account-wide exclusion.
+
+When an older Core reports the requested settings endpoint missing, the row
+explains the version requirement and offers Retry. A failed read leaves the
+route and permission unconfirmed.
