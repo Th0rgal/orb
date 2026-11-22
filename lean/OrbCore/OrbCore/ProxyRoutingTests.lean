@@ -273,7 +273,7 @@ def runStreamingPumpContracts : IO Unit := do
         | .ok () =>
           let rest ← readStreamChunk ufd2 65536
           observedClose := rest.isEmpty
-        | .error _ => observedClose := true
+        | .error _ => pure () -- Poll timeouts do not establish peer closure.
         pollTicks := pollTicks + 1
       upClosed.set observedClose
       discard <| closeFd ufd2
