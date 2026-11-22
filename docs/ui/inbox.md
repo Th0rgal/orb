@@ -86,6 +86,9 @@ marking it done advances focus. Opening a different preview, by keyboard or
 mouse, preserves each conversation’s draft and keeps only one preview open.
 Leave native disclosure keys, text selection,
 textarea movement, IME and child overlays alone.
+If the window has just crossed the narrow breakpoint, a Projects shortcut opens
+the sidebar and focuses its first project even when the resize notification
+arrives after the shortcut.
 
 Do not add opacity entrance animations to Inbox rows. They must paint even
 when opened in a background macOS WebKit window. Long summaries are bounded

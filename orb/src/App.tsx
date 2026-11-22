@@ -273,22 +273,29 @@ export default function App() {
   });
   const sidebarViewport = window.matchMedia("(max-width: 720px)");
   const narrowSidebar = () => shouldAutoCollapseSidebar(sidebarViewport.matches, nativeChromeActive);
-  const [sidebar, setSidebar] = createSignal(!narrowSidebar());
+  let lastNarrow = narrowSidebar();
+  let wideSidebarOpen = true;
+  const [sidebar, setSidebar] = createSignal(!lastNarrow);
+  const syncSidebarViewport = () => {
+    const narrow = narrowSidebar();
+    if (narrow === lastNarrow) return;
+    lastNarrow = narrow;
+    if (narrow) {
+      wideSidebarOpen = sidebar();
+      setSidebar(false);
+    } else {
+      setSidebar(wideSidebarOpen);
+    }
+  };
   onMount(() => {
     if (nativeChromeActive) return;
-    let wideSidebarOpen = true;
-    const onLayoutChange = (event: MediaQueryListEvent) => {
-      if (event.matches) {
-        wideSidebarOpen = sidebar();
-        setSidebar(false);
-      } else {
-        setSidebar(wideSidebarOpen);
-      }
-    };
-    sidebarViewport.addEventListener("change", onLayoutChange);
-    onCleanup(() => sidebarViewport.removeEventListener("change", onLayoutChange));
+    sidebarViewport.addEventListener("change", syncSidebarViewport);
+    onCleanup(() => sidebarViewport.removeEventListener("change", syncSidebarViewport));
   });
-  const setSidebarWithNative = setSidebar;
+  const setSidebarWithNative = (open: boolean) => {
+    syncSidebarViewport();
+    setSidebar(open);
+  };
   // The WebView's sidebar signal is the single owner of sidebar visibility. The native pane
   // mirrors every change, including the initial value, so its toolbar and the WebView's are
   // never both on screen.
