@@ -165,6 +165,15 @@ def replay_child_result():
                                "params": {"name": "get_mission", "arguments": {"mission_id": mid}}})
     assert json.loads(read(child)["result"]["content"][0]["text"]) == {
         "status": "awaiting_user", "model_override": "fixture-model", "final_response": "17"}
+    permission = {"sessionId": "parent-session", "toolCall": {"rawInput": {
+        "ServerName": "sandboxed", "ToolName": "get_mission", "Arguments": {"mission_id": child}}},
+        "options": [{"kind": "allow_once", "optionId": "one-read"}]}
+    assert permission_choice(permission, "parent-session", lambda _: False) == "one-read"
+    assert permission_choice(permission, "other-session", lambda _: False) is None
+    permission["toolCall"]["rawInput"]["Arguments"]["include_history"] = True
+    assert permission_choice(permission, "parent-session", lambda _: False) is None
+    assert "error" in broker.respond({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {
+        "name": "get_mission", "arguments": {"mission_id": child, "include_history": True}}})
     denied = read(missing)
     for mid in (parent, peer, foreign, grandchild, "not-a-uuid"):
         assert read(mid) == denied and "error" in denied
