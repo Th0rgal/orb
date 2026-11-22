@@ -258,3 +258,8 @@ the displayed `run_generation` to `/api/control/missions/:id/resume-goal`. Core 
 the saved objective. A second click or stale generation receives a conflict.
 Sending a normal follow-up after stopping starts an ordinary turn, as it does
 after Goal completion. The previous objective remains in history.
+
+Desktop displays a pending native permission as soon as its live tool call
+arrives. Both `name` and `tool_name` identify the tool on the wire. The call ID
+identifies the request across live delivery, history replay and the owner's
+one-time decision. A subsequent call with its own ID opens its own prompt.

@@ -3,6 +3,8 @@ import {render,screen,fireEvent,waitFor,cleanup} from '@solidjs/testing-library'
 import {createSignal} from 'solid-js';
 import {MissionGlyph} from '../src/MissionGlyph';
 import {NativeInteraction} from '../src/NativeInteraction';
+import {TranscriptReducer} from '../src/transcriptModel';
+import {storedToStream} from '../src/stream';
 import {api,bumpConnectionVersion,clearConnection,connectionVersion,setApiUrl,setConnection} from '../src/api';
 vi.mock('../src/api',async importOriginal=>({...await importOriginal<typeof import('../src/api')>(),api:vi.fn()}));
 import {composerModes,modePrompt} from '../src/goal';
@@ -70,6 +72,25 @@ describe('native plan interactions',()=>{
    expect(screen.getByRole('button',{name:'Decline'})).toBeTruthy();
    expect(screen.getByRole('button',{name:'Allow once'})).toBeTruthy();
   }finally{cleanup();host.__TAURI_INTERNALS__=previous;}
+ });
+ it('shows consecutive live permissions and reconciles history for the same request',async()=>{
+  const reducer=new TranscriptReducer();
+  const [items,setItems]=createSignal([...reducer.items]);
+  const notice=(description:string)=>({method:'permission',params:{tool:'start_mission',input:{description,once_only:true}}});
+  const live=(id:string,description:string)=>reducer.apply({type:'tool_call',data:{tool_call_id:id,tool_name:'ui_native_request',args:notice(description)}});
+  try{
+   render(()=><NativeInteraction mission="remote" active remote items={items()}/>);
+   live('first','Run first child');setItems([...reducer.items]);
+   await screen.findByText('Run first child');
+   reducer.apply(storedToStream({id:3,sequence:3,event_type:'tool_call',timestamp:'',tool_call_id:'first',tool_name:'ui_native_request',content:JSON.stringify(notice('Run first child'))})!);
+   expect(reducer.items).toHaveLength(1);
+   reducer.apply({type:'tool_result',data:{tool_call_id:'first',tool_name:'ui_native_request',result:{action:'accept'}}});
+   live('second','Run second child');setItems([...reducer.items]);
+   await screen.findByText('Run second child');
+   expect(screen.queryByText('Run first child')).toBeNull();
+   expect(screen.getAllByRole('button',{name:'Allow once'})).toHaveLength(1);
+   expect(screen.queryByRole('button',{name:'Allow for session'})).toBeNull();
+  }finally{cleanup();}
  });
  it('does not accept a plan until explicitly clicked',async()=>{
   const invoke=vi.fn(async(cmd:string)=>cmd==='local_interaction'?{id:'plan-1',method:'plan',params:{plan:'Create hello.txt'}}:null);
