@@ -515,7 +515,61 @@ private def provisioningArchiveTests (root : String) : IO Unit := do
     closeManagedComputeStore mc
     closeCoreStore core
 
+private def expiredResumeTests (root : String) : IO Unit := do
+  let mc ← requireOk (← openManagedComputeStore s!"{root}/ttl-resume.db") "open resume"
+  let core ← requireOk (← openCoreStore s!"{root}/ttl-resume-core") "open resume core"
+  try
+    let original ← seed mc "expired-in-place"
+    stop mc original 1050
+    discard <| sql mc "UPDATE managed_machines SET provider='leanci' WHERE id=?1;" #[original.id]
+    discard <| requireOk (← prepareManagedResume mc fleet original.id "resume" "enrollment" 5 5 1100 1200)
+      "reserve in-place resume before lost provider response"
+    let observed ← IO.mkRef "unavailable"
+    let provider : Provider := { OrbCore.ManagedProvisioningTests.mockPolicyProvider mc "leanci" with
+      resumeInPlace := true
+      get := fun id => do
+        let state ← observed.get
+        if state == "unavailable" then return .error { code := "unavailable", status := 503 }
+        return .ok { providerId := id, state }
+      isStopped := fun state => state == "reaped"
+      destroy := fun _ => throw (IO.userError "cannot destroy reaped fixture")
+    }
+    let advance := fun (now : UInt64) => tick mc core fleet (fun _ => pure (.ok provider)) now
+    observed.set "reaped"
+    discard <| requireOk (← advance 1300) "old lease expires before successor"
+    check ((← machine mc original.id).status == "provisioning") "live resume lease stays fenced"
+    for state in #["unavailable", "running"] do
+      observed.set state
+      discard <| requireOk (← advance 1401) "uncertain provider observation"
+      check ((← machine mc original.id).status == "provisioning") "uncertain resume remains owned"
+    let racing ← seed mc "racing-identity"
+    stop mc racing 1050
+    discard <| sql mc "UPDATE managed_machines SET provider='leanci' WHERE id=?1;" #[racing.id]
+    discard <| requireOk (← prepareManagedResume mc fleet racing.id "racing-resume" "second-enrollment"
+      5 5 1100 1200) "reserve second resume"
+    let changedProvider := { provider with get := fun id => do
+      if id == racing.providerId then
+        discard <| requireOk (← bindManagedResumeProvider mc "racing-resume" "different-vm") "racing bind"
+        return .ok { providerId := id, state := "reaped" }
+      return .ok { providerId := id, state := "running" } }
+    discard <| requireOk (← tick mc core fleet (fun _ => pure (.ok changedProvider)) 1401)
+      "provider probe races a different binding"
+    let changed ← machine mc racing.id
+    check (changed.status == "provisioning" && changed.providerId == "different-vm" &&
+      changed.expiryCleanupState.isEmpty) "provider observation cannot roll back a different successor"
+    observed.set "reaped"
+    discard <| requireOk (← advance 1401) "both leases expired and exact VM reaped"
+    let ended ← machine mc original.id
+    check (ended.status == "stopped" && ended.expiryCleanupState == "completed" &&
+      ended.expiryProviderState == "reaped") "expired unbound resume reconciles the reaped in-place VM"
+    checkError (← bindManagedResumeProvider mc "resume" original.providerId) "stale_boot_epoch"
+      "late acknowledgement cannot resurrect expired resume"
+  finally
+    closeManagedComputeStore mc
+    closeCoreStore core
+
 def run (root : String) : IO Unit := do
+  expiredResumeTests root
   provisioningArchiveTests root
   warningTests root
   extensionTests root

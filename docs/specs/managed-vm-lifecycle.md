@@ -330,6 +330,11 @@ tool text says so. A busy machine still stops at its TTL.
   `pending` (row shown as `destroying`) and it is retried; nothing is marked done on
   silence. Spend is the provider's metered figure when it reports one, otherwise the lease
   reservation, labelled `lease_reservation_estimate`. Events are deduplicated per boot.
+- **Lost in-place resume reply.** While readiness or either lease is still valid, Core
+  retains the resume reservation. After all three deadlines, a terminal response for
+  the exact in-place provider ID (reaped, deleted, destroyed, HTTP 404 or 410) releases
+  the reservation so the regular expiry pass closes the ledger. A transient provider
+  failure, a different provider ID, or a live machine keeps the reservation.
 - **No live machine without a deadline:** a `ready` or `provisioning` row with
   `expires_at_sec = 0` (written before deadlines existed) gets creation time plus TTL,
   or one TTL from discovery when the creation time is unknown, and then follows the
