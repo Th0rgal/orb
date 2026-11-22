@@ -253,6 +253,15 @@ def run():
                 check('selected first mission', lambda: (row('copper') or {}).get('selected'))
                 # Toggle twice after the server projection replaces the parent row.
                 _, parent_y = check('Copper label', lambda: words('copper').get('copper'))
+                # The right-hand click lands on the child disclosure in hybrid.
+                anchors = []
+                for x in (55, 190):
+                    pointer.click(x, parent_y, 'button3')
+                    menu_x, _ = check('mission menu', lambda: words('rename').get('rename'))
+                    anchors.append(menu_x)
+                    subprocess.run(['wtype', '-k', 'Escape'], env=env, check=True)
+                    check('dismiss mission menu', lambda: 'rename' not in words('rename'))
+                assert anchors[1] - anchors[0] > 45, (mode, anchors)
                 was_open = row('copper')['expanded']
                 pointer.click(195, parent_y)
                 check('pointer toggles disclosure', lambda: row('copper')['expanded'] != was_open)

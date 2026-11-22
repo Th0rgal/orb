@@ -8,6 +8,8 @@ int orb_gtk_menu_self_test(void);
 
 #if defined(ORB_HAS_WEBKITGTK)
 #include <gtk/gtk.h>
+GtkWidget *orb_menu_page(void);
+void orb_menu_anchor(GtkPopover *pop, GtkWidget *row, const GdkEvent *event);
 /* Pops up the menu for `row` when it is a mission row; returns TRUE when it did. */
 gboolean orb_gtk_row_context_menu(GtkWidget *wv, GtkWidget *list, GtkWidget *row, const GdkEvent *ev);
 /* Multi-selection: re-apply after the list is rebuilt, toggle/extend on a modified click, clear,
