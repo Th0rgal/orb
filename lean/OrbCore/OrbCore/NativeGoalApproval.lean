@@ -17,12 +17,14 @@ def currentGoal (store : CoreStore) (p : Placement) : IO Bool := do
 
 def allowedKeys := #["title","prompt","backend","model_override","remote_node_id","idempotency_key"]
 
+private def backends := #["codex","antigravity","opencode"]
+
 def validArgs (args : JVal) : Bool := Id.run do
   let .obj fields := args | return false
   unless fields.all (fun (k,v) => allowedKeys.contains k && v.asStr?.isSome) do return false
   unless #["title","prompt","backend","model_override"].all (fun k =>
       ((args.fieldStr? k).getD "").trimAscii.toString != "") do return false
-  unless #["codex","antigravity","opencode"].contains ((args.fieldStr? "backend").getD "") do return false
+  unless backends.contains ((args.fieldStr? "backend").getD "") do return false
   return (renderCompact args).utf8ByteSize ≤ 32768
 
 /-- The approval describes exactly the bytes the existing bounded workspace writer receives. -/
@@ -44,12 +46,19 @@ def catalogue : JVal := Id.run do
   let some entry := entries.find? (fun t => t.fieldStr? "name" == some "start_mission") | return .arr #[]
   let schema := entry.fieldOrNull "inputSchema"
   let .obj props := schema.fieldOrNull "properties" | return .arr #[]
-  let selected := props.filter fun (k,_) => allowedKeys.contains k
+  let selected := (props.filter fun (k,_) => allowedKeys.contains k).map fun (k, v) =>
+    (k, match k with
+      | "backend" => v.setField "enum" (.arr (backends.map JVal.str))
+      | "model_override" => v.setField "description" (.str "Exact model ID for the selected harness.")
+      | "remote_node_id" => v.setField "description" (.str "Optional child placement. Omit to inherit the parent’s node.")
+      | _ => v)
   let input := (schema.setField "properties" (.obj selected)).setField "required"
     (.arr (#["title","prompt","backend","model_override"].map JVal.str))
   let some read := entries.find? (fun t => t.fieldStr? "name" == some "get_mission") | return .arr #[]
   let summary := "Read a direct child by its mission UUID. Returns status, selected model and up to 2048 characters of its latest final response when available."
-  return .arr #[entry.setField "inputSchema" input, read.setField "description" (.str summary)]
+  let start := (entry.setField "inputSchema" input).setField "description"
+    (.str "Request approval to start a direct child with title, prompt, backend and model_override. Keep the returned mission ID for get_mission.")
+  return .arr #[start, read.setField "description" (.str summary)]
 
 /-- A native parent receives only its own child's bounded public answer, never the full mission digest. -/
 def readChild (store : CoreStore) (p : Placement) (args : JVal) : IO JVal := do

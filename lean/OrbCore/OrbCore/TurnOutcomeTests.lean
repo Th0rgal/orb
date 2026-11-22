@@ -665,6 +665,17 @@ private def verifyNativeApprovalBudget (root : String) : IO Unit := do
     execute "INSERT INTO mission_runs(id,mission_id,remote_job_id,generation,execution_state) VALUES('r','m','j',8,'running');"
     let placement : NativeSharedWorkspace.Placement :=
       ⟨"m", "member", "orb-member", "j", "node", "account", "model", false, 8, 1, 1, "", 1, 200⟩
+    let empty ← NativeSharedWorkspace.childContext store placement
+    check (empty.contains "no direct child" && empty.contains "sandboxed/start_mission") "empty Goal starts with creation guidance"
+    let child ← newUuidV4
+    let foreign ← newUuidV4
+    let elsewhere ← newUuidV4
+    discard <| execParamQuery db
+      "INSERT INTO missions(id,parent_mission_id,owner_user_id) VALUES(?1,'m','member'),(?2,'m','other'),(?3,'elsewhere','member');"
+      #[child,foreign,elsewhere]
+    let resumed ← NativeSharedWorkspace.childContext store placement
+    check (resumed.contains child && resumed.contains "sandboxed/get_mission" && !resumed.contains foreign &&
+      !resumed.contains elsewhere) "resumed Goal receives only its own existing child UUID"
     let args := JVal.obj #[("title", .str "test"), ("prompt", .str "test"),
       ("model_override", .str "test"), ("backend", .str "codex")]
     let closed ← IO.mkRef false
