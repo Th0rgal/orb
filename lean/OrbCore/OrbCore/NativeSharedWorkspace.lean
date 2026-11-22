@@ -129,7 +129,7 @@ def pumpTurn (store : CoreStore) (hub : ProviderRuntimeHub) (working grant job n
       | return .error "native_holder_unavailable"
     let (input, running) ← child.takeStdin
     let stopping ← IO.mkRef false
-    let holderLive := stopping.get.map (!·)
+    let holderLive : IO Bool := do return !(← stopping.get)
     let approvalWait ← IO.mkRef ({} : ApprovalWait)
     let start ← IO.monoMsNow
     let watch ← IO.asTask (prio := .dedicated) do

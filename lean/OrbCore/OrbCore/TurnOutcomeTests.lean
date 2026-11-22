@@ -626,7 +626,7 @@ private def verifyHolderClosedDuringApproval (root : String) : IO Unit := do
     let result ← NativeGoalApproval.ask store placement args 100 (fun id _ => do
       check ((← cellOf db "SELECT decision FROM native_goal_approvals WHERE id=?1;" #[id]) == "pending")
         "permission was pending when the holder expired"
-      closed.set true) (closed.get.map (!·))
+      closed.set true) (do return !(← closed.get))
     check ((← closed.get) && result == .null &&
       (← cellOf db "SELECT COUNT(*) FROM native_goal_approvals;") == "0")
       "holder closure withdraws the ticket before the permission timeout"
