@@ -4440,9 +4440,10 @@ private def issueProxyToken (st : CoreStore) (tokenPrefix mission owner : String
         let shared ← execParamQueryUnlocked st.missionsDb
           ("INSERT INTO native_shared_workspace_bindings(token_sha256,node_id,route_generation,route_kind) " ++
            "SELECT ?1,?2,v.generation,CASE WHEN v.country='' THEN 'direct' ELSE 'vpn' END FROM account_vpn_routes v " ++
-           "WHERE v.account_id=?3 AND (v.country='' OR v.country GLOB '[A-Z][A-Z]') AND v.generation>0;")
+           "WHERE v.account_id=?3 AND (v.country='' OR v.country GLOB '[A-Z][A-Z]') AND v.generation>0 RETURNING node_id;")
           #[digest,node,account]
-        if let .error err := shared then return .error err
+        let .ok placement := shared | return .error "native_workspace_binding_unavailable"
+        unless placement[1]? == some #[node] do return .error "native_workspace_route_required"
         let bound ← execParamQueryUnlocked st.missionsDb
           ("INSERT INTO native_job_relay_bindings SELECT ?1,e.node_id,e.revision,v.generation " ++
            "FROM native_owner_enrollments e JOIN account_vpn_routes v ON v.account_id=e.account_id " ++
@@ -4500,6 +4501,7 @@ def resolveNativeAntigravityToken? (st : CoreStore) (token : String) (now : UInt
       ("SELECT t.mission_id,t.owner_user_id,g.account_id,g.model FROM native_antigravity_grants g " ++
        "JOIN mission_proxy_tokens t USING(token_sha256) JOIN remote_node_jobs j ON j.job_id=g.job_id " ++
        "WHERE t.token_sha256=?1 AND t.revoked=0 AND t.expires_at_epoch>CAST(?2 AS INTEGER) " ++
+       "AND NOT EXISTS(SELECT 1 FROM native_shared_workspace_bindings b WHERE b.token_sha256=t.token_sha256) " ++
        "AND j.mission_id=t.mission_id AND j.state IN ('submitting','running','queued');") #[digest,s!"{now}"] | return none
   return do
     let row ← rows[1]?

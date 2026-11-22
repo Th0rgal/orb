@@ -3112,6 +3112,8 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
       unless url.host == "127.0.0.1" do return .ok denied
     let some p ← OrbCore.NativeSharedWorkspace.placement? st.store grant job node owner nowEpochSec
       | return .ok (mkJson 409 "{\"error\":\"native_workspace_not_running\"}")
+    let some member ← getUserById? st.store p.owner | return .ok denied
+    if let some refusal ← proxySpendDenial? st member (currentUtcDay nowEpochSec) then return .ok (mkJson 429 refusal)
     let some auth ← resolveStaticNodeToken? sn | return .ok denied
     let .ok (200, _, some status) ← OrbBin.HttpClient.sendJsonRequest "GET" (sn.baseUrl ++ "/jobs/" ++ job)
         (some auth) none #[] 3000 131072 | return .ok denied

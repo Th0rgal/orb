@@ -1696,6 +1696,13 @@ private def nativeGrantContract (store : CoreStore) : IO Unit := do
   let moved ← mintNativeAntigravityToken store "mission" "member" job "other" "carbon" 200
   unless (moved matches .error "antigravity_continuity_required") do
     throw (IO.userError "Resuming a native conversation switched its account")
+  let missingRoute ← mintNativeAntigravityToken store "mission" "member" job "a/b" "carbon" 100 (some "node")
+  unless (missingRoute matches .error "native_workspace_route_required") do
+    throw (IO.userError "Holder grant must require a saved route")
+  IO.ofExcept (← AccountVpnRoutes.set store.missionsDb "a/b" none)
+  let held ← IO.ofExcept (← mintNativeAntigravityToken store "mission" "member" job "a/b" "carbon" 100 (some "node"))
+  if (← resolveNativeAntigravityToken? store held 99).isSome || (← resolveMissionProxyToken? store held 99).isSome then
+    throw (IO.userError "Workspace grant must not authorize raw inference")
   revokeMissionProxyTokensForMission store "mission"
 
 private def nativeGatewayContract (app : CoreAppState) (owner root : String) (now : UInt64) : IO Unit := do
