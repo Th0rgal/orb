@@ -6133,6 +6133,8 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
         match ← deleteAIProvider st.store pid with
         | .error e => return .ok (mkJson 500 s!"\{\"error\":{jsonEscape e}}")
         | .ok () =>
+          if isAdm then
+            removeLegacyAIProviderJson st.cfg.workingDir st.store.rootDir pid
           if existing?.isSome || pid.startsWith "cliproxyapi:" then
             appendProviderAuditLog st.store caller.userId (if isAdm then "admin" else "member") "delete" pid #[] s!"{nowEpochSec}"
           let refreshed ← loadRoutingChainsFromStore st.store st.cfg.workingDir

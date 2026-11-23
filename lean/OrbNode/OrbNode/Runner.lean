@@ -1294,9 +1294,10 @@ structure NodeRuntime where
   shrinkDebt     : UInt32 := 0
   activeExecMain : UInt32 := 0
   activeExecSide : UInt32 := 0
-  ledger         : Ledger
-  queuedPayloads : Std.HashMap String JVal := {}
-  launching      : Std.HashMap String LaunchingSlot := {}
+  ledger            : Ledger
+  queuedPayloads    : Std.HashMap String JVal := {}
+  queuedCallerRoles : Std.HashMap String String := {}
+  launching         : Std.HashMap String LaunchingSlot := {}
   liveProcs      : Std.HashMap String LiveProc := {}
   queueOrder     : Array String := #[]
 
@@ -1858,6 +1859,7 @@ def commitPreparedJob
     rt0 with
     launching := rt0.launching.erase jid
     queuedPayloads := rt0.queuedPayloads.erase jid
+    queuedCallerRoles := rt0.queuedCallerRoles.erase jid
   }
   let releaseDebt (r : NodeRuntime) : NodeRuntime :=
     match wasLaunching with
@@ -2309,7 +2311,7 @@ def tickRuntimeReserve
           finishedAt? := some (r.finishedAt?.getD nowStale)
           error? := some (r.error?.getD "refused adopting job from prior node_boot_epoch")
         }) then
-          rt := { rt with ledger := l', queuedPayloads := rt.queuedPayloads.erase jid }
+          rt := { rt with ledger := l', queuedPayloads := rt.queuedPayloads.erase jid, queuedCallerRoles := rt.queuedCallerRoles.erase jid }
       else if rec.state == .queued && !rt.launching.contains jid then
         let payload? := (rt.queuedPayloads.get? jid).orElse (fun _ =>
           (payloadHints.get? jid).orElse (fun _ =>
@@ -2323,10 +2325,13 @@ def tickRuntimeReserve
             let sl : LaunchingSlot := {
               forced := false, sideLane, coordLane, missionId := rec.missionId, trackBg
             }
+            let effectiveRole := (rt.queuedCallerRoles.get? jid).getD
+              (if !rec.execUnixUser.isEmpty || !rec.ownerUserId.isEmpty then "member" else "admin")
             rt := {
               rt with
               launching := rt.launching.insert jid sl
               queuedPayloads := rt.queuedPayloads.erase jid
+              queuedCallerRoles := rt.queuedCallerRoles.erase jid
             }
             toLaunch := toLaunch.push {
               cfg := rt.cfg
@@ -2338,7 +2343,7 @@ def tickRuntimeReserve
               sideLane := sideLane
               coordLane := coordLane
               execUnixUser := rec.execUnixUser
-              callerRole := if !rec.execUnixUser.isEmpty || !rec.ownerUserId.isEmpty then "member" else "admin"
+              callerRole := effectiveRole
             }
           | none =>
             remQueue := remQueue.push jid
@@ -2430,6 +2435,7 @@ def cancelJob
   let nextProcs := rt.liveProcs.erase jid
   let nextLaunching := rt.launching.erase jid
   let nextPayloads := rt.queuedPayloads.erase jid
+  let nextCallerRoles := rt.queuedCallerRoles.erase jid
   let nextQueue := rt.queueOrder.filter (· != jid)
   let nextDebt := if releasedRegular && rt.shrinkDebt > 0 then rt.shrinkDebt - 1 else rt.shrinkDebt
   match ← rt.ledger.updateJob jid (fun r =>
@@ -2447,6 +2453,7 @@ def cancelJob
       rt with
       ledger := l'
       queuedPayloads := nextPayloads
+      queuedCallerRoles := nextCallerRoles
       launching := nextLaunching
       liveProcs := nextProcs
       queueOrder := nextQueue
@@ -2477,10 +2484,13 @@ def reserveForceJob (rt : NodeRuntime) (jid : String) :
   let sl : LaunchingSlot := {
     forced := true, sideLane := false, coordLane := false, missionId := cur.missionId, trackBg
   }
+  let effectiveRole := (rt.queuedCallerRoles.get? jid).getD
+    (if !cur.execUnixUser.isEmpty || !cur.ownerUserId.isEmpty then "member" else "admin")
   let rt' := {
     rt with
     queueOrder := rt.queueOrder.filter (· != jid)
     queuedPayloads := rt.queuedPayloads.erase jid
+    queuedCallerRoles := rt.queuedCallerRoles.erase jid
     launching := rt.launching.insert jid sl
   }
   let launch : PendingAsyncLaunch := {
@@ -2493,7 +2503,7 @@ def reserveForceJob (rt : NodeRuntime) (jid : String) :
     sideLane := false
     coordLane := false
     execUnixUser := cur.execUnixUser
-    callerRole := if !cur.execUnixUser.isEmpty || !cur.ownerUserId.isEmpty then "member" else "admin"
+    callerRole := effectiveRole
   }
   return (rt', launch, cur)
 

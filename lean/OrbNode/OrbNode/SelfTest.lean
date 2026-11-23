@@ -2309,6 +2309,34 @@ def runTests : IO UInt32 := do
   assertTrue "mission retains its conversation and observes credential renewal"
     (repeated.isOk && (← (cli / "conversations" / "private-session").pathExists) &&
      (← IO.FS.readBinFile (cli / tokenName)) == renewed && (← IO.FS.readBinFile (otherCli / tokenName)) == renewed)
+  -- Regression: admin lease with non-empty ownerUserId (multi-user admin) must preserve callerRole="admin"
+  -- through POST /jobs -> tickRuntimeReserve -> prepareManagedAuthWorkspace so managed_auth attaches.
+  let rtAgAdmin := { rt with cfg := { rt.cfg with managedAuth := agBindingConfig } }
+  let adminOwnedMid := "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeee0001"
+  let adminOwnedJid := "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeee0002"
+  let adminOwnedTok := signLeaseToken rt.cfg.token {
+    missionId := adminOwnedMid, nodeId := rt.cfg.nodeId, scope := .jobSubmit,
+    expiresAt := nowMu + 600, jobId? := some adminOwnedJid,
+    ownerUserId := "874e26f5-8e44-4991-81e2-6ca6d6a0d700", callerRole := "admin", unixUsername := none
+  }
+  let (_, rAdminAg) ← handleRequest rtAgAdmin {
+    method := "POST", rawPath := "/jobs", path := "/jobs", query := #[], headers := authHdrs,
+    body := (renderCompact (.obj #[
+      ("job_id", .str adminOwnedJid),
+      ("mission_id", .str adminOwnedMid),
+      ("lease_token", .str adminOwnedTok),
+      ("payload", .obj #[
+        ("kind", .str "raw_command"),
+        ("command", .str "true"),
+        ("long_running", .bool true),
+        ("managed_auth", .arr #[.str "antigravity"])
+      ])
+    ])).toUTF8
+  }
+  let attachedAdminToken := System.FilePath.mk rt.cfg.workDir / adminOwnedMid / ".gemini" / "antigravity-cli" / tokenName
+  assertTrue "admin lease with non-empty ownerUserId attaches managed_auth antigravity-oauth-token"
+    (rAdminAg.status == 202 && (← attachedAdminToken.pathExists) &&
+     (← IO.FS.readBinFile attachedAdminToken) == renewed)
   setenvVar "ORB_PRIVD_ALLOW_NONROOT_TEST" "1"
   setenvVar "ORB_PRIVD_HOME_ROOT" privdHomes.toString
   setenvVar "ORB_PRIVD_STATE_DIR" privdState.toString

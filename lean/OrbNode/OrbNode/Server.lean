@@ -814,6 +814,7 @@ def handleNonExecRequestCore (rt0 : NodeRuntime) (req : HttpRequest) :
           rt with
           ledger := l'
           queuedPayloads := rt.queuedPayloads.insert jobId payloadVal
+          queuedCallerRoles := rt.queuedCallerRoles.insert jobId claims.callerRole
           queueOrder := rt.queueOrder.push jobId
         }
         let (rtReserved, postLaunches) ← tickRuntimeReserve rtQueued
@@ -1281,6 +1282,7 @@ private partial def spawnAsyncLaunches (mtx : Std.Mutex NodeRuntime) (launches :
             rt with
             launching := rt.launching.erase item.jid
             queuedPayloads := rt.queuedPayloads.erase item.jid
+            queuedCallerRoles := rt.queuedCallerRoles.erase item.jid
             shrinkDebt := nextDebt
           }
           let updOut ← (rtClean.ledger.updateJob item.jid (fun r =>
