@@ -207,6 +207,11 @@ Changing a device profile retires every Orb connection using that profile.
 Changing the API key retires all local Orb tunnels for fresh verification.
 Invalid or identical edits preserve running tunnels.
 
+A tunnel process that exits on its own counts as stopped, including after
+its exit status has already been collected. Settings then reports the route
+as blocked. The account's next request retires the tunnel, revokes its relay
+connections and must verify a new tunnel before any provider is contacted.
+
 For a Google Antigravity OAuth file, the candidate sidecar fixture verifies
 buffered and streaming Gemini requests, catalog discovery, forced token
 refresh, and a targeted sign-in. The token exchange, user-info lookup and
