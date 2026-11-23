@@ -314,7 +314,10 @@ def buildSidebarChrome (st : DesktopState) (availH : SubPx) (useReferenceTree : 
   let theme := st.theme
   let pal := theme.palette
   let border := theme.borderWidth
-  let innerW := width - border
+  -- When embedded inside GTK's `GtkPaned`, `.orb-paned > separator` already renders the 1px divider;
+  -- omit the canvas right border so hybrid mode doesn't paint a 2px double seam.
+  let rightBorder := if embedded then 0 else border
+  let innerW := width - rightBorder
   let rowW := innerW - pxToSub 12
   let footH := pxToSub 45
   let rowsSource := if embedded then st.sidebarRows else if useReferenceTree then referenceSidebarRows st.screen else st.visibleProjectRows
@@ -368,11 +371,12 @@ def buildSidebarChrome (st : DesktopState) (availH : SubPx) (useReferenceTree : 
     if embedded then WidgetNode.focusable id icon else icon
   WidgetNode.rrect
     (BoxStyle.col 0
-      |>.withPadding (Edges.trbl 0 border 0 0)
+      |>.withPadding (Edges.trbl 0 rightBorder 0 0)
       |>.withFixedSize width availH)
     pal.sidebar
     CornerRadii.zero
-    { widths := Edges.trbl 0 border 0 0, color := pal.borderSubtle }
+    (if rightBorder == 0 then BorderStyle.none
+     else { widths := Edges.trbl 0 rightBorder 0 0, color := pal.borderSubtle })
     [ WidgetNode.box (BoxStyle.row 10 |>.withAlign .center
         |>.withPadding (Edges.xy (pxToSub 12) 0) |>.withFixedSize innerW chromeHeaderHeightSub)
         [if st.liveData then sidebarToggle theme else chromeIcon "sidebar" pal.textMuted 14,
