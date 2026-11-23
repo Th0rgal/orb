@@ -1049,3 +1049,15 @@ private def inboxSecond := inboxStep inboxOpened (.key 0xff54 0 .pressed)
 #guard desktopFocusChange inboxFixture inboxOpened (.activate 102) == some 940
 #guard (inboxStep inboxSecond (.activate 941)).writeRequest == some (.inboxRead ⟨"second", 20, 3, default⟩ false)
 #guard (inboxStep inboxSecond (.activate 940)).writeRequest == some (.inboxRead ⟨"second", 20, 3, default⟩ true)
+
+-- Embedded sidebar (hybrid GTK host) omits its own right border because GtkPaned already paints the 1px divider;
+-- standalone LeanUI keeps its 1px right border.
+private def sidebarRootRightBorder (embedded : Bool) : SubPx :=
+  match (buildSidebarChrome hierarchyFixture (pxToSub 600) (embedded := embedded)).payloadOf with
+  | .rrect _ _ b => b.widths.right
+  | _ => 999
+
+#guard sidebarRootRightBorder true == 0
+#guard sidebarRootRightBorder false == hierarchyFixture.theme.borderWidth
+#guard (buildSidebarChrome hierarchyFixture (pxToSub 600) (embedded := true)).styleOf.padding.right == 0
+#guard (buildSidebarChrome hierarchyFixture (pxToSub 600) (embedded := false)).styleOf.padding.right == hierarchyFixture.theme.borderWidth
