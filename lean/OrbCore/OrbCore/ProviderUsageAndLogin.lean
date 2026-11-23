@@ -370,6 +370,52 @@ private def writeDataJsonFile (workingDir storeRoot relName : String) (jv : JVal
     storeRoot
   let _ ← writeAtomicPrivate0600 (System.FilePath.mk s!"{dir}/{relName}") ((renderPretty jv) ++ "\n").toUTF8
 
+private initialize legacyAiProvidersJsonMu : Std.Mutex Unit ← Std.Mutex.new ()
+
+/-- Remove a deleted provider ID from any legacy `ai_providers.json` file so
+    `loadHydratedProviders` does not resurrect a deleted provider on the next read.
+    Serialized via `legacyAiProvidersJsonMu` to prevent lost updates under concurrent deletes. -/
+def removeLegacyAIProviderJson (workingDir storeRoot pid : String) : IO Unit := do
+  let target := pid.trimAscii.toString
+  if target.isEmpty then return
+  legacyAiProvidersJsonMu.atomically do
+    let cands := #[
+      s!"{workingDir}/.sandboxed-sh/ai_providers.json",
+      s!"{storeRoot}/ai_providers.json"
+    ]
+    let matchesId (item : JVal) : Bool :=
+      ((item.fieldStr? "id").getD "").trimAscii.toString == target
+    for p in cands do
+      let fp := System.FilePath.mk p
+      if ← fp.pathExists then
+        if let some raw ← (try some <$> IO.FS.readFile fp catch _ => pure none) then
+          if let .ok jv := OrbBin.Json.parse raw then
+            let pruned? : Option JVal :=
+              match jv with
+              | .arr xs =>
+                let ys := xs.filter (!matchesId ·)
+                if ys.size < xs.size then some (.arr ys) else none
+              | .obj kvs => Id.run do
+                let mut changed := false
+                let mut next : Array (String × JVal) := #[]
+                for (k, v) in kvs do
+                  if k == "providers" || k == "items" then
+                    match v with
+                    | .arr xs =>
+                      let ys := xs.filter (!matchesId ·)
+                      if ys.size < xs.size then
+                        changed := true
+                        next := next.push (k, .arr ys)
+                      else
+                        next := next.push (k, v)
+                    | _ => next := next.push (k, v)
+                  else
+                    next := next.push (k, v)
+                if changed then some (.obj next) else none
+              | _ => none
+            if let some outJv := pruned? then
+              let _ ← writeAtomicPrivate0600 fp ((renderPretty outJv) ++ "\n").toUTF8
+
 structure HydratedProvider where
   id              : String
   name            : String
