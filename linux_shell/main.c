@@ -28,16 +28,16 @@ static int parse_valid_port(const char *s, unsigned *out_port) {
     for (const char *p = s; *p; ++p) if (*p < '0' || *p > '9' || (v = v * 10u + (unsigned)(*p - '0')) > 65535u) return 0;
     return v >= 1024u ? (*out_port = v, 1) : 0;
 }
-/* Each account window owns its loopback daemon and per-launch secret. */
-static unsigned account_rpc_port(void) {
-    struct sockaddr_in addr = { .sin_family = AF_INET, .sin_addr.s_addr = htonl(INADDR_LOOPBACK) };
+/* Each window owns its loopback daemon and per-launch secret; avoid port collisions. */
+static unsigned pick_free_rpc_port(unsigned preferred) {
+    struct sockaddr_in addr = { .sin_family = AF_INET, .sin_addr.s_addr = htonl(INADDR_LOOPBACK), .sin_port = htons((uint16_t)preferred) };
     socklen_t len = sizeof(addr);
     int fd = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
     if (fd < 0) return 0;
-    int ok = bind(fd, (struct sockaddr *)&addr, sizeof(addr)) == 0 &&
-             getsockname(fd, (struct sockaddr *)&addr, &len) == 0;
-    close(fd);
-    return ok ? ntohs(addr.sin_port) : 0;
+    if (preferred && bind(fd, (struct sockaddr *)&addr, sizeof(addr)) == 0) return close(fd), preferred;
+    addr.sin_port = 0;
+    int ok = bind(fd, (struct sockaddr *)&addr, sizeof(addr)) == 0 && getsockname(fd, (struct sockaddr *)&addr, &len) == 0;
+    return close(fd), ok ? ntohs(addr.sin_port) : 0;
 }
 static int gen_csprng_hex(char out_hex[65]) {
     unsigned char raw[32]; int fd = open("/dev/urandom", O_RDONLY | O_CLOEXEC); if (fd < 0) return -1;
@@ -140,8 +140,9 @@ int main(int argc, char **argv) {
 #else
     const int native_chrome = !account_form && (!nc_env || (strcmp(nc_env, "0") != 0 && strcmp(nc_env, "false") != 0));
 #endif
-    if (port_env && *port_env && !parse_valid_port(port_env, &port)) return fprintf(stderr, "orb-linux-shell: invalid ORB_LOCALD_PORT\n"), 1;
-    if (account_form && !(port = account_rpc_port())) return 1;
+    if (port_env && *port_env) { if (!parse_valid_port(port_env, &port)) return fprintf(stderr, "orb-linux-shell: invalid ORB_LOCALD_PORT\n"), 1; }
+    else if (!(port = pick_free_rpc_port(account_form ? 0 : port))) return 1;
+    if (account_form && port_env && *port_env && !(port = pick_free_rpc_port(0))) return 1;
     char eph_tok[65], *init_js = NULL; const char *token = account_form ? NULL : getenv("ORB_LOCALD_TOKEN");
     if (!token || strlen(token) < 32 || strcmp(token, "orb-locald-default-token") == 0) { if (gen_csprng_hex(eph_tok) != 0) return 1; token = eph_tok; }
     if (!(init_js = build_init_script(port, token, native_chrome))) return 1;
