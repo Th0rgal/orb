@@ -1164,7 +1164,7 @@ enum OrbAccountVpn {
         var latest = 0
 
         /// Nil while a selection is being saved: nothing else starts until it settles.
-        func start(write: Bool) -> Requests? { saving ? nil : Requests(saving: write, latest: latest + 1) }
+        func start(write: Bool) -> Requests? { saving ? nil : Requests(saving: true, latest: latest + 1) }
         func current(_ request: Int) -> Bool { request == latest }
         func saved() -> Requests { Requests(saving: false, latest: latest) }
     }
@@ -1172,7 +1172,7 @@ enum OrbAccountVpn {
     enum Labels {
         static let vpnUpdate = "Update Core to configure account VPNs."
         static let routerUpdate = "Update Core to configure alternative router access."
-        static let routeUnavailable = "Account connection settings are unavailable."
+        static let routeUnavailable = "Connection settings unavailable."
         static let routerUnavailable = "Router access is unavailable."
         static let routerUnconfirmed = "Could not confirm the change. Check the current setting before retrying."
     }
@@ -1182,7 +1182,7 @@ enum OrbAccountVpn {
     static func route(_ payload: OrbJSON) -> OrbJSON? {
         guard case .array = payload["countries"] else { return nil }
         switch payload["mode"].text {
-        case "vpn": return payload["country"].text.isEmpty ? nil : payload
+        case "vpn": return payload
         case "direct": return payload
         default: return nil
         }
@@ -1191,7 +1191,7 @@ enum OrbAccountVpn {
     static func view(_ route: OrbJSON, nativeAccount: Bool) -> View {
         // Only a VPN route has a country, an exit or a failure to retry.
         let vpn = route["mode"].text == "vpn"
-        let selected = vpn ? route["country"].text : ""
+        let selected = route["country"].text
         let offered = route["countries"].items.map(\.text).filter { !$0.isEmpty }
         let editable = route["can_configure"].flag
         let blocked = vpn && route["status"].text == "blocked"
