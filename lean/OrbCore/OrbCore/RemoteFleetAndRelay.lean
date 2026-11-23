@@ -809,7 +809,7 @@ def buildComputeFleetJVal
   for m in visibleMachines do
     let isActiveVm :=
       (m.status == "ready" || m.status == "provisioning") &&
-      (m.expiresAtSec == 0 || m.expiresAtSec.toNat > nowSec)
+      (m.expiresAtSec == (0 : UInt64) || m.expiresAtSec > nowSec)
     if isActiveVm then
       let hubSeen? ← match hub? with
         | some h => getMachineLastSeen? h m.id

@@ -4275,7 +4275,7 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
       items := items.push "{\"id\":\"core\",\"name\":\"orb-core\",\"status\":\"online\",\"admin_only\":true,\"core_colocated\":true}"
     for vm in visibleVms do
       if (vm.status == "ready" || vm.status == "provisioning") &&
-         (vm.expiresAtSec == 0 || vm.expiresAtSec > nowEpochSec) then
+         (vm.expiresAtSec == (0 : UInt64) || vm.expiresAtSec > nowEpochSec) then
         items := items.push s!"\{\"id\":{jsonEscape s!"managed-{vm.id}"},\"name\":{jsonEscape vm.sandboxName},\"provider\":{jsonEscape vm.provider},\"status\":{jsonEscape vm.status},\"admin_only\":false}"
     return .ok (mkJson 200 ("[" ++ String.intercalate "," items.toList ++ "]"))
 
