@@ -898,8 +898,8 @@ private def prepareRemoteHarnessCommand
       !(← loadHydratedProviders store coreWorkDir).any (·.providerType == "antigravity")
     let adminDirectOauth? ←
       if legacyAdmin then pure none
-      else adminDirectAntigravityStaticTarget? store coreWorkDir effNodeId spec.ownerUserId bootstrapAdminId
-        bound? rollout holder?.isSome staticNodes
+      else
+        adminDirectAntigravityStaticTarget? store coreWorkDir effNodeId spec.ownerUserId bootstrapAdminId bound? rollout holder?.isSome staticNodes
     if let some oauthFile := adminDirectOauth? then
       if let some payload ← readAdminAntigravitySyncPayload? oauthFile then
         discard <| (callRemoteNodeHttpOpt relayHub? mc? effNodeId "PUT" "/managed-auth/antigravity" (some payload) #[] 4000).toBaseIO
