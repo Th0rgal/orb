@@ -1514,6 +1514,10 @@ def run : IO Unit := do
       for i in [0:12] do
         let ref ← IO.FS.readFile s!"{ws}/.opencode/skills/big-{i}/references/ref.md"
         check (ref == String.ofList (List.replicate 20000 'r')) s!"complete reference {i} arrives"
+      check (OrbCore.RemoteDispatch.normalizeAntigravityExpiresAtMs 1795450000000 3600 == 1795453600000 &&
+             OrbCore.RemoteDispatch.normalizeAntigravityExpiresAtMs 1795450000 3600 == 1795453600000 &&
+             OrbCore.RemoteDispatch.normalizeAntigravityExpiresAtMs 0 3600 == 1893456000000)
+        "Antigravity OAuth sync normalizes both millisecond and second timestamps to epoch ms"
     finally
       closeCoreStore store
     -- The resume fixture shuts down its mock node without a terminal job reply.
