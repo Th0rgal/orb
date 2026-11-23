@@ -6674,14 +6674,14 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
     let nowIsoRn := formatEpochIso8601Utc nowEpochSec
     match st.managedStore? with
     | none =>
-      let fv ← buildComputeFleetJVal st.relayHub? none mf callerUidOpt (infS + cmpS) caller.dailySpendCapCents? st.store.rootDir nowIsoRn (some st.store) 2500 isRnAdmin
+      let fv ← buildComputeFleetJVal st.relayHub? none mf callerUidOpt (infS + cmpS) caller.dailySpendCapCents? st.store.rootDir nowIsoRn (some st.store) 2500 isRnAdmin (some nowEpochSec)
       return .ok (mkJson 200 (renderCompact fv))
     | some mst =>
       match ← loadManagedFleet mst mf.enabled mf.boatEnabled mf.dailyCapCents mf.spentTodayCents mf.maxConcurrent with
       | .error e => return .ok (mkJson 500 s!"\{\"error\":{jsonEscape e}}")
       | .ok live =>
         st.managedRef.set live
-        let fv ← buildComputeFleetJVal st.relayHub? (some mst) live callerUidOpt (infS + cmpS) caller.dailySpendCapCents? st.store.rootDir nowIsoRn (some st.store) 2500 isRnAdmin
+        let fv ← buildComputeFleetJVal st.relayHub? (some mst) live callerUidOpt (infS + cmpS) caller.dailySpendCapCents? st.store.rootDir nowIsoRn (some st.store) 2500 isRnAdmin (some nowEpochSec)
         return .ok (mkJson 200 (renderCompact fv))
 
   -- Durable follow-up queue (`GET|POST /api/control/queue`, `PATCH /api/control/queue/:id`, `POST /api/control/queue/:id/step`, `POST /api/control/queue/:id/requeue`)

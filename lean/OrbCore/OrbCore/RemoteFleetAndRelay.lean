@@ -776,9 +776,12 @@ def buildComputeFleetJVal
     (nowIso : String := "")
     (store? : Option CoreStore := none)
     (probeDeadlineMs : Nat := 2500)
-    (isAdmin : Bool := false) : IO JVal := do
+    (isAdmin : Bool := false)
+    (nowSec? : Option UInt64 := none) : IO JVal := do
   let (rnEnabled, staticNodes) ← loadStaticRemoteNodes
-  let nowSec ← nowEpoch
+  let nowSec ← match nowSec? with
+    | some s => pure s
+    | none => nowEpoch
   let effIso := if nowIso.isEmpty then formatEpochIso8601Utc nowSec else nowIso
   let mut persistedCordons ← loadPersistedNodeCordons dataRoot
   if let some st := store? then
