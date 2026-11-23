@@ -195,13 +195,14 @@ def buildSidebarRowWidget (theme : Theme) (innerW : SubPx) (row : ChromeSidebarR
     let padRight : SubPx := if isFooter then pxToSub 8 else pxToSub 6
     let leadSize : SubPx := if isMission then pxToSub 18 else pxToSub 16
     let projectRunning := row.kind == "project" && ((row.rowId.drop 5).toString.toNat?.getD 99) < 8
+    let isTreeChild := (isMission || row.kind == "folder" || row.kind == "file") && row.depth > 0
     let lead : WidgetNode :=
       .mk none false false
         (BoxStyle.row 0 |>.withAlign .center |>.withFixedSize leadSize leadSize)
-        (.treeDecoration (isMission && row.depth > 0) last children rails pal.borderSubtle
+        (.treeDecoration isTreeChild last children rails pal.borderSubtle
           (if isMission && livePhase.isNone then statusBadgeColor pal row.status else if projectRunning && livePhase.isNone then pal.accent else 0)
           (if row.selected then pal.rowActive else pal.sidebar))
-        [if isMission && livePhase.isSome then liveMissionLead theme row.status (livePhase.getD 0) else chromeIcon (if isMission then "mission" else if row.kind == "project" then (if expanded then "project-folder-open" else "project-folder") else row.rowId) (row.iconColor.getD pal.textMuted)]
+        [if isMission && livePhase.isSome then liveMissionLead theme row.status (livePhase.getD 0) else chromeIcon (if isMission then "mission" else if row.kind == "project" || row.kind == "folder" then (if expanded then "project-folder-open" else "project-folder") else row.rowId) (row.iconColor.getD pal.textMuted)]
     let labelColor : Color :=
       if isFooter then (if row.selected then pal.textPrimary else pal.textSecondary)
       else if row.selected then pal.textStrong
@@ -335,12 +336,18 @@ def buildSidebarChrome (st : DesktopState) (availH : SubPx) (useReferenceTree : 
     (sidebarTreeBranches ((rowsSource.filter fun r => !isNav r && !isFoot r && !archived r) ++ archiveGroup)).map fun (r, last, children, rails) =>
       if r.kind == "empty" then
         let small := Theme.mutedText theme
+        let emptyPadLeft := pxToSub 10 + r.depth * pxToSub 16
+        let railAnchor : List WidgetNode :=
+          if rails.isEmpty then []
+          else [.mk none false false
+            (BoxStyle.row 0 |>.withFixedSize 0 (pxToSub 16))
+            (.treeDecoration false true false rails pal.borderSubtle 0 0) []]
         WidgetNode.box
           (BoxStyle.row 0
             |>.withAlign .center
-            |>.withPadding (Edges.trbl 0 (pxToSub 8) 0 (pxToSub 10))
+            |>.withPadding (Edges.trbl 0 (pxToSub 8) 0 emptyPadLeft)
             |>.withFixedSize rowW (pxToSub 24))
-          [chromeLabel small.lineHeightSub [overlaySynthRun small r.title]]
+          (railAnchor ++ [chromeLabel small.lineHeightSub [overlaySynthRun small r.title]])
       else
         buildSidebarRowWidget theme rowW { r with selected := r.selected || st.multiRows.contains r.rowId }
           (if r.kind == "section" then Edges.trbl (pxToSub 14) 0 (pxToSub 4) 0

@@ -58,6 +58,19 @@ private def treeGeometry (rows : List ChromeSidebarRow) :=
 #guard treeGeometry [treeRow 0, treeRow 1 true, treeRow 2, treeRow 1] ==
   [(true, true, []), (false, true, []), (true, false, [1]), (true, false, [])]
 #guard treeGeometry [treeRow 0, treeRow 1] == [(true, true, []), (true, false, [])]
+-- Empty placeholders never draw dangling parent stems, while ancestor rails pass cleanly past them
+-- and folder children connect with branches just like missions.
+private def kindRow (kind : String) (depth : Nat) : ChromeSidebarRow :=
+  { widgetId := 1002, rowId := kind, kind, title := kind, depth }
+#guard treeGeometry [
+    kindRow "project" 0, kindRow "empty" 1,
+    kindRow "project" 0, kindRow "folder" 1, kindRow "empty" 2, kindRow "folder" 1, kindRow "folder" 1,
+    kindRow "project" 0, kindRow "folder" 1, kindRow "mission" 1
+  ] == [
+    (false, false, []), (true, false, []),
+    (false, true, []), (false, false, []), (true, false, [1]), (false, false, []), (true, false, []),
+    (true, true, []), (false, false, []), (true, false, [])
+  ]
 private def miscFixture : DesktopState := { hierarchyFixture with
   missionCards := [{ (default : MissionSummaryCard) with widgetId := 1001, missionId := "m" }]
   sidebarRows := [hierarchyFixture.sidebarRows.head!, { widgetId := 1000, rowId := "project:default", kind := "project", title := "Misc" }] }
