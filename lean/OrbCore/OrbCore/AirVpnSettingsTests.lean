@@ -112,6 +112,36 @@ def run (root : String) : IO Unit := do
     let (_, direct) ← AccountVpnApi.route store (some pool) "" "a" "openai" true "PUT" "{\"mode\":\"direct\"}".toUTF8 (some configure)
     check (!(← patched.get)) "sidecar unbound after explicit Direct selection"
     check (direct.fieldStr? "mode" == some "direct" && (direct.field? "exits").isNone) "direct clears VPN selection"
+    let db := store.missionsDb
+    IO.ofExcept (← AccountVpnPool.savePreference pool db "v" (some "NL"))
+    let .ok (some pref) ← AccountVpnRoutes.read db "v" | throw (IO.userError "fixture VPN preference")
+    let child ← IO.Process.spawn { cmd := "sleep", args := #["30"], stdin := .null, stdout := .null, stderr := .null }
+    let seen := [Orb.AccountVpn.ExitAddress.v4 0x01020304, .v6 0x20010db800000000 1]
+    let gateway : AccountVpnPool.Gateway := ⟨30002, ← IO.mkRef false⟩
+    let tunnel : AirVpnTunnel.Tunnel := ⟨child, 30002, seen, ← IO.mkRef none, ← IO.Promise.new, ← IO.asTask (pure ())⟩
+    let occupant : AccountVpnPool.Occupant := ⟨⟨"v", cat "openai", "NL", seen⟩, pref.generation, [], gateway⟩
+    let running : AccountVpnPool.Active :=
+      { endpoint := ⟨"device", "NL", "west"⟩, tunnel, evidence := ⟨"west", "NL", seen⟩, occupants := [occupant] }
+    pool.atomically <| set ({ active := [running] } : AccountVpnPool.PoolState)
+    let shown := AccountVpnApi.route store (some pool) root "v" "openai" true "GET" ByteArray.empty
+    let (_, verified) ← shown
+    check (verified.fieldStr? "mode" == some "vpn" && verified.fieldStr? "country" == some "NL" &&
+      verified.fieldStr? "status" == some "verified" && verified.fieldStr? "server" == some "west" &&
+      ((verified.fieldArr? "exits").getD #[]).map JVal.asStr? == #[some "1.2.3.4", some "2001:db8:0:0:0:0:0:1"] &&
+      verified.fieldBool? "can_configure" == some true && (verified.fieldArr? "countries").isSome)
+      "verified route names its server and both exits"
+    -- The state every check after the first one finds once the tunnel process has exited.
+    child.kill
+    discard child.wait
+    let (stopped, afterExit) ← shown
+    check (stopped == 200 && afterExit.fieldStr? "status" == some "blocked" && (afterExit.field? "exits").isNone)
+      "exited tunnel is no longer shown as a verified exit"
+    let refused ← AccountVpnPool.allocate pool store.rootDir root db "v" "openai" pref
+    check (refused.toOption.isNone && (← gateway.revoked.get) && (← pool.atomically get).active.isEmpty)
+      "exited tunnel is refused, revoked and retired"
+    let (_, reported) ← shown
+    check (reported.fieldStr? "status" == some "blocked" && reported.fieldStr? "reason" != some "vpn_awaiting_verification")
+      "settings report why the exited tunnel was not replaced"
   finally OrbCore.Store.closeCoreStore store
   let first : ProviderUsageAndLogin.CliAuthFileInfo := { (default : ProviderUsageAndLogin.CliAuthFileInfo) with
     fileName := "one.json", authType := "codex", prefixId := "first" }

@@ -35,7 +35,7 @@ private def observed? (pool : AccountVpnPool.Pool) (account : String) (pref : Pr
     if generation == pref.generation then return some (.error reason)
   for t in state.active do
     if t.occupants.any (fun o => o.binding.account == account && o.generation == pref.generation) &&
-        (← t.tunnel.child.tryWait).isNone then return some (.ok t.evidence)
+        !(← t.tunnel.exited) then return some (.ok t.evidence)
   return none
 
 def route (store : CoreStore) (pool? : Option AccountVpnPool.Pool) (dir account provider : String)

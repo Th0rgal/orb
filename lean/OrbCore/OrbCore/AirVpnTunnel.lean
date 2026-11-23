@@ -15,9 +15,14 @@ structure Tunnel where
   release : IO.Promise Unit
   owner : Task (Except IO.Error Unit)
 
+/-- The first check that sees the exit also reaps the child. Later checks
+have no status left to read and raise instead of answering. -/
+def Tunnel.exited (t : Tunnel) : IO Bool := do
+  try return (← t.child.tryWait).isSome catch _ => return true
+
 def Tunnel.stop (t : Tunnel) : IO Unit := do
   try
-    if (← t.child.tryWait).isNone then
+    unless ← t.exited do
       t.child.kill
       discard t.child.wait
   finally
@@ -67,7 +72,7 @@ private def ownsSession (addresses : List ExitAddress) (session : JVal) : Bool :
 /-- The caller must hold the allocation lock while associating this observation
 with a live generation and publishing the admitted binding. -/
 def Tunnel.verify (t : Tunnel) (root server country : String) : IO (Option VerifiedTunnel) := do
-  if (← t.child.tryWait).isSome then return none
+  if ← t.exited then return none
   let now ← IO.monoMsNow
   -- Keep only this child's matching session rows. Every dispatch still probes
   -- the actual exit, and a replacement child starts with an empty cache.
@@ -79,7 +84,7 @@ def Tunnel.verify (t : Tunnel) (root server country : String) : IO (Option Verif
       pure (all.filter (ownsSession t.addresses))
   let ipv6 := t.addresses.any fun | .v6 .. => true | _ => false
   let evidence ← AirVpnObservation.observe t.port ipv6 server country sessions
-  if (← t.child.tryWait).isSome then return none
+  if ← t.exited then return none
   if evidence.isSome && recent.isNone then t.sessionEvidence.set (some (now, sessions))
   return evidence
 
@@ -110,7 +115,7 @@ def startVerified (root sharedDir device server country : String) (port : UInt16
       let mut evidence := none
       for _ in [:6] do
         IO.sleep 1000
-        if (← t.child.tryWait).isSome then break
+        if ← t.exited then break
         evidence ← t.verify root server country
         if evidence.isSome then break
       pure evidence
