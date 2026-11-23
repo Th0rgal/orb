@@ -655,6 +655,15 @@ def mintMissionScopedMcpEnv
     ("SANDBOXED_MCP_WRAPPER", "/usr/local/bin/sandboxed-mcp")
   ]
 
+/-- Normalize an Antigravity OAuth `timestamp` (which may be in Unix seconds or
+    milliseconds) plus `expires_in` seconds into Unix epoch milliseconds for
+    `PUT /managed-auth/antigravity`. -/
+def normalizeAntigravityExpiresAtMs (ts expIn : Nat) : Nat :=
+  if ts == 0 then 1893456000000
+  else
+    let tsSec := if ts > 100000000000 then ts / 1000 else ts
+    (tsSec + expIn) * 1000
+
 /-- Read the active admin Antigravity OAuth payload (`access_token`, `refresh_token`, `expires_at`)
     from `CLI_PROXY_AUTH_DIR` so Core can keep static admin-owned fleet nodes synchronized
     across routine OAuth token rotations without manually copying credentials. -/
@@ -673,7 +682,7 @@ private def readAdminAntigravitySyncPayload? (boundFile : String) : IO (Option J
             if access.isEmpty || refresh.isEmpty then return none
             let ts := (jv.fieldNat? "timestamp").getD 0
             let expIn := (jv.fieldNat? "expires_in").getD 3600
-            let expiresAtMs := if ts > 0 then (ts + expIn) * 1000 else 1893456000000
+            let expiresAtMs := normalizeAntigravityExpiresAtMs ts expIn
             return some (.obj #[
               ("access_token", .str access),
               ("refresh_token", .str refresh),
