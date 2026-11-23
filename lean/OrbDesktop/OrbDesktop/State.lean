@@ -1085,6 +1085,11 @@ def DesktopState.visibleProjectRows (st : DesktopState) : List ChromeSidebarRow 
   visible := visible ++ unassigned
   return (visible ++ archived).toList
 
+/-- Rows that participate in the sidebar hierarchy connectors (`project`, `folder`, `mission`, `file`).
+    Placeholder rows (`empty`) and `section` headers never draw branch connectors or parent stems. -/
+def isSidebarTreeRow (r : ChromeSidebarRow) : Bool :=
+  r.kind == "project" || r.kind == "folder" || r.kind == "mission" || r.kind == "file"
+
 /-- Connector geometry follows visible preorder, independently of the selected row. -/
 def sidebarTreeBranches (rows : List ChromeSidebarRow) :
     List (ChromeSidebarRow × Bool × Bool × List Nat) := Id.run do
@@ -1092,17 +1097,26 @@ def sidebarTreeBranches (rows : List ChromeSidebarRow) :
   let mut nextDepth := 0
   let mut marked := []
   for row in rows.reverse do
-    let depth := row.depth
-    siblings := siblings.filter (· ≤ depth)
-    marked := (row, !siblings.contains depth, decide (nextDepth > depth)) :: marked
-    if !siblings.contains depth then siblings := depth :: siblings
-    nextDepth := depth
+    if !isSidebarTreeRow row then
+      if row.kind == "section" then
+        siblings := []
+        nextDepth := 0
+      marked := (row, true, false) :: marked
+    else
+      let depth := row.depth
+      siblings := siblings.filter (· ≤ depth)
+      marked := (row, !siblings.contains depth, decide (nextDepth > depth)) :: marked
+      if !siblings.contains depth then siblings := depth :: siblings
+      nextDepth := depth
   let mut rails : List Nat := []
   let mut result := #[]
   for (row, last, children) in marked do
-    rails := rails.filter (· < row.depth)
+    if row.kind == "section" then
+      rails := []
+    else
+      rails := rails.filter (· < row.depth)
     result := result.push (row, last, children, rails.map (row.depth - ·))
-    if row.depth > 0 && !last then rails := row.depth :: rails
+    if isSidebarTreeRow row && row.depth > 0 && !last then rails := row.depth :: rails
   return result.toList
 
 def toggleSelection (st : DesktopState) (row : ChromeSidebarRow) (extend : Bool) : DesktopState := Id.run do
