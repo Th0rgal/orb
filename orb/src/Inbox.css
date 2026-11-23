@@ -69,7 +69,8 @@
 .inbox-row.focused, .inbox-row.peeked { background: color-mix(in srgb, var(--bg-active) 45%, transparent); }
 /* Row navigation follows the rounded message surface. */
 .inbox-row:has(.inbox-row-title-btn:focus-visible) {
-  box-shadow: inset 0 0 0 1px var(--overlay-focus);
+  outline: 1px solid var(--focus-border);
+  outline-offset: -1px;
 }
 .inbox-page .inbox-row-title-btn:focus-visible {
   outline: none; border-radius: 0;

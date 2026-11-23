@@ -60,7 +60,7 @@ test('Hermes is the default service; "+" sits like the mission composer and send
  await expect(plus).toBeVisible();
  await expect(plus).toBeEnabled();
  expect(await plusInset(page, '.cloud-agent-page')).toEqual(mission);
- await form.getByLabel('Choose images').setInputFiles({ name: 'notes.txt', mimeType: 'text/plain', buffer: Buffer.from('ORB_ATTACH_OK') });
+ await form.getByLabel('Choose files or images').setInputFiles({ name: 'notes.txt', mimeType: 'text/plain', buffer: Buffer.from('ORB_ATTACH_OK') });
  await expect(form.getByRole('button', { name: 'Remove notes.txt' })).toBeVisible();
  await form.getByLabel('Prompt', { exact: true }).fill('Read the attached notes');
  await form.getByRole('button', { name: 'Create cloud agent' }).click();
@@ -76,7 +76,7 @@ test('a removed chip is not sent, and services without attachments disable "+" w
  await page.goto('/');
  await page.getByRole('button', { name: 'Cloud agent', exact: true }).click();
  const form = page.getByRole('region', { name: 'Cloud agent' });
- await form.getByLabel('Choose images').setInputFiles({ name: 'drop.txt', mimeType: 'text/plain', buffer: Buffer.from('x') });
+ await form.getByLabel('Choose files or images').setInputFiles({ name: 'drop.txt', mimeType: 'text/plain', buffer: Buffer.from('x') });
  await form.getByRole('button', { name: 'Remove drop.txt' }).click();
  await expect(form.getByRole('button', { name: 'Remove drop.txt' })).toHaveCount(0);
  for (const name of ['Grok Bot', 'Cursor Cloud']) {

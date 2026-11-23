@@ -913,7 +913,7 @@ function ReAuthDialog(p: { provider: AIProvider; onClose: () => void; onDone: ()
   };
 
   const beginLogin = () => {
-    setPhase("starting"); setError(null); setPaste("");
+    setPhase("starting"); setError(null); setUnlinked(false); setPaste("");
     const start = polledLogin
       ? startSubscriptionLogin(p.provider.provider_type, p.provider.id || undefined).then(s => ({ id: s.session_id, url: s.auth_url, flow: s.flow, instructions: s.instructions }))
       : startProviderOAuth(p.provider.id).then(s => ({ id: p.provider.id, url: s.url, flow: s.method, instructions: s.instructions }));
@@ -937,10 +937,15 @@ function ReAuthDialog(p: { provider: AIProvider; onClose: () => void; onDone: ()
   const closeLogin = async () => {
     if (closing() || phase() === "finishing") return;
     setClosing(true);
+    stopPolling();
     const s = session();
-    try { if (polledLogin && s && !completed) await cancelSubscriptionLogin(s.id); completed = true; p.onClose(); }
-    catch (e) { setError(`Could not cancel sign-in: ${String(e)}`); }
-    finally { setClosing(false); }
+    try {
+      if (polledLogin && s && !completed) {
+        await cancelSubscriptionLogin(s.id).catch(swallow("providers.cancelLogin"));
+      }
+      completed = true;
+      p.onClose();
+    } finally { setClosing(false); }
   };
   const retryLogin = async () => {
     if (resetting()) return;

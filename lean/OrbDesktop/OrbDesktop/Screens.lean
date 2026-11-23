@@ -1378,7 +1378,7 @@ def buildDesktopScreen (st : DesktopState) (availW availH : SubPx)
         else if st.resourceRows.isNone then [line w "Loading resources…"]
         else if rows.isEmpty then [line w s!"No resource usage · {st.resourceRange}"]
         else items ++ (if rows.length > 4 then [controls] else [])
-      return WidgetNode.box (BoxStyle.col 0 |>.withAlign .center |>.withFixedSize mainW availH) (headerNode :: toolbar :: content)
+      return WidgetNode.box (BoxStyle.col 0 |>.withAlign .center |>.withFixedSize mainW availH |>.withBg mainFill) (headerNode :: toolbar :: content)
     | .inbox => Id.run do
       let line := fun (w : SubPx) (text : String) => screenTextLine theme w (pxToSub 32) (pxToSub 14) (pxToSub 24) pal.textPrimary text
       let button := fun (id : Nat) (width : SubPx) (title : String) =>
@@ -1393,7 +1393,7 @@ def buildDesktopScreen (st : DesktopState) (availW availH : SubPx)
            WidgetNode.box (BoxStyle.row (pxToSub 12))
              ([button 941 (pxToSub 96) "Mark read"] ++ (if index > 0 then [button 942 (pxToSub 80) "Previous"] else []) ++
               (if index + 1 < st.inboxItems.length then [button 943 (pxToSub 64) "Next"] else []))]
-      return WidgetNode.box (BoxStyle.col 0 |>.withFixedSize mainW availH) (headerNode :: content)
+      return WidgetNode.box (BoxStyle.col 0 |>.withFixedSize mainW availH |>.withBg mainFill) (headerNode :: content)
     | .missionTranscript =>
       let bodyH := availH - headerH - composerH
       let bodyNode := buildMissionTranscriptBody st mainW bodyH runs

@@ -1,5 +1,5 @@
 import {createEffect,createMemo,createSignal,Show,onCleanup} from 'solid-js';
-import {api} from './api';
+import {api,connectionVersion} from './api';
 import {AgentChoice} from './AgentChoice';
 import type {CloudProvider,ModelParam} from './cloudAgentApi';
 export interface CloudModel {id:string;name?:string;displayName?:string;parameters?:{id:string;displayName?:string;values:{value:string;displayName?:string}[]}[];variants?:{displayName?:string;isDefault?:boolean;params:ModelParam[]}[]}
@@ -21,6 +21,7 @@ export function CloudModelPicker(p:{provider:CloudProvider;model:string;params:M
  const provider = createMemo(()=>p.provider);
  const [models,setModels]=createSignal<CloudModel[]>([]),[efforts,setEfforts]=createSignal<{id:string;name?:string;displayName?:string}[]>([]),[open,setOpen]=createSignal<'model'|'effort'|null>(null),[loading,setLoading]=createSignal(true);
  createEffect(()=>{
+  void connectionVersion();
   const selectedProvider=provider();
   if(selectedProvider==='grok_bot')return;
   let current=true; // provider changes discard late discovery replies

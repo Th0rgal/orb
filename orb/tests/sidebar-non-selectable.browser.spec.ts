@@ -35,5 +35,5 @@ test('sidebar chrome is not selectable and only rows show focus', async ({page})
   await expect(tree.getByRole('button',{name:'Agent 1',exact:true})).toBeFocused();
   const entry=tree.locator('.tree-entry:has(button:focus)');
   await expect(entry).toHaveCount(1);
-  expect(await entry.evaluate(el=>getComputedStyle(el).boxShadow)).not.toBe('none');
+  expect(await entry.evaluate(el=>getComputedStyle(el).outlineStyle)).not.toBe('none');
 });

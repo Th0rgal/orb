@@ -297,6 +297,10 @@
   box-shadow: none;
 }
 
+.res-filter-chip:focus-visible {
+  border-color: var(--focus-border);
+}
+
 .res-sankey-wrap {
   position: relative;
   width: 100%;
@@ -411,6 +415,10 @@
 .res-dag-row-label.is-hovered {
   background: var(--bg-hover);
   color: var(--fg-strong);
+}
+
+.res-dag-row-label:focus-visible {
+  border-color: var(--focus-border);
 }
 
 .res-dag-row-title {

@@ -844,7 +844,7 @@ export function Composer(p: {
   });
   const plus = (
     <div class="plus-wrap" onPointerDown={(e) => e.stopPropagation()}>
-      <input ref={fileInput} type="file" accept={p.imagesOnly ? "image/png,image/jpeg,image/webp,image/gif" : undefined} multiple hidden aria-label={p.imagesOnly || p.directFileUpload ? "Choose images" : "Choose files or images"} onChange={(event) => { const files = Array.from(event.currentTarget.files ?? []); event.currentTarget.value = ""; void attachMixed(files.map(file => ({ name: file.name, file }))); }} />
+      <input ref={fileInput} type="file" accept={p.imagesOnly ? "image/png,image/jpeg,image/webp,image/gif" : undefined} multiple hidden aria-label={p.imagesOnly ? "Choose images" : "Choose files or images"} onChange={(event) => { const files = Array.from(event.currentTarget.files ?? []); event.currentTarget.value = ""; void attachMixed(files.map(file => ({ name: file.name, file }))); }} />
       <input ref={folderInput} type="file" multiple hidden aria-label="Choose a folder" {...{ webkitdirectory: "" }} onChange={(event) => { const files = Array.from(event.currentTarget.files ?? []); event.currentTarget.value = ""; void attachSources(files.map(file => ({ name: file.name, file, relativePath: file.webkitRelativePath || undefined }))); }} />
       <button class="plus" title={p.imagesOnly ? "Attach image" : p.directFileUpload ? "Attach file or image" : "Add context"} aria-label={p.imagesOnly ? "Attach image" : p.directFileUpload ? "Attach file or image" : undefined} disabled={uploading() || sendingLocked()} onClick={() => { if (p.imagesOnly || p.directFileUpload) void chooseFiles(); else { const next = !ctx(); setCtx(next); if (!next) setCtxFolder(""); } }}>
         <Ic.PlusIcon size={14} />

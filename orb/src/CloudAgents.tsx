@@ -5,7 +5,7 @@ import * as Ic from "./icons";
 import { For, Show, createMemo, createSignal, createEffect, on, onMount, onCleanup } from 'solid-js';
 import { createPinnedScroll } from './mission/pinnedScroll';
 import { JumpToLatest } from './mission/JumpToLatest';
-import { api, getMission, getRemoteNodes, openExternalUrl, type Mission, type RemoteNodeView } from './api';
+import { api, connectionVersion, getMission, getRemoteNodes, openExternalUrl, type Mission, type RemoteNodeView } from './api';
 import { ForkMission, type CloudHandoffTarget } from './ForkMission';
 import { harnessChoices, refreshHarnessChoices, refreshNodeAntigravityModels } from './harnessPick';
 import { orbCloudHandoffStep } from './orbKernel';
@@ -103,7 +103,7 @@ export function CloudAgentPage(p: { project: string; path?: string; projects?: {
     try { const list = await cloudAccounts(); setAccounts(list); setLoaded(true); if (!explicit) setProvider(defaultCloudProvider(list, readCloudProvider())); }
     catch(e) { setAccountsError(String(e)); }
   };
-  onMount(() => { void loadAccounts(); });
+  createEffect(() => { void connectionVersion(); void loadAccounts(); });
   const choose = (value: CloudProvider) => {
     explicit = true; writeCloudProvider(value);
     setError(''); setProvider(value); setAccountId(''); setModel(''); setModelParams([]); setRepo(''); setRef('');
@@ -155,7 +155,7 @@ export function CloudAgentPage(p: { project: string; path?: string; projects?: {
       </div>
       <Show when={account()}><AgentChoice label={provider()==='hermes'?'Profile':'Account'} description={account()?.label} meta value={account()!.id} items={accounts().filter(a => a.provider === provider()).map(a => ({value:a.id, label:cloudAccountLabel(a),description:a.label}))}
         icon={<ProviderLogo type={provider()}/>} suffix={<Show when={account()?.experimental}><span class="cloud-experimental" title="Experimental connector" aria-label="Experimental connector"><Ic.FlaskIcon size={13}/></span></Show>}
-        disabled={busy()} open={open() === 'account'} onOpen={() => setOpen('account')} onClose={close} onSelect={setAccountId}/></Show>
+        disabled={busy()} open={open() === 'account'} onOpen={() => setOpen('account')} onClose={close} onSelect={id => { setAccountId(id); setModel(''); setModelParams([]); setRepo(''); setRef(''); }}/></Show>
     </div>
     {/* The shared composer, as on a new mission: "+" sits at the same left inset. */}
     <Composer tall autofocus picker={false} busy={false} onPending={() => {}} onSendError={setError}
@@ -210,7 +210,10 @@ export function CloudConversation(p: { id: string; active?: boolean; launch?: Cl
   });
   let attempt: {signature: string; text: string; key: string; model:string; params:ModelParam[]} | undefined; let disposed = false; let refreshing: Promise<void> | undefined; let queuedManual = false;
   const refresh = (manual = false): Promise<void> => {
-    if (manual) setLoadError('');
+    if (manual) {
+      setLoadError('');
+      if (!accounts().length) loadConvAccounts();
+    }
     if (refreshing) { queuedManual ||= manual; return refreshing; }
     refreshing = (async () => {
       try { const [e, m] = await Promise.all([cloudExecution(p.id), getMission(p.id)]);
@@ -226,9 +229,10 @@ export function CloudConversation(p: { id: string; active?: boolean; launch?: Cl
   };
   const working = (t: {phase: string}) => ['queued', 'submitting', 'running', 'waiting_user', 'cancel_requested'].includes(t.phase);
   const active = () => execution()?.turns.some(working) ?? false;
-  onMount(() => {
+  const loadConvAccounts = () => {
     void cloudAccounts().then(value => { if (!disposed) setAccounts(value); }).catch(e => { if (!disposed) setLoadError(String(e)); });
-  });
+  };
+  createEffect(() => { void connectionVersion(); loadConvAccounts(); });
   createEffect(() => {
     if (!p.id || !isSlotActive()) return;
     void refresh();

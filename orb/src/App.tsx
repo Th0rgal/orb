@@ -1764,8 +1764,11 @@ export default function App() {
       activityMissions={missions()}
       currentMission={(() => { const m = findKnownMission(currentMissionId()); return m ? movedMission(m) : undefined; })()}
       harnessChoices={harnessChoices()}
-      forkChoices={mission => harnessChoices(missionAssignedNode(mission) ?? "core")}
-      onForkOpen={mission => void refreshNodeAntigravityModels(missionAssignedNode(mission) ?? "core")}
+      forkChoices={mission => harnessChoices(isClientPlacement(mission) || localBinding(mission.id) ? "local" : (missionAssignedNode(mission) ?? "core"))}
+      onForkOpen={mission => {
+        const dest = isClientPlacement(mission) || localBinding(mission.id) ? "local" : (missionAssignedNode(mission) ?? "core");
+        if (dest === "local") void refreshLocalAgents(false); else void refreshNodeAntigravityModels(dest);
+      }}
       onFork={commitFork}
       selected={selected}
       onDeleted={ids => {

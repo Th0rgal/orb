@@ -55,4 +55,22 @@ private def widget (scale120 : Nat) (id : Nat) : Option Rect :=
 #guard liveBadgeKind "paused" == "pause" && liveBadgeKind "failed" == "alert"
 #guard liveBadgeKind "completed" == "check" && liveBadgeKind "awaiting_user" == ""
 
+-- Embedded sidebar (GTK hybrid host) omits its own right border & padding so GtkPaned paints the
+-- sole 1 px seam; standalone LeanUI retains its 1 px right border across themes and DPI scales.
+private def sidebarBorderInvariant (light embedded : Bool) (scale120 : Nat) : Bool :=
+  let st : DesktopState := { geomState with theme := if light then orbLightTheme else orbDarkTheme }
+  let root := buildSidebarChrome st (pxToSub 923) (embedded := embedded)
+  let rightBorder := match root.payloadOf with | .rrect _ _ b => b.widths.right | _ => 999
+  let expected := if embedded then 0 else st.theme.borderWidth
+  let (box, _) := renderWidgetTree scale120 chromeSidebarWidthSub (pxToSub 923) st.initialFocusState st.theme root
+  rightBorder == expected && root.styleOf.padding.right == expected &&
+    box.rectDev.w == (220 * scale120) / 120
+
+#guard sidebarBorderInvariant false true 120
+#guard sidebarBorderInvariant true true 120
+#guard sidebarBorderInvariant false false 120
+#guard sidebarBorderInvariant true false 120
+#guard sidebarBorderInvariant false true 240
+#guard sidebarBorderInvariant false false 240
+
 end OrbDesktop.Spec
