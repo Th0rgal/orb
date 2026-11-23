@@ -6076,13 +6076,13 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
             ("custom_models", existing.customModels != updated.customModels)].filterMap
             (fun (k, c) => if c then some k else none)
           appendProviderAuditLog st.store caller.userId (if isAdm then "admin" else "member") "edit" pid changed s!"{nowEpochSec}"
+          let syncErr? ← if existing.enabled != updated.enabled then
+            syncSidecarAuthFileDisabledForProvider st.store st.cfg.workingDir pid (!updated.enabled)
+          else pure none
           let refreshed ← loadRoutingChainsFromStore st.store st.cfg.workingDir
           discard <| publishRoutingChainsUpdate st refreshed
-          if existing.enabled != updated.enabled then
-            if let some errResp ← syncSidecarAuthFileDisabledForProvider
-                st.store st.cfg.workingDir pid (!updated.enabled) then
-              let (code, ctype, body) := errResp
-              return .ok { status := code, contentType := ctype, body := body }
+          if let some (code, ctype, body) := syncErr? then
+            return .ok { status := code, contentType := ctype, body := body }
           if !isAdm && !own then
             let uPrefs ← getUserProviderPrefs st.store caller.userId
             return .ok (mkJson 200 (renderAIProviderForCallerJson updated false (isUserProviderEnabled uPrefs updated.id)))

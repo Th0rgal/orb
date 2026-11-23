@@ -415,7 +415,8 @@ private def museDeviceToken (providerType : String) (matchedAuth? : Option CliAu
     else if !legacy.isEmpty && !legacy.endsWith ".json" then legacy
     else ""
 
-def loadHydratedProviders (store : CoreStore) (workingDir : String) : IO (Array HydratedProvider) := do
+def loadHydratedProviders (store : CoreStore) (workingDir : String)
+    (includeDisabledForAll : Bool := false) : IO (Array HydratedProvider) := do
   let key32? ← loadPrivateKeyBytes? workingDir store.rootDir
   let dbProvs ← listAIProviders store
   let rawLegacy ← readDataJsonFile workingDir store.rootDir "ai_providers.json"
@@ -457,11 +458,17 @@ def loadHydratedProviders (store : CoreStore) (workingDir : String) : IO (Array 
      let legSandboxedId := (leg?.bind (fun j => (j.fieldStr? "sandboxed_provider_id").orElse (fun _ => j.fieldStr? "account_id"))).getD ""
     let legAccessTok := (legOauthObj?.bind (fun o => o.fieldStr? "access_token")).getD ""
 
-    let typed := authFiles.filter (fun f => !f.disabled && providerTypeMatchesAuthType p.providerType f.authType)
+    let allTyped := authFiles.filter (fun f => providerTypeMatchesAuthType p.providerType f.authType)
+    let typed := allTyped.filter (fun f => !f.disabled)
     let singleton := plainKey == "cli-proxy-managed" && (dbProvs.filter (fun r => r.providerType == p.providerType)).size == 1
-    let matchFile := matchCredential? typed p.id memberAdded legAuthFile legRefreshFile legSandboxedId legEmail
-    let boundAuth? := matchFile false
-    let matchedAuth? := boundAuth?.orElse fun _ => if singleton then matchFile true else none
+    let resolveIn := fun (fs : Array CliAuthFileInfo) =>
+      let b := matchCredential? fs p.id memberAdded legAuthFile legRefreshFile legSandboxedId legEmail false
+      let m := b.orElse fun _ => if singleton then matchCredential? fs p.id memberAdded legAuthFile legRefreshFile legSandboxedId legEmail true else none
+      (b, m)
+    let (boundActive?, matchedActive?) := resolveIn typed
+    let (boundAuth?, matchedAuth?) :=
+      if matchedActive?.isSome || (p.enabled && !includeDisabledForAll) then (boundActive?, matchedActive?)
+      else resolveIn allTyped
 
     let metaInfo := lookupProviderMeta p.providerType
     let envKeyVal ← match metaInfo.envVar? with
@@ -547,9 +554,13 @@ def loadHydratedProviders (store : CoreStore) (workingDir : String) : IO (Array 
       let oauthObj? := leg.field? "oauth"
       let refFile := (oauthObj?.bind (fun o => o.fieldStr? "refresh_token")).getD ""
       let accTok := (oauthObj?.bind (fun o => o.fieldStr? "access_token")).getD ""
-      let typed := authFiles.filter (fun f => !f.disabled && providerTypeMatchesAuthType pType f.authType)
+      let allTyped := authFiles.filter (fun f => providerTypeMatchesAuthType pType f.authType)
+      let typed := allTyped.filter (fun f => !f.disabled)
       let authFile := ((leg.fieldStr? "cli_proxy_auth_file").orElse fun _ => leg.fieldStr? "auth_file").getD ""
-      let matchedAuth? := matchCredential? typed lid false authFile refFile "" email false
+      let matchedActive? := matchCredential? typed lid false authFile refFile "" email false
+      let matchedAuth? :=
+        if matchedActive?.isSome || (en && !includeDisabledForAll) then matchedActive?
+        else matchCredential? allTyped lid false authFile refFile "" email false
       let hasApi := !aKey.isEmpty && aKey != "cli-proxy-managed"
       let hasOa := matchedAuth?.isSome || !accTok.isEmpty || (pType.toLower == "muse-code" && !refFile.isEmpty && !refFile.endsWith ".json")
       let effLegTok :=
@@ -587,11 +598,16 @@ def loadHydratedProviders (store : CoreStore) (workingDir : String) : IO (Array 
 
   -- Any sidecar login may precede creation of a Core provider row. Disabled files with no
   -- matching row stay visible so an operator can see the login and re-enable it; a file that
-  -- belongs to a disabled Core row is not duplicated.
-  for af in authFiles do
-    let pType := if af.authType == "codex" then "openai" else if af.authType == "claude" then "anthropic" else af.authType
-    if !out.any (fun hp => hp.oauthFile == af.fileName ||
-        (!hp.enabled && hp.id == af.prefixId && !af.prefixId.isEmpty)) then
+  -- belongs to a disabled Core row or is a disabled superseded login for an already-hydrated
+  -- account is not duplicated.
+  let orderedAuthFiles := (authFiles.filter (!·.disabled)) ++ (authFiles.filter (·.disabled))
+  for af in orderedAuthFiles do
+    let pType := authTypeToProviderType af.authType
+    let supersededDisabled := af.disabled && out.any (fun hp =>
+      hp.providerType == pType && (
+        authFileMatchesRowId af hp.id false ||
+        (!af.email.isEmpty && hp.accountEmail.trimAscii.toString.toLower == af.email.trimAscii.toString.toLower)))
+    if !out.any (fun hp => hp.oauthFile == af.fileName) && !supersededDisabled then
       out := out.push { (default : HydratedProvider) with
         id := if af.prefixId.isEmpty || af.prefixId == vpnModelPrefix af.fileName || out.any (fun hp => hp.id == af.prefixId) ||
             (authFiles.filter (fun f => f.prefixId == af.prefixId)).size != 1 then fileAccountId pType af.fileName else af.prefixId
@@ -2673,23 +2689,35 @@ private def matchSidecarFileForProvider?
     let candidateFiles := if includeDisabled then files else files.filter (fun f => !f.disabled)
     let typeFiles := candidateFiles.filter (fun (f : SidecarAuthFileEntry) =>
       providerTypeMatchesAuthType hp.providerType f.provider)
-    let oauthRows := hps.filter (fun (p : HydratedProvider) =>
-      p.hasOAuth && !p.hasApiKey && p.providerType == hp.providerType)
-    let rowEmail := hp.accountEmail.trimAscii.toString.toLower
-    let emailRows :=
-      if rowEmail.isEmpty then #[]
-      else oauthRows.filter (fun (p : HydratedProvider) => p.accountEmail.trimAscii.toString.toLower == rowEmail)
-    let emailFiles :=
-      if rowEmail.isEmpty then #[]
-      else typeFiles.filter (fun (f : SidecarAuthFileEntry) => f.email.trimAscii.toString.toLower == rowEmail)
-    if !rowEmail.isEmpty && emailRows.size == 1 && emailFiles.size == 1 then
-      emailFiles[0]?
-    else if oauthRows.size == 1 && typeFiles.size == 1 then
-      let f := typeFiles[0]!
-      let fileEmail := f.email.trimAscii.toString.toLower
-      if fileEmail.isEmpty || fileEmail == rowEmail then some f else none
+    let uniqueBound := !hp.oauthFile.isEmpty &&
+      (hps.filter (fun p => p.oauthFile == hp.oauthFile)).size == 1
+    let exactBound? := if uniqueBound then typeFiles.find? (fun f => f.name == hp.oauthFile) else none
+    if exactBound?.isSome then exactBound?
     else
-      none
+      let oauthRows := hps.filter (fun (p : HydratedProvider) =>
+        p.hasOAuth && !p.hasApiKey && p.providerType == hp.providerType)
+      let rowEmail := hp.accountEmail.trimAscii.toString.toLower
+      let emailRows :=
+        if rowEmail.isEmpty then #[]
+        else oauthRows.filter (fun (p : HydratedProvider) => p.accountEmail.trimAscii.toString.toLower == rowEmail)
+      let emailFiles :=
+        if rowEmail.isEmpty then #[]
+        else typeFiles.filter (fun (f : SidecarAuthFileEntry) => f.email.trimAscii.toString.toLower == rowEmail)
+      if !rowEmail.isEmpty && emailRows.size == 1 && emailFiles.size == 1 then
+        emailFiles[0]?
+      else if oauthRows.size == 1 && typeFiles.size == 1 then
+        let f := typeFiles[0]!
+        let fileEmail := f.email.trimAscii.toString.toLower
+        if fileEmail.isEmpty || fileEmail == rowEmail then some f else none
+      else
+        none
+
+private def matchPreferredSidecarFileForProvider?
+    (hps : Array HydratedProvider)
+    (files : Array SidecarAuthFileEntry)
+    (hp : HydratedProvider) : Option SidecarAuthFileEntry :=
+  (matchSidecarFileForProvider? hps files hp).orElse
+    (fun _ => matchSidecarFileForProvider? hps files hp (includeDisabled := true))
 
 /-- Reporting-only hint for a failed routing chain. Does not alter selection or recovery. -/
 def sidecarLoginFailureMessage (store : CoreStore) (workingDir : String)
@@ -2699,10 +2727,10 @@ def sidecarLoginFailureMessage (store : CoreStore) (workingDir : String)
   let affected := hps.filter fun hp =>
     (accounts.contains hp.id || accounts.any (fun k =>
       k == s!"cliproxyapi:{hp.providerType}" || k.startsWith s!"cliproxyapi:{hp.providerType}:")) &&
-    (matchSidecarFileForProvider? hps files hp (includeDisabled := true)).any (·.needsReauth)
+    (matchPreferredSidecarFileForProvider? hps files hp).any (·.needsReauth)
   if affected.isEmpty then return none
   let emails := affected.filterMap fun hp =>
-    (matchSidecarFileForProvider? hps files hp (includeDisabled := true)).bind fun file =>
+    (matchPreferredSidecarFileForProvider? hps files hp).bind fun file =>
       if file.email.trimAscii.toString.isEmpty then none else some file.email.trimAscii.toString
   let identity := if emails.isEmpty then "the provider login" else String.intercalate ", " emails.toList
   return some s!"Sign in again for {identity}: the login is refresh-failed, expired or quota-exhausted. See Providers for the sidecar's reported reset."
@@ -2761,14 +2789,17 @@ private def setSidecarAuthFileDisabled (providerId : String) (file : SidecarAuth
 def syncSidecarAuthFileDisabledForProvider
     (store : CoreStore) (workingDir : String) (providerId : String) (disabled : Bool) :
     IO (Option (Nat × String × ByteArray)) := do
-  let hps ← loadHydratedProviders store workingDir
+  let hps ← loadHydratedProviders store workingDir (includeDisabledForAll := !disabled)
   match hps.find? (fun hp => hp.id == providerId) with
   | none => return none
   | some hp =>
     if !(hp.hasOAuth && !hp.hasApiKey) then return none
     else
       let files ← fetchSidecarAuthFiles
-      match matchSidecarFileForProvider? hps files hp (includeDisabled := true) with
+      let matched? :=
+        if disabled then matchPreferredSidecarFileForProvider? hps files hp
+        else matchSidecarFileForProvider? hps files hp (includeDisabled := true)
+      match matched? with
       | none => return none
       | some file =>
         if file.disabled == disabled then return none
@@ -3164,9 +3195,7 @@ def dispatchProviderAndAiRoute
         (coreCooldowns.foldl (fun (best : UInt64 × Option String) c =>
           let r := c.remainingSecs nowSec
           if r > best.1 then (r, some (cooldownReasonSlug c.reason)) else best) (0, none)).2
-      let matchedSidecar? :=
-        (matchSidecarFileForProvider? hps sidecarFiles hp).orElse
-          (fun _ => matchSidecarFileForProvider? hps sidecarFiles hp (includeDisabled := true))
+      let matchedSidecar? := matchPreferredSidecarFileForProvider? hps sidecarFiles hp
       let sidecarDisabled := (matchedSidecar?.map (·.disabled)).getD false
       let loginUnavailable := matchedSidecar?.any (·.needsReauth)
       let sidecarRem : UInt64 := if sidecarDisabled then 0 else (matchedSidecar?.map (·.remainingSecs)).getD 0
@@ -3261,8 +3290,7 @@ def dispatchProviderAndAiRoute
     if let some hp := matchedProv? then
       let sidecarFiles ← fetchSidecarAuthFiles
       -- Recovery retains enabled-only matching even when reporting also sees old disabled files.
-      let recoveryFile? := (matchSidecarFileForProvider? hps sidecarFiles hp).orElse
-        fun _ => matchSidecarFileForProvider? hps sidecarFiles hp (includeDisabled := true)
+      let recoveryFile? := matchPreferredSidecarFileForProvider? hps sidecarFiles hp
       if let some file := recoveryFile? then
         if let some errResp ← clearSidecarAuthFileCooldown hp.id file then
           return some errResp
@@ -3338,7 +3366,7 @@ def dispatchProviderAndAiRoute
           let uEn? := if isLegacyUnscoped then none else some (isUserProviderEnabled uPrefs hp.id)
           let rejected ← loginRejectedFor hub store hp
           let rejected := rejected ||
-            (matchSidecarFileForProvider? hps sidecarFiles hp (includeDisabled := true)).any (·.needsReauth)
+            (matchPreferredSidecarFileForProvider? hps sidecarFiles hp).any (·.needsReauth)
           let obs? ← match pacingTracker? with
             | some tr => if effAdmin then lookupObservedKeyRpm? tr hp.id else pure none
             | none => pure none
@@ -3635,7 +3663,7 @@ def dispatchProviderAndAiRoute
         let rejected ← loginRejectedFor hub store hp
         let sidecarFiles ← fetchSidecarAuthFiles
         let rejected := rejected ||
-          (matchSidecarFileForProvider? hps sidecarFiles hp (includeDisabled := true)).any (·.needsReauth)
+          (matchPreferredSidecarFileForProvider? hps sidecarFiles hp).any (·.needsReauth)
         let usernames ← listUsernamesById store
         if effAdmin then
           let obs? ← match pacingTracker? with
