@@ -850,20 +850,44 @@ private def r26SidecarToggleAndOrphanContract
       | other => other
     else row
   let orphanPath := s!"{root}/auth-empty/xai-orphan.json"
+  let agRowId := "10000000-0000-4000-8000-000000000099"
+  let agAuthPath := s!"{root}/auth-empty/antigravity-disabled-row.json"
+  let supersededPath := s!"{root}/auth-empty/claude-superseded.json"
+  let agLegacy := JVal.obj #[
+    ("id", .str agRowId), ("provider_type", .str "antigravity"), ("name", .str "Antigravity disabled fixture"),
+    ("enabled", .bool false), ("account_email", .str "ag-disabled@fixture.invalid"),
+    ("cli_proxy_auth_file", .str "antigravity-disabled-row.json")
+  ]
   try
-    IO.FS.writeFile s!"{root}/.sandboxed-sh/ai_providers.json" (renderCompact (.arr updated))
+    IO.FS.writeFile s!"{root}/.sandboxed-sh/ai_providers.json" (renderCompact (.arr (updated.push agLegacy)))
     match ← upsertAIProvider app.store {
         id := oauthOnly, providerType := "anthropic", name := "Anthropic fixture",
         apiKey := "cli-proxy-managed", updatedAt := "1700001000" } with
     | .error e => throw (IO.userError s!"R26 seed provider failed: {e}")
     | .ok () => pure ()
+    match ← upsertAIProvider app.store {
+        id := agRowId, providerType := "antigravity", name := "Antigravity disabled fixture",
+        enabled := false, apiKey := "", updatedAt := "1700001000" } with
+    | .error e => throw (IO.userError s!"R26 seed antigravity provider failed: {e}")
+    | .ok () => pure ()
     IO.FS.writeFile orphanPath
       "{\"type\":\"xai\",\"email\":\"orphan@fixture.invalid\",\"disabled\":true}"
+    IO.FS.writeFile agAuthPath
+      "{\"type\":\"antigravity\",\"email\":\"ag-disabled@fixture.invalid\",\"prefix\":\"antigravity\",\"access_token\":\"fixture-only\",\"disabled\":true}"
+    IO.FS.writeFile supersededPath
+      "{\"type\":\"claude\",\"email\":\"owner-secret@fixture.invalid\",\"disabled\":true}"
     let listed := (← getJson app jwt "/api/ai/providers" now).asArr?.getD #[]
     let orphanId := "cliproxyapi:xai:fb5d024d63da95145145c8093f7628bf4ebfe247900470810378269f4cd6da00"
     let orphan := (listed.find? (fun v => v.fieldStr? "id" == some orphanId)).getD .null
     if orphan.isNull then
       failures := failures.push "R26 sidecar: a disabled sidecar login with no Core row must be listed"
+    let agMatches := listed.filter (fun v => v.fieldStr? "account_email" == some "ag-disabled@fixture.invalid")
+    if agMatches.size != 1 || agMatches[0]!.fieldStr? "id" != some agRowId ||
+       agMatches[0]!.fieldBool? "has_oauth" != some true then
+      failures := failures.push s!"R26 sidecar: disabled Core row with disabled on-disk auth file must appear once with has_oauth=true, got {renderCompact (.arr agMatches)}"
+    let ownerMatches := listed.filter (fun v => v.fieldStr? "account_email" == some "owner-secret@fixture.invalid")
+    if ownerMatches.size != 1 || ownerMatches[0]!.fieldStr? "id" != some oauthOnly then
+      failures := failures.push s!"R26 sidecar: superseded disabled sidecar file must not duplicate an already-hydrated account, got {renderCompact (.arr ownerMatches)}"
     let healthRows := (← getJson app jwt "/api/model-routing/health" now).asArr?.getD #[]
     let orphanHealth := (healthRows.find? (fun v => v.fieldStr? "account_id" == some orphanId)).getD .null
     if orphanHealth.fieldStr? "account_state" != some "disabled" ||
@@ -881,6 +905,7 @@ private def r26SidecarToggleAndOrphanContract
     sidecarFilesJsonRef.set
       ("{\"files\":[" ++
         "{\"name\":\"claude-secret-file.json\",\"provider\":\"claude\",\"email\":\"owner-secret@fixture.invalid\",\"disabled\":true,\"status\":\"disabled\",\"cooldowns\":[]}," ++
+        "{\"name\":\"antigravity-disabled-row.json\",\"provider\":\"antigravity\",\"email\":\"ag-disabled@fixture.invalid\",\"disabled\":true,\"status\":\"disabled\",\"cooldowns\":[]}," ++
         "{\"name\":\"xai-orphan.json\",\"provider\":\"xai\",\"email\":\"orphan@fixture.invalid\",\"disabled\":true,\"status\":\"disabled\",\"cooldowns\":[]}" ++
       "]}")
 
@@ -891,10 +916,20 @@ private def r26SidecarToggleAndOrphanContract
        (enableBodies[0]!.splitOn "\"name\":\"claude-secret-file.json\"").length != 2 ||
        (enableBodies[0]!.splitOn "\"disabled\":false").length != 2 then
       failures := failures.push s!"R26 sidecar: re-enabling the Core row must re-enable its login once, got code={enableCode} bodies={enableBodies}"
+
+    patchBodies.set #[]
+    let (enableAgCode, _) ← putJson app jwt s!"/api/ai/providers/{agRowId}" "{\"enabled\":true}" now
+    let enableAgBodies ← patchBodies.get
+    if enableAgCode != 200 || enableAgBodies.size != 1 ||
+       (enableAgBodies[0]!.splitOn "\"name\":\"antigravity-disabled-row.json\"").length != 2 ||
+       (enableAgBodies[0]!.splitOn "\"disabled\":false").length != 2 then
+      failures := failures.push s!"R26 sidecar: re-enabling a disabled Antigravity row (apiKey=\"\") must re-enable its sidecar login once, got code={enableAgCode} bodies={enableAgBodies}"
   finally
     discard <| deleteAIProvider app.store oauthOnly
+    discard <| deleteAIProvider app.store agRowId
     IO.FS.writeFile s!"{root}/.sandboxed-sh/ai_providers.json" origProvidersRaw
-    discard <| (IO.FS.removeFile orphanPath).toBaseIO
+    for p in #[orphanPath, agAuthPath, supersededPath] do
+      discard <| (IO.FS.removeFile p).toBaseIO
     stop.set true
     discard <| IO.wait server
     discard <| LeanSys.Posix.closeFd fd

@@ -17,6 +17,13 @@ structure CliAuthFileInfo where
   deviceToken : String := ""
   deriving Repr, Inhabited
 
+def authTypeToProviderType (authType : String) : String :=
+  match authType.toLower with
+  | "codex" => "openai"
+  | "claude" => "anthropic"
+  | "meta" => "muse-code"
+  | other => other
+
 def providerTypeMatchesAuthType (provType authType : String) : Bool :=
   match provType.toLower, authType.toLower with
   | "anthropic", "claude" | "anthropic", "anthropic" => true
@@ -26,6 +33,15 @@ def providerTypeMatchesAuthType (provType authType : String) : Bool :=
   | "xai", "xai" => true
   | "muse-code", "meta" | "muse-code", "muse-code" => true
   | p, a => !p.isEmpty && p == a
+
+private def idWithoutHyphens (id : String) : String :=
+  String.ofList (id.toList.filter (· != '-'))
+
+def authFileMatchesRowId (f : CliAuthFileInfo) (id : String) (member : Bool := false) : Bool :=
+  !id.isEmpty && (if member then f.prefixId == id else
+    f.prefixId == id || f.accountId == id ||
+    (!f.authType.isEmpty && f.prefixId == s!"orb-{f.authType}-{idWithoutHyphens id}") ||
+    (!f.authType.isEmpty && f.fileName == s!"{f.authType}-sandboxed-{id}.json"))
 
 /-- An unmatched login keeps the same identifier when another login joins,
 departs, refreshes, or changes its display label. -/
@@ -42,14 +58,12 @@ def matchCredential? (files : Array CliAuthFileInfo) (account : String) (member 
     (file refreshFile linkedId email : String) (legacySingleton : Bool) : Option CliAuthFileInfo := Id.run do
   if account.isEmpty then return none
   let named := if !file.isEmpty then file else if refreshFile.endsWith ".json" then refreshFile else ""
-  let byId := fun (f : CliAuthFileInfo) (id : String) =>
-    !id.isEmpty && (f.prefixId == id || f.accountId == id)
-  let own := files.filter (fun f => if member then f.prefixId == account else byId f account)
+  let own := files.filter (fun f => authFileMatchesRowId f account member)
   let mut possible := if own.isEmpty then files else own
   if member then possible := own
   else
     if !named.isEmpty then possible := possible.filter (fun f => f.fileName == named)
-    if !linkedId.isEmpty then possible := possible.filter (fun f => byId f linkedId)
+    if !linkedId.isEmpty then possible := possible.filter (fun f => authFileMatchesRowId f linkedId false)
     if !email.isEmpty then possible := possible.filter (fun f => f.email.toLower == email.toLower)
     if own.isEmpty && named.isEmpty && linkedId.isEmpty && email.isEmpty && !legacySingleton then return none
   if possible.size == 1 then return possible[0]? else return none
