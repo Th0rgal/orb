@@ -49,7 +49,7 @@ object OrbAccountVpn {
                 blocked -> route["message"] as? String ?: "The VPN route is unavailable."
                 else -> ""
             },
-            retry = blocked,
+            retry = blocked && !pending,
             poll = pending,
         )
     }
@@ -61,7 +61,7 @@ object OrbAccountVpn {
     fun missingSetting(status: Int?, body: String?, path: String): Boolean {
         if (status != 404 || body == null) return false
         val parsed = OrbJSON.dict(OrbJSON.parse(body)) ?: return false
-        return parsed["error"] == "not_found"
+        return parsed["error"] == "not_found" && parsed["path"] == path
     }
 
     fun routerAccess(payload: Any?): Boolean? = OrbJSON.dict(payload)?.get("allowed") as? Boolean
