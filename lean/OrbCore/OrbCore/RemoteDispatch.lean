@@ -655,8 +655,71 @@ def mintMissionScopedMcpEnv
     ("SANDBOXED_MCP_WRAPPER", "/usr/local/bin/sandboxed-mcp")
   ]
 
+/-- Read the active admin Antigravity OAuth payload (`access_token`, `refresh_token`, `expires_at`)
+    from `CLI_PROXY_AUTH_DIR` so Core can keep static admin-owned fleet nodes synchronized
+    across routine OAuth token rotations without manually copying credentials. -/
+private def readAdminAntigravitySyncPayload? (boundFile : String) : IO (Option JVal) := do
+  if boundFile.isEmpty || !boundFile.endsWith ".json" || boundFile.contains '/' || boundFile.contains '\\' then
+    return none
+  let dirs ← candidateCliProxyAuthDirs
+  for d in dirs do
+    for cand in #[System.FilePath.mk d / boundFile, System.FilePath.mk d / "auth" / boundFile] do
+      if ← cand.pathExists then
+        if let some raw ← (try some <$> IO.FS.readFile cand catch _ => pure none) then
+          if let .ok jv := OrbBin.Json.parse raw then
+            if (jv.fieldBool? "disabled") == some true then return none
+            let access := ((jv.fieldStr? "access_token").getD "").trimAscii.toString
+            let refresh := ((jv.fieldStr? "refresh_token").getD "").trimAscii.toString
+            if access.isEmpty || refresh.isEmpty then return none
+            let ts := (jv.fieldNat? "timestamp").getD 0
+            let expIn := (jv.fieldNat? "expires_in").getD 3600
+            let expiresAtMs := if ts > 0 then (ts + expIn) * 1000 else 1893456000000
+            return some (.obj #[
+              ("access_token", .str access),
+              ("refresh_token", .str refresh),
+              ("expires_at", .nat expiresAtMs)
+            ])
+  return none
+
+/-- Determine whether an admin-owned Antigravity CLI turn on `effNodeId` may run through
+    the static node's `managed_auth` (`agy` with full workspace & MCP tools) because:
+    1. the caller is the bootstrap admin and the mission has no shared-workspace grant binding;
+    2. `effNodeId` is a static, non-dedicated fleet node neither reserved by `NativeCanary`
+       nor bound to `NativeSharedWorkspace.holderFor?` (ephemeral `managed-*` VMs never qualify);
+    3. at least one admin-owned Antigravity provider is enabled (including caller prefs), and
+       every enabled admin Antigravity provider is routed `Direct` (`country == ""` in
+       `account_vpn_routes`), never bypassing a configured VPN exit.
+    Returns `some boundOauthFile` (possibly empty) when eligible, or `none` when the turn
+    must go through `NativeSharedWorkspace`. -/
+def adminDirectAntigravityStaticTarget?
+    (store : CoreStore) (coreWorkDir effNodeId ownerUserId bootstrapAdminId : String)
+    (bound? : Option String) (rollout : NativeCanary.Scope)
+    (holderPresent : Bool) (staticNodes : Array StaticRemoteNode) : IO (Option String) := do
+  unless !bootstrapAdminId.isEmpty && ownerUserId == bootstrapAdminId && bound?.isNone do
+    return none
+  if rollout.reserves effNodeId || holderPresent then
+    return none
+  unless staticNodes.any (fun n => n.id == effNodeId && n.dedicatedOwner?.isNone) do
+    return none
+  let hydrated ← loadHydratedProviders store coreWorkDir
+  let prefs ← getUserProviderPrefs store ownerUserId
+  let allAdminAg := hydrated.filter fun hp =>
+    hp.providerType == "antigravity" &&
+      (hp.createdByUserId.isEmpty || hp.createdByUserId == bootstrapAdminId)
+  for hp in allAdminAg do
+    match ← OrbCore.AccountVpnRoutes.snapshot store.missionsDb hp.id with
+    | .ok (.direct _) => pure ()
+    | _ => return none
+  let activeAdminAg := allAdminAg.filter fun hp => hp.enabled && isUserProviderEnabled prefs hp.id
+  if activeAdminAg.isEmpty then
+    return none
+  let oauthFile := (activeAdminAg.find? (fun h => !h.boundOauthFile.isEmpty)).map (·.boundOauthFile) |>.getD ""
+  return some oauthFile
+
 private def prepareRemoteHarnessCommand
     (store : CoreStore)
+    (mc? : Option ManagedComputeStore)
+    (relayHub? : Option RelayHub)
     (sup : RemoteJobSupervisor)
     (coreWorkDir effNodeId jobId : String)
     (spec : RemoteTurnSpec)
@@ -827,39 +890,48 @@ private def prepareRemoteHarnessCommand
           "/usr/local/bin/sandboxed-mcp launch --harness antigravity -- " ++ inner
         else wrapWithRemoteMcp "antigravity" inner
     let readPrompt := "agy_prompt=\"$(cat <&3 && printf .)\" || exit 1; "
-    if let some hub := sup.providerHub? then
-      let .ok bound? ← nativeMissionAccount? store spec.missionId | return .error "antigravity_binding_unavailable"
-      let rollout ← NativeCanary.load
-      let legacyAdmin := rollout == .unrestricted && spec.ownerUserId == bootstrapAdminId && !bootstrapAdminId.isEmpty && bound?.isNone &&
-        !(← loadHydratedProviders store coreWorkDir).any (·.providerType == "antigravity")
-      if !legacyAdmin then
-        unless (← NativeSharedWorkspace.executionEnabled) && !sup.devMode do return .error "native_subscription_disabled"
-        let some holder ← NativeSharedWorkspace.holderFor? effNodeId | return .error "native_owner_executor_unavailable"
-        let .ok accountFilter := rollout.accountFor effNodeId spec.ownerUserId
-          | return .error "native_canary_unavailable"
-        let catalogs ← (nativeAntigravityAccounts hub store coreWorkDir spec.ownerUserId true accountFilter).toBaseIO
-        let .ok offers := catalogs | return .error "antigravity_catalog_unavailable"
-        let (nativeModel, _) := OrbBin.ClaudeControl.normalizeAntigravityCliModel spec.modelOverride (some spec.modelEffort)
-        let group := (OrbBin.ClaudeControl.groupAntigravityModels #[(nativeModel, nativeModel)])[0]?.map Prod.fst
-        let requested := group.getD nativeModel
-        let candidates := offers.filter fun (id, models) =>
-          bound?.all (· == id) && models.any (fun m => requested.isEmpty || m.1 == requested)
-        let some (account, models) := candidates[0]? | return .error (if bound?.isSome then
-          "antigravity_continuity_required" else "antigravity_account_model_unavailable")
-        let some model := (models.find? (fun m => requested.isEmpty || m.1 == requested)).map Prod.fst
-          | return .error "antigravity_account_model_unavailable"
-        let .ok url := parseUrl apiBase | return .error "native_core_url_unavailable"
-        unless url.isHttps do return .error "native_core_tls_required"
-        let .ok bearer ← mintNativeAntigravityToken store spec.missionId spec.ownerUserId jobId account model (nowSec + 86400) (some effNodeId)
-          | return .error "native_grant_unavailable"
-        if spec.goalDispatch?.isSome && !holder.remote then return .error "native_workspace_goal_unavailable"
-        let worker := include_str "antigravity_workspace_turn.py"
-        let readTimeout := NativeSharedWorkspace.turnReadTimeoutSecs spec.goalDispatch?.isSome
-        let options := #[jobId, spec.ownerUserId, effNodeId, resumeSid?.getD "", toString readTimeout]
-        let args := String.intercalate " " (options.toList.map shellSingleQuote)
-        let cmd := wsPrefix ++ skillPrelude ++ fd3Prelude ++ "exec python3 -I -c " ++ shellSingleQuote worker ++ " " ++ args
-        return .ok { command := cmd, envPairs := skillEnvs ++ promptEnvs ++ #[
-          ("ORB_NATIVE_CORE", apiBase), ("ORB_NATIVE_ANTIGRAVITY_TOKEN", bearer)], managedAuth := #[], proxyToken := bearer }
+    let .ok bound? ← nativeMissionAccount? store spec.missionId | return .error "antigravity_binding_unavailable"
+    let rollout ← NativeCanary.load
+    let holder? ← NativeSharedWorkspace.holderFor? effNodeId
+    let (_, staticNodes) ← loadStaticRemoteNodes
+    let legacyAdmin := rollout == .unrestricted && spec.ownerUserId == bootstrapAdminId && !bootstrapAdminId.isEmpty && bound?.isNone &&
+      !(← loadHydratedProviders store coreWorkDir).any (·.providerType == "antigravity")
+    let adminDirectOauth? ←
+      if legacyAdmin then pure none
+      else adminDirectAntigravityStaticTarget? store coreWorkDir effNodeId spec.ownerUserId bootstrapAdminId
+        bound? rollout holder?.isSome staticNodes
+    if let some oauthFile := adminDirectOauth? then
+      if let some payload ← readAdminAntigravitySyncPayload? oauthFile then
+        discard <| (callRemoteNodeHttpOpt relayHub? mc? effNodeId "PUT" "/managed-auth/antigravity" (some payload) #[] 4000).toBaseIO
+    if !legacyAdmin && adminDirectOauth?.isNone then
+      let some hub := sup.providerHub? | return .error "native_subscription_disabled"
+      unless (← NativeSharedWorkspace.executionEnabled) && !sup.devMode do return .error "native_subscription_disabled"
+      let some holder := holder? | return .error "native_owner_executor_unavailable"
+      let .ok accountFilter := rollout.accountFor effNodeId spec.ownerUserId
+        | return .error "native_canary_unavailable"
+      let catalogs ← (nativeAntigravityAccounts hub store coreWorkDir spec.ownerUserId true accountFilter).toBaseIO
+      let .ok offers := catalogs | return .error "antigravity_catalog_unavailable"
+      let (nativeModel, _) := OrbBin.ClaudeControl.normalizeAntigravityCliModel spec.modelOverride (some spec.modelEffort)
+      let group := (OrbBin.ClaudeControl.groupAntigravityModels #[(nativeModel, nativeModel)])[0]?.map Prod.fst
+      let requested := group.getD nativeModel
+      let candidates := offers.filter fun (id, models) =>
+        bound?.all (· == id) && models.any (fun m => requested.isEmpty || m.1 == requested)
+      let some (account, models) := candidates[0]? | return .error (if bound?.isSome then
+        "antigravity_continuity_required" else "antigravity_account_model_unavailable")
+      let some model := (models.find? (fun m => requested.isEmpty || m.1 == requested)).map Prod.fst
+        | return .error "antigravity_account_model_unavailable"
+      let .ok url := parseUrl apiBase | return .error "native_core_url_unavailable"
+      unless url.isHttps do return .error "native_core_tls_required"
+      let .ok bearer ← mintNativeAntigravityToken store spec.missionId spec.ownerUserId jobId account model (nowSec + 86400) (some effNodeId)
+        | return .error "native_grant_unavailable"
+      if spec.goalDispatch?.isSome && !holder.remote then return .error "native_workspace_goal_unavailable"
+      let worker := include_str "antigravity_workspace_turn.py"
+      let readTimeout := NativeSharedWorkspace.turnReadTimeoutSecs spec.goalDispatch?.isSome
+      let options := #[jobId, spec.ownerUserId, effNodeId, resumeSid?.getD "", toString readTimeout]
+      let args := String.intercalate " " (options.toList.map shellSingleQuote)
+      let cmd := wsPrefix ++ skillPrelude ++ fd3Prelude ++ "exec python3 -I -c " ++ shellSingleQuote worker ++ " " ++ args
+      return .ok { command := cmd, envPairs := skillEnvs ++ promptEnvs ++ #[
+        ("ORB_NATIVE_CORE", apiBase), ("ORB_NATIVE_ANTIGRAVITY_TOKEN", bearer)], managedAuth := #[], proxyToken := bearer }
     let cmd := wsPrefix ++ skillPrelude ++ fd3Prelude ++
       "command -v agy >/dev/null 2>&1 || { echo 'agy is not installed on this node' >&2; exit 127; }; " ++
       readPrompt ++ invocation spec.modelOverride
@@ -2032,7 +2104,7 @@ partial def submitRemoteMissionTurn
       pure (nid, ntok)
 
   let jobId ← newUuidV4
-  let prep ← match ← prepareRemoteHarnessCommand store sup coreWorkDir effTarget jobId spec nowSec with
+  let prep ← match ← prepareRemoteHarnessCommand store mc? relayHub? sup coreWorkDir effTarget jobId spec nowSec with
     | .ok p => pure p
     | .error e => return .error e
 

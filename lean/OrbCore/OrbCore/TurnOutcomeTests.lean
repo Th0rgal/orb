@@ -835,6 +835,83 @@ private def verifyNativeApprovalBudget (root : String) : IO Unit := do
   finally
     closeCoreStore store
 
+private def verifyAdminDirectAntigravityStaticTarget (root : String) : IO Unit := do
+  let workRoot := s!"{root}/admin-direct-ag"
+  let authDir := s!"{workRoot}/auth"
+  IO.FS.createDirAll s!"{workRoot}/.sandboxed-sh"
+  IO.FS.createDirAll authDir
+  let prevAuthDir ← IO.getEnv "CLI_PROXY_AUTH_DIR"
+  setenvVar "CLI_PROXY_AUTH_DIR" authDir
+  try
+    let .ok store ← openCoreStore s!"{workRoot}/.sandboxed-sh"
+      | throw (IO.userError "admin direct ag store open failed")
+    try
+      let db := store.missionsDb
+      let execute (sql : String) (params : Array String := #[]) : IO Unit := do
+        if let .error err ← execParamQuery db sql params then throw (IO.userError err)
+      execute "INSERT INTO users(id,username,password_hash,role,unix_username,disabled) VALUES('u-admin','admin','x','admin','orb-admin',0);"
+      execute "INSERT INTO users(id,username,password_hash,role,unix_username,disabled) VALUES('u-member','ben','x','member','orb-ben',0);"
+      IO.ofExcept (← upsertAIProvider store {
+        id := "ag-admin", name := "Antigravity Admin", providerType := "antigravity",
+        apiKey := "cli-proxy-managed", enabled := true
+      })
+      IO.FS.writeFile s!"{authDir}/antigravity-admin.json" (renderCompact (.obj #[
+        ("type", .str "antigravity"), ("prefix", .str "ag-admin"),
+        ("access_token", .str "tok-adm"), ("refresh_token", .str "ref-adm"),
+        ("email", .str "admin@example.test"), ("disabled", .bool false)
+      ]))
+      IO.ofExcept (← OrbCore.AccountVpnRoutes.set db "ag-admin" none)
+      let staticNodes : Array OrbCore.RemoteFleetAndRelay.StaticRemoteNode := #[
+        { id := "ashur", baseUrl := "http://127.0.0.1:9", tokenEnv := "T1", dedicatedOwner? := none },
+        { id := "ded-node", baseUrl := "http://127.0.0.1:9", tokenEnv := "T2", dedicatedOwner? := some "u-member" }
+      ]
+      -- 1. Bootstrap admin on Direct static non-dedicated node resolves to bound OAuth file.
+      let okAdmin ← OrbCore.RemoteDispatch.adminDirectAntigravityStaticTarget?
+        store workRoot "ashur" "u-admin" "u-admin" none .unrestricted false staticNodes
+      check (okAdmin == some "antigravity-admin.json") "admin on Direct static node resolves bound OAuth file"
+
+      -- 2. Member never qualifies for admin static managed_auth.
+      let denyMember ← OrbCore.RemoteDispatch.adminDirectAntigravityStaticTarget?
+        store workRoot "ashur" "u-member" "u-admin" none .unrestricted false staticNodes
+      check (denyMember == none) "member never qualifies for admin static managed_auth"
+
+      -- 3. Dedicated owner node or ephemeral managed-* VM never qualifies.
+      let denyDed ← OrbCore.RemoteDispatch.adminDirectAntigravityStaticTarget?
+        store workRoot "ded-node" "u-admin" "u-admin" none .unrestricted false staticNodes
+      let denyManaged ← OrbCore.RemoteDispatch.adminDirectAntigravityStaticTarget?
+        store workRoot "managed-1234" "u-admin" "u-admin" none .unrestricted false staticNodes
+      check (denyDed == none && denyManaged == none) "dedicated and managed nodes never qualify"
+
+      -- 4. Holder-backed node or canary-reserved node stays on NativeSharedWorkspace.
+      let denyHolder ← OrbCore.RemoteDispatch.adminDirectAntigravityStaticTarget?
+        store workRoot "ashur" "u-admin" "u-admin" none .unrestricted true staticNodes
+      let denyCanary ← OrbCore.RemoteDispatch.adminDirectAntigravityStaticTarget?
+        store workRoot "ashur" "u-admin" "u-admin" none (.selected "ashur" "u-member" "ag-admin") false staticNodes
+      check (denyHolder == none && denyCanary == none) "holder and canary-reserved nodes stay on NativeSharedWorkspace"
+
+      -- 5. VPN-routed admin account never bypasses VPN via direct node managed_auth.
+      execute "UPDATE account_vpn_routes SET country='NL', generation=2 WHERE account_id='ag-admin';"
+      let denyVpn ← OrbCore.RemoteDispatch.adminDirectAntigravityStaticTarget?
+        store workRoot "ashur" "u-admin" "u-admin" none .unrestricted false staticNodes
+      check (denyVpn == none) "VPN-routed admin account never bypasses VPN"
+
+      -- 6. Cloud owner alias (`HERMES_CLOUD_OWNER="prod"`) binds uniquely to bootstrapAdminId
+      --    even when active members exist, while strictly denying members and non-bootstrap users.
+      let hermesAdminOk ← OrbCore.CloudHttpAndWorker.matchesCloudOwner
+        store "prod" "u-admin" "admin" "u-admin" true false
+      let hermesMemberDeny ← OrbCore.CloudHttpAndWorker.matchesCloudOwner
+        store "prod" "u-member" "ben" "u-admin" false false
+      let hermesMemberProdNameDeny ← OrbCore.CloudHttpAndWorker.matchesCloudOwner
+        store "prod" "u-member-prod" "prod" "u-admin" false false
+      let hermesOtherAdmDeny ← OrbCore.CloudHttpAndWorker.matchesCloudOwner
+        store "prod" "u-admin-2" "admin2" "u-admin" true false
+      check (hermesAdminOk && !hermesMemberDeny && !hermesMemberProdNameDeny && !hermesOtherAdmDeny)
+        "HERMES_CLOUD_OWNER=prod binds uniquely to bootstrapAdminId in multi-user mode"
+    finally
+      closeCoreStore store
+  finally
+    match prevAuthDir with | some v => setenvVar "CLI_PROXY_AUTH_DIR" v | none => unsetenvVar "CLI_PROXY_AUTH_DIR"
+
 def run : IO Unit := do
   r24_lost_reply_is_uncertain_not_rejected
   r24_failed_enqueue_is_not_success
@@ -845,6 +922,7 @@ def run : IO Unit := do
   try
     verifyNativeApprovalBudget root
     verifyNativeOAuthRotation root
+    verifyAdminDirectAntigravityStaticTarget root
     verifyManagedWorkerLoss root
     startupRecovery root
     let .ok store ← openCoreStore s!"{root}/.sandboxed-sh" | throw (IO.userError "turn outcome store open failed")

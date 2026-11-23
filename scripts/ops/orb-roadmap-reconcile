@@ -21,8 +21,8 @@ Config (environment, see deploy/systemd/orb-roadmap-reconcile.service):
   ORB_ROADMAP_NODES        nodes workers are spread over (default ashur,dgx-spark: the
                            nodes with a checkout and the development identity)
   ORB_ROADMAP_MODELS       worker models, one per attempt, comma-separated
-                           (default openai/gpt-6.2-astra,openai/gpt-6.2-sol,
-                           anthropic/claude-fable-5-2; DeepSeek hung on long rows)
+                           (default antigravity/gemini-4-neon,anthropic/claude-fable-5-2,
+                           openai/gpt-6.2-astra)
   ORB_ROADMAP_INBOX_MISSION mission whose transcript receives decision requests
   ORB_ROADMAP_DRY_RUN=1    print the plan, change nothing
   ORB_ROADMAP_FILE         read the roadmap from this file instead of master
@@ -41,10 +41,10 @@ MISSIONS_DB = ENV("ORB_ROADMAP_MISSIONS_DB", "/root/.sandboxed-sh/missions/missi
 # uruk, babylon and nippur ended at once with "gh is unauthenticated".
 NODES = [n.strip() for n in ENV("ORB_ROADMAP_NODES", "ashur,dgx-spark").split(",") if n.strip()]
 MODELS = [m.strip() for m in ENV("ORB_ROADMAP_MODELS",
-          "openai/gpt-6.2-astra,openai/gpt-6.2-sol,anthropic/claude-fable-5-2").split(",") if m.strip()]
+          "antigravity/gemini-4-neon,anthropic/claude-fable-5-2,openai/gpt-6.2-astra").split(",") if m.strip()]
 IDLE_SECONDS = 15 * 60          # an idle worker is nudged after this long
 FOREIGN_PR_SECONDS = 60 * 60    # an open PR touched this recently has an owner elsewhere
-MAX_PER_MODEL = int(ENV("ORB_ROADMAP_MAX_PER_MODEL", "4"))
+MAX_PER_MODEL = int(ENV("ORB_ROADMAP_MAX_PER_MODEL", "2"))
 MAX_ATTEMPTS = 2                # missions per row before a human decides
 QUICK_DEATH_SECONDS = 5 * 60    # a worker that ended this fast is replaced, not nudged
 MASTER_WINDOW_SECONDS = 24 * 3600  # master-fix attempts older than this are forgotten
@@ -116,6 +116,28 @@ def tagged_prs(prs):
 
 def is_done(row, prs):
     return row["state"].startswith(("done", "dropped")) or bool(prs.get(row["id"], {}).get("merged"))
+
+
+def backend_and_model(spec):
+    """Map a roadmap model entry to Core (backend, model_override)."""
+    if spec.startswith("antigravity/"):
+        return "antigravity", spec.split("/", 1)[1]
+    if spec.startswith("gemini-4-"):
+        return "antigravity", spec
+    return "opencode", spec
+
+
+def canon_model(backend, model):
+    """Normalize a stored mission (backend, model_override) back to a MODELS key."""
+    if not model:
+        return ""
+    if backend == "antigravity" or model.startswith("antigravity/") or model.startswith("gemini-4-"):
+        m = model.split("/", 1)[-1]
+        for base in ("gemini-4-neon", "gemini-4-carbon", "gemini-4-argon", "gemini-4-hydrogen"):
+            if m == base or m.startswith(base + "-"):
+                return "antigravity/" + base
+        return "antigravity/" + m
+    return model
 
 
 def plan(rows, queue, prs, missions, master_green, ledger, now, parked=None):
@@ -227,16 +249,21 @@ def master_tick(actions, rows, prs, now, master, heartbeat_due):
         row = rows.get(rid, {"node": "Master CI is red: make it green.", "done_when": "The latest master CI run passes"})
         open_prs = ", ".join(f"#{p['number']}" for p in prs.get(rid, {}).get("open", [])) or "none"
         track = f"roadmap-{rid}" if attempt == 1 else f"roadmap-{rid}-{attempt}"
+        backend, model_id = backend_and_model(model)
         lines.append(f"- START row {rid} now as YOUR child mission (title MUST end with \"({rid})\"; "
                      f"the heartbeat recognises your children by it): start_mission with track "
-                     f"\"{track}\", "
-                     f"model_override \"{model}\", project \"now\", remote_node_id on ashur or dgx-spark "
-                     f"(nodes with a checkout and gh identity), the row text and done-when below, "
-                     f"PR title ending \"({rid})\", worker merges its own PR on green CI. Open PRs: {open_prs}.\n"
+                     f"\"{track}\", backend \"{backend}\", model_override \"{model_id}\", "
+                     f"project \"now\", remote_node_id on ashur or dgx-spark "
+                     f"(nodes with a checkout, native Antigravity login and gh identity), the row text and done-when below, "
+                     f"PR title ending \"({rid})\". Before squash-merging on green CI, the worker MUST get a read-only "
+                     f"review from Gemini 4 Carbon (start_mission with backend=\"antigravity\", "
+                     f"model_override=\"gemini-4-carbon\", writer=false, remote_node_id on ashur or dgx-spark) and fix "
+                     f"every finding. Open PRs: {open_prs}.\n"
                      f"  Row: {row['node'][:600]}\n  Done when: {row['done_when'][:300]}")
     if not starts:
-        lines.append("- No row is waiting for a worker. Review your children and open PRs: merge what is green, "
-                     "unblock or replace stuck children, keep the queue (roadmap section 7) ordered and full.")
+        lines.append("- No row is waiting for a worker. Review your children and open PRs: ensure each open PR has a "
+                     "clean Gemini 4 Carbon read-only review and green CI before merging, unblock or replace stuck "
+                     "children, keep the queue (roadmap section 7) ordered and full.")
     lines.append("Do these now, write your board, then end the turn; the heartbeat wakes you again.")
     return "\n".join(lines)
 
@@ -257,22 +284,29 @@ How to work:
 - One branch, one PR. The PR title must end with "({rid})"; that is how the
   roadmap sees it. If an open PR above already does the job, adopt it instead.
 - Push after every verified step. Run the tests for the area you touch.
-- When every CI check on the exact head is green, squash-merge the PR
-  yourself. A merged PR marks the row done; nobody else will merge it.
+- Before merging, request a read-only review from Gemini 4 Carbon: call
+  start_mission with backend="antigravity", model_override="gemini-4-carbon",
+  writer=false, remote_node_id="dgx-spark" (or "ashur"), passing your PR URL,
+  exact head SHA, and this row's "Done when" + AGENTS.md. Arm a wakeup while
+  waiting, fix every finding, and re-verify on the updated head.
+- When every CI check on the exact head is green AND the Gemini 4 Carbon review
+  is clean, squash-merge the PR yourself. A merged PR marks the row done;
+  nobody else will merge it.
 - Decide everything inside the row yourself: test fixtures, build bootstrap,
   rebases, re-running CI jobs that failed on runner infrastructure, splitting
   a C shim to stay under 220 lines. Only production authorization code,
   secrets, deploys and changes outside the row need a human: then end your turn
   with one line "BLOCKED: <question, options, your recommendation>".
-- Never end a turn just to wait: if you wait on CI, arm a wakeup.
+- Never end a turn just to wait: if you wait on CI or review, arm a wakeup.
 """
 
 
 def nudge_text(open_prs):
     pr = f" Your open PR: #{open_prs[0]['number']}." if open_prs else ""
-    return ("You stopped without a merged PR." + pr + " Continue now: get the PR to green CI and "
-            "squash-merge it, or end with one line \"BLOCKED: <question, options, recommendation>\" "
-            "if a decision outside the row is needed.")
+    return ("You stopped without a merged PR." + pr + " Continue now: get a clean read-only review from "
+            "Gemini 4 Carbon (backend=\"antigravity\", model_override=\"gemini-4-carbon\", writer=false), "
+            "get the PR to green CI on the exact head and squash-merge it, or end with one line "
+            "\"BLOCKED: <question, options, recommendation>\" if a decision outside the row is needed.")
 
 # ---------------------------------------------------------------- I/O
 
@@ -317,20 +351,21 @@ def fetch_github():
 
 def fetch_missions():
     con = sqlite3.connect(f"file:{MISSIONS_DB}?mode=ro", uri=True, timeout=10)
-    rows = con.execute("SELECT id, status, track, created_at, updated_at, model_override FROM missions "
+    rows = con.execute("SELECT id, status, track, created_at, updated_at, backend, model_override FROM missions "
                        "WHERE track LIKE 'roadmap-%'").fetchall()
     if MASTER:
         # The master's children carry no track (start_mission from a mission drops
         # it); their row is the "(<row id>)" that ends their title.
-        for r in con.execute("SELECT id, status, title, created_at, updated_at, model_override FROM missions "
+        for r in con.execute("SELECT id, status, title, created_at, updated_at, backend, model_override FROM missions "
                              "WHERE parent_mission_id=? AND COALESCE(track,'')=''", (MASTER,)).fetchall():
             hit = re.search(r"\((" + ROW_ID + r")\)\s*$", r[2] or "")
             if hit:
-                rows.append((r[0], r[1], f"roadmap-{hit.group(1)}-c{r[0][:8]}", r[3], r[4], r[5]))
+                rows.append((r[0], r[1], f"roadmap-{hit.group(1)}-c{r[0][:8]}", r[3], r[4], r[5], r[6]))
     out = []
     for r in rows:
         m = {"id": r[0], "status": r[1], "track": r[2], "created_at": r[3] or "",
-             "created_ts": iso_ts(r[3]), "updated_ts": iso_ts(r[4]), "model": r[5]}
+             "created_ts": iso_ts(r[3]), "updated_ts": iso_ts(r[4]),
+             "model": canon_model(r[5] or "", r[6] or "")}
         if m["updated_ts"] - m["created_ts"] < QUICK_DEATH_SECONDS:
             err = con.execute("SELECT payload FROM mission_events WHERE mission_id=? AND event_type='error' "
                               "ORDER BY id DESC LIMIT 1", (r[0],)).fetchone()
@@ -358,7 +393,7 @@ def fetch_mission(mid):
 
 
 def fetch_parked():
-    """{provider: parked-until epoch} for providers whose every account is parked."""
+    """{provider: parked-until epoch} for providers whose every enabled account is parked."""
     req = urllib.request.Request(CORE + "/api/model-routing/health",
                                  headers={"Authorization": "Bearer " + core_token(),
                                           "User-Agent": "orb-roadmap-reconcile"})
@@ -366,6 +401,8 @@ def fetch_parked():
         accounts = json.load(r)
     by = {}
     for a in accounts if isinstance(accounts, list) else []:
+        if a.get("disabled") or a.get("disabled_by_provider"):
+            continue
         until = iso_ts(a.get("parked_until") or "")
         by.setdefault(a.get("provider_id", ""), []).append(until)
     return {p: min(us) for p, us in by.items() if us and all(us)}
@@ -373,11 +410,12 @@ def fetch_parked():
 
 def start_worker(row, attempt, open_prs, model, node="auto"):
     rid = row["id"]
+    backend, model_id = backend_and_model(model)
     return core_post("/api/control/missions", {
-        "title": f"Roadmap {rid}: {row['node'][:80]}", "prompt": brief(row, attempt, open_prs),
+        "title": f"Roadmap {rid}: {row['node'][:80]} ({rid})", "prompt": brief(row, attempt, open_prs),
         "project": "now",
-        "track": f"roadmap-{rid}" if attempt == 1 else f"roadmap-{rid}-{attempt}", "backend": "opencode",
-        "model_override": model, "remote_node_id": node, "tags": EXCLUDE,
+        "track": f"roadmap-{rid}" if attempt == 1 else f"roadmap-{rid}-{attempt}", "backend": backend,
+        "model_override": model_id, "remote_node_id": node, "tags": EXCLUDE,
         "idempotency_key": f"roadmap-{rid}-attempt-{attempt}"})
 
 
