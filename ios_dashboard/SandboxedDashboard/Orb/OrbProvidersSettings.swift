@@ -1187,7 +1187,7 @@ enum OrbAccountVpn {
             if case .string(let message) = route["message"] { view.status = message }
             else { view.status = "The VPN route is unavailable." }
         }
-        view.retry = blocked && !pending
+        view.retry = blocked
         view.poll = pending
         return view
     }
@@ -1199,7 +1199,7 @@ enum OrbAccountVpn {
     /// Core answers an unknown endpoint with its own path; a missing account does not.
     static func missingSetting(status: Int, body: String, path: String) -> Bool {
         guard status == 404, let parsed = try? JSONDecoder().decode(OrbJSON.self, from: Data(body.utf8)) else { return false }
-        return parsed["error"].text == "not_found" && parsed["path"].text == path
+        return parsed["error"].text == "not_found"
     }
 
     static func routerAccess(_ payload: OrbJSON) -> Bool? {
