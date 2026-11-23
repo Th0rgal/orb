@@ -1348,7 +1348,7 @@ fun OrbProvidersSettingsPage(
                                             verticalArrangement = Arrangement.spacedBy(10.dp)
                                         ) {
                                             if (manages && providerType == "antigravity") AlternativeRouterSettings(core, pid)
-                                            AccountVpnSettings(core, pid)
+                                            AccountVpnSettings(core, pid, providerType == "antigravity")
                                             usageLimitStatus(detail)?.let { limit ->
                                                 Text(
                                                     text = limit.label,
@@ -2214,20 +2214,35 @@ private fun AlternativeRouterSettings(core: OrbCore, account: String) {
     val scope = rememberCoroutineScope()
     var allowed by remember(core, account) { mutableStateOf<Boolean?>(null) }
     var busy by remember(core, account) { mutableStateOf(false) }
-    var failed by remember(core, account) { mutableStateOf(false) }
+    var error by remember(core, account) { mutableStateOf("") }
+    val path = "/api/ai/providers/${core.encodeComponent(account)}/alternative-routers"
+    suspend fun access(value: Boolean? = null): Boolean =
+        OrbAccountVpn.routerAccess(
+            if (value == null) core.request(path) else core.request(path, method = "PUT", body = mapOf("allowed" to value))
+        ) ?: throw IllegalStateException("Missing router access")
     suspend fun update(value: Boolean? = null) {
         if (busy) return
         busy = true
+        var unconfirmed = ""
         try {
-            val path = "/api/ai/providers/${core.encodeComponent(account)}/alternative-routers"
-            val result = if (value == null) core.request(path)
-                else core.request(path, method = "PUT", body = mapOf("allowed" to value))
-            allowed = OrbJSON.dict(result)?.get("allowed") as? Boolean ?: error("Missing router access")
-            failed = false
+            if (value != null) {
+                try {
+                    allowed = access(value)
+                    error = ""
+                    return
+                } catch (e: Exception) {
+                    if (e is kotlinx.coroutines.CancellationException) throw e
+                    // Core refused or could not confirm the change: show what it still reports.
+                    unconfirmed = "Could not confirm the change. Check the current setting before retrying."
+                }
+            }
+            allowed = access()
+            error = unconfirmed
         } catch (e: Exception) {
             if (e is kotlinx.coroutines.CancellationException) throw e
             allowed = null
-            failed = true
+            error = OrbAccountVpn.readError(e, path, "Update Core to configure alternative router access.",
+                "Router settings are unavailable.")
         } finally { busy = false }
     }
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -2240,46 +2255,62 @@ private fun AlternativeRouterSettings(core: OrbCore, account: String) {
             Switch(checked = current, enabled = !busy, onCheckedChange = { value -> scope.launch { update(value) } })
         }
     }
-    if (failed) TextButton(enabled = !busy, onClick = { scope.launch { update() } }) { Text("Retry router settings") }
+    if (error.isNotEmpty()) Text(error)
+    if (allowed == null && error.isNotEmpty()) {
+        TextButton(enabled = !busy, onClick = { scope.launch { update() } }) { Text("Retry router settings") }
+    }
 }
 
 @Composable
-private fun AccountVpnSettings(core: OrbCore, account: String) {
+private fun AccountVpnSettings(core: OrbCore, account: String, nativeAccount: Boolean) {
     val scope = rememberCoroutineScope()
     var route by remember(core, account) { mutableStateOf<OrbDict?>(null) }
     var busy by remember(core, account) { mutableStateOf(false) }
     var error by remember(core, account) { mutableStateOf("") }
     var menu by remember(core, account) { mutableStateOf(false) }
+    val path = "/api/ai/providers/${core.encodeComponent(account)}/vpn"
     suspend fun update(country: String? = null) {
         if (busy) return
         busy = true
         error = ""
-        val path = "/api/ai/providers/${core.encodeComponent(account)}/vpn"
         try {
-            route = if (country == null) core.fetchDict(path) else {
-                val fields = if (country.isEmpty()) mapOf("mode" to "direct")
-                    else mapOf("mode" to "vpn", "country" to country)
-                OrbJSON.dict(core.request(path, method = "PUT", body = fields))
-            }
+            val result = if (country == null) core.request(path)
+                else core.request(path, method = "PUT", body = OrbAccountVpn.write(country))
+            val confirmed = OrbAccountVpn.route(result)
+            route = confirmed
+            if (confirmed == null) error = "Account connection settings are unavailable."
         } catch (e: Exception) {
             if (e is kotlinx.coroutines.CancellationException) throw e
-            error = e.localizedMessage ?: "Connection settings unavailable."
+            if (country == null) {
+                // A failed read leaves the route unconfirmed.
+                route = null
+                error = OrbAccountVpn.readError(e, path, "Update Core to configure account VPNs.")
+            } else {
+                error = e.localizedMessage ?: "Connection settings unavailable."
+            }
         } finally { busy = false }
     }
+    val view = route?.let { OrbAccountVpn.view(it, nativeAccount) }
     val lifecycleOwner = LocalLifecycleOwner.current
     LaunchedEffect(core, account, lifecycleOwner) {
         lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) { update() }
     }
-    route?.let { current ->
-        val selected = current["country"] as? String ?: ""
-        val editable = current["can_configure"] == true
-        val countries = (current["countries"] as? List<*>)?.filterIsInstance<String>().orEmpty()
+    LaunchedEffect(core, account, lifecycleOwner, view?.poll == true) {
+        // Verification is still running: reread until it settles or the row closes.
+        if (view?.poll == true) lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
+            while (true) {
+                kotlinx.coroutines.delay(5_000)
+                update()
+            }
+        }
+    }
+    view?.let { current ->
         Box {
-            TextButton(enabled = editable && !busy, onClick = { menu = true }) {
-                Text("Account connection · " + if (selected.isEmpty()) "Direct" else "AirVPN · $selected")
+            TextButton(enabled = current.editable && !busy, onClick = { menu = true }) {
+                Text("Account connection · " + if (current.selected.isEmpty()) "Direct" else "AirVPN · ${current.selected}")
             }
             androidx.compose.material3.DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
-                (listOf("", selected) + countries).distinct().forEach { country ->
+                (listOf("") + current.countries).forEach { country ->
                     androidx.compose.material3.DropdownMenuItem(
                         text = { Text(if (country.isEmpty()) "Direct" else "AirVPN · $country") },
                         onClick = { menu = false; scope.launch { update(country) } }
@@ -2287,18 +2318,17 @@ private fun AccountVpnSettings(core: OrbCore, account: String) {
                 }
             }
         }
-        if (!editable) Text("This credential’s connection is managed by the sidecar.")
-        else if (countries.isEmpty()) Text("Import a named server profile in AirVPN Settings to enable VPN routing.")
-        when (current["status"]) {
-            "verified" -> {
-                val exits = (current["exits"] as? List<*>)?.filterIsInstance<String>().orEmpty().joinToString(", ")
-                Text("Verified exit · ${current["server"]} · $exits")
-            }
-            "blocked" -> {
-                Text(current["message"] as? String ?: "The VPN route is unavailable.")
-                TextButton(enabled = editable && !busy, onClick = { scope.launch { update(selected) } }) {
-                    Text("Retry verification")
-                }
+        if (current.confirmDirect) {
+            TextButton(enabled = !busy, onClick = { scope.launch { update("") } }) { Text("Confirm Direct route") }
+        }
+        if (current.notice.isNotEmpty()) Text(current.notice)
+        if (!current.editable) {
+            TextButton(enabled = !busy, onClick = { scope.launch { update() } }) { Text("Refresh connection settings") }
+        }
+        if (current.status.isNotEmpty()) Text(current.status)
+        if (current.retry) {
+            TextButton(enabled = current.editable && !busy, onClick = { scope.launch { update(current.selected) } }) {
+                Text("Retry verification")
             }
         }
     }

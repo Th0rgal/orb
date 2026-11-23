@@ -241,6 +241,12 @@ When an older Core reports the requested settings endpoint missing, the row
 explains the version requirement and offers Retry. A failed read leaves the
 route and permission unconfirmed.
 
+While an exit awaits verification, the open row rereads the route every five
+seconds and offers Retry only once Core reports a failure. A native account
+whose Direct route was never saved offers Confirm Direct route. Desktop, iOS
+and Android derive the row from the same model, checked against
+`shared/orb-spec/fixtures/account-vpn.json`.
+
 ### Reconnecting a Direct Codex subscription
 
 Reconnect updates the credential file uniquely bound to the selected Orb account.
