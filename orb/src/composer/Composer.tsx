@@ -908,7 +908,7 @@ export function Composer(p: {
   const choice = () => harnessChoices(p.uploadTarget).find((c) => c.backend.id === pick()?.backend);
   const modelLabel = () => {
     const m = choice()?.models.find((x) => x.value === pick()?.model);
-    return m ? shortModelLabel(m.label) : (pick()?.model ?? "Model");
+    return m ? shortModelLabel(m.label) : (pick()?.model || "Model");
   };
   const modelBtn = (
     <Show when={p.picker !== false}>
@@ -952,7 +952,8 @@ export function Composer(p: {
                   const c = harnessChoices(p.uploadTarget).find(c => c.backend.id === id);
                   if (c && id !== pick()?.backend) {
                     const effort = normalizeEffort(pick()?.effort, id);
-                    setHarnessPick({backend:id,model:modelPickerItems(c.models, id)[0].id,...(effort ? {effort} : {})});
+                    const firstModel = modelPickerItems(c.models, id)[0]?.id ?? c.models[0]?.value ?? "";
+                    setHarnessPick({backend:id,model:firstModel,...(effort ? {effort} : {})});
                   }
                   setWhich(null);
                 }}/>

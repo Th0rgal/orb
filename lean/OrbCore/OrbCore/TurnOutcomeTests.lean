@@ -912,7 +912,39 @@ private def verifyAdminDirectAntigravityStaticTarget (root : String) : IO Unit :
   finally
     match prevAuthDir with | some v => setenvVar "CLI_PROXY_AUTH_DIR" v | none => unsetenvVar "CLI_PROXY_AUTH_DIR"
 
+private def checkSidecarAuthFileDuplicated : IO Unit := do
+  let existingProvs : Array OrbCore.ProviderUsageAndLogin.HydratedProvider := #[
+    { (default : OrbCore.ProviderUsageAndLogin.HydratedProvider) with
+      id := "anth-row", providerType := "anthropic", hasOAuth := true, enabled := false,
+      accountEmail := "ben@example.com", oauthFile := "claude-old.json" },
+    { (default : OrbCore.ProviderUsageAndLogin.HydratedProvider) with
+      id := "kimi-row", providerType := "kimi", hasOAuth := true, enabled := true,
+      accountEmail := "", oauthFile := "kimi-1.json" }
+  ]
+  let dupEnabledAnth : OrbCore.ProviderUsageAndLogin.CliAuthFileInfo :=
+    { (default : OrbCore.ProviderUsageAndLogin.CliAuthFileInfo) with
+      fileName := "claude-new.json", authType := "claude", email := "BEN@example.com", disabled := false }
+  let distinctAnth : OrbCore.ProviderUsageAndLogin.CliAuthFileInfo :=
+    { (default : OrbCore.ProviderUsageAndLogin.CliAuthFileInfo) with
+      fileName := "claude-other.json", authType := "claude", email := "alice@example.com", disabled := false }
+  let dupKimi : OrbCore.ProviderUsageAndLogin.CliAuthFileInfo :=
+    { (default : OrbCore.ProviderUsageAndLogin.CliAuthFileInfo) with
+      fileName := "kimi-2.json", authType := "kimi", email := "", disabled := false }
+  let agyFirst : OrbCore.ProviderUsageAndLogin.HydratedProvider :=
+    { (default : OrbCore.ProviderUsageAndLogin.HydratedProvider) with
+      id := "cliproxyapi:antigravity:first", providerType := "antigravity", hasOAuth := true,
+      enabled := true, accountEmail := "", oauthFile := "antigravity-first.json" }
+  let agySecond : OrbCore.ProviderUsageAndLogin.CliAuthFileInfo :=
+    { (default : OrbCore.ProviderUsageAndLogin.CliAuthFileInfo) with
+      fileName := "antigravity-second.json", authType := "antigravity", email := "", disabled := false }
+  check (OrbCore.ProviderUsageAndLogin.sidecarAuthFileDuplicated existingProvs "anthropic" dupEnabledAnth &&
+         !OrbCore.ProviderUsageAndLogin.sidecarAuthFileDuplicated existingProvs "anthropic" distinctAnth &&
+         OrbCore.ProviderUsageAndLogin.sidecarAuthFileDuplicated existingProvs "kimi" dupKimi &&
+         !OrbCore.ProviderUsageAndLogin.sidecarAuthFileDuplicated #[agyFirst] "antigravity" agySecond)
+    "sidecarAuthFileDuplicated suppresses duplicate enabled/kimi cliproxyapi rows while keeping distinct and multi-account email-less antigravity files"
+
 def run : IO Unit := do
+  checkSidecarAuthFileDuplicated
   r24_lost_reply_is_uncertain_not_rejected
   r24_failed_enqueue_is_not_success
   r24_failed_dispatch_is_not_success

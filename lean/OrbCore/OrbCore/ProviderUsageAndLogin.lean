@@ -415,6 +415,24 @@ private def museDeviceToken (providerType : String) (matchedAuth? : Option CliAu
     else if !legacy.isEmpty && !legacy.endsWith ".json" then legacy
     else ""
 
+/-- True when a CLIProxyAPI sidecar auth file is already represented by an existing
+    hydrated provider row (same file, same row id, same non-empty email for the same
+    operator provider type, or an operator `kimi` DB row when the auth file has no
+    email/prefix). Applies to both enabled and disabled files so toggling or re-authenticating
+    a Core row never spawns a duplicate `cliproxyapi:*` ghost row, while preserving
+    multi-account email-less sidecar fixtures (e.g. multiple Antigravity files). -/
+def sidecarAuthFileDuplicated (out : Array HydratedProvider) (pType : String) (af : CliAuthFileInfo) : Bool :=
+  let afEmail := af.email.trimAscii.toString.toLower
+  out.any fun hp =>
+    hp.oauthFile == af.fileName ||
+    (hp.providerType == pType && (
+      authFileMatchesRowId af hp.id false ||
+      (hp.createdByUserId.isEmpty && !afEmail.isEmpty &&
+        hp.accountEmail.trimAscii.toString.toLower == afEmail) ||
+      (pType == "kimi" && !hp.id.startsWith "cliproxyapi:" && hp.createdByUserId.isEmpty &&
+        afEmail.isEmpty && af.prefixId.isEmpty && hp.hasOAuth &&
+        hp.accountEmail.trimAscii.toString.isEmpty)))
+
 def loadHydratedProviders (store : CoreStore) (workingDir : String)
     (includeDisabledForAll : Bool := false) : IO (Array HydratedProvider) := do
   let key32? ← loadPrivateKeyBytes? workingDir store.rootDir
@@ -596,18 +614,13 @@ def loadHydratedProviders (store : CoreStore) (workingDir : String)
         deviceToken := museDeviceToken pType matchedAuth? refFile
       }
 
-  -- Any sidecar login may precede creation of a Core provider row. Disabled files with no
-  -- matching row stay visible so an operator can see the login and re-enable it; a file that
-  -- belongs to a disabled Core row or is a disabled superseded login for an already-hydrated
-  -- account is not duplicated.
+  -- Any sidecar login may precede creation of a Core provider row. Unmatched sidecar files
+  -- stay visible so an operator can see the login and enable/disable it; any file already
+  -- represented by a Core row (whether enabled or disabled) is never duplicated.
   let orderedAuthFiles := (authFiles.filter (!·.disabled)) ++ (authFiles.filter (·.disabled))
   for af in orderedAuthFiles do
     let pType := authTypeToProviderType af.authType
-    let supersededDisabled := af.disabled && out.any (fun hp =>
-      hp.providerType == pType && (
-        authFileMatchesRowId af hp.id false ||
-        (!af.email.isEmpty && hp.accountEmail.trimAscii.toString.toLower == af.email.trimAscii.toString.toLower)))
-    if !out.any (fun hp => hp.oauthFile == af.fileName) && !supersededDisabled then
+    if !sidecarAuthFileDuplicated out pType af then
       out := out.push { (default : HydratedProvider) with
         id := if af.prefixId.isEmpty || af.prefixId == vpnModelPrefix af.fileName || out.any (fun hp => hp.id == af.prefixId) ||
             (authFiles.filter (fun f => f.prefixId == af.prefixId)).size != 1 then fileAccountId pType af.fileName else af.prefixId
@@ -2800,7 +2813,10 @@ def syncSidecarAuthFileDisabledForProvider
         if disabled then matchPreferredSidecarFileForProvider? hps files hp
         else matchSidecarFileForProvider? hps files hp (includeDisabled := true)
       match matched? with
-      | none => return none
+      | none =>
+        if hp.id.startsWith "cliproxyapi:" then
+          return some (jsonErr 502 s!"CLIProxyAPI login for provider {providerId} was not updated")
+        else return none
       | some file =>
         if file.disabled == disabled then return none
         else setSidecarAuthFileDisabled providerId file disabled
@@ -3648,7 +3664,8 @@ def dispatchProviderAndAiRoute
 
     -- 5g. Per-Provider Routes: `/api/ai/providers/:id[/{usage,default,health,reset-usage,antigravity/recheck,auth/methods}]`
     if segs.length >= 4 then
-      let pidOrType := segs[3]!
+      let rawSeg := segs[3]!
+      let pidOrType := (percentDecodeStrict rawSeg).getD rawSeg
       let hps ← loadHydratedProviders store workingDir
       let matchedProv? :=
         (hps.find? (fun p => p.id == pidOrType)).orElse fun _ =>
