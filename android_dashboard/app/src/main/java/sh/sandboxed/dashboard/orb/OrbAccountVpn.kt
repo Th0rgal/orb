@@ -22,7 +22,7 @@ object OrbAccountVpn {
      *  read in flight, and only the newest request is shown. */
     data class Requests(val saving: Boolean = false, val latest: Int = 0) {
         /** Null while a selection is being saved: nothing else starts until it settles. */
-        fun start(write: Boolean): Requests? = if (saving) null else Requests(true, latest + 1)
+        fun start(write: Boolean): Requests? = if (saving) null else Requests(write, latest + 1)
         fun current(request: Int): Boolean = request == latest
         fun saved(): Requests = copy(saving = false)
     }
@@ -30,7 +30,7 @@ object OrbAccountVpn {
     object Labels {
         const val vpnUpdate = "Update Core to configure account VPNs."
         const val routerUpdate = "Update Core to configure alternative router access."
-        const val routeUnavailable = "Connection settings unavailable."
+        const val routeUnavailable = "Account connection settings are unavailable."
         const val routerUnavailable = "Router access is unavailable."
         const val routerUnconfirmed = "Could not confirm the change. Check the current setting before retrying."
     }
@@ -41,7 +41,7 @@ object OrbAccountVpn {
         val route = OrbJSON.dict(payload) ?: return null
         if (route["countries"] !is List<*>) return null
         return when (route["mode"]) {
-            "vpn" -> route
+            "vpn" -> route.takeIf { (it["country"] as? String).orEmpty().isNotEmpty() }
             "direct" -> route
             else -> null
         }
@@ -50,7 +50,7 @@ object OrbAccountVpn {
     fun view(route: OrbDict, nativeAccount: Boolean): View {
         // Only a VPN route has a country, an exit or a failure to retry.
         val vpn = route["mode"] == "vpn"
-        val selected = route["country"] as? String ?: ""
+        val selected = if (vpn) route["country"] as? String ?: "" else ""
         val offered = (route["countries"] as? List<*>)?.filterIsInstance<String>().orEmpty().filter { it.isNotEmpty() }
         val editable = route["can_configure"] == true
         val blocked = vpn && route["status"] == "blocked"
