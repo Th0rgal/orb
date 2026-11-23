@@ -6005,11 +6005,34 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
         return .ok (mkJson 403 "{\"error\":\"account_disabled\"}")
       let pid := (params.find? (fun p => p.1 == "id")).map Prod.snd |>.getD ""
       if req.method == "PUT" || req.method == "PATCH" then
-        let some existing ← getAIProvider? st.store pid
-          | return .ok (mkJson 404 "{\"error\":\"provider_not_found\"}")
         let rawBody := String.fromUTF8? req.bodySlice.toByteArray |>.getD ""
         let .ok jv := OrbBin.Json.parse rawBody
           | return .ok (mkJson 400 "{\"error\":\"invalid_json\"}")
+        let existing? ← getAIProvider? st.store pid
+        if existing?.isNone then
+          if !isAdm || !pid.startsWith "cliproxyapi:" then
+            return .ok (mkJson 404 "{\"error\":\"provider_not_found\"}")
+          let some newEnabled := jv.fieldBool? "enabled"
+            | return .ok (mkJson 400 "{\"error\":\"synthetic_provider_only_supports_enabled\"}")
+          let hps ← loadHydratedProviders st.store st.cfg.workingDir (includeDisabledForAll := true)
+          let some hp := hps.find? (fun h => h.id == pid)
+            | return .ok (mkJson 404 "{\"error\":\"provider_not_found\"}")
+          if newEnabled != hp.enabled then
+            if let some (code, ctype, body) ← syncSidecarAuthFileDisabledForProvider st.store st.cfg.workingDir pid (!newEnabled) then
+              return .ok { status := code, contentType := ctype, corsOrigin? := reqOrigin?, body := body }
+          appendProviderAuditLog st.store caller.userId "admin" "edit" pid #["enabled"] s!"{nowEpochSec}"
+          let refreshed ← loadRoutingChainsFromStore st.store st.cfg.workingDir
+          discard <| publishRoutingChainsUpdate st refreshed
+          let updatedHp := { hp with enabled := newEnabled }
+          let uPrefs ← if caller.isLegacyUnscoped then pure #[] else getUserProviderPrefs st.store caller.userId
+          let uEn? := if caller.isLegacyUnscoped then none else some (isUserProviderEnabled uPrefs pid)
+          let row := renderHydratedProviderForCaller hps updatedHp true caller.userId #[] uEn? none false
+          let row := match uEn? with
+            | some ue => (row.setField "globally_enabled" (.bool newEnabled)).setField "effective_enabled" (.bool (newEnabled && ue))
+            | none => row
+          return .ok (mkJson 200 (renderCompact row))
+        let some existing := existing?
+          | return .ok (mkJson 404 "{\"error\":\"provider_not_found\"}")
         let own := !existing.createdByUserId.isEmpty && existing.createdByUserId == caller.userId
         -- Members edit settings of any shared account; credentials and endpoint only on their own.
         if !isAdm then
@@ -6099,10 +6122,15 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
           | some e =>
             if e.createdByUserId.isEmpty || e.createdByUserId != caller.userId then
               return .ok (mkJson 403 "{\"error\":\"not_account_owner\"}")
+        -- Disable any matched CLIProxyAPI sidecar login before deleting the Core row so a
+        -- removed OAuth provider cannot respawn as an active (`enabled: true`) synthetic row.
+        if isAdm then
+          if let some (code, ctype, body) ← syncSidecarAuthFileDisabledForProvider st.store st.cfg.workingDir pid true then
+            return .ok { status := code, contentType := ctype, corsOrigin? := reqOrigin?, body := body }
         match ← deleteAIProvider st.store pid with
         | .error e => return .ok (mkJson 500 s!"\{\"error\":{jsonEscape e}}")
         | .ok () =>
-          if existing?.isSome then
+          if existing?.isSome || pid.startsWith "cliproxyapi:" then
             appendProviderAuditLog st.store caller.userId (if isAdm then "admin" else "member") "delete" pid #[] s!"{nowEpochSec}"
           let refreshed ← loadRoutingChainsFromStore st.store st.cfg.workingDir
           discard <| publishRoutingChainsUpdate st refreshed
