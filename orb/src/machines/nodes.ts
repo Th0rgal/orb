@@ -153,14 +153,7 @@ export const nodeProvider = (node: { id?: string; labels?: readonly string[] | n
 export const MANAGED_FLEET_COLLAPSE_AFTER = 3;
 
 export function managedProviderFleetLabel(provider?: string | null): string {
-  const key = (provider ?? "boat").trim().toLowerCase() || "boat";
-  if (key === "boat") return "Managed (boat.dev)";
-  if (key === "leanci") return "Managed (lean.ci)";
-  if (key === "hetzner") return "Managed (Hetzner)";
-  if (key === "vastai") return "Managed (Vast.ai)";
-  if (key === "scaleway") return "Managed (Scaleway)";
-  if (key === "colab" || key === "google-colab") return "Managed (Google Colab)";
-  return `Managed (${provider})`;
+  return `Managed (${managedProviderShortLabel(provider ?? "boat")})`;
 }
 
 export interface ManagedFleetGroup<N> {
