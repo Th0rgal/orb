@@ -3098,6 +3098,7 @@ private def runR4dUnitTests (r4dRoot : String) (r4dChain : RoutingChain) : IO UI
     return 1
   return 0
 
+set_option maxRecDepth 4000 in
 private def runR4dProxyAuthTests (prodValid : CoreConfig) : IO UInt32 := do
   let r4dPid ← IO.monoNanosNow
   let r4dRoot := s!"/tmp/orb-core-r4d-{r4dPid}"
@@ -3211,6 +3212,29 @@ private def runR4dProxyAuthTests (prodValid : CoreConfig) : IO UInt32 := do
      !((String.fromUTF8! gonePinResp.body).splitOn "committed_stream_pin_mismatch").length > 1 then
     IO.FS.removeDirAll r4dRoot
     IO.eprintln s!"[orb-core-test] FAIL: HTTP committed pin fail-closed: miss={missPinResp.status} gone={gonePinResp.status}"
+    return 1
+  -- An upstream that answers with Core's attribution header names must not be believed.
+  let servedRef ← IO.mkRef ""
+  let spoofMock : ProviderTarget → IO (Except String HttpsResponse) := fun tgt => do
+    servedRef.set tgt.accountId
+    return .ok { status := 200, body := "{\"ok\":true}".toUTF8, headers := #[
+      ("x-orb-selected-account", "spoofed"), ("X-Orb-Attempts-Used", "9"), ("X-Orb-Route", "spoofed"),
+      ("X-Orb-Verdict-Code", "9"), ("X-Upstream-Request-Id", "fixture") ] }
+  let appSpoof : CoreAppState := { appLive with
+    healthTracker? := some (← newProviderHealthTracker 1 2), proxyMockTransport? := some spoofMock }
+  let .ok spoofReq := parseRequest
+      s!"POST /v1/responses HTTP/1.1\r\nHost: 127.0.0.1\r\n{bearer}\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n\{}".toUTF8 none
+    | return 1
+  let .ok spoofResp ← dispatchCoreRequest appSpoof spoofReq 1020 | return 1
+  let allOf (k : String) : Array String :=
+    (spoofResp.extraHdrs.filter (fun p => p.1.toLower == k.toLower)).map Prod.snd
+  let served ← servedRef.get
+  if spoofResp.status != 200 || served.isEmpty || allOf "X-Orb-Selected-Account" != #[served] ||
+     allOf "X-Orb-Attempts-Used" != #["1"] || allOf "X-Orb-Verdict-Code" == #["9"] ||
+     (allOf "X-Orb-Verdict-Code").size != 1 || (allOf "X-Orb-Route").size != 1 ||
+     allOf "X-Orb-Route" == #["spoofed"] || allOf "X-Upstream-Request-Id" != #["fixture"] then
+    IO.FS.removeDirAll r4dRoot
+    IO.eprintln s!"[orb-core-test] FAIL: upstream headers must not shadow Core attribution: served={served} selected={allOf "X-Orb-Selected-Account"} attempts={allOf "X-Orb-Attempts-Used"} route={allOf "X-Orb-Route"}"
     return 1
   let postCtl (path body : String) (atEp : UInt64) : IO (Nat × String) := do
     let raw := s!"POST {path} HTTP/1.1\r\nHost: 127.0.0.1\r\n{jwtH}\r\nContent-Type: application/json\r\nContent-Length: {body.utf8ByteSize}\r\n\r\n{body}".toUTF8
