@@ -215,7 +215,9 @@ route as blocked with the reason `vpn_tunnel_stopped` and offers Retry
 verification. It does not report the route as awaiting verification, because
 nothing replaces the tunnel on its own. The account's next request or a retry
 retires the tunnel, revokes its relay connections and must verify a new
-tunnel before any provider is contacted.
+tunnel before any provider is contacted. Accounts in other categories may
+share that tunnel. Each of them is reported as `vpn_tunnel_stopped` too, until
+its own next request or retry.
 
 For a Google Antigravity OAuth file, the candidate sidecar fixture verifies
 buffered and streaming Gemini requests, catalog discovery, forced token

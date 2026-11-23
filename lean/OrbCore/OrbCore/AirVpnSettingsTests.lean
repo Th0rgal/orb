@@ -122,16 +122,22 @@ def run (root : String) : IO Unit := do
     let db := store.missionsDb
     IO.ofExcept (← AccountVpnPool.savePreference pool db "v" (some "NL"))
     let .ok (some pref) ← AccountVpnRoutes.read db "v" | throw (IO.userError "fixture VPN preference")
+    IO.ofExcept (← AccountVpnPool.savePreference pool db "w" (some "NL"))
+    let .ok (some sharing) ← AccountVpnRoutes.read db "w" | throw (IO.userError "fixture sharing preference")
     let child ← IO.Process.spawn { cmd := "sleep", args := #["30"], stdin := .null, stdout := .null, stderr := .null }
     let seen := [Orb.AccountVpn.ExitAddress.v4 0x01020304, .v6 0x20010db800000000 1]
     let gateway : AccountVpnPool.Gateway := ⟨30002, ← IO.mkRef false⟩
     let tunnel : AirVpnTunnel.Tunnel :=
       ⟨child, 30002, seen, ← IO.mkRef none, ← IO.Promise.new, ← IO.asTask (pure ()), ← IO.mkRef false⟩
     let occupant : AccountVpnPool.Occupant := ⟨⟨"v", cat "openai", "NL", seen⟩, pref.generation, [], gateway⟩
+    -- An account of another category shares the tunnel and both of its exits.
+    let sharer : AccountVpnPool.Occupant :=
+      ⟨⟨"w", cat "claude", "NL", seen⟩, sharing.generation, [], ⟨30002, ← IO.mkRef false⟩⟩
     let running : AccountVpnPool.Active :=
-      { endpoint := ⟨"device", "NL", "west"⟩, tunnel, evidence := ⟨"west", "NL", seen⟩, occupants := [occupant] }
+      { endpoint := ⟨"device", "NL", "west"⟩, tunnel, evidence := ⟨"west", "NL", seen⟩, occupants := [occupant, sharer] }
     pool.atomically <| set ({ active := [running] } : AccountVpnPool.PoolState)
     let shown := AccountVpnApi.route store (some pool) root "v" "openai" true "GET" ByteArray.empty
+    let shownSharer := AccountVpnApi.route store (some pool) root "w" "claude" true "GET" ByteArray.empty
     let (_, verified) ← shown
     check (verified.fieldStr? "mode" == some "vpn" && verified.fieldStr? "country" == some "NL" &&
       verified.fieldStr? "status" == some "verified" && verified.fieldStr? "server" == some "west" &&
@@ -154,6 +160,9 @@ def run (root : String) : IO Unit := do
     let (_, reported) ← shown
     check (reported.fieldStr? "status" == some "blocked" && reported.fieldStr? "reason" != some "vpn_awaiting_verification")
       "settings report why the exited tunnel was not replaced"
+    let (_, left) ← shownSharer
+    check (left.fieldStr? "status" == some "blocked" && left.fieldStr? "reason" == some "vpn_tunnel_stopped")
+      "an account sharing a tunnel retired by another account's request is told it stopped"
     -- The system may reissue the process id of a collected child. A running
     -- process stands in for the one that received it.
     let bystander ← IO.Process.spawn { cmd := "sleep", args := #["30"], stdin := .null, stdout := .null, stderr := .null }
@@ -168,6 +177,12 @@ def run (root : String) : IO Unit := do
       let spared ← try pure (← bystander.tryWait).isNone catch _ => pure false
       check ((← pool.atomically get).active.isEmpty && spared)
         "retiring a collected tunnel does not signal the process that reuses its id"
+      -- An account of another category asks to join a tunnel that has stopped.
+      pool.atomically <| set ({ active := [{ running with tunnel := collected, occupants := [sharer] }] } : AccountVpnPool.PoolState)
+      discard <| AccountVpnPool.allocate pool store.rootDir root db "v" "openai" pref
+      let (_, joined) ← shownSharer
+      check ((← pool.atomically get).active.isEmpty && joined.fieldStr? "reason" == some "vpn_tunnel_stopped")
+        "an account on a tunnel retired when another account tried to join it is told it stopped"
     finally stopFixture bystander
   finally OrbCore.Store.closeCoreStore store
   let first : ProviderUsageAndLogin.CliAuthFileInfo := { (default : ProviderUsageAndLogin.CliAuthFileInfo) with

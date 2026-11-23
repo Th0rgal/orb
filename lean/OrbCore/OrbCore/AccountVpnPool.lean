@@ -112,6 +112,14 @@ private def install (dir : String) (db : SqliteDb) (account cat : String) (pref 
   let gateway : Gateway := ⟨t.tunnel.port, ← IO.mkRef false⟩
   return .ok ({ t with occupants := ⟨binding, pref.generation, locks, gateway⟩ :: t.occupants }, gateway)
 
+/-- Retire a tunnel that failed verification. Nothing starts another tunnel
+before an account's next request, so every account on it is told it stopped. -/
+private def retire (t : Active) : Std.AtomicT PoolState IO Unit := do
+  drain t
+  for o in t.occupants do
+    modify fun state => { state with
+      failures := state.failures.insert o.binding.account (o.generation, "vpn_tunnel_stopped") }
+
 /-- Recheck the credential's saved generation while serializing local admission.
 Each selected listener belongs to a running process with fresh exit evidence. -/
 private def allocateLocked (root dir : String) (db : SqliteDb) (account provider : String)
@@ -129,7 +137,7 @@ private def allocateLocked (root dir : String) (db : SqliteDb) (account provider
       if o.generation == pref.generation && o.binding.category == cat then
         if (← t.tunnel.verify root t.endpoint.server pref.country) == some t.evidence then
           return .ok o.gateway
-        drain t
+        retire t
         available := available.filter (fun a => a.tunnel.port != t.tunnel.port)
       else
         available ← detach available account
@@ -153,7 +161,7 @@ private def allocateLocked (root dir : String) (db : SqliteDb) (account provider
           return .ok gateway
         | .error e => failure := e
         continue
-      drain t
+      retire t
       available := others
       modify fun state => { state with active := available }
       if !configured.contains endpoint then continue
