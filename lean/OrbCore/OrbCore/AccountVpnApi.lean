@@ -26,6 +26,7 @@ private def reasonMessage : String → String
   | "vpn_process_unavailable" | "vpn_start_failed" | "vpn_config_transfer_failed" =>
     "Check that Core can launch wireproxy and load the selected profile, then retry verification."
   | "vpn_exit_unverified" => "The server, country, or exit address could not be verified."
+  | "vpn_tunnel_stopped" => "The VPN tunnel stopped. Retry verification to start a new one."
   | _ => "The VPN route is unavailable."
 
 private def observed? (pool : AccountVpnPool.Pool) (account : String) (pref : Preference) :
@@ -34,8 +35,10 @@ private def observed? (pool : AccountVpnPool.Pool) (account : String) (pref : Pr
   if let some (generation, reason) := state.failures.get? account then
     if generation == pref.generation then return some (.error reason)
   for t in state.active do
-    if t.occupants.any (fun o => o.binding.account == account && o.generation == pref.generation) &&
-        (← t.tunnel.child.tryWait).isNone then return some (.ok t.evidence)
+    if t.occupants.any (fun o => o.binding.account == account && o.generation == pref.generation) then
+      -- Nothing replaces a stopped tunnel before the account's next request or a retry.
+      if ← t.tunnel.exited then return some (.error "vpn_tunnel_stopped")
+      return some (.ok t.evidence)
   return none
 
 def route (store : CoreStore) (pool? : Option AccountVpnPool.Pool) (dir account provider : String)

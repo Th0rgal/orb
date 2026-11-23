@@ -1,0 +1,174 @@
+{
+  "routes": [
+    {
+      "name": "legacy Direct on a native account",
+      "native": true,
+      "payload": {"countries": ["DE", "NL"], "can_configure": true, "mode": "direct", "status": "direct", "saved": false},
+      "view": {"selected": "", "countries": ["DE", "NL"], "editable": true, "confirm_direct": true, "notice": "", "status": "", "retry": false, "poll": false}
+    },
+    {
+      "name": "saved Direct on a native account",
+      "native": true,
+      "payload": {"countries": ["DE", "NL"], "can_configure": true, "mode": "direct", "status": "direct", "saved": true},
+      "view": {"selected": "", "countries": ["DE", "NL"], "editable": true, "confirm_direct": false, "notice": "", "status": "", "retry": false, "poll": false}
+    },
+    {
+      "name": "legacy Direct on a routed account",
+      "native": false,
+      "payload": {"countries": ["NL"], "can_configure": true, "mode": "direct", "status": "direct", "saved": false},
+      "view": {"selected": "", "countries": ["NL"], "editable": true, "confirm_direct": false, "notice": "", "status": "", "retry": false, "poll": false}
+    },
+    {
+      "name": "verified country exit",
+      "native": false,
+      "payload": {"countries": ["DE", "NL"], "can_configure": true, "mode": "vpn", "country": "NL", "status": "verified", "server": "Alkaid", "exits": ["192.0.2.20", "2001:db8:0:0:0:0:0:20"]},
+      "view": {"selected": "NL", "countries": ["NL", "DE"], "editable": true, "confirm_direct": false, "notice": "", "status": "Verified exit · Alkaid · 192.0.2.20, 2001:db8:0:0:0:0:0:20", "retry": false, "poll": false}
+    },
+    {
+      "name": "exit reserved by another account in the category",
+      "native": false,
+      "payload": {"countries": ["NL"], "can_configure": true, "mode": "vpn", "country": "NL", "status": "blocked", "reason": "vpn_exit_in_use", "message": "This exit is already reserved for another account in this category."},
+      "view": {"selected": "NL", "countries": ["NL"], "editable": true, "confirm_direct": false, "notice": "", "status": "This exit is already reserved for another account in this category.", "retry": true, "poll": false}
+    },
+    {
+      "name": "exit awaiting verification",
+      "native": true,
+      "payload": {"countries": ["NL"], "can_configure": true, "mode": "vpn", "country": "NL", "status": "blocked", "reason": "vpn_awaiting_verification", "message": "Waiting for exit verification."},
+      "view": {"selected": "NL", "countries": ["NL"], "editable": true, "confirm_direct": false, "notice": "", "status": "Waiting for exit verification.", "retry": false, "poll": true}
+    },
+    {
+      "name": "tunnel that stopped on its own",
+      "native": false,
+      "payload": {"countries": ["NL"], "can_configure": true, "mode": "vpn", "country": "NL", "status": "blocked", "reason": "vpn_tunnel_stopped", "message": "The VPN tunnel stopped. Retry verification to start a new one."},
+      "view": {"selected": "NL", "countries": ["NL"], "editable": true, "confirm_direct": false, "notice": "", "status": "The VPN tunnel stopped. Retry verification to start a new one.", "retry": true, "poll": false}
+    },
+    {
+      "name": "blocked route without a message",
+      "native": false,
+      "payload": {"countries": ["NL"], "can_configure": true, "mode": "vpn", "country": "NL", "status": "blocked"},
+      "view": {"selected": "NL", "countries": ["NL"], "editable": true, "confirm_direct": false, "notice": "", "status": "The VPN route is unavailable.", "retry": true, "poll": false}
+    },
+    {
+      "name": "saved country whose profile was removed",
+      "native": false,
+      "payload": {"countries": ["DE", "NL"], "can_configure": true, "mode": "vpn", "country": "SE", "status": "blocked", "reason": "vpn_no_compatible_profile", "message": "Import another device profile for this country in AirVPN Settings."},
+      "view": {"selected": "SE", "countries": ["SE", "DE", "NL"], "editable": true, "confirm_direct": false, "notice": "", "status": "Import another device profile for this country in AirVPN Settings.", "retry": true, "poll": false}
+    },
+    {
+      "name": "credential whose route cannot be configured",
+      "native": true,
+      "payload": {"countries": ["NL"], "can_configure": false, "mode": "direct", "status": "direct", "saved": false},
+      "view": {"selected": "", "countries": ["NL"], "editable": false, "confirm_direct": false, "notice": "VPN routing is unavailable for this credential.", "status": "", "retry": false, "poll": false}
+    },
+    {
+      "name": "answer that does not state whether the route can be changed",
+      "native": true,
+      "payload": {"countries": ["NL"], "mode": "direct", "status": "direct"},
+      "view": {"selected": "", "countries": ["NL"], "editable": false, "confirm_direct": false, "notice": "VPN routing is unavailable for this credential.", "status": "", "retry": false, "poll": false}
+    },
+    {
+      "name": "credential issue reported by Core",
+      "native": false,
+      "payload": {"countries": [], "can_configure": false, "configuration_message": "Check the account connection, then refresh.", "mode": "direct", "status": "direct", "saved": false},
+      "view": {"selected": "", "countries": [], "editable": false, "confirm_direct": false, "notice": "Check the account connection, then refresh.", "status": "", "retry": false, "poll": false}
+    },
+    {
+      "name": "Direct answer that still names a country and a failure",
+      "native": false,
+      "payload": {"countries": ["NL"], "can_configure": true, "mode": "direct", "country": "NL", "status": "blocked", "message": "Tunnel unavailable.", "saved": true},
+      "view": {"selected": "", "countries": ["NL"], "editable": true, "confirm_direct": false, "notice": "", "status": "", "retry": false, "poll": false}
+    },
+    {
+      "name": "Direct answer that still names a verified exit",
+      "native": false,
+      "payload": {"countries": ["NL"], "can_configure": true, "mode": "direct", "country": "NL", "status": "verified", "server": "Alkaid", "exits": ["192.0.2.20"], "saved": true},
+      "view": {"selected": "", "countries": ["NL"], "editable": true, "confirm_direct": false, "notice": "", "status": "", "retry": false, "poll": false}
+    },
+    {
+      "name": "country list with unusable entries",
+      "native": false,
+      "payload": {"countries": ["", 7, "NL", "NL"], "can_configure": true, "mode": "vpn", "country": "DE", "status": "verified", "server": "Alkaid", "exits": ["192.0.2.20"]},
+      "view": {"selected": "DE", "countries": ["DE", "NL"], "editable": true, "confirm_direct": false, "notice": "", "status": "Verified exit · Alkaid · 192.0.2.20", "retry": false, "poll": false}
+    },
+    {
+      "name": "country list with no usable entry",
+      "native": false,
+      "payload": {"countries": ["", 7], "can_configure": true, "mode": "direct", "status": "direct", "saved": true},
+      "view": {"selected": "", "countries": [], "editable": true, "confirm_direct": false, "notice": "Import a named server profile in AirVPN Settings to enable VPN routing.", "status": "", "retry": false, "poll": false}
+    },
+    {
+      "name": "no imported server profile",
+      "native": false,
+      "payload": {"countries": [], "can_configure": true, "mode": "direct", "status": "direct", "saved": true},
+      "view": {"selected": "", "countries": [], "editable": true, "confirm_direct": false, "notice": "Import a named server profile in AirVPN Settings to enable VPN routing.", "status": "", "retry": false, "poll": false}
+    }
+  ],
+  "invalid_routes": [
+    null,
+    {},
+    {"mode": "vpn", "can_configure": true},
+    {"mode": "vpn", "countries": ["NL"], "can_configure": true, "status": "blocked"},
+    {"mode": "vpn", "country": "", "countries": ["NL"], "can_configure": true, "status": "blocked"},
+    {"mode": "vpn", "country": 7, "countries": ["NL"], "can_configure": true, "status": "verified"},
+    {"mode": "relay", "countries": [], "can_configure": true},
+    {"mode": "direct", "countries": "NL", "can_configure": true}
+  ],
+  "writes": [
+    {"country": "", "body": {"mode": "direct"}},
+    {"country": "NL", "body": {"mode": "vpn", "country": "NL"}}
+  ],
+  "read_errors": [
+    {"name": "older Core without the endpoint", "path": "/api/ai/providers/a/vpn", "status": 404, "body": "{\"error\":\"not_found\",\"path\":\"/api/ai/providers/a/vpn\"}", "missing_endpoint": true},
+    {"name": "account that no longer exists", "path": "/api/ai/providers/a/vpn", "status": 404, "body": "{\"error\":\"provider_not_found\"}", "missing_endpoint": false},
+    {"name": "another missing path", "path": "/api/ai/providers/a/vpn", "status": 404, "body": "{\"error\":\"not_found\",\"path\":\"/api/ai/providers/b/vpn\"}", "missing_endpoint": false},
+    {"name": "unavailable coordinator", "path": "/api/ai/providers/a/vpn", "status": 503, "body": "{\"error\":\"not_found\",\"path\":\"/api/ai/providers/a/vpn\"}", "missing_endpoint": false},
+    {"name": "proxy error page", "path": "/api/ai/providers/a/alternative-routers", "status": 404, "body": "Not Found", "missing_endpoint": false},
+    {"name": "older Core without router access", "path": "/api/ai/providers/a/alternative-routers", "status": 404, "body": "{\"error\":\"not_found\",\"path\":\"/api/ai/providers/a/alternative-routers\"}", "missing_endpoint": true}
+  ],
+  "requests": [
+    {
+      "name": "a selection made during a background read is sent and outlives it",
+      "steps": [
+        {"start": "read", "request": 1, "saving": false},
+        {"start": "write", "request": 2, "saving": true},
+        {"current": 1, "is": false},
+        {"current": 2, "is": true}
+      ]
+    },
+    {
+      "name": "no read or second selection starts while a selection is saved",
+      "steps": [
+        {"start": "write", "request": 1, "saving": true},
+        {"start": "read", "request": null, "saving": true},
+        {"start": "write", "request": null, "saving": true},
+        {"current": 1, "is": true},
+        {"saved": true, "saving": false},
+        {"start": "read", "request": 2, "saving": false},
+        {"current": 1, "is": false}
+      ]
+    },
+    {
+      "name": "the newest of two reads is the one shown",
+      "steps": [
+        {"start": "read", "request": 1, "saving": false},
+        {"start": "read", "request": 2, "saving": false},
+        {"current": 1, "is": false},
+        {"current": 2, "is": true}
+      ]
+    }
+  ],
+  "router_access": [
+    {"payload": {"allowed": true}, "allowed": true},
+    {"payload": {"allowed": false}, "allowed": false},
+    {"payload": {}, "allowed": null},
+    {"payload": {"allowed": "true"}, "allowed": null},
+    {"payload": null, "allowed": null}
+  ],
+  "labels": {
+    "vpn_update": "Update Core to configure account VPNs.",
+    "router_update": "Update Core to configure alternative router access.",
+    "route_unavailable": "Account connection settings are unavailable.",
+    "router_unavailable": "Router access is unavailable.",
+    "router_unconfirmed": "Could not confirm the change. Check the current setting before retrying."
+  }
+}

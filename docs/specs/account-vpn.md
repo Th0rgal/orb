@@ -207,6 +207,18 @@ Changing a device profile retires every Orb connection using that profile.
 Changing the API key retires all local Orb tunnels for fresh verification.
 Invalid or identical edits preserve running tunnels.
 
+A tunnel process that exits on its own counts as stopped. Core records the
+exit the first time it observes it. Collecting the exit status frees the
+process id, which the system may give to another process, so Core never
+polls, signals or waits for that process again. Settings then reports the
+route as blocked with the reason `vpn_tunnel_stopped` and offers Retry
+verification. It does not report the route as awaiting verification, because
+nothing replaces the tunnel on its own. The account's next request or a retry
+retires the tunnel, revokes its relay connections and must verify a new
+tunnel before any provider is contacted. Accounts in other categories may
+share that tunnel. Each of them is reported as `vpn_tunnel_stopped` too, until
+its own next request or retry.
+
 For a Google Antigravity OAuth file, the candidate sidecar fixture verifies
 buffered and streaming Gemini requests, catalog discovery, forced token
 refresh, and a targeted sign-in. The token exchange, user-info lookup and
@@ -240,6 +252,27 @@ reload. Credential owners and administrators control the account-wide exclusion.
 When an older Core reports the requested settings endpoint missing, the row
 explains the version requirement and offers Retry. A failed read leaves the
 route and permission unconfirmed.
+
+While an exit awaits verification, the open row rereads the route every five
+seconds and offers Retry only once Core reports a failure. A native account
+whose Direct route was never saved offers Confirm Direct route. Desktop, iOS
+and Android derive the row from the same model, checked against
+`shared/orb-spec/fixtures/account-vpn.json`.
+
+A VPN answer that does not name its country confirms nothing, like an answer
+without a mode. Only a VPN route shows a country, an exit or a failure to
+retry. Entries of the country list that are not non-empty text are ignored.
+
+A reread never disables the row. A selection made while a reread is in
+flight is sent, and the answer to that older reread is discarded. While a
+selection is being saved, no reread and no second selection starts. Retry
+connection settings appears only while the route is unread. A selection that
+Core refused keeps its message until the next selection.
+
+The pure `--leanui` row is not derived from this model yet. It offers Retry
+verification while an exit still awaits verification, does not reread a
+pending route on a timer, and is not checked against the shared fixture.
+Roadmap node V1a tracks it.
 
 ### Reconnecting a Direct Codex subscription
 

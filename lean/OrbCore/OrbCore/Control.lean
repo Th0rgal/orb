@@ -2109,7 +2109,7 @@ private def handleProxyRequest (st : CoreAppState) (req : HttpRequest) (cleanPat
         toString (out.attemptsUsed - 1)] with
     | .ok rows => pure ((rows[1]?.bind (·[0]?)).filter (!·.isEmpty))
     | .error _ => pure none
-  let diagHdrs := out.headers ++ #[
+  let attribution := #[
     ("X-Orb-Requested-Model", rawRequestedModel),
     ("X-Orb-Effective-Model", effectiveModel),
     ("X-Orb-Route", if routeKind == "chain" then s!"chain:{dispatchChain.id}" else routeKind),
@@ -2118,6 +2118,9 @@ private def handleProxyRequest (st : CoreAppState) (req : HttpRequest) (cleanPat
     ("X-Orb-Verdict-Code", s!"{out.verdictCode}"),
     ("X-Orb-First-Byte-Committed", if out.firstByteCommitted then "true" else "false")
   ]
+  -- Only Core states which account served the request: an upstream copy of these names is dropped.
+  let diagHdrs := out.headers.filter (fun h =>
+    !attribution.any (·.1.toLower == h.1.trimAscii.toString.toLower)) ++ attribution
   match out.stream? with
   | some pump =>
     let wantsStreamReq := requestWantsStream cleanPath forwardBody

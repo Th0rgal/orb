@@ -14,12 +14,25 @@ structure Tunnel where
   sessionEvidence : IO.Ref (Option (Nat × Array JVal))
   release : IO.Promise Unit
   owner : Task (Except IO.Error Unit)
+  /-- Set once the child's exit has been observed. The system may then give
+  its process id to another process, so the child is never polled, signalled
+  or awaited again. -/
+  reaped : IO.Ref Bool
+
+/-- The first check that sees the exit also reaps the child, which frees its
+process id. Every later check answers from the record. Callers hold the
+allocation lock or own a tunnel that is not yet published. -/
+def Tunnel.exited (t : Tunnel) : IO Bool := do
+  if ← t.reaped.get then return true
+  let gone ← try pure (← t.child.tryWait).isSome catch _ => pure true
+  if gone then t.reaped.set true
+  return gone
 
 def Tunnel.stop (t : Tunnel) : IO Unit := do
   try
-    if (← t.child.tryWait).isNone then
+    unless ← t.exited do
       t.child.kill
-      discard t.child.wait
+      try discard t.child.wait finally t.reaped.set true
   finally
     t.release.resolve ()
     discard <| IO.wait t.owner
@@ -42,8 +55,10 @@ private def launch (profile : DeviceProfile) (port : UInt16) : IO (Except String
     input.putStr cfg
     input.flush
   catch _ =>
-    if (← running.tryWait).isNone then running.kill
-    discard running.wait
+    -- A child that already exited was reaped by the check itself.
+    if (← running.tryWait).isNone then
+      running.kill
+      discard running.wait
     return .error "vpn_config_transfer_failed"
   return .ok running
 
@@ -59,7 +74,8 @@ private def start (profile : DeviceProfile) (port : UInt16) : IO (Except String 
     if result.isOk then discard <| IO.wait release.result?
   let some result ← IO.wait started.result? | return .error "vpn_start_failed"
   let sessionEvidence ← IO.mkRef none
-  return result.map fun child => ⟨child, port, profile.addresses, sessionEvidence, release, owner⟩
+  let reaped ← IO.mkRef false
+  return result.map fun child => ⟨child, port, profile.addresses, sessionEvidence, release, owner, reaped⟩
 
 private def ownsSession (addresses : List ExitAddress) (session : JVal) : Bool :=
   ((session.fieldStr? "vpn_ip").bind AirVpnObservation.parseExit?).any addresses.contains
@@ -67,7 +83,7 @@ private def ownsSession (addresses : List ExitAddress) (session : JVal) : Bool :
 /-- The caller must hold the allocation lock while associating this observation
 with a live generation and publishing the admitted binding. -/
 def Tunnel.verify (t : Tunnel) (root server country : String) : IO (Option VerifiedTunnel) := do
-  if (← t.child.tryWait).isSome then return none
+  if ← t.exited then return none
   let now ← IO.monoMsNow
   -- Keep only this child's matching session rows. Every dispatch still probes
   -- the actual exit, and a replacement child starts with an empty cache.
@@ -79,7 +95,7 @@ def Tunnel.verify (t : Tunnel) (root server country : String) : IO (Option Verif
       pure (all.filter (ownsSession t.addresses))
   let ipv6 := t.addresses.any fun | .v6 .. => true | _ => false
   let evidence ← AirVpnObservation.observe t.port ipv6 server country sessions
-  if (← t.child.tryWait).isSome then return none
+  if ← t.exited then return none
   if evidence.isSome && recent.isNone then t.sessionEvidence.set (some (now, sessions))
   return evidence
 
@@ -110,7 +126,7 @@ def startVerified (root sharedDir device server country : String) (port : UInt16
       let mut evidence := none
       for _ in [:6] do
         IO.sleep 1000
-        if (← t.child.tryWait).isSome then break
+        if ← t.exited then break
         evidence ← t.verify root server country
         if evidence.isSome then break
       pure evidence

@@ -1,14 +1,9 @@
 import { Show } from "solid-js";
 import { ApiError } from "./api";
+import { missingAccountSetting } from "./accountVpn";
 
 function missingEndpoint(error: unknown, path: string) {
-  if (!(error instanceof ApiError) || error.status !== 404) return false;
-  try {
-    const body = JSON.parse(error.detail);
-    return body?.error === "not_found" && body.path === path;
-  } catch {
-    return false;
-  }
+  return error instanceof ApiError && missingAccountSetting(error.status, error.detail, path);
 }
 
 export function AccountSettingReadError(p: {
