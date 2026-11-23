@@ -2,30 +2,16 @@ import { Show, createEffect, createResource, createSignal, onCleanup } from "sol
 import { api, connectionVersion } from "./api";
 import { pollWhileVisible } from "./poll";
 import { AccountSettingReadError } from "./AccountSettingReadError";
+import { accountVpnRoute, accountVpnView, accountVpnWrite } from "./accountVpn";
 import { Select } from "./Select";
 import { SettingsRow } from "./SettingsCard";
-
-interface Route {
-  mode: "direct" | "vpn";
-  country?: string;
-  countries: string[];
-  can_configure: boolean;
-  saved?: boolean;
-  configuration_message?: string;
-  status: "direct" | "verified" | "blocked";
-  reason?: string;
-  server?: string;
-  exits?: string[];
-  message?: string;
-}
 
 export function AccountVpnSettings(p: { account: string; nativeAccount?: boolean }) {
   const source = () => [connectionVersion(), p.account] as const;
   const uri = (id: string) => `/api/ai/providers/${encodeURIComponent(id)}/vpn`;
   async function readRoute(id: string, options?: RequestInit) {
-    const result = await api<Route>(uri(id), options);
-    if (!result || !["vpn", "direct"].includes(result.mode) || !Array.isArray(result.countries))
-      throw new Error("Account connection settings are unavailable.");
+    const result = accountVpnRoute(await api<unknown>(uri(id), options));
+    if (!result) throw new Error("Account connection settings are unavailable.");
     return result;
   }
   const [route, { mutate, refetch }] = createResource(source, ([, id]) => readRoute(id));
@@ -33,7 +19,7 @@ export function AccountVpnSettings(p: { account: string; nativeAccount?: boolean
   const [error, setError] = createSignal("");
   createEffect(() => {
     if (busy() || route.state !== "ready") return;
-    const interval = route().reason === "vpn_awaiting_verification" ? 5000 : null;
+    const interval = accountVpnView(route(), !!p.nativeAccount).poll ? 5000 : null;
     const [, id] = source();
     let active = true;
     const stop = pollWhileVisible(async () => {
@@ -51,9 +37,7 @@ export function AccountVpnSettings(p: { account: string; nativeAccount?: boolean
     setBusy(true);
     setError("");
     try {
-      const result = await readRoute(id, { method: "PUT", body: JSON.stringify(
-        value ? { mode: "vpn", country: value } : { mode: "direct" }
-      ) });
+      const result = await readRoute(id, { method: "PUT", body: JSON.stringify(accountVpnWrite(value)) });
       if (current()) mutate({ ...result, saved: true });
     } catch (e) {
       if (current()) setError(e instanceof Error ? e.message : String(e));
@@ -64,31 +48,29 @@ export function AccountVpnSettings(p: { account: string; nativeAccount?: boolean
   return <SettingsRow title="Account connection" stack>
     <Show when={!route.error} fallback={<AccountSettingReadError error={route.error} path={uri(p.account)}
       updateMessage="Update Core to configure account VPNs." retryLabel="Retry connection settings" retry={() => void refetch()} />}>
-      <Show when={route()}>{r => <div class="p-native-controls">
-        <Select aria-label="Account connection" disabled={busy() || !r().can_configure}
-          value={r().country ?? ""} onChange={e => {
+      <Show when={route()}>{r => { const v = () => accountVpnView(r(), !!p.nativeAccount); return <div class="p-native-controls">
+        <Select aria-label="Account connection" disabled={busy() || !v().editable}
+          value={v().selected} onChange={e => {
             const selected = e.currentTarget.value;
-            e.currentTarget.value = r().country ?? "";
+            e.currentTarget.value = v().selected;
             void save(selected);
           }}>
           <option value="">Direct</option>
-          {Array.from(new Set([...(r().country ? [r().country!] : []), ...r().countries])).map(c =>
-            <option value={c}>AirVPN · {c}</option>)}
+          {v().countries.map(c => <option value={c}>AirVPN · {c}</option>)}
         </Select>
-        <Show when={p.nativeAccount && r().can_configure && r().mode === "direct" && r().saved !== true}>
+        <Show when={v().confirmDirect}>
           <button class="s-btn" disabled={busy()} onClick={() => void save("")}>Confirm Direct route</button>
         </Show>
-        <Show when={!r().can_configure}><span>{r().configuration_message ?? "VPN routing is unavailable for this credential."}</span>
+        <Show when={v().notice}><span>{v().notice}</span></Show>
+        <Show when={!v().editable}>
           <button class="s-btn" disabled={route.loading} onClick={() => void refetch()}>Refresh connection settings</button></Show>
-        <Show when={r().can_configure && !r().countries.length}><span>Import a named server profile in AirVPN Settings to enable VPN routing.</span></Show>
-        <Show when={r().status === "verified"}><span class="s-row-desc" role="status">Verified exit · {r().server} · {r().exits?.join(", ")}</span></Show>
-        <Show when={r().status === "blocked"}>
-          <span role="status">{r().message ?? "The VPN route is unavailable."}</span>
-          <Show when={r().reason !== "vpn_awaiting_verification"}>
-            <button class="s-btn" disabled={busy() || !r().can_configure} onClick={() => void save(r().country!)}>Retry verification</button>
-          </Show>
+        <Show when={v().status}>
+          <span classList={{ "s-row-desc": r().status === "verified" }} role="status">{v().status}</span>
         </Show>
-      </div>}</Show>
+        <Show when={v().retry}>
+          <button class="s-btn" disabled={busy() || !v().editable} onClick={() => void save(v().selected)}>Retry verification</button>
+        </Show>
+      </div>; }}</Show>
     </Show>
     <Show when={error()}><span role="alert">{error()}</span></Show>
   </SettingsRow>;

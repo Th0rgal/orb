@@ -1,6 +1,7 @@
 import { Show, createEffect, createResource, createSignal, onCleanup } from "solid-js";
 import { api, connectionVersion } from "./api";
 import { AccountSettingReadError } from "./AccountSettingReadError";
+import { alternativeRouterAccess } from "./accountVpn";
 import { pollWhileVisible } from "./poll";
 import { SettingsRow } from "./SettingsCard";
 import { Toggle } from "./Toggle";
@@ -9,12 +10,12 @@ export function AlternativeRouterSettings(p: { account: string }) {
   const source = () => [connectionVersion(), p.account] as const;
   const uri = (id: string) => `/api/ai/providers/${encodeURIComponent(id)}/alternative-routers`;
   async function access(id: string, allowed?: boolean) {
-    const settings = await api<{ allowed: boolean }>(uri(id),
+    const access = alternativeRouterAccess(await api<unknown>(uri(id),
       allowed === undefined ? undefined : {
         method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ allowed }),
-      });
-    if (typeof settings?.allowed !== "boolean") throw new Error("Router access is unavailable.");
-    return settings;
+      }));
+    if (access === null) throw new Error("Router access is unavailable.");
+    return { allowed: access };
   }
   const [setting, { mutate, refetch }] = createResource(source, ([, id]) => access(id));
   const [saving, setSaving] = createSignal(false);
