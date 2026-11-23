@@ -212,7 +212,8 @@ private def runShortCmd (prog : String) (args : Array String) : IO (Nat × Strin
 /-! ## Single-Tenant + Multi-User Owner Matching & Hermes Runtime Discovery -/
 
 /-- Match cloud owner env var (`HERMES_CLOUD_OWNER`, `CURSOR_CLOUD_OWNER`, `GROK_BOT_OWNER`)
-    against `callerUserId`, `callerUsername`, or single-tenant `"prod"|"dev"|"admin"` aliases. -/
+    against `callerUserId`, `callerUsername`, or operator `"prod"|"dev"|"admin"|"default"|"local"`
+    aliases (which bind uniquely to `bootstrapAdminId` in multi-user mode and never match members). -/
 def matchesCloudOwner
     (store : CoreStore)
     (ownerVal callerUserId callerUsername bootstrapAdminId : String)
@@ -220,12 +221,14 @@ def matchesCloudOwner
   let ov := ownerVal.trimAscii.toString
   if ov.isEmpty then return false
   if !callerUserId.isEmpty && ov == callerUserId then return true
-  if !callerUsername.isEmpty && ov.toLower == callerUsername.toLower then return true
+  let ovl := ov.toLower
+  let isEnvAlias := ovl == "prod" || ovl == "dev" || ovl == "admin" || ovl == "default" || ovl == "local"
+  if !isEnvAlias && !callerUsername.isEmpty && ovl == callerUsername.toLower then return true
+  if isEnvAlias && (isAdmin || isLegacyUnscoped) && !bootstrapAdminId.isEmpty && callerUserId == bootstrapAdminId then
+    return true
   let multi ← hasMultipleActiveUsers store
-  if !multi && (isLegacyUnscoped || isAdmin || (!bootstrapAdminId.isEmpty && callerUserId == bootstrapAdminId)) then
-    let ovl := ov.toLower
-    if ovl == "prod" || ovl == "dev" || ovl == "admin" || ovl == "default" || ovl == "local" then
-      return true
+  if !multi && isEnvAlias && (isLegacyUnscoped || isAdmin) then
+    return true
   return false
 
 def assistantRuntimeName (serverPort : UInt16) : IO String := do

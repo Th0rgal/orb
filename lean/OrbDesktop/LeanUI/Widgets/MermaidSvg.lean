@@ -415,10 +415,11 @@ private def columnCenterX (nodeW rankGap : SubPx) (pos : Nat) : SubPx :=
 
 /-- Physically connected routing lane for a non-adjacent edge (back edge, skip
 forward, self loop), drawn just below the rank rows: one continuous thin-stroke
-polyline leaves the source column's bottom, runs across the lane and rises into the
-target column's bottom, a directional chevron sits directly on the target stub so
-the route enters the target node from the lane side, and the edge label rides the
-lane just below the run. The stroke radius is chosen so the rendered weight matches
+polyline leaves the source column's bottom (a same-pen stub segment joins it
+through the tip row), runs across the lane and rises into the target column's
+bottom, a directional chevron sits directly on the target stub so the route
+enters the target node from the lane side, and the edge label rides the lane
+just below the run. The stroke radius is chosen so the rendered weight matches
 the shared 2px border, so the return route reads as the same pen as the forward
 connectors. -/
 def buildLaneEdgeWidget (theme : Theme) (laneW laneH : SubPx)
@@ -461,9 +462,29 @@ def buildLaneEdgeWidget (theme : Theme) (laneW laneH : SubPx)
       (.vectorIcon [[(28, 132), (80, 24), (132, 132)]] pal.accent none
         (Text.iconStrokeTenthsForPxWidth 8))
       []
+  -- Source-side join: the polyline's source stub rises only to the run row's
+  -- top, so the tip row above the source column carries a thin vertical stub
+  -- segment of the same pen, continuing the route into the source node's bottom
+  -- edge. No arrowhead on the source side — the direction stays source -> target.
+  let laneStub : WidgetNode :=
+    WidgetNode.mk none false true
+      (BoxStyle.row 0 |>.withFixedSize (pxToSub 8) tipRowH)
+      (.vectorIcon [[(80, 0), (80, 160)]] pal.textSecondary none
+        (Text.iconStrokeTenthsForPxWidth 8))
+      []
   let tipRow : WidgetNode :=
-    WidgetNode.box (BoxStyle.row 0 |>.withFixedSize laneW tipRowH)
-      [WidgetNode.box (BoxStyle.row 0 |>.withFixedSize (xTarget - pxToSub 4) tipRowH) [], laneTip]
+    if xSource == xTarget then
+      -- Degenerate lane (self loop): the chevron caps the shared column.
+      WidgetNode.box (BoxStyle.row 0 |>.withFixedSize laneW tipRowH)
+        [WidgetNode.box (BoxStyle.row 0 |>.withFixedSize (xTarget - pxToSub 4) tipRowH) [], laneTip]
+    else if xSource < xTarget then
+      WidgetNode.box (BoxStyle.row 0 |>.withFixedSize laneW tipRowH)
+        [WidgetNode.box (BoxStyle.row 0 |>.withFixedSize (xSource - pxToSub 4) tipRowH) [], laneStub,
+         WidgetNode.box (BoxStyle.row 0 |>.withFixedSize (xTarget - xSource - pxToSub 8) tipRowH) [], laneTip]
+    else
+      WidgetNode.box (BoxStyle.row 0 |>.withFixedSize laneW tipRowH)
+        [WidgetNode.box (BoxStyle.row 0 |>.withFixedSize (xTarget - pxToSub 4) tipRowH) [], laneTip,
+         WidgetNode.box (BoxStyle.row 0 |>.withFixedSize (xSource - xTarget - pxToSub 8) tipRowH) [], laneStub]
   let leadSpacer : WidgetNode :=
     WidgetNode.box (BoxStyle.row 0 |>.withFixedSize (xMin - subPerPx) runRowH) []
   let runRow : WidgetNode :=

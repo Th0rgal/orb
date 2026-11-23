@@ -108,10 +108,10 @@ class ReconcileTest(unittest.TestCase):
         self.assertEqual(self.models, [astra, astra])
 
     def test_a_provider_with_every_account_parked_is_skipped(self):
-        acts = plan(self.rows, self.queue, {}, [], True, {}, NOW, {"openai": NOW + 600})
+        acts = plan(self.rows, self.queue, {}, [], True, {}, NOW, {"antigravity": NOW + 600})
         self.assertEqual({a[3] for a in acts if a[0] == "start"}, {"anthropic/claude-fable-5-2"})
         acts = plan(self.rows, self.queue, {}, [], True, {}, NOW,
-                    {"openai": NOW + 600, "anthropic": NOW + 600, "ethereumfoundation": NOW + 1})
+                    {"antigravity": NOW + 600, "anthropic": NOW + 600, "openai": NOW + 1})
         self.assertEqual([a for a in acts if a[0] == "start"], [])
 
     def test_a_quickly_completed_blocked_worker_costs_an_attempt(self):
@@ -152,8 +152,12 @@ class ReconcileTest(unittest.TestCase):
         self.assertEqual([a for a in self.run_plan(missions=full) if a[0] == "start"], [])
 
     def test_each_attempt_uses_the_next_model(self):
-        self.assertEqual(NS["MODELS"], ["openai/gpt-6.2-astra", "openai/gpt-6.2-sol",
-                                        "anthropic/claude-fable-5-2"])
+        self.assertEqual(NS["MODELS"], ["antigravity/gemini-4-neon", "anthropic/claude-fable-5-2",
+                                        "openai/gpt-6.2-astra"])
+        self.assertEqual(NS["backend_and_model"]("antigravity/gemini-4-neon"), ("antigravity", "gemini-4-neon"))
+        self.assertEqual(NS["backend_and_model"]("anthropic/claude-fable-5-2"), ("opencode", "anthropic/claude-fable-5-2"))
+        self.assertEqual(NS["canon_model"]("antigravity", "gemini-4-neon-high"), "antigravity/gemini-4-neon")
+        self.assertEqual(NS["canon_model"]("opencode", "anthropic/claude-fable-5-2"), "anthropic/claude-fable-5-2")
 
     def test_a_recently_idle_worker_is_not_nudged_yet(self):
         self.assertNotIn("A2", [a[1] for a in self.run_plan(missions=[mission("A2", "awaiting_user", updated=NOW - 60)])])
@@ -175,6 +179,12 @@ class ReconcileTest(unittest.TestCase):
         self.assertIn('end with "(A2)"', text)
         self.assertIn("#42", text)
         self.assertIn("attempt 2", text)
+        self.assertIn("gemini-4-carbon", text)
+        acts = plan(self.rows, self.queue, {}, [], True, {}, NOW)
+        idle = {"id": "M", "status": "completed", "updated_ts": NOW - 60}
+        tick = NS["master_tick"](acts, self.rows, {}, NOW, idle, False)
+        self.assertIn('backend "antigravity", model_override "gemini-4-neon"', tick)
+        self.assertIn('model_override="gemini-4-carbon"', tick)
 
 
 if __name__ == "__main__":

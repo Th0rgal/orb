@@ -424,6 +424,21 @@ private def cycleObserved := (renderedTurns [cycleTurn]).1
   | (some p, some q) => p.x < q.x && q.x + q.w <= pxToSub 800 && q.y + q.h <= pxToSub 600
   | _ => false
 
+-- A single-line stream heading must route through the markdown-lite gate by the
+-- same 1..6-hash rule `liveProseLine` uses: the marker is styled into the
+-- heading, never painted literally (fail-first for the `## Title` class of
+-- device findings on 31662eb9, where `###` took the pre-shaped fast path and
+-- the hashes showed). The state carries an in-flight stream (`renders > 1`)
+-- and the shaped runs hold the same text, mirroring the live frame exactly.
+private def headingTurn : String := "## Title"
+private def headingStreamState : DesktopState :=
+  { coldFixture with stream := { shown := [headingTurn], pending := [], renders := 2 } }
+private def headingObserved : List (String × Rect × Rect) :=
+  let (rootBox, _) := renderScreen headingStreamState headingTurn
+  collectObserved rootBox 24
+#guard (headingObserved.filter (fun p => p.1.contains '#')).isEmpty
+#guard headingObserved.any (fun p => p.1 == "Title")
+
 -- Physical parity for the m2air evidence flow: a four-node graph with two labeled
 -- edges and a decision node keeps every node and both edge labels visible in source
 -- order, and the decision node renders as a rhombus (icon mask), not a rect fill.
@@ -757,6 +772,15 @@ def main (args : List String) : IO Unit := do
       unless (lanePath.x - min alphaCx betaCx).natAbs ≤ 2 &&
           (lanePath.x + lanePath.w - max alphaCx betaCx).natAbs ≤ 2 do
         throw (IO.userError "the lane path does not span the Alpha and Beta columns exactly")
+      -- Source-side join: the lane's stub must continue through the tip row into
+      -- the Beta (source) node's bottom edge — no gap between the source node and
+      -- the lane run on the source side (the target side's chevron is checked
+      -- above; this is the matching source join, without an arrowhead).
+      unless smallMasks.any fun dst =>
+          dst.w == 8 && dst.h == 8 &&
+          (dst.x + dst.w / 2 - betaCx).natAbs ≤ 16 &&
+          dst.y ≥ betaDev.y + betaDev.h - 2 && dst.y + dst.h ≤ lanePath.y + 1 do
+        throw (IO.userError "the return edge has no source-side stub joining the Beta (source) column's bottom edge to the lane")
       let shafts := scene.prims.toList.filterMap fun p => match p with
         | .rrect r _ _ _ _ =>
           if r.h ≤ 3 && r.w ≥ 20 &&

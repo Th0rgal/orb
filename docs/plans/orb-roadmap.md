@@ -28,21 +28,34 @@ receipt (PR, deployed SHA, and the check that was run):
 3. **CI runs on lean.ci Mode 2** for master, with GitHub runners as fallback,
    and meets the targets: web-only PR < 5 min, warm Lean PR < 10 min, cold full
    run < 20 min. No Mode 1. `evm.fast` is never touched.
-4. **LeanUI is at pixel parity**: every one of the 36 variants under 1%
-   differing pixels, or a listed deliberate improvement with crops. It stays
-   opt-in until Thomas decides otherwise.
-5. **Core does not report success wrongly**, and deploys do not break running
+4. **LeanUI works end to end and reaches pixel parity**: live Core data, full
+   on-demand older-turn transcript paging (`U5a`), Wayland input/IME/actions
+   (`U6a`, `U6`), 60 fps damage-only rendering (`U7`), Hyprland blur/vibrancy
+   (`U8`), and every one of the 36 variants under 1% differing pixels (or a
+   listed deliberate improvement with crops, `U3`). `Alt+O` runs
+   `--leanui-hybrid` until Thomas confirms a full working day on pure `--leanui`
+   (`U4`).
+5. **Per-account VPN, model/account routing, and Hermes Cloud Agent work end to
+   end**: Direct and country-pinned AirVPN routing, disjoint same-category
+   exits, fail-closed zero direct egress on relay drop, exact credential
+   attribution, alternative-router exclusions, model routing chains/cooldowns,
+   and Hermes (`paloma`) Cloud Agent multi-user owner binding, capability probe,
+   session execution, follow-ups and settings work across Core, harnesses,
+   Desktop (WebKit, `--leanui-hybrid`, `--leanui`), iOS and Android (section 4,
+   groups V and R).
+6. **Core does not report success wrongly**, and deploys do not break running
    turns (section 4, group R).
-6. **Operations are governed**: one deploy path for Core and node binaries, env
+7. **Operations are governed**: one deploy path for Core and node binaries, env
    migration applied on dev and prod, monitoring quiet.
-7. Every node in section 4 is `done` or `dropped` with a reason.
+8. Every node in section 4 is `done` or `dropped` with a reason.
 
 ## 2. How the work moves
 
 **The master orchestrates; a timer keeps it awake.** The master mission
-(`f5e86c78`, chain `genius`) starts every worker as its own child mission, on
-track `roadmap-<row id>` (attempt n > 1: `roadmap-<row id>-<n>`), on ashur or
-dgx-spark (the nodes with a checkout and the development identity), with a PR
+(`f5e86c78`, `antigravity` / `gemini-4-neon`) starts every worker as its own
+child mission, on track `roadmap-<row id>` (attempt n > 1:
+`roadmap-<row id>-<n>`), on ashur or dgx-spark (the nodes with a checkout,
+admin-synced Antigravity CLI login, and the development identity), with a PR
 title ending `(<row id>)`. `orb-roadmap-reconcile` (`scripts/ops`, a 5-minute
 timer on the Core host, `ORB_ROADMAP_MASTER` set) is its heartbeat: it reads this
 file from master, PRs and CI on GitHub and the roadmap missions in Core, and
@@ -51,9 +64,9 @@ file from master, PRs and CI on GitHub and the roadmap missions in Core, and
   7) has its needs done and no live worker, or the master has been idle for an
   hour;
 - resumes an idle worker once, then has the master replace it with the next
-  model that is not cooling down (`openai/gpt-6.2-astra`, `openai/gpt-6.2-sol`,
-  `anthropic/claude-fable-5-2`; DeepSeek was dropped on 18 Nov after it hung on three rows), then
-  posts a decision request to the Inbox after two failed attempts;
+  model that is not cooling down (`antigravity/gemini-4-neon`,
+  `anthropic/claude-fable-5-2`, `openai/gpt-6.2-astra`), then posts a decision
+  request to the Inbox after two failed attempts;
 - when master CI is red, asks only for the worker that fixes it.
 
 A row is done when its state here says so or when a PR whose title ends with
@@ -92,27 +105,29 @@ State lives on the board, not in the conversation.
 6. **Wake up** on a child ending, or after at most 45 minutes. A tick that
    finds nothing changed ends silently.
 
-**Tokens.** The master runs on `builtin/genius` and spends it on decisions
-only. It never reads a diff, a build log or a transcript longer than a
-worker's receipt; when it needs something read, it sends a worker. Workers are
-spawned sparingly: one per ready node, none for work a node already has.
+**Tokens.** The master runs on `antigravity` (`gemini-4-neon`) and spends turns
+on orchestration decisions only. It never reads a diff, a build log or a
+transcript longer than a worker's receipt; when it needs something read or
+reviewed, it dispatches a read-only `antigravity` (`gemini-4-carbon`,
+`writer: false`) reviewer. Workers are spawned sparingly: one per ready node,
+none for work a node already has.
 
 **Workers.** One worker per node, one branch, one PR.
-- Model, cheapest that can do the node:
-  - read-only checks, inventories, `verify` nodes, docs, small mechanical
-    edits: `ethereumfoundation/deepseek-v4.1-flash`,
-    `ethereumfoundation/glm-5.3-flash-uncensored`,
-    `ethereumfoundation/qwen3.8-27b` or Grok 4.7;
-  - implementation: `builtin/smart`;
-  - a node that failed twice, or a milestone review: `openai/gpt-6-astra`,
-    then `openai/gpt-6.1-sol`.
-  The plain `ethereumfoundation/glm-5.3` is rejected for our key (node X4).
+- Model order (23 Nov):
+  - default implementation, verification and integration workers:
+    `antigravity` with `gemini-4-neon` (up to 2 concurrent workers; overflows
+    when busy or cooling down to `opencode` with `anthropic/claude-fable-5-2`,
+    then `openai/gpt-6.2-astra`);
+  - mandatory pre-merge code & acceptance review on every PR: `antigravity`
+    with `gemini-4-carbon` (`writer: false`).
   Record requested and effective model.
 - One writer per queued row; the queue is the only limit (Thomas, 17 Nov). Never two writers on the same files.
-- Placement: spread them. No more than 2 Lean-building workers on one static
-  node (8 cores each); use `auto-managed:<provider>:large` for the rest. Never
-  `nimrud` (reserved), never the Core host. Destroy a VM when its worker ends,
-  after its work is pushed.
+- Placement: spread across `ashur` and `dgx-spark` (the static nodes with a
+  checkout, admin Direct Antigravity sync, and development identity). No more
+  than 2 Lean-building workers on one static node (8 cores each); use
+  `auto-managed:<provider>:large` only for `opencode`/`codex`/`claude` builds
+  (managed VMs hold no credentials). Never `nimrud` (reserved), never the Core
+  host. Destroy a VM when its worker ends, after its work is pushed.
 - **Commit and push often.** A worker pushes its branch after every verified
   step and at least every 30 minutes of work, so a lost machine costs one
   step. Work that exists only on a worker's disk does not count as progress.
@@ -120,17 +135,15 @@ spawned sparingly: one per ready node, none for work a node already has.
   it may touch, and the receipt format (at most 20 lines: PR, SHA, what was
   verified, what remains).
 
-**Milestone review.** A milestone is the last node of a chain that changes
-production behaviour: L5, C6, U3, M4, O4, O5, and any change to authorization,
-secrets or deploy code. Before its PR merges, a second worker that did not
-write it reviews the diff read-only (`writer: false`) against the node's "done
-when" and `AGENTS.md`, and its findings are fixed. Other nodes merge on green
-CI alone.
+**Gemini 4 Carbon review (mandatory before merge).** Before any worker PR
+merges, a read-only reviewer on `antigravity` (`model_override: "gemini-4-carbon"`,
+`writer: false`) that did not write the diff reviews the exact head against the
+node's "done when" and `AGENTS.md`, and every finding is fixed and re-verified.
 
-**Merge (rule M).** Green before merge: every CI check passed, none pending,
-and the milestone review done where one applies. Then the worker merges its
-own PR (squash) without asking. A red master is fixed before anything else is
-merged.
+**Merge (rule M).** Green before merge: every CI check on the exact head passed,
+none pending, and the Gemini 4 Carbon read-only review is clean. Then the worker
+merges its own PR (squash) without asking. A red master is fixed before anything
+else is merged.
 
 **Deploy (rule D).** One deployer, one deploy at a time.
 - Only `orb-deploy --detach <full sha>` (or the governed deploy endpoint with
@@ -184,7 +197,7 @@ same node (then split or restate the node).
 | L2 | lean.ci default in code with Boat fallback (#1793), park/resume, extend (#1798, #1802) | — | done | — |
 | L3 | Node enrolment tries every resolved address (IPv4 when IPv6 has no route), public URL `orbcore.thomas.md` (owned by the mission "lean.ci: make a fresh VM enrol and run a turn") | — | done (#1815, 994ef16a) | Merged and deployed |
 | L4 | Probe: a fresh `auto-managed:leanci:small` VM enrols and runs opencode, claude and codex turns (16 Nov 11:52Z, reported by the operator: `orb-managed-d2f8a3e7-66d` ready 8 s after spawn, three "reply OK" turns, destroyed; it needed #1853) | L3 | done | Three "reply OK" turns on one VM, VM destroyed |
-| L5 | Prod uses lean.ci when a request names no provider. The code default is already `leanci` (`Managed.lean`, `defaultManagedProviderOf`), yet prod answers `default_provider: boat` (16 Nov), so the prod environment must set `SANDBOXED_MANAGED_DEFAULT_PROVIDER` (inferred, not read on the host); that name is not classified in `scripts/ops/orb-env`, which refuses unclassified keys | L4 | ready | Env changed through a deploy; `list_managed_machines` answers `default_provider: leanci`; a mission on `auto-managed` lands on lean.ci |
+| L5 | Prod uses lean.ci when a request names no provider. The code default is already `leanci` (`Managed.lean`, `defaultManagedProviderOf`), yet prod answers `default_provider: boat` (16 Nov), so the prod environment must set `SANDBOXED_MANAGED_DEFAULT_PROVIDER` (inferred, not read on the host); that name is not classified in `scripts/ops/orb-env`, which refuses unclassified keys | L4, M3 | ready | Env changed through a deploy; `list_managed_machines` answers `default_provider: leanci`; a mission on `auto-managed` lands on lean.ci |
 | L6 | Rollout doc and `build` script match reality: idle check, 100 GiB default, warm-repo trap, layered update, rollback | — | done (lean.ci #40, 705dfaf9) | A dry run following only the doc succeeds |
 | L7 | Split the base image from warm project state with named snapshots | L5 | blocked | — |
 | L8 | Colab and lean.ci at Boat parity in the UI (list, start, stop, extend, destroy, cost) on desktop, iOS, Android | L5 | verify | Real rental through each client on dev then prod |
@@ -224,15 +237,24 @@ same node (then split or restate the node).
 | --- | --- | --- | --- | --- |
 | U1 | S1–S4 parity fixes and 36-variant report (#1805) | — | done | — |
 | U2 | `lean/OrbDesktop` builds through turbo-lean (`srcDir ".."` rejected); edits under `lean/LeanUI` invalidate the cache (#1822, 2c36e460; LeanUI parity run 43807502974 runs `scripts/orb_desktop_dev.sh --native` with both override variables unset) | — | done | — |
-| U3 | Every variant under 1% or a listed improvement with crops (U2 is needed for the final measurement) | U2 | verify | Table in `docs/ui/leanui-parity.md` regenerated by the documented commands |
-| U4 | LeanUI as the default Linux desktop: `orb dev`, the Alt+O launcher and the NixOS package start the LeanUI client; the GTK/WebKit client stays available behind a flag. Reverted 18 Nov: #1910 switched the default while LeanUI was only a renderer of the nine parity fixture screens (no Core data, no working input, slow, no blur); WebKit is the default again and LeanUI starts with `--leanui` | U5, U6, U7, U8 | blocked | Thomas uses LeanUI as his daily client for a day without falling back; then the default switches on Linux |
-| U5 | LeanUI talks to Core: it reads `~/.orb/connection.json`, signs in with the existing token, loads the real projects, missions, transcripts, Inbox and machines, and stays live on the same event stream as the WebKit client (no fixture data outside `--screen` golden runs) | — | ready | Launched with no flags it shows Thomas's real projects and missions; a message sent from another client appears within a second; tests by name against a local Core |
-| U6 | LeanUI input works end to end: pointer hit-testing on every control, scrolling with the shared scroll policy (`lean/Orb/Scroll.lean`), keyboard focus and shortcuts, text entry with IME, sending a message, Stop, archive, new mission, side panels | U5 | verify | A scripted session (Wayland input injection) creates a mission, sends a message, stops it and archives it; every control in the nine screens responds |
-| U6a | Wire live LeanUI typing and IME commits to the composer, and Create, Send, Stop and Archive to the connected Core. The U6 replay in #1929 did not exercise these live writes. | — | ready | A scripted Wayland session launches `--leanui` against a local Core, creates a mission, types and commits IME text, sends it, stops the running turn and archives the mission. A separate Core client observes the new mission ID, exact submitted text, stopped turn and persisted archive state for that ID. |
-| U7 | LeanUI performance: damage-only redraws (only changed nodes), streamed text coalesced to one frame (`lean/Orb/Stream.lean`), frame-time budget measured in CI | U5 | wip | 60 fps while a long transcript streams on the m2air; startup and transcript-open times recorded in the PR and no worse than WebKit |
-| U8 | LeanUI window effects at WebKit parity on Hyprland: transparency and background blur, rounded corners, the `orb-desktop` window class and vibrancy rule | — | verify | Side-by-side screenshots on Hyprland show the same blur and transparency as the WebKit client |
+| U3 | Every variant under 1% or a listed improvement with crops (U2 and U5a–U8 are needed for the final measurement) | U2, U7 | verify | Table in `docs/ui/leanui-parity.md` regenerated by the documented commands |
+| U4 | LeanUI as the default Linux desktop: `orb dev`, the Alt+O launcher and the NixOS package start the pure `--leanui` client; `--leanui-hybrid` and GTK/WebKit stay available behind flags (`Alt+O` currently runs `--leanui-hybrid` via omarchnix#106 `8a8d838ae` and nixos-config#77 `67e5b2f04`) | U5, U5a, U6, U7, U8 | blocked | Thomas uses pure `--leanui` as his daily client for a day without falling back; then the default switches on Linux |
+| U5 | LeanUI talks to Core: it reads `~/.orb/connection.json`, signs in with the existing token, loads the real projects, missions, transcripts, Inbox and machines, renders native Markdown & Mermaid turns, and stays live on the same event stream as the WebKit client (#1924, #1928, #2135 `17b9eda69` + heading/lane-join follow-up) | — | done | Launched with no flags it shows real projects and missions; live messages and Mermaid diagrams render natively |
+| U5a | On-demand older-turn transcript paging in pure `--leanui`: remove the fixed ~600-row (`SPINE_MAX_PAGES=3`) ceiling so scrolling near the top of a transcript (or activating "Load older turns") fetches earlier Core timeline pages on demand while preserving scroll anchor and avoiding duplicate or dropped rows | U5 | ready | A transcript longer than 1,000 rows loads its initial window fast and pages all the way back to turn 1 on scroll/trigger without layout jumps; deterministic tests in `lean/OrbDesktop/tests/` |
+| U6 | LeanUI input works end to end: pointer hit-testing on every control, scrolling with the shared scroll policy (`lean/Orb/Scroll.lean`), keyboard focus and shortcuts, text entry with IME, sending a message, Stop, archive, new mission, side panels, and Inference VPN/routing controls | U6a | verify | A scripted session (Wayland input injection) creates a mission, sends a message, stops it, archives it, and exercises every control in the nine screens |
+| U6a | Wire live LeanUI typing and IME commits to the composer, and Create, Send, Stop and Archive to the connected Core. The U6 replay in #1929 did not exercise these live writes. | U5a | ready | A scripted Wayland session launches `--leanui` against a local Core, creates a mission, types and commits IME text, sends it, stops the running turn and archives the mission. A separate Core client observes the new mission ID, exact submitted text, stopped turn and persisted archive state for that ID. |
+| U7 | LeanUI performance: damage-only redraws (only changed nodes), streamed text coalesced to one frame (`lean/Orb/Stream.lean`), vector-icon lane rasterisation cost bounded/cached, frame-time budget measured in CI | U8 | ready | 60 fps while a long transcript streams; startup and transcript-open times recorded in the PR and no worse than WebKit |
+| U8 | LeanUI window effects at WebKit/hybrid parity on Hyprland: transparency and background blur, rounded corners, the `orb-desktop` window class and vibrancy rule | U6 | verify | Side-by-side captures and renderer checks confirm the same blur, transparency, rounded corners and active/paused badge rendering as the WebKit/hybrid client |
 
 Not on this roadmap: a macOS backend for LeanUI.
+
+### V. Per-account VPN and model/account routing
+
+| Id | Node | Needs | State | Done when |
+| --- | --- | --- | --- | --- |
+| V1 | Per-account AirVPN and Direct routing end to end (`docs/specs/account-vpn.md`, `lean/Orb/AccountVpn.lean`, `AccountVpnSidecar.lean`): shared `/var/lib/orb-airvpn-coordinator` (prod + dev, 3 profiles), `#2132`, `#2133`, `#2145`, and `00cd24aa7` landed; audit, test and fix any remaining gaps across Core, sidecar, harnesses and clients (Desktop WebKit / `--leanui-hybrid` / pure `--leanui`, iOS, Android) for country/Direct selection, verified exit display, disjoint same-category exits, cross-category sharing within budget, fail-closed zero direct egress on relay drop, restart persistence, `X-Orb-Selected-Account` attribution, and per-account alternative-router exclusion | — | ready | Automated contract + UI tests across Core and clients cover Direct, country VPN, disjoint same-category admission, cross-category reuse, relay drop (`0` direct requests), restart persistence, disabled-account deduplication and alternative-router exclusion; zero defects or all fixed in the PR |
+| V2 | Model and account routing chains, priority, cooldowns and failover end to end: audit, test and fix any gaps across `/api/model-routing/chains`, `/api/model-routing/health`, per-account rank/priority & user prefs, `503 model_cooldown` / `remote_quota` handling (`#2144`), disabled-account deduplication (`#2145`), compact full-width `Resources` Sankey (`#2143`), and pure `--leanui` `Inference`/`Resources` routing parity | V1 | ready | Chain selection, account priority, cooldown parking/clear, `remote_quota` stop, and client `Inference`/`Resources` views match Core truth in automated tests across Core and clients |
+| H1 | Hermes (`paloma`) Cloud Agent end to end across Core, `hermes-gateway` (`:8642`), and clients (`CloudHttpAndWorker.lean`, `HermesSettings.tsx`, pure `--leanui`, iOS, Android): multi-user owner binding (`matchesCloudOwner` + `HERMES_CLOUD_OWNER` so bootstrap admin connects cleanly when members exist while members stay isolated), `hermes-gateway` `:8642` runtime health & corrupt `state.db` recovery (`hermes sessions recover` + None-authority guard in `session_llm_oneshot.py`), `/v1/capabilities` readiness, model/effort options (`/api/cloud/hermes/options`), settings (`/api/cloud/hermes/settings`), cloud mission creation, live streaming, follow-up turns, and cancellation | V2 | ready | Admin sees Hermes (`Paloma`) connected in composer and settings on Desktop (WebKit, `--leanui-hybrid`, `--leanui`), iOS and Android; members cannot access admin's Hermes (`403`); `hermes-gateway` `:8642` is active and `/v1/capabilities` answers `200`; a live Hermes cloud mission completes a turn and a follow-up end to end with automated Core + client tests |
 
 #### U4 Linux trial: owners and acceptance
 
@@ -267,7 +289,7 @@ On the same worker, LeanUI passed the standard mouse and keyboard/IME workflows,
 | --- | --- | --- | --- | --- |
 | M1 | Member accounts, per-user libraries, provider editing, redaction, project ownership (#1784, #1787, #1788, #1790, #1799, #1806) | — | done | — |
 | M2 | `ben` exists on prod | — | done (Thomas, 15 Nov) | — |
-| M3 | In-depth walk as `ben` on prod: REST and MCP isolation matrix (missions, projects, files, secrets, machines, settings, Inbox, search, providers) | — | verify | Scripted matrix checked in; zero leaks, or one node per leak |
+| M3 | In-depth walk as `ben` on prod: REST and MCP isolation matrix (missions, projects, files, secrets, machines, settings, Inbox, search, providers) | R21 | verify | Scripted matrix checked in; zero leaks, or one node per leak |
 | M4 | Same walk on a real desktop client in a Linux VM with a desktop session | M3 | blocked | Screenshots and the list of defects, each fixed with a test |
 | M5 | Member missions run on lean.ci VMs by default, at most 2 machines per member, never the Core host | L5 | blocked | A mission started by `ben` with no placement lands on lean.ci |
 
@@ -281,8 +303,8 @@ On the same worker, LeanUI passed the standard mouse and keyboard/IME workflows,
 | R4 | Stall watchdog: a mission `active` with no job, or finished with live workers and no wake-up, is woken once and flagged | — | verify | Deliberately stalled test mission |
 | R5 | Honest tool receipts: `action_outcome` matches the result (start, resume and cancel report "rejected" on success today) (#1830, fb111cbf; start, resume and cancel receipts read `accepted` with `durable_success: true` on prod build 056018e36, 16 Nov 04:26 UTC) | — | done | — |
 | R6 | A deploy does not kill running turns or lose their events (#1804 covers events) | — | verify | Deploy during a running turn: turn completes, no 502 |
-| R7 | A 429 from a chain with one cooling target surfaces as a mission error within a minute | — | verify | Replay on dev |
-| R8 | `health/:account/clear` clears both cooldown stores; provider status comes from request evidence | — | verify | Replay on dev |
+| R7 | A 429 from a chain with one cooling target surfaces as a mission error within a minute | X6 | verify | Replay on dev |
+| R8 | `health/:account/clear` clears both cooldown stores; provider status comes from request evidence | R7 | verify | Replay on dev |
 | R9 | Controller closes out instead of dispatching: `start_mission` and the board make "ready node without worker" visible to the controller | — | done | A controller tick lists ready nodes from the board |
 | R10 | [Rust → Lean parity queue](rust-lean-parity-audit.md): 92 numbered IDs (88 comparative findings, two duplicate extensions, one packaging warning, one Lean-only finding). HTTP-06, HTTP-07: chain partial PUT/get/delete in `Control.lean`, `ProxyRoutingTests`. FLT-01, FLT-02: `TenantIsolationTests`, `ManagedSnapshotLifecycleTests`. PROV01, PROV05: status and numeric Codex resets in `ProviderContractTests`. MCP-08, MCP-09, MCP-12: structured board and Hermes controller retired by #1807. | — | done | Every audit item is done or covered by a node below. |
 | R11 | SEC-01: an approval lease is marked biometric-signed without a verified enrolled-device signature | — | done | A lease needs a valid request-bound P-256 signature; replay, bad-signature, wrong-body and expired cases are refused |
@@ -291,11 +313,11 @@ On the same worker, LeanUI passed the standard mouse and keyboard/IME workflows,
 | R14 | FLT-13: raw exec on a managed machine never runs with a defaulted admin identity | — | done | Raw exec on a worker is refused or runs as its own Unix identity, never admin |
 | R15 | MCP-05: a launch with `writer:false` runs read-only | — | done | `start_mission(writer:false)` yields a read-only launch or an explicit refusal |
 | R16 | Tenant isolation residue: HTTP-14, MCP-13, SEC-04, MCP-14, FLT-03, FLT-09, FLT-15, FLT-16, SEC-07, SEC-11; with MCP-01 (and FLT-12, which dedupes to MCP-01/MCP-14) | — | ready | Two users and two unrelated same-user trees: no read, list, count, grant, lease or revocation crosses the boundary |
-| R17 | Honest answers, no stub that reports success: HTTP-04, HTTP-05, HTTP-13, HTTP-15, HTTP-16, MCP-04, MCP-10, MCP-15, MCP-16, MCP-17, MCP-18, FLT-04, FLT-14, PROV08, SEC-06. MCP-02: scoped lookup landed; restore all/any waits and evidence-bound reconciliation. MCP-06: single-model dispatch landed; raw poll returns mission detail. MCP-11: #1807 retired decisions/steers, but `update_project_status` still advertises steer consumption. | — | verify | Each effect has a receipt or returns unsupported. Test mixed wait states and refusal to rewrite settled receipts; consult polls return `done` and terminal answer, unsupported quorum is refused. Align the status tool's accepted fields and catalog; never acknowledge discarded steer IDs. |
-| R18 | Runtime liveness: FLT-05, FLT-06, FLT-07, FLT-08, RUN-01, RUN-02, RUN-03, RUN-05, RUN-06, RUN-10, RUN-11, RUN-12, MCP-03, MCP-07, FUP-01, FUP-02 | — | ready | A restart, partition, stale poller, blocked queue prefix or lost reply loses no owned work; SSE streams, WebSocket transports and queue delivery are live |
-| R19 | Hung node: a node whose API stops answering while it answers ping is cordoned from placement, its missions are flagged once, and a resume names the node as the cause (lagash, 2026-11-16) | — | verify | Reproduced on dev: cordon, one flag, resume names the node |
+| R17 | Honest answers, no stub that reports success: HTTP-04, HTTP-05, HTTP-13, HTTP-15, HTTP-16, MCP-04, MCP-10, MCP-15, MCP-16, MCP-17, MCP-18, FLT-04, FLT-14, PROV08, SEC-06. MCP-02: scoped lookup landed; restore all/any waits and evidence-bound reconciliation. MCP-06: single-model dispatch landed; raw poll returns mission detail. MCP-11: #1807 retired decisions/steers, but `update_project_status` still advertises steer consumption. | L5 | verify | Each effect has a receipt or returns unsupported. Test mixed wait states and refusal to rewrite settled receipts; consult polls return `done` and terminal answer, unsupported quorum is refused. Align the status tool's accepted fields and catalog; never acknowledge discarded steer IDs. |
+| R18 | Runtime liveness: FLT-05, FLT-06, FLT-07, FLT-08, RUN-01, RUN-02, RUN-03, RUN-05, RUN-06, RUN-10, RUN-11, RUN-12, MCP-03, MCP-07, FUP-01, FUP-02 | R18a | ready | A restart, partition, stale poller, blocked queue prefix or lost reply loses no owned work; SSE streams, WebSocket transports and queue delivery are live |
+| R19 | Hung node: a node whose API stops answering while it answers ping is cordoned from placement, its missions are flagged once, and a resume names the node as the cause (lagash, 2026-11-16) | R18 | verify | Reproduced on dev: cordon, one flag, resume names the node |
 | R20 | Data safety: HTTP-02, HTTP-03, HTTP-11, HTTP-12, HTTP-17, RUN-04 | — | done | Uploads round-trip exact bytes with a usable receipt, downloads keep their headers, a color change keeps title and status, retention stays opt-in |
-| R21 | Provider usage truth: HTTP-08, HTTP-09, HTTP-10, PROV06, PROV07, PROV09, PROV10, PROV11, SEC-12 | — | verify | Usage, health, reliability and concurrency report observed caller-scoped values, never invented ones |
+| R21 | Provider usage truth: HTTP-08, HTTP-09, HTTP-10, PROV06, PROV07, PROV09, PROV10, PROV11, SEC-12 | R8 | verify | Usage, health, reliability and concurrency report observed caller-scoped values, never invented ones |
 | R22 | Managed budget: FLT-10, FLT-11 | — | done | A mission pool and the dated global cap gate creation; an impossible single-VM fit is refused |
 | R23 | Legacy state migration: SEC-09, SEC-10 | — | done | Existing bunker and telemetry state is migrated once, fail-closed, and survives restart |
 | R24 | Receipts under failure: a lost node reply is answered `accepted: no` and retryable although the job may have run; enqueue, dispatch and cancel errors are discarded before a success receipt; a failed receipt insert is ignored, so two same-key calls can both mutate (post-merge review of #1830) | B2 | done | A lost reply, a failed enqueue and two concurrent same-key calls each give one truthful receipt; tests by name |
@@ -304,11 +326,11 @@ On the same worker, LeanUI passed the standard mouse and keyboard/IME workflows,
 | R27 | Stream-cut truth. The proxy records a stream that ends without `finish_reason`, carries an error frame after `[DONE]` or any error frame after a 200, or exceeds the idle timeout as a failure (`stream_incomplete` / `idle_timeout`) in `proxy_outcomes`; `/api/ai/proxy/health`, provider health and the breaker (`orb_breaker_step`) count it, so a degrading provider gets a cooldown and the chain fails over. (Evidence 17 Nov, 48 h on `missions-prod.db`: `surplusintelligence/gemini-4-carbon` 11 cuts/timeouts over 1,463 = 7.5/1,000; `gemini-4-argon` 16 over 13,798 = 1.2/1,000; `glm-5.3-flash-uncensored` 1 over 3,630; `gpt-6-astra` 0/10,582; `deepseek-v4.1-flash` 0/5,335; `claude-fable-5-2` 0/2,371; 27 of 28 via `builtin/smart`, counted as HTTP 200 successes; Pareto `8a349331` died 8 times in 14 h) | — | done | Replay fixtures in `shared/orb-spec` (cut before content, cut mid-text, cut mid tool-call JSON, cut after a complete tool call, the observed `[DONE]` then error frame) each produce a failure outcome and a breaker step; health no longer reports them as ok; tests by name |
 | R28 | Transient turn recovery. A mission turn that fails on `stream_incomplete` or `idle_timeout` is resumed automatically on the same mission, at most 2 times with backoff, with a visible `recovered` event, before being marked `failed` with the reason. Kernel-side classification with its spec (reason code), not a proxy special case; complements R3/R4 | — | verify | A forced cut on dev resumes the mission once and it completes; a third consecutive cut ends `failed` with the reason; tests by name |
 | R29 | Cut-rate monitoring. `orb-monitor` reports per provider/model cuts per 1,000 requests and killed turns, from `mission_events` joined to `proxy_usage`, and alerts on a jump; the 48 h query becomes the standing check | R27 | done | The monitor output shows the rate and an injected spike alerts |
-| R30 | Safe in-proxy recovery without breaking the sticky fence. Kernel (`lean/Orb/Kernel.lean`, `Spec.lean`, `audit-spec` clean) gains two endings: (a) cut before any complete tool call: retryable abort, the proxy retries the same provider first (warm cache), then the next chain target after a context-size check, stripping provider-bound reasoning (OpenAI encrypted reasoning, Anthropic signed thinking) when switching; (b) cut after one or more complete tool calls: close the stream cleanly at the end of the last complete tool call as a normal tool-call response and drop only the unfinished tail. Proved: two attempts are never mixed in one stream, a tool call is never delivered twice, abort only before a tool call completes | R27 | verify | The R27 fixtures pass end to end through opencode on dev with no killed turn and no duplicated tool call |
+| R30 | Safe in-proxy recovery without breaking the sticky fence. Kernel (`lean/Orb/Kernel.lean`, `Spec.lean`, `audit-spec` clean) gains two endings: (a) cut before any complete tool call: retryable abort, the proxy retries the same provider first (warm cache), then the next chain target after a context-size check, stripping provider-bound reasoning (OpenAI encrypted reasoning, Anthropic signed thinking) when switching; (b) cut after one or more complete tool calls: close the stream cleanly at the end of the last complete tool call as a normal tool-call response and drop only the unfinished tail. Proved: two attempts are never mixed in one stream, a tool call is never delivered twice, abort only before a tool call completes | R27, R30a | verify | The R27 fixtures pass end to end through opencode on dev with no killed turn and no duplicated tool call |
 | R31 | Routing by turn length. After one week of R29 data: coordinator and long-running missions default to targets whose measured cut rate keeps a 200-request turn above 99% survival; short calls may keep `surplusintelligence`; reorder `builtin/smart` from the data | R29 (+ 7 days) | blocked | The chain change is merged with the data table in the PR |
 | R32 | A provider login that needs signing in again is reported as one, not as "overloaded". On 17 Nov the ChatGPT login `thomas@lfglabs.dev` stopped refreshing at 07:02 UTC (`invalid_refresh_token`), the other OpenAI login was out of quota for 66 h and two more were disabled or expired; CLIProxyAPI answered 503 "auth unavailable", Core classified it as `overloaded`, parked both OpenAI accounts for an hour at a time and showed 100% quota, and every gpt-6-astra and gpt-6.1-sol worker died at start for twelve hours without anyone being told. Core reads the sidecar's per-login state (refresh failure, disabled, expired, quota with reset time) and: shows "sign in again" with the login's email on the Providers card on desktop, iOS and Android; names it in the mission error instead of "Provider is unavailable"; alerts through orb-monitor once when every login of a provider is unusable; and parks for the sidecar's reported reset, not a guessed hour. The classification is a kernel reason code with its spec | — | done | A fixture with one refresh-failed, one quota-exhausted and one disabled login yields "sign in again" for the provider on the three clients and in the mission error, one monitor alert, and a park until the reported reset; a fresh login clears it; tests by name |
-| R30a | RUN-07: incremental relay landed (#1729, #1748, #1757), but #1908 holds recognized model frames below the recovery buffer cap until upstream completion. `ProxyRoutingTests.runStreaming` uses unrecognized `n` frames. | — | ready | A delayed `choices` delta reaches the client before upstream completion. A later cut never mixes attempts or duplicates a tool call. |
-| R18a | RUN-08, RUN-09: preserve legacy automation intent and durable wake-ups across failed launches. `migrateLegacyAutomations` maps unknown triggers to time; `WakeupRestartTests` uses a launcher that does not advance the generation. | — | ready | Unsupported triggers and failed inserts leave the source intact. A definite failure through the production launcher after generation advance re-arms once; uncertain remote acceptance reconciles the original job before retry. |
+| R30a | RUN-07: incremental relay landed (#1729, #1748, #1757), but #1908 holds recognized model frames below the recovery buffer cap until upstream completion. `ProxyRoutingTests.runStreaming` uses unrecognized `n` frames. | H1 | ready | A delayed `choices` delta reaches the client before upstream completion. A later cut never mixes attempts or duplicates a tool call. |
+| R18a | RUN-08, RUN-09: preserve legacy automation intent and durable wake-ups across failed launches. `migrateLegacyAutomations` maps unknown triggers to time; `WakeupRestartTests` uses a launcher that does not advance the generation. | R17 | ready | Unsupported triggers and failed inserts leave the source intact. A definite failure through the production launcher after generation advance re-arms once; uncertain remote acceptance reconciles the original job before retry. |
 | R16a | Verify the remaining R16 scopes after #1916, especially workspace resource limits. SEC-05: `f3863239c` restored the pre-retrieval gate for managed-classified callers; placement classification and delivery still need evidence. | — | ready | An authorized workspace can persist and apply its limits or gets explicit unsupported. Exercise managed placements with an inert test secret: reserved-key refusal precedes retrieval; permitted delivery reaches only the requesting companion. |
 | R21a | Verify remaining R21 paths after #1932. PROV02–04: `ProviderContractTests.r21aAdapterReplays` exercises Google quota/eligibility, Muse device credentials and Kimi `data[]` through the adapters and upkeep; `r21aGoogleAcquisition` exercises the slot gate. | [PROV10: OAuth recovery owner](rust-lean-audit-provider-status.md#prov10--md-narrowly-legacycore-owned-anthropic-ordinary-usage-omits-the-expiryrenewal-handoff) | verify | Core re-reading a proxy-rotated token is not renewal. Run `python3 scripts/replay_r21a_kimi_renewal.py <CLIProxyAPIPlus-checkout>` against [the pinned owner](https://github.com/kaitranntt/CLIProxyAPIPlus/tree/0341bcc440583738d7d0e673abefc63bbe99e131) to exercise the expired Kimi login exchange separately. Still outstanding: ordinary usage of an expired legacy Core-owned Anthropic login must trigger owner-scoped renewal before reading usage. |
 
@@ -341,7 +363,7 @@ does that once B2 and B3 are deployed.
 | --- | --- | --- | --- | --- |
 | O1 | `orb-deploy` installs ops scripts with backup and rollback (#1811) | — | done | — |
 | O2 | Env migration tooling and handoff (#1784, #1814) | — | done | — |
-| O3 | Env migration applied on dev, verified | — | ready | Both startup checks pass on dev |
+| O3 | Env migration applied on dev, verified | R19 | ready | Both startup checks pass on dev |
 | O4 | Env migration applied on prod | O3 | blocked | Commands from the handoff run through a deploy; checks pass |
 | O5 | One governed, checksummed rollout for `sandboxed-node`, `sandboxed-mcp`, `orb-privd` with cordon, drain and rollback, driven by the deploy tool | — | verify | Every node reports the deployed build; no hand copy |
 | O6 | Dev deploys automatically on merge; prod stays deliberate | — | verify | A merge appears on dev with no human |
@@ -362,7 +384,7 @@ does that once B2 and B3 are deployed.
 | X3 | Tether: lease revoked on every terminal transition; WAN endpoint chosen for remote fleet hosts | — | ready | Tests first |
 | X4 | Plain `ethereumfoundation/glm-5.3` is rejected for our key (the flash variants work): fix the entry or remove it from the catalog | — | done | A turn on it replies, or it is gone from the list |
 | X5 | Tether end-to-end retest from a fleet node | 5.3 | blocked (Thomas) | SSH as `orb-tether` succeeds |
-| X6 | Routing checks from 15 Nov still hold on prod: provider catalog complete, chain test endpoint authenticated, one "Weekly" row for ChatGPT | — | verify | Three checks against prod |
+| X6 | Routing checks from 15 Nov still hold on prod: provider catalog complete, chain test endpoint authenticated, one "Weekly" row for ChatGPT | R30 | verify | Three checks against prod |
 | X7 | Remote `/goal` in the clients: the pure policy and event sync of #1877 drive a Goal mode for remote missions on desktop, iOS and Android (start, progress, Stop, truthful completion); harnesses Core cannot loop no longer offer Goal and show why; iOS and Android ship together with version bumps | — | wip | Browser test on desktop and unit tests on iOS and Android with the shared fixtures; Goal on an opencode remote mission continues until the objective is met or Stop |
 
 ## 5. Waiting on Thomas
@@ -392,13 +414,13 @@ Only these. Each one names what it unblocks.
 | Members: per-user library, at most 2 managed machines, never the Core host | Thomas, 14 Nov |
 | LeanUI stays opt-in; bar is < 1% per screen or a listed improvement | Thomas, 14 Nov |
 | Mobile ships on CI alone, iOS and Android together, with version bumps | Thomas, 14 Nov |
-| Antigravity always uses `gemini-4-carbon`; `argon` only through Surplus Intelligence | Thomas, 15 Nov |
-| The five Antigravity logins disabled on 16 Nov stay disabled; `antigravity` entries stay out of `builtin/smart`, `builtin/fast`, `genius` and `google-sonnet` (R26) | Thomas, 16 Nov |
-| Canonical Core URL is `https://orbcore.thomas.md` | Thomas, 15 Nov |
-| Master on `builtin/genius`; until R27 and R28 are deployed, workers that run long turns (implementation, integration, coordination) use `openai/gpt-6-astra`, and `builtin/smart` is used only for short read-only checks; spawned sparingly | Thomas, 17 Nov (replaces 15 Nov "workers on `builtin/smart`") |
-| Roadmap workers start on the first model that is not cooling down, in order `openai/gpt-6.2-astra`, `openai/gpt-6.2-sol`, `anthropic/claude-fable-5-2`, `ethereumfoundation/deepseek-v4.1-flash` (DeepSeek last) (both of the first two were out of quota for most of 17 Nov afternoon) | Thomas, 17 Nov |
-| Unattended overnight operation: `orb-auto-deploy` deploys green master to prod hourly; LeanUI becomes the default only after U5-U8 and Thomas's own trial (U4, reverted 18 Nov); workers may rent lean.ci or Boat VMs within the managed-VM daily cap | Thomas, 17 Nov |
-| Workers push often; milestone PRs get an independent review; merges need no approval | Thomas, 15 Nov |
+| Master (`f5e86c78`) and roadmap workers run on `antigravity` with `gemini-4-neon` (overflow/cooldown fallback: `opencode` `anthropic/claude-fable-5-2`, then `openai/gpt-6.2-astra`); every worker PR requires a read-only `antigravity` `gemini-4-carbon` review before squash-merge; `argon` only through Surplus Intelligence | Thomas, 23 Nov (replaces 15 Nov Carbon-only and 17 Nov `builtin/genius` / `gpt-6-astra` rules) |
+| The four disabled Antigravity logins stay disabled; Thomas's personal Antigravity stays `Direct` with alternative routers off (`excluded_models: ["*"]`); `antigravity` entries stay out of `builtin/smart`, `builtin/fast`, `genius` and `google-sonnet` (R26, #2145) | Thomas, 16 and 23 Nov |
+| Canonical Core URL is `https://orbcore.thomas.md`; prod and dev share `/var/lib/orb-airvpn-coordinator` (3 AirVPN device profiles) without splitting the 5-device AirVPN limit | Thomas, 15 and 23 Nov |
+| Pure `--leanui` implements on-demand older-turn transcript paging (`U5a`) rather than a ~600-row cap; `Alt+O` on `m2air` runs `--leanui-hybrid` (`omarchnix#106`, `nixos-config#77`) until `U5a–U8` and `U3` pass and Thomas confirms `U4` | Thomas, 23 Nov |
+| Priority order: LeanUI (`U5a`, `U6a`, `U6`, `U8`, `U7`), per-account VPN (`V1`), model/account routing (`V2`, `R30a`, `R30`), and Hermes Cloud Agent (`H1`) first, then remaining Core, multi-user and ops items; skip the transient 22 Nov GitHub runner-drop investigation | Thomas, 23 Nov |
+| Unattended overnight operation: `orb-auto-deploy` deploys green master to prod hourly; LeanUI becomes the default only after U5–U8 and Thomas's own trial (U4, reverted 18 Nov); workers may rent lean.ci or Boat VMs within the managed-VM daily cap | Thomas, 17 Nov |
+| Workers push often; every PR gets a read-only `gemini-4-carbon` review; merges need no human approval once review and CI are green | Thomas, 15 and 23 Nov |
 | Green before merge again (CI is fast enough since #1786) | this file |
 | Managed VMs hold no credentials; the integrator pushes for them | 13 Nov |
 
@@ -407,6 +429,6 @@ Only these. Each one names what it unblocks.
 Rows the reconciler dispatches, in order. A row leaves the queue by PR when it
 is done or dropped.
 
-`U5`, `U8`, `U6`, `U7`, `U3`, `R30`, `M3`, `L5`, `R17`, `R18`, `R19`, `R21`, `O3`, `O4`, `R21a`, `R31`
+`U5a`, `U6a`, `U6`, `U8`, `U7`, `V1`, `V2`, `H1`, `R30a`, `R30`, `U3`, `X6`, `R7`, `R8`, `R21`, `M3`, `L5`, `R17`, `R18`, `R18a`, `R19`, `O3`, `O4`
 
 **Already-owned Linux trial lanes:** follow the [U4 lane table](#u4-linux-trial-owners-and-acceptance). The controller's two cloud verification lanes can proceed in parallel with the existing Spark/m2air work. Source changes stay with #1977 and the separate #1971 owner. These are assignments, not additional automatic starts. Device acceptance gates only the trial and default decision; unrelated queued work keeps its order and capacity.
