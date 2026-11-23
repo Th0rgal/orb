@@ -2435,7 +2435,8 @@ select.orb-select-native:disabled { cursor: default; }
 /* Keep pointer selection quiet; keyboard focus follows the whole tree row. */
 .sidebar-tree .tree-entry button:focus-visible { outline: none; }
 .sidebar-tree:not([data-pointer-focus="true"]) .tree-entry:has(button:focus) {
-  box-shadow: inset 0 0 0 1px var(--stroke-strong);
+  outline: 1px solid var(--focus-border);
+  outline-offset: -1px;
   border-radius: var(--radius-sm);
 }
 
@@ -2686,8 +2687,8 @@ select.orb-select-native:disabled { cursor: default; }
    the whole content area below the title bar on an opaque surface. The conversation stays
    mounted and focusable underneath, so shortcuts that act on it keep working. */
 @media(max-width:1150px) {
-  .app:not([data-files-split="true"]) > .file-panel.btw-sidebar:not(.maximized) { left:var(--sb-w); right:0; width:auto; background:var(--bg); box-shadow:none; }
-  .app.sb-hidden:not([data-files-split="true"]) > .file-panel.btw-sidebar:not(.maximized) { left:0; width:auto; }
+  .app:not([data-files-split="true"]) > .file-panel.btw-sidebar:not(.maximized) { left:var(--sb-w); right:0; width:auto; border-left:0; background:var(--bg); box-shadow:none; }
+  .app.sb-hidden:not([data-files-split="true"]) > .file-panel.btw-sidebar:not(.maximized) { left:0; width:auto; border-left:0; }
 }
 @media(max-width:720px) {
   .app:not([data-files-split="true"]) > .file-panel.btw-sidebar:not(.maximized) { left:0; }
@@ -2764,7 +2765,7 @@ select.orb-select-native:disabled { cursor: default; }
 @media (prefers-reduced-motion:reduce) { .followup-queue, .queue-row { animation:none; } }
 @media (max-width:600px) { .queue-hint, .queue-tooltip { display:none; } .queue-row-actions { opacity:1; } }
 
-.file-panel.maximized { inset:0 0 0 var(--sb-w); width:auto; z-index:40; }
+.file-panel.maximized { inset:0 0 0 var(--sb-w); width:auto; border-left:0; z-index:40; }
 .app.sb-hidden .file-panel.maximized { left:0; }
 .file-panel.maximized > .file-panel-resize { display:none; }
 @media(max-width:720px) { .file-panel.maximized { left:0; } }

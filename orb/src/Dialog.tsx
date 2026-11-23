@@ -9,16 +9,6 @@ import "./Dialog.css";
 // Registering their guard keeps X, Escape, outside clicks and Cancel identical.
 export const DialogCloseContext = createContext<(guard: () => void) => () => void>();
 
-const DialogFooterContext = createContext<{ target: () => HTMLElement | undefined; register: () => () => void }>();
-
-/** Keep reusable form actions in the modal footer, outside its scrolling body. */
-export function DialogActions(p: {children: JSX.Element}) {
-  const slot = useContext(DialogFooterContext);
-  if (!slot) return p.children;
-  onMount(() => onCleanup(slot.register()));
-  return <Show when={slot.target()}>{target => <Portal mount={target()}>{p.children}</Portal>}</Show>;
-}
-
 export function Dialog(p: {
   title: string; description?: string; hint?: string;
   size?: "compact" | "standard" | "wide" | "fullscreen"; class?: string;
@@ -29,16 +19,13 @@ export function Dialog(p: {
   let root!: HTMLDivElement;
   const slotActive = useContext(SlotActiveContext);
   const [discard, setDiscard] = createSignal(false);
-  const [footerTarget, setFooterTarget] = createSignal<HTMLElement>();
-  const [actionCount, setActionCount] = createSignal(0);
-  const footerSlot = {target: footerTarget, register: () => {setActionCount(n => n + 1); return () => setActionCount(n => n - 1);}};
   const layer: OverlayLayer = {root: () => root, parent: useOverlayParent(), modal: true};
   const titleId = createUniqueId(), descriptionId = createUniqueId();
   let closeGuard: (() => void) | undefined;
   const registerClose = (guard: () => void) => {closeGuard = guard; return () => {if (closeGuard === guard) closeGuard = undefined;};};
   const requestClose = () => { if (!p.busy) closeGuard ? closeGuard() : p.dirty ? setDiscard(true) : p.onClose(); };
   createEffect(() => {if (slotActive() && p.busy && root && overlayTop(layer) && !root.contains(document.activeElement)) root.focus({preventScroll:true});});
-  return <DialogFooterContext.Provider value={footerSlot}><DialogCloseContext.Provider value={registerClose}><OverlayContext.Provider value={layer}>{(() => {
+  return <DialogCloseContext.Provider value={registerClose}><OverlayContext.Provider value={layer}>{(() => {
     const body = children(() => p.children);
     return <><Show when={slotActive()}>{_ => {
       let detachOverlay: (() => void) | undefined;
@@ -46,7 +33,7 @@ export function Dialog(p: {
         detachOverlay = mountOverlay(layer, {close: requestClose, busy: () => !!p.busy, outsideGesture: true, persistent: p.persistent,
           initialFocus: () => p.initialFocus?.() ?? root.querySelector<HTMLElement>("[autofocus], .dlg-body input:not(:disabled), .dlg-body textarea:not(:disabled)") ?? undefined});
       });
-      onCleanup(() => { detachOverlay?.(); detachOverlay = undefined; setFooterTarget(undefined); });
+      onCleanup(() => { detachOverlay?.(); detachOverlay = undefined; });
       return <Portal>
         <div class="dlg-back" classList={{"dlg-back-dim": overlayFirstModal(layer), "dlg-back-fullscreen": p.size === "fullscreen"}} style={{"z-index": overlayZIndex(layer)}}>
           <div ref={root} role="dialog" aria-modal="true" aria-labelledby={titleId} aria-describedby={p.description || p.hint ? descriptionId : undefined}
@@ -55,12 +42,12 @@ export function Dialog(p: {
             <header class="dlg-head" data-orb-drag-region={p.size === "fullscreen" || undefined}><h3 id={titleId} title={p.size === "fullscreen" ? p.title : undefined}>{p.title}</h3>{p.actions}<button type="button" class="dlg-close" aria-label="Close" disabled={p.busy} onClick={requestClose}><CloseIcon size={16}/></button></header>
             <Show when={p.description || p.hint}><p class="dlg-description" id={descriptionId}>{p.description ?? p.hint}</p></Show>
             <div class="dlg-body">{body()}</div>
-            <Show when={p.footer || actionCount()}><footer ref={setFooterTarget} class="dlg-foot">{typeof p.footer === "function" ? p.footer(requestClose) : p.footer}</footer></Show>
+            <Show when={p.footer}><footer class="dlg-foot">{typeof p.footer === "function" ? p.footer(requestClose) : p.footer}</footer></Show>
           </div>
         </div>
       </Portal>;
     }}</Show><Show when={slotActive() && discard()}><ConfirmDialog title="Discard unsaved changes?" description="Your changes have not been saved." action="Discard changes" destructive={false} cancelLabel="Keep editing" onConfirm={p.onClose} onClose={() => setDiscard(false)} /></Show></>;
-  })()}</OverlayContext.Provider></DialogCloseContext.Provider></DialogFooterContext.Provider>;
+  })()}</OverlayContext.Provider></DialogCloseContext.Provider>;
 }
 export function DialogButton(p: JSX.ButtonHTMLAttributes<HTMLButtonElement> & { variant?: "primary" | "secondary" | "destructive" }) {
   const [local, rest] = splitProps(p, ["variant", "class", "type", "onClick"]);

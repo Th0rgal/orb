@@ -1,6 +1,8 @@
 import { isHarness } from "./harnesses";
 import { CodexSpeedPicker, missionSpeed, requireSpeedSupport } from "./CodexSpeedPicker";
-import { localBinding } from "./localAgents";
+import { localAgentForLaunch, localBinding, rememberBinding } from "./localAgents";
+import { isClientPlacement } from "./missionTree";
+import { missionAssignedNode } from "./machines/nodes";
 import { forkMission, shortModelLabel, type CodexServiceTier, type HarnessChoice, type Mission } from "./api";
 import { ErrorNotice } from "./ErrorNotice";
 import { For, Show, createEffect, createMemo, createSignal, on, onMount } from "solid-js";
@@ -64,9 +66,10 @@ export function ForkMission(p: {
   createEffect(() => { if (p.targetId !== undefined) setLocalTargetId(p.targetId); });
   const activeTargetId = () => p.targetId !== undefined ? p.targetId : localTargetId();
   const selectedTarget = () => p.targets?.find(t => t.id === activeTargetId()) ?? p.targets?.[0];
-  const remoteTargetNodeId = () => isCloudSource() ? (selectedTarget()?.remoteNodeId ?? null) : p.mission.remote_node_id;
+  const isLocalSource = () => !isCloudSource() && (!!localBinding(p.mission.id) || isClientPlacement(p.mission));
+  const remoteTargetNodeId = () => isCloudSource() ? (selectedTarget()?.remoteNodeId ?? null) : (isLocalSource() ? null : missionAssignedNode(p.mission));
   const choices = () => p.choices.find(choice => choice.backend.id === backend())?.models ?? [];
-  const unavailable = (id: string) => !!remoteTargetNodeId() && !isHarness(id);
+  const unavailable = (id: string) => !!remoteTargetNodeId() && (!isHarness(id) || id === "vibe");
   const menuTitle = () => isCloudSource() ? "Continue in workspace" : "Transfer to another agent";
   const existing = createMemo(() => transferForSource(p.mission.id));
   const lockedSubmitted = createMemo(() => {
@@ -133,9 +136,21 @@ export function ForkMission(p: {
           archiveState: "idle",
         });
         if (backend() === "codex") await requireSpeedSupport(model(), speed(), undefined, !!localBinding(p.mission.id));
+        const srcLocal = localBinding(p.mission.id);
+        if (srcLocal) {
+          const cli = await localAgentForLaunch(backend());
+          if (!cli?.installed || !cli.path) throw new Error(`${backend()} is not installed on this computer.`);
+        }
         await stopSource(p.mission.id);
         payload = nextPayload;
         putTransfer({ sourceId: p.mission.id, targetSignature: sig, payload, stage: "source_stopped", archiveState: "idle" });
+      }
+      const srcLocal = localBinding(p.mission.id);
+      let destLocalPath = "";
+      if (srcLocal) {
+        const cli = await localAgentForLaunch(payload.backend);
+        if (!cli?.installed || !cli.path) throw new Error(`${payload.backend} is not installed on this computer.`);
+        destLocalPath = cli.path;
       }
       const next = await forkMission(p.mission.id, payload);
       const immediate = destinationStartupOutcome(next, []);
@@ -147,6 +162,17 @@ export function ForkMission(p: {
       } else {
         putTransfer({ sourceId: p.mission.id, targetSignature: sig, payload, destination: next, stage: "destination_starting", archiveState: "idle" });
         watchTransferDestination(p.mission.id, next.id);
+      }
+      if (srcLocal && destLocalPath) {
+        await rememberBinding(next.id, {
+          harness: payload.backend,
+          bin: destLocalPath,
+          cwd: srcLocal.cwd,
+          model: payload.model_override || undefined,
+          effort: payload.model_effort || undefined,
+          permissionMode: srcLocal.permissionMode,
+          worktreeMode: srcLocal.worktreeMode,
+        });
       }
       p.onFork(next);
       usageTelemetry.action("fork", "mission");

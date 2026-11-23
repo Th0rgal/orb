@@ -1081,7 +1081,11 @@ export default function Resources(props: {
                   const sankeyNodeIds = createMemo(() => [...sankeyNodeMap().keys()], [], { equals: eqIds });
                   const [hoveredNodeId, setHoveredNodeId] = createSignal<string | null>(null);
                   const [hoveredLinkId, setHoveredLinkId] = createSignal<string | null>(null);
-                  const isolatedLabel = () => sankeyNodeMap().get(isolatedId() ?? "")?.label;
+                  const cardIsolatedId = () => {
+                    const id = isolatedId();
+                    return id && sankeyNodeMap().has(id) ? id : null;
+                  };
+                  const isolatedLabel = () => sankeyNodeMap().get(cardIsolatedId() ?? "")?.label;
                   const activeReadout = () => {
                     const link = sankeyLinkMap().get(hoveredLinkId() ?? "");
                     const node = sankeyNodeMap().get(hoveredNodeId() ?? "");
@@ -1095,7 +1099,7 @@ export default function Resources(props: {
                   };
                   const isLinkDimmed = (id: string, source: string, target: string) => {
                     if (hoveredLinkId()) return hoveredLinkId() !== id;
-                    const node = hoveredNodeId() ?? isolatedId();
+                    const node = hoveredNodeId() ?? cardIsolatedId();
                     return Boolean(node && source !== node && target !== node);
                   };
                   let wrap: HTMLDivElement | undefined;
@@ -1166,7 +1170,7 @@ export default function Resources(props: {
                       sankeyGraph() &&
                       sankeyGraph()!.layout.nodes.length > 0 &&
                       (sankeyGraph()!.layout.links.length > 0 ||
-                        sankeyGraph()!.layout.nodes.some((n) => n.value > 0))
+                        sankeyGraph()!.layout.nodes.some((n) => n.column > 0 && n.value > 0))
                     }
                     fallback={
                       <div
@@ -1381,7 +1385,7 @@ export default function Resources(props: {
                                         rx={3}
                                         fill={nd().color}
                                         opacity={
-                                          isolatedId() && isolatedId() !== id
+                                          cardIsolatedId() && cardIsolatedId() !== id
                                             ? 0.42
                                             : hoveredNodeId() === id
                                               ? 1

@@ -280,7 +280,7 @@ test('Hermes cloud agent supports custom router model selection and image attach
  await form.getByLabel('Model',{exact:true}).click();
  await page.getByRole('option',{name:'Private · builtin/private'}).click();
  await expect(form.getByLabel('Model',{exact:true})).toContainText('Private · builtin/private');
- await form.getByLabel('Choose images').setInputFiles({name:'pixel.png',mimeType:'image/png',buffer:png});
+ await form.getByLabel('Choose files or images').setInputFiles({name:'pixel.png',mimeType:'image/png',buffer:png});
  await expect(form.locator('.composer-image img')).toBeVisible();
  await form.getByLabel('Prompt',{exact:true}).fill('Describe this image [Image #1]');
  await form.getByRole('button',{name:'Create cloud agent'}).click();
@@ -289,7 +289,7 @@ test('Hermes cloud agent supports custom router model selection and image attach
  expect(launches[0].prompt).toContain('[Uploaded: /var/lib/sandboxed-sh/context/image-1.png]');
  await expect(page.getByText('Red pixel seen.',{exact:true})).toBeVisible();
  await expect(page.locator('.message-image img')).toBeVisible();
- await page.getByLabel('Choose images').setInputFiles({name:'followup.png',mimeType:'image/png',buffer:png});
+ await page.getByLabel('Choose files or images').setInputFiles({name:'followup.png',mimeType:'image/png',buffer:png});
  await page.getByPlaceholder('Send follow-up').fill('Compare with second image [Image #1]');
  await page.getByRole('button',{name:'Send',exact:true}).click();
  await expect.poll(()=>followups.length).toBe(1);
@@ -436,7 +436,7 @@ test('Hermes supports router catalog models, effort switching mid-mission withou
  await page.getByRole('option',{name:'Private · builtin/private'}).click();
  await form.getByLabel('Effort',{exact:true}).click();
  await page.getByRole('option',{name:'High',exact:true}).click();
- await form.getByLabel('Choose images').setInputFiles({name:'notes.txt',mimeType:'text/plain',buffer:Buffer.from('Important project notes')});
+ await form.getByLabel('Choose files or images').setInputFiles({name:'notes.txt',mimeType:'text/plain',buffer:Buffer.from('Important project notes')});
  await expect(form.getByText('notes.txt')).toBeVisible();
  await form.getByLabel('Prompt',{exact:true}).fill('Analyze this file');
  await form.getByRole('button',{name:'Create cloud agent'}).click();

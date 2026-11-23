@@ -1,5 +1,7 @@
 import { DONE_STATUSES, isArchivable, isFailedStatus, isReady, remoteJobEnded, remoteJobFailed } from "./missionStatus";
-import { api, ApiError, archiveMission, cancelMission, forkMission, getMission, type CodexServiceTier, type Mission } from "./api";
+import { api, ApiError, archiveMission, cancelMission, forkMission, getMission, setClientMissionStatus, type CodexServiceTier, type Mission } from "./api";
+import { flushClientLink } from "./clientLink";
+import { localBinding, stopLocal } from "./localAgents";
 import { createSignal } from "solid-js";
 import { peekTranscript } from "./missionCache";
 import { getMissionEventPage, storedToStream } from "./stream";
@@ -194,6 +196,14 @@ export function isDefinitiveRefusal(error: unknown): boolean {
 /** Stops a conversation that another version replaces, if it is still running. */
 export async function stopSource(id: string): Promise<void> {
   const current = await getMission(id, { includeHistory: false });
+  if (localBinding(id)) {
+    await stopLocal(id);
+    await flushClientLink(id).catch(() => {});
+    if (!sourceStopped(current)) {
+      await setClientMissionStatus(id, "interrupted");
+    }
+    return;
+  }
   if (sourceStopped(current)) return;
   if (current.backend?.startsWith("cloud_")) {
     await api(`/api/control/missions/${encodeURIComponent(id)}/cloud/cancel`, { method: "POST" });
