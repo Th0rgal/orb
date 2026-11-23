@@ -11,6 +11,13 @@ open OrbBin.Json OrbCore.Managed OrbCore.AirVpnSettings
 private def check (ok : Bool) (label : String) : IO Unit := do
   unless ok do throw (IO.userError s!"airvpn settings: {label}")
 
+/-- A failing check may already have collected the fixture process. -/
+private def stopFixture (child : AirVpnTunnel.Child) : IO Unit :=
+  try
+    child.kill
+    discard child.wait
+  catch _ => pure ()
+
 private def routeStorage (root : String) : IO Unit := do
   let path := root ++ "/vpn-prefs-test.db"
   let openDb := OrbBin.Sqlite.openSqliteDb path OrbCore.Store.missionsSchemaSql #[]
@@ -118,7 +125,8 @@ def run (root : String) : IO Unit := do
     let child ← IO.Process.spawn { cmd := "sleep", args := #["30"], stdin := .null, stdout := .null, stderr := .null }
     let seen := [Orb.AccountVpn.ExitAddress.v4 0x01020304, .v6 0x20010db800000000 1]
     let gateway : AccountVpnPool.Gateway := ⟨30002, ← IO.mkRef false⟩
-    let tunnel : AirVpnTunnel.Tunnel := ⟨child, 30002, seen, ← IO.mkRef none, ← IO.Promise.new, ← IO.asTask (pure ())⟩
+    let tunnel : AirVpnTunnel.Tunnel :=
+      ⟨child, 30002, seen, ← IO.mkRef none, ← IO.Promise.new, ← IO.asTask (pure ()), ← IO.mkRef false⟩
     let occupant : AccountVpnPool.Occupant := ⟨⟨"v", cat "openai", "NL", seen⟩, pref.generation, [], gateway⟩
     let running : AccountVpnPool.Active :=
       { endpoint := ⟨"device", "NL", "west"⟩, tunnel, evidence := ⟨"west", "NL", seen⟩, occupants := [occupant] }
@@ -136,12 +144,31 @@ def run (root : String) : IO Unit := do
     let (stopped, afterExit) ← shown
     check (stopped == 200 && afterExit.fieldStr? "status" == some "blocked" && (afterExit.field? "exits").isNone)
       "exited tunnel is no longer shown as a verified exit"
+    check (afterExit.fieldStr? "reason" == some "vpn_tunnel_stopped" &&
+      (afterExit.fieldStr? "message").any (·.startsWith "The VPN tunnel stopped."))
+      "a stopped tunnel is reported as a failure to retry, not as awaiting verification"
+    check (← tunnel.reaped.get) "the first observed exit is recorded on the tunnel"
     let refused ← AccountVpnPool.allocate pool store.rootDir root db "v" "openai" pref
     check (refused.toOption.isNone && (← gateway.revoked.get) && (← pool.atomically get).active.isEmpty)
       "exited tunnel is refused, revoked and retired"
     let (_, reported) ← shown
     check (reported.fieldStr? "status" == some "blocked" && reported.fieldStr? "reason" != some "vpn_awaiting_verification")
       "settings report why the exited tunnel was not replaced"
+    -- The system may reissue the process id of a collected child. A running
+    -- process stands in for the one that received it.
+    let bystander ← IO.Process.spawn { cmd := "sleep", args := #["30"], stdin := .null, stdout := .null, stderr := .null }
+    try
+      let collected : AirVpnTunnel.Tunnel :=
+        ⟨bystander, 30002, seen, ← IO.mkRef none, ← IO.Promise.new, ← IO.asTask (pure ()), ← IO.mkRef true⟩
+      pool.atomically <| set ({ active := [{ running with tunnel := collected }] } : AccountVpnPool.PoolState)
+      let (_, reused) ← shown
+      check (reused.fieldStr? "reason" == some "vpn_tunnel_stopped")
+        "a process that reuses a collected tunnel's id is not shown as its verified exit"
+      discard <| AccountVpnPool.allocate pool store.rootDir root db "v" "openai" pref
+      let spared ← try pure (← bystander.tryWait).isNone catch _ => pure false
+      check ((← pool.atomically get).active.isEmpty && spared)
+        "retiring a collected tunnel does not signal the process that reuses its id"
+    finally stopFixture bystander
   finally OrbCore.Store.closeCoreStore store
   let first : ProviderUsageAndLogin.CliAuthFileInfo := { (default : ProviderUsageAndLogin.CliAuthFileInfo) with
     fileName := "one.json", authType := "codex", prefixId := "first" }
