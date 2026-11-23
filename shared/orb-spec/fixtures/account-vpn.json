@@ -37,6 +37,12 @@
       "view": {"selected": "NL", "countries": ["NL"], "editable": true, "confirm_direct": false, "notice": "", "status": "Waiting for exit verification.", "retry": false, "poll": true}
     },
     {
+      "name": "tunnel that stopped on its own",
+      "native": false,
+      "payload": {"countries": ["NL"], "can_configure": true, "mode": "vpn", "country": "NL", "status": "blocked", "reason": "vpn_tunnel_stopped", "message": "The VPN tunnel stopped. Retry verification to start a new one."},
+      "view": {"selected": "NL", "countries": ["NL"], "editable": true, "confirm_direct": false, "notice": "", "status": "The VPN tunnel stopped. Retry verification to start a new one.", "retry": true, "poll": false}
+    },
+    {
       "name": "blocked route without a message",
       "native": false,
       "payload": {"countries": ["NL"], "can_configure": true, "mode": "vpn", "country": "NL", "status": "blocked"},
@@ -67,6 +73,30 @@
       "view": {"selected": "", "countries": [], "editable": false, "confirm_direct": false, "notice": "Check the account connection, then refresh.", "status": "", "retry": false, "poll": false}
     },
     {
+      "name": "Direct answer that still names a country and a failure",
+      "native": false,
+      "payload": {"countries": ["NL"], "can_configure": true, "mode": "direct", "country": "NL", "status": "blocked", "message": "Tunnel unavailable.", "saved": true},
+      "view": {"selected": "", "countries": ["NL"], "editable": true, "confirm_direct": false, "notice": "", "status": "", "retry": false, "poll": false}
+    },
+    {
+      "name": "Direct answer that still names a verified exit",
+      "native": false,
+      "payload": {"countries": ["NL"], "can_configure": true, "mode": "direct", "country": "NL", "status": "verified", "server": "Alkaid", "exits": ["192.0.2.20"], "saved": true},
+      "view": {"selected": "", "countries": ["NL"], "editable": true, "confirm_direct": false, "notice": "", "status": "", "retry": false, "poll": false}
+    },
+    {
+      "name": "country list with unusable entries",
+      "native": false,
+      "payload": {"countries": ["", 7, "NL", "NL"], "can_configure": true, "mode": "vpn", "country": "DE", "status": "verified", "server": "Alkaid", "exits": ["192.0.2.20"]},
+      "view": {"selected": "DE", "countries": ["DE", "NL"], "editable": true, "confirm_direct": false, "notice": "", "status": "Verified exit · Alkaid · 192.0.2.20", "retry": false, "poll": false}
+    },
+    {
+      "name": "country list with no usable entry",
+      "native": false,
+      "payload": {"countries": ["", 7], "can_configure": true, "mode": "direct", "status": "direct", "saved": true},
+      "view": {"selected": "", "countries": [], "editable": true, "confirm_direct": false, "notice": "Import a named server profile in AirVPN Settings to enable VPN routing.", "status": "", "retry": false, "poll": false}
+    },
+    {
       "name": "no imported server profile",
       "native": false,
       "payload": {"countries": [], "can_configure": true, "mode": "direct", "status": "direct", "saved": true},
@@ -77,6 +107,9 @@
     null,
     {},
     {"mode": "vpn", "can_configure": true},
+    {"mode": "vpn", "countries": ["NL"], "can_configure": true, "status": "blocked"},
+    {"mode": "vpn", "country": "", "countries": ["NL"], "can_configure": true, "status": "blocked"},
+    {"mode": "vpn", "country": 7, "countries": ["NL"], "can_configure": true, "status": "verified"},
     {"mode": "relay", "countries": [], "can_configure": true},
     {"mode": "direct", "countries": "NL", "can_configure": true}
   ],
@@ -91,6 +124,38 @@
     {"name": "unavailable coordinator", "path": "/api/ai/providers/a/vpn", "status": 503, "body": "{\"error\":\"not_found\",\"path\":\"/api/ai/providers/a/vpn\"}", "missing_endpoint": false},
     {"name": "proxy error page", "path": "/api/ai/providers/a/alternative-routers", "status": 404, "body": "Not Found", "missing_endpoint": false},
     {"name": "older Core without router access", "path": "/api/ai/providers/a/alternative-routers", "status": 404, "body": "{\"error\":\"not_found\",\"path\":\"/api/ai/providers/a/alternative-routers\"}", "missing_endpoint": true}
+  ],
+  "requests": [
+    {
+      "name": "a selection made during a background read is sent and outlives it",
+      "steps": [
+        {"start": "read", "request": 1, "saving": false},
+        {"start": "write", "request": 2, "saving": true},
+        {"current": 1, "is": false},
+        {"current": 2, "is": true}
+      ]
+    },
+    {
+      "name": "no read or second selection starts while a selection is saved",
+      "steps": [
+        {"start": "write", "request": 1, "saving": true},
+        {"start": "read", "request": null, "saving": true},
+        {"start": "write", "request": null, "saving": true},
+        {"current": 1, "is": true},
+        {"saved": true, "saving": false},
+        {"start": "read", "request": 2, "saving": false},
+        {"current": 1, "is": false}
+      ]
+    },
+    {
+      "name": "the newest of two reads is the one shown",
+      "steps": [
+        {"start": "read", "request": 1, "saving": false},
+        {"start": "read", "request": 2, "saving": false},
+        {"current": 1, "is": false},
+        {"current": 2, "is": true}
+      ]
+    }
   ],
   "router_access": [
     {"payload": {"allowed": true}, "allowed": true},

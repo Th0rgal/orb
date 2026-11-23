@@ -58,10 +58,39 @@ final class OrbSettingsTests: XCTestCase {
             XCTAssertEqual(OrbAccountVpn.write(country), body, country)
         }
     }
+    func testAccountConnectionRequestsMatchSharedFixture() throws {
+        let spec = try OrbSpec.json("fixtures/account-vpn.json")
+        let cases = try XCTUnwrap(spec["requests"] as? [[String: Any]])
+        XCTAssertFalse(cases.isEmpty)
+        for c in cases {
+            let name = try XCTUnwrap(c["name"] as? String)
+            var requests = OrbAccountVpn.Requests()
+            for step in try XCTUnwrap(c["steps"] as? [[String: Any]]) {
+                if let kind = step["start"] as? String {
+                    let started = requests.start(write: kind == "write")
+                    XCTAssertEqual(started?.latest, step["request"] as? Int, name)
+                    requests = started ?? requests
+                } else if let request = step["current"] as? Int {
+                    let expected = try XCTUnwrap(step["is"] as? Bool)
+                    XCTAssertEqual(requests.current(request), expected, name)
+                } else {
+                    XCTAssertNotNil(step["saved"], name)
+                    requests = requests.saved()
+                }
+                if let saving = step["saving"] as? Bool { XCTAssertEqual(requests.saving, saving, name) }
+            }
+        }
+    }
     func testAccountSettingReadErrorsAndRouterAccessMatchSharedFixture() throws {
         let spec = try OrbSpec.json("fixtures/account-vpn.json")
         let labels = try XCTUnwrap(spec["labels"] as? [String: String])
-        let update = try XCTUnwrap(labels["vpn_update"])
+        XCTAssertEqual(labels, [
+            "vpn_update": OrbAccountVpn.Labels.vpnUpdate, "router_update": OrbAccountVpn.Labels.routerUpdate,
+            "route_unavailable": OrbAccountVpn.Labels.routeUnavailable, "router_unavailable": OrbAccountVpn.Labels.routerUnavailable,
+            "router_unconfirmed": OrbAccountVpn.Labels.routerUnconfirmed,
+        ])
+        let update = OrbAccountVpn.Labels.vpnUpdate
+        let unavailable = OrbAccountVpn.Labels.routeUnavailable
         let errors = try XCTUnwrap(spec["read_errors"] as? [[String: Any]])
         XCTAssertFalse(errors.isEmpty)
         for c in errors {
@@ -71,10 +100,10 @@ final class OrbSettingsTests: XCTestCase {
             let path = try XCTUnwrap(c["path"] as? String)
             let missing = try XCTUnwrap(c["missing_endpoint"] as? Bool)
             XCTAssertEqual(OrbAccountVpn.missingSetting(status: status, body: body, path: path), missing, name)
-            let shown = OrbAccountVpn.readError(OrbHTTPError(status: status, detail: body), path: path, update: update, unavailable: "unavailable")
-            XCTAssertEqual(shown, missing ? update : "unavailable", name)
+            let shown = OrbAccountVpn.readError(OrbHTTPError(status: status, detail: body), path: path, update: update, unavailable: unavailable)
+            XCTAssertEqual(shown, missing ? update : unavailable, name)
         }
-        XCTAssertEqual(OrbAccountVpn.readError(URLError(.timedOut), path: "/api/ai/providers/a/vpn", update: update, unavailable: "unavailable"), "unavailable")
+        XCTAssertEqual(OrbAccountVpn.readError(URLError(.timedOut), path: "/api/ai/providers/a/vpn", update: update, unavailable: unavailable), unavailable)
         let access = try XCTUnwrap(spec["router_access"] as? [[String: Any]])
         XCTAssertFalse(access.isEmpty)
         for c in access {

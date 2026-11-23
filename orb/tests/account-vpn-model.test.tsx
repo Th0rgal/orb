@@ -52,6 +52,7 @@ test.each(fixture.routes)("account connection row renders: $name", async c => {
   expect(screen.queryAllByRole("button", { name: "Refresh connection settings" })).toHaveLength(c.view.editable ? 0 : 1);
   expect(screen.queryByRole("status")?.textContent ?? "").toBe(c.view.status);
   if (c.view.notice) screen.getByText(c.view.notice);
+  else expect(screen.queryByText(/VPN routing is unavailable|Import a named server profile/)).toBeNull();
 });
 
 it("leaves the account connection unconfirmed when Core answers without a mode", async () => {

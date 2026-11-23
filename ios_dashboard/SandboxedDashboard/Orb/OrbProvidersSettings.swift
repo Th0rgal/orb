@@ -1157,17 +1157,44 @@ enum OrbAccountVpn {
         var poll = false
     }
 
-    /// A payload that states neither the mode nor the countries confirms nothing.
+    /// Orders the row's reads and writes: a selection is never dropped for a
+    /// read in flight, and only the newest request is shown.
+    struct Requests: Equatable {
+        var saving = false
+        var latest = 0
+
+        /// Nil while a selection is being saved: nothing else starts until it settles.
+        func start(write: Bool) -> Requests? { saving ? nil : Requests(saving: write, latest: latest + 1) }
+        func current(_ request: Int) -> Bool { request == latest }
+        func saved() -> Requests { Requests(saving: false, latest: latest) }
+    }
+
+    enum Labels {
+        static let vpnUpdate = "Update Core to configure account VPNs."
+        static let routerUpdate = "Update Core to configure alternative router access."
+        static let routeUnavailable = "Account connection settings are unavailable."
+        static let routerUnavailable = "Router access is unavailable."
+        static let routerUnconfirmed = "Could not confirm the change. Check the current setting before retrying."
+    }
+
+    /// A payload that states neither the mode nor the countries confirms nothing,
+    /// and neither does a VPN route that does not name its country.
     static func route(_ payload: OrbJSON) -> OrbJSON? {
-        guard ["vpn", "direct"].contains(payload["mode"].text), case .array = payload["countries"] else { return nil }
-        return payload
+        guard case .array = payload["countries"] else { return nil }
+        switch payload["mode"].text {
+        case "vpn": return payload["country"].text.isEmpty ? nil : payload
+        case "direct": return payload
+        default: return nil
+        }
     }
 
     static func view(_ route: OrbJSON, nativeAccount: Bool) -> View {
-        let selected = route["country"].text
-        let offered = route["countries"].items.map(\.text)
+        // Only a VPN route has a country, an exit or a failure to retry.
+        let vpn = route["mode"].text == "vpn"
+        let selected = vpn ? route["country"].text : ""
+        let offered = route["countries"].items.map(\.text).filter { !$0.isEmpty }
         let editable = route["can_configure"].flag
-        let blocked = route["status"].text == "blocked"
+        let blocked = vpn && route["status"].text == "blocked"
         let pending = blocked && route["reason"].text == "vpn_awaiting_verification"
         var countries: [String] = []
         for country in [selected] + offered where !country.isEmpty && !countries.contains(country) {
@@ -1181,7 +1208,7 @@ enum OrbAccountVpn {
         } else if offered.isEmpty {
             view.notice = "Import a named server profile in AirVPN Settings to enable VPN routing."
         }
-        if route["status"].text == "verified" {
+        if vpn && route["status"].text == "verified" {
             view.status = "Verified exit · " + route["server"].text + " · " + route["exits"].items.map(\.text).joined(separator: ", ")
         } else if blocked {
             if case .string(let message) = route["message"] { view.status = message }
@@ -1208,9 +1235,9 @@ enum OrbAccountVpn {
     }
 
     /// An older Core gets the version requirement instead of its raw 404.
-    static func readError(_ error: Error, path: String, update: String, unavailable: String? = nil) -> String {
+    static func readError(_ error: Error, path: String, update: String, unavailable: String) -> String {
         if let http = error as? OrbHTTPError, missingSetting(status: http.status, body: http.detail, path: path) { return update }
-        return unavailable ?? error.localizedDescription
+        return unavailable
     }
 }
 
@@ -1219,7 +1246,7 @@ private struct AlternativeRouterSettings: View {
     let client: OrbSettingsClient
     let account: String
     @State private var allowed: Bool?
-    @State private var busy = false
+    @State private var requests = OrbAccountVpn.Requests()
     @State private var error = ""
 
     private var path: String { "/api/ai/providers/\(OrbCore.escape(account))/alternative-routers" }
@@ -1235,10 +1262,12 @@ private struct AlternativeRouterSettings: View {
         return current
     }
 
+    /// A reread never disables the switch and never outlives a newer change.
     private func update(_ value: Bool? = nil) async {
-        guard !busy else { return }
-        busy = true
-        defer { busy = false }
+        guard let started = requests.start(write: value != nil) else { return }
+        requests = started
+        let request = started.latest
+        defer { if value != nil { requests = requests.saved() } }
         var unconfirmed = ""
         do {
             if let value {
@@ -1250,16 +1279,19 @@ private struct AlternativeRouterSettings: View {
                     return
                 } catch {
                     // Core refused or could not confirm the change: show what it still reports.
-                    unconfirmed = "Could not confirm the change. Check the current setting before retrying."
+                    unconfirmed = OrbAccountVpn.Labels.routerUnconfirmed
                 }
             }
-            allowed = try await access()
+            let current = try await access()
+            guard requests.current(request) else { return }
+            allowed = current
             error = unconfirmed
         } catch is CancellationError {
         } catch {
+            guard requests.current(request) else { return }
             allowed = nil
             self.error = OrbAccountVpn.readError(error, path: path,
-                update: "Update Core to configure alternative router access.", unavailable: "Router settings are unavailable.")
+                update: OrbAccountVpn.Labels.routerUpdate, unavailable: OrbAccountVpn.Labels.routerUnavailable)
         }
     }
 
@@ -1268,11 +1300,11 @@ private struct AlternativeRouterSettings: View {
             if let allowed {
                 Toggle("Allow alternative routers", isOn: Binding(get: { allowed }, set: { next in
                     Task { await update(next) }
-                })).disabled(busy)
+                })).disabled(requests.saving)
             }
             if !error.isEmpty { Text(error).font(.caption) }
             if allowed == nil && !error.isEmpty {
-                Button("Retry router settings") { Task { await update() } }.disabled(busy)
+                Button("Retry router settings") { Task { await update() } }
             }
         }.task(id: account) { await update() }
         .onChange(of: scenePhase) { _, phase in if phase == .active { Task { await update() } } }
@@ -1285,16 +1317,18 @@ private struct OrbAccountVpnSettings: View {
     let account: String
     let nativeAccount: Bool
     @State private var route: OrbJSON?
-    @State private var busy = false
+    @State private var requests = OrbAccountVpn.Requests()
     @State private var error = ""
 
     private var path: String { "/api/ai/providers/\(OrbCore.escape(account))/vpn" }
 
+    /// A reread never disables the controls and never outlives a newer selection.
     private func update(_ country: String? = nil) async {
-        guard !busy else { return }
-        busy = true
-        error = ""
-        defer { busy = false }
+        guard let started = requests.start(write: country != nil) else { return }
+        requests = started
+        let request = started.latest
+        if country != nil { error = "" }
+        defer { if country != nil { requests = requests.saved() } }
         do {
             let result: OrbJSON
             if let country {
@@ -1302,24 +1336,30 @@ private struct OrbAccountVpnSettings: View {
             } else {
                 result = try await client.call(path)
             }
+            guard requests.current(request) else { return }
             // A payload that does not state the mode confirms nothing.
-            route = OrbAccountVpn.route(result)
-            if route == nil { error = "Account connection settings are unavailable." }
+            let confirmed = OrbAccountVpn.route(result)
+            // A reread keeps the message of a selection Core refused.
+            if route == nil || confirmed == nil { error = confirmed == nil ? OrbAccountVpn.Labels.routeUnavailable : "" }
+            route = confirmed
         } catch is CancellationError {
         } catch {
+            guard requests.current(request) else { return }
             guard country == nil else {
                 self.error = error.localizedDescription
                 return
             }
             // A failed read leaves the route unconfirmed.
             route = nil
-            self.error = OrbAccountVpn.readError(error, path: path, update: "Update Core to configure account VPNs.")
+            self.error = OrbAccountVpn.readError(error, path: path,
+                update: OrbAccountVpn.Labels.vpnUpdate, unavailable: OrbAccountVpn.Labels.routeUnavailable)
         }
     }
 
     var body: some View {
         let view = route.map { OrbAccountVpn.view($0, nativeAccount: nativeAccount) }
         let polling = scenePhase == .active && view?.poll == true
+        let busy = requests.saving
         VStack(alignment: .leading) {
             if let view {
                 Picker("Account connection", selection: Binding(get: { view.selected }, set: { value in
@@ -1342,9 +1382,10 @@ private struct OrbAccountVpnSettings: View {
                         .disabled(busy || !view.editable)
                 }
             }
-            if !error.isEmpty {
-                Text(error).font(.caption)
-                Button("Retry connection settings") { Task { await update() } }.disabled(busy)
+            if !error.isEmpty { Text(error).font(.caption) }
+            // Only an unread route is reread; a refused selection is made again from the row.
+            if route == nil && !error.isEmpty {
+                Button("Retry connection settings") { Task { await update() } }
             }
         }.task(id: account) { await update() }
         .task(id: polling) {

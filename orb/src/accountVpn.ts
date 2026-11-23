@@ -1,7 +1,9 @@
 /** Account connection and alternative-router settings as Core reports them.
  * `OrbAccountVpn` on iOS (`OrbProvidersSettings.swift`) and Android (`OrbAccountVpn.kt`)
  * mirrors these functions; all three are checked against
- * `shared/orb-spec/fixtures/account-vpn.json`. */
+ * `shared/orb-spec/fixtures/account-vpn.json`. Its `requests` cases order the
+ * mobile row's reads and writes; `AccountVpnSettings.tsx` gets the same order
+ * from its effect cleanup. */
 export interface AccountVpnRoute {
   mode: "direct" | "vpn";
   country?: string;
@@ -31,26 +33,31 @@ export interface AccountVpnView {
   poll: boolean;
 }
 
-/** A payload that states neither the mode nor the countries confirms nothing. */
+/** A payload that states neither the mode nor the countries confirms nothing,
+ * and neither does a VPN route that does not name its country. */
 export function accountVpnRoute(payload: unknown): AccountVpnRoute | null {
   const route = payload as AccountVpnRoute | null;
-  if (!route || typeof route !== "object" || !["vpn", "direct"].includes(route.mode) || !Array.isArray(route.countries)) return null;
-  return route;
+  if (!route || typeof route !== "object" || !Array.isArray(route.countries)) return null;
+  if (route.mode === "vpn") return typeof route.country === "string" && route.country ? route : null;
+  return route.mode === "direct" ? route : null;
 }
 
 export function accountVpnView(route: AccountVpnRoute, nativeAccount: boolean): AccountVpnView {
-  const selected = route.country ?? "";
+  // Only a VPN route has a country, an exit or a failure to retry.
+  const vpn = route.mode === "vpn";
+  const selected = vpn ? route.country ?? "" : "";
+  const offered = route.countries.filter(country => typeof country === "string" && country);
   const editable = route.can_configure === true;
-  const blocked = route.status === "blocked";
+  const blocked = vpn && route.status === "blocked";
   const pending = blocked && route.reason === "vpn_awaiting_verification";
   return {
     selected,
-    countries: Array.from(new Set([...(selected ? [selected] : []), ...route.countries])),
+    countries: Array.from(new Set([...(selected ? [selected] : []), ...offered])),
     editable,
     confirmDirect: nativeAccount && editable && route.mode === "direct" && route.saved !== true,
     notice: !editable ? route.configuration_message ?? "VPN routing is unavailable for this credential."
-      : route.countries.length ? "" : "Import a named server profile in AirVPN Settings to enable VPN routing.",
-    status: route.status === "verified" ? `Verified exit · ${route.server ?? ""} · ${(route.exits ?? []).join(", ")}`
+      : offered.length ? "" : "Import a named server profile in AirVPN Settings to enable VPN routing.",
+    status: vpn && route.status === "verified" ? `Verified exit · ${route.server ?? ""} · ${(route.exits ?? []).join(", ")}`
       : blocked ? route.message ?? "The VPN route is unavailable." : "",
     retry: blocked && !pending,
     poll: pending,

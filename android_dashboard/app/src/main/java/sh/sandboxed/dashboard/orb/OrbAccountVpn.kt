@@ -18,18 +18,42 @@ object OrbAccountVpn {
         val poll: Boolean,
     )
 
-    /** A payload that states neither the mode nor the countries confirms nothing. */
+    /** Orders the row's reads and writes: a selection is never dropped for a
+     *  read in flight, and only the newest request is shown. */
+    data class Requests(val saving: Boolean = false, val latest: Int = 0) {
+        /** Null while a selection is being saved: nothing else starts until it settles. */
+        fun start(write: Boolean): Requests? = if (saving) null else Requests(write, latest + 1)
+        fun current(request: Int): Boolean = request == latest
+        fun saved(): Requests = copy(saving = false)
+    }
+
+    object Labels {
+        const val vpnUpdate = "Update Core to configure account VPNs."
+        const val routerUpdate = "Update Core to configure alternative router access."
+        const val routeUnavailable = "Account connection settings are unavailable."
+        const val routerUnavailable = "Router access is unavailable."
+        const val routerUnconfirmed = "Could not confirm the change. Check the current setting before retrying."
+    }
+
+    /** A payload that states neither the mode nor the countries confirms nothing,
+     *  and neither does a VPN route that does not name its country. */
     fun route(payload: Any?): OrbDict? {
         val route = OrbJSON.dict(payload) ?: return null
-        val mode = route["mode"]
-        return route.takeIf { (mode == "vpn" || mode == "direct") && it["countries"] is List<*> }
+        if (route["countries"] !is List<*>) return null
+        return when (route["mode"]) {
+            "vpn" -> route.takeIf { (it["country"] as? String).orEmpty().isNotEmpty() }
+            "direct" -> route
+            else -> null
+        }
     }
 
     fun view(route: OrbDict, nativeAccount: Boolean): View {
-        val selected = route["country"] as? String ?: ""
-        val offered = (route["countries"] as? List<*>)?.filterIsInstance<String>().orEmpty()
+        // Only a VPN route has a country, an exit or a failure to retry.
+        val vpn = route["mode"] == "vpn"
+        val selected = if (vpn) route["country"] as? String ?: "" else ""
+        val offered = (route["countries"] as? List<*>)?.filterIsInstance<String>().orEmpty().filter { it.isNotEmpty() }
         val editable = route["can_configure"] == true
-        val blocked = route["status"] == "blocked"
+        val blocked = vpn && route["status"] == "blocked"
         val pending = blocked && route["reason"] == "vpn_awaiting_verification"
         return View(
             selected = selected,
@@ -42,7 +66,7 @@ object OrbAccountVpn {
                 else -> ""
             },
             status = when {
-                route["status"] == "verified" -> {
+                vpn && route["status"] == "verified" -> {
                     val exits = (route["exits"] as? List<*>)?.filterIsInstance<String>().orEmpty().joinToString(", ")
                     "Verified exit · ${route["server"] as? String ?: ""} · $exits"
                 }
@@ -67,7 +91,6 @@ object OrbAccountVpn {
     fun routerAccess(payload: Any?): Boolean? = OrbJSON.dict(payload)?.get("allowed") as? Boolean
 
     /** An older Core gets the version requirement instead of its raw 404. */
-    fun readError(error: Throwable, path: String, update: String, unavailable: String? = null): String =
-        if (error is OrbError && missingSetting(error.status, error.body, path)) update
-        else unavailable ?: error.localizedMessage ?: "Connection settings unavailable."
+    fun readError(error: Throwable, path: String, update: String, unavailable: String): String =
+        if (error is OrbError && missingSetting(error.status, error.body, path)) update else unavailable
 }
