@@ -10,6 +10,7 @@ import OrbCore.Spec
 import OrbCore.Store
 import OrbCore.Managed
 import OrbBin.PrivdShared
+import OrbNode.ProjectContext
 
 namespace OrbCore.R7Core
 
@@ -22,10 +23,10 @@ open OrbCore.Spec
 open OrbCore.Store
 open OrbCore.Managed
 
-def contextFileLimit : Nat := 10 * 1024 * 1024
-def contextConfirmedFileLimit : UInt64 := 2 * 1024 * 1024 * 1024
-def contextProjectLimit : UInt64 := 100 * 1024 * 1024
-def contextEntryLimit : Nat := 5000
+abbrev contextFileLimit : Nat := OrbNode.ProjectContext.contextFileLimit
+abbrev contextConfirmedFileLimit : UInt64 := OrbNode.ProjectContext.contextConfirmedFileLimit
+abbrev contextProjectLimit : UInt64 := OrbNode.ProjectContext.contextProjectLimit
+abbrev contextEntryLimit : Nat := OrbNode.ProjectContext.contextEntryLimit
 
 private def cell (row : Array String) (i : Nat) : String :=
   (row[i]?).getD ""
@@ -33,22 +34,8 @@ private def cell (row : Array String) (i : Nat) : String :=
 private def cellNat (row : Array String) (i : Nat) : Nat :=
   (cell row i).toNat?.getD 0
 
-def validContextPath (path : String) : Except String Unit := do
-  if path.isEmpty || path.length > 1024 || path.contains '\\' then
-    throw "invalid context path"
-  if path.any (fun c => c.toNat < 32 || c.toNat == 127) then
-    throw "invalid context path"
-  let segs := path.splitOn "/"
-  if segs.any (fun seg => seg.isEmpty || seg == "." || seg == "..") then
-    throw "context path must be canonical and relative"
-  for name in segs do
-    if name.startsWith "." ||
-       name == "node_modules" || name == "target" || name == "vendor" ||
-       name.endsWith "~" ||
-       name == "id_rsa" || name == "id_ed25519" ||
-       name == "credentials.json" || name == "auth.json" ||
-       name.endsWith ".pem" || name.endsWith ".key" then
-      throw s!"excluded context path: {path}"
+abbrev validContextPath (path : String) : Except String Unit :=
+  OrbNode.ProjectContext.validContextPath path
 
 def validRawProjectSlug (slug : String) : Bool :=
   (validContextPath slug).isOk && !slug.contains '/' && !slug.contains ':'

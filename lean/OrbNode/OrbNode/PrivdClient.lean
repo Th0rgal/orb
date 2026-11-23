@@ -174,41 +174,6 @@ def userFileBrowser := userFileOp "file_browser"
 
 def userNativeJobFile := userFileOp "native_job_file"
 
-/-- Write a binary/text file inside `/home/<unixUsername>/.orb-missions/<missionId>` via UID-dropped `O_NOFOLLOW`. -/
-def userWriteFile
-    (socketPath unixUsername missionId relPath : String)
-    (bytes : ByteArray) : IO (Except String UInt64) := do
-  let b64 := OrbBin.PosixExt.base64Encode bytes
-  let req := JVal.obj #[
-    ("action", .str "user_fs_op"),
-    ("unix_username", .str unixUsername),
-    ("mission_id", .str missionId),
-    ("subop", .str "write"),
-    ("rel_path", .str relPath),
-    ("content_b64", .str b64)
-  ]
-  match ← callPrivd socketPath req 30000 with
-  | .error e => return .error e
-  | .ok resp =>
-    let res := resp.fieldOrNull "result"
-    return .ok ((res.fieldUInt64? "size").getD bytes.size.toUInt64)
-
-/-- Create directory path inside `/home/<unixUsername>/.orb-missions/<missionId>` via UID-dropped `O_NOFOLLOW`. -/
-def userMkdir
-    (socketPath unixUsername missionId relPath : String) : IO (Except String String) := do
-  let req := JVal.obj #[
-    ("action", .str "user_fs_op"),
-    ("unix_username", .str unixUsername),
-    ("mission_id", .str missionId),
-    ("subop", .str "mkdir"),
-    ("rel_path", .str relPath)
-  ]
-  match ← callPrivd socketPath req 15000 with
-  | .error e => return .error e
-  | .ok resp =>
-    let res := resp.fieldOrNull "result"
-    return .ok ((res.fieldStr? "path").getD "")
-
 /-- Hash and size declared artifact paths inside `/home/<unixUsername>/.orb-missions/<missionId>`. -/
 def collectUserArtifacts
     (socketPath unixUsername missionId : String)

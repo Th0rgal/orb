@@ -40,14 +40,6 @@ structure ShapedScreenRuns where
   diffAddRuns : List InlineRun := []
   deriving Repr, Inhabited
 
-/-- Elevation shadow helper for Orb Desktop cards. -/
-@[inline] def desktopCardShadow (pal : Palette) : ShadowStyle :=
-  { offsetX := 0
-    offsetY := Int.ofNat (pxToSub 4)
-    blur := pxToSub 10
-    spread := 0
-    color := pal.shadowColor }
-
 /-- Helper for a single line of text with explicit `sizePx`, `lineH`, and `color`. -/
 def screenTextLine (theme : Theme) (w h sizePx linePx : SubPx) (color : Color)
     (text : String) (weight : Nat := 400) (monospace : Bool := false) : WidgetNode :=
@@ -174,12 +166,6 @@ def buildNewAgentBody (st : DesktopState) (mainW bodyH : SubPx) : WidgetNode :=
       |>.withFixedSize mainW bodyH
       |>.withBg pal.canvas)
     ([centerStack] ++ toastRegion)
-
-def buildControlEmptyBody (st : DesktopState) (mainW bodyH : SubPx) : WidgetNode :=
-  buildNewAgentBody st mainW bodyH
-
-def buildControlPopulatedBody (st : DesktopState) (mainW bodyH : SubPx) : WidgetNode :=
-  buildNewAgentBody st mainW bodyH
 
 /-! ## 3. `03_mission_transcript` (`/?screen=mission&id=m-active`) -/
 
@@ -721,9 +707,6 @@ def buildSplitDiffRightPane (theme : Theme) (paneW paneH : SubPx)
         (BoxStyle.col 0 |>.withPadding (Edges.all (pxToSub 12)) |>.withFixedSize paneW (paneH - pxToSub 82))
         [diffCard]
     ]
-
-def buildMissionSplitDiffBody (st : DesktopState) (mainW bodyH : SubPx) : WidgetNode :=
-  buildMissionTranscriptBody st mainW bodyH {}
 
 /-! ## 5. `05_machines_fleet` (`/?screen=machines`) -/
 

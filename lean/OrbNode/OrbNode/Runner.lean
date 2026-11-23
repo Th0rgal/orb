@@ -2325,8 +2325,7 @@ def tickRuntimeReserve
             let sl : LaunchingSlot := {
               forced := false, sideLane, coordLane, missionId := rec.missionId, trackBg
             }
-            let effectiveRole := (rt.queuedCallerRoles.get? jid).getD
-              (if !rec.execUnixUser.isEmpty || !rec.ownerUserId.isEmpty then "member" else "admin")
+            let effectiveRole := resolveQueuedCallerRole (rt.queuedCallerRoles.get? jid) rec.execUnixUser rec.ownerUserId
             rt := {
               rt with
               launching := rt.launching.insert jid sl
@@ -2484,8 +2483,7 @@ def reserveForceJob (rt : NodeRuntime) (jid : String) :
   let sl : LaunchingSlot := {
     forced := true, sideLane := false, coordLane := false, missionId := cur.missionId, trackBg
   }
-  let effectiveRole := (rt.queuedCallerRoles.get? jid).getD
-    (if !cur.execUnixUser.isEmpty || !cur.ownerUserId.isEmpty then "member" else "admin")
+  let effectiveRole := resolveQueuedCallerRole (rt.queuedCallerRoles.get? jid) cur.execUnixUser cur.ownerUserId
   let rt' := {
     rt with
     queueOrder := rt.queueOrder.filter (· != jid)

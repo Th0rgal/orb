@@ -744,4 +744,43 @@ theorem workspace_build_rejects_active
   unfold verifyWorkspaceBuildAdmit at hf ⊢
   exact bit_gate_eq_zero hf
 
+/-! ### 8. Queued Job Caller Role Resolution (`OrbNode.Runner` admission) -/
+
+/-- Resolve the effective caller role when dequeuing or force-starting a queued job.
+    Preserves an explicitly recorded caller role (e.g. `"admin"` on a multi-user
+    mission with a non-empty `ownerUserId`) so managed auth profiles remain accessible;
+    falls back to `"member"` when `execUnixUser` or `ownerUserId` is set, else `"admin"`. -/
+def resolveQueuedCallerRole (storedRole? : Option String) (execUnixUser ownerUserId : String) : String :=
+  match storedRole? with
+  | some role => role
+  | none => if !execUnixUser.isEmpty || !ownerUserId.isEmpty then "member" else "admin"
+
+theorem resolveQueuedCallerRole_preserves_stored
+    (role execUnixUser ownerUserId : String) :
+    resolveQueuedCallerRole (some role) execUnixUser ownerUserId = role := rfl
+
+theorem resolveQueuedCallerRole_admin_survives_owner
+    (execUnixUser ownerUserId : String) :
+    resolveQueuedCallerRole (some "admin") execUnixUser ownerUserId = "admin" := rfl
+
+theorem resolveQueuedCallerRole_none_owner_defaults_member
+    (execUnixUser ownerUserId : String) (h : ownerUserId ≠ "") :
+    resolveQueuedCallerRole none execUnixUser ownerUserId = "member" := by
+  unfold resolveQueuedCallerRole
+  have hne : (!ownerUserId.isEmpty) = true := by
+    cases ho : ownerUserId.isEmpty with
+    | false => rfl
+    | true => exact absurd (String.isEmpty_iff.mp ho) h
+  simp [hne]
+
+theorem resolveQueuedCallerRole_none_unowned_defaults_admin :
+    resolveQueuedCallerRole none "" "" = "admin" := rfl
+
+#guard resolveQueuedCallerRole (some "admin") "" "user-123" == "admin"
+#guard resolveQueuedCallerRole (some "admin") "orb_u1" "user-123" == "admin"
+#guard resolveQueuedCallerRole (some "member") "" "" == "member"
+#guard resolveQueuedCallerRole none "" "user-123" == "member"
+#guard resolveQueuedCallerRole none "orb_u1" "" == "member"
+#guard resolveQueuedCallerRole none "" "" == "admin"
+
 end OrbNode.Spec
