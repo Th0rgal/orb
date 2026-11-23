@@ -472,12 +472,6 @@ def statusOfPhase (phaseCode : UInt8) : String :=
   else if phaseCode == 2 then "stopped"
   else "destroyed"
 
-def phaseOfStatus (status : String) : UInt8 :=
-  if status == "ready" || status == "online" then 1
-  else if status == "stopped" then 2
-  else if status == "destroyed" || status == "failed" then 3
-  else 0
-
 def cell (row : Array String) (i : Nat) : String :=
   (row[i]?).getD ""
 
@@ -488,12 +482,20 @@ def cellU8 (row : Array String) (i : Nat) : UInt8 :=
   cellU64 row i |>.toUInt8
 
 private def machineFromRow (row : Array String) : ManagedMachine :=
+  let rawStatus := cell row 4
+  let phaseCode := cellU8 row 13
+  let effectiveStatus :=
+    if phaseCode == 3 || rawStatus == "destroyed" then "destroyed"
+    else if cell row 22 == "1" then "provisioning"
+    else if phaseCode == 2 || rawStatus == "stopped" then "stopped"
+    else if cell row 24 == "pending" then "destroying"
+    else rawStatus
   {
     id := cell row 0
     sandboxName := cell row 1
     provider := cell row 2
     size := cell row 3
-    status := if cell row 22 == "1" then "provisioning" else if cell row 24 == "pending" then "destroying" else cell row 4
+    status := effectiveStatus
     ownerMission := cell row 5
     ttlMinutes := cellU64 row 6
     spentCents := cellU64 row 7
@@ -880,6 +882,9 @@ def applyVmLifecycle (st : ManagedComputeStore) (machineId : String) (ev : VmSli
           let .ok _ ← execParamQueryUnlocked st.db
               "UPDATE managed_resume_intents SET state='failed' WHERE machine_id=?1 AND state IN ('pending','aborting');" #[machineId]
             | return .error "managed_resume_close_failed"
+          let .ok _ ← execParamQueryUnlocked st.db
+              "UPDATE managed_expirations SET state='completed' WHERE machine_id=?1 AND state='pending';" #[machineId]
+            | return .error "managed_expiry_close_failed"
         return .ok (next, effs)
 
 /-- The provider's declared shape for a machine's size, when Core knows it. -/
@@ -2073,19 +2078,6 @@ def renderManagedMachinesJson
     let budgetJson := renderManagedBudgetJson st (some uid) userSpentTodayCents userDailyCapCents?
     let provsJson := renderManagedProvidersJson st isAdmin userPrefs configuredProviders disabledProviders
     s!"\{\"enabled\":{enStr},\"boat_enabled\":{boatStr},\"active_machines\":{active},\"max_concurrent\":{st.maxConcurrent},\"spent_today_cents\":{userSpentTodayCents},\"daily_cap_cents\":{st.dailyCapCents},\"machines\":[{String.intercalate "," items.toList}],\"sizes\":[],\"providers\":{provsJson},\"budget\":{budgetJson},\"daily_spend\":[]}"
-
-def renderRemoteNodesJson
-    (st : ManagedFleetState)
-    (callerUserId? : Option String := none)
-    (userSpentTodayCents : UInt64 := 0)
-    (userDailyCapCents? : Option UInt64 := none) : String :=
-  let visible := match callerUserId? with
-    | none => st.machines
-    | some uid => st.machines.filter (fun m => m.ownerUserId == uid)
-  let nodes := visible.filterMap fun m =>
-    if m.status == "destroyed" then none
-    else some s!"\{\"id\":{jsonEscape s!"managed-{m.id}"},\"machine_id\":{jsonEscape m.id},\"provider\":{jsonEscape m.provider},\"status\":{jsonEscape m.status},\"node_boot_epoch\":{m.nodeBootEpoch},\"labels\":[\"managed\",{jsonEscape s!"provider={m.provider}"}]}"
-  s!"\{\"nodes\":[{String.intercalate "," nodes.toList}],\"managed_compute\":{renderManagedBudgetJson st callerUserId? userSpentTodayCents userDailyCapCents?}}"
 
 def renderRelayPollJson (cmd : ManagedRelayCommand) : String :=
   s!"[\{\"id\":{jsonEscape cmd.commandId},\"lease_id\":{cmd.heldLeaseId},\"lease_deadline\":{cmd.leaseDeadline},\"node_boot_epoch\":{cmd.nodeBootEpoch},\"payload\":{cmd.payloadJson}}]"

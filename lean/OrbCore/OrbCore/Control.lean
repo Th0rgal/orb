@@ -446,15 +446,6 @@ def verifyLoginCredentials (cfg : CoreConfig) (username? : Option String) (suppl
       (match username? with | none => true | some reqU => reqU.isEmpty || reqU == u) &&
       ctEqSlice (ByteSlice.ofString suppliedPassword) (ByteSlice.ofString p)
 
-/-- Authenticate protected HTTP API routes (`Authorization: Bearer <token>`). -/
-def authenticateHttpBearer (cfg : CoreConfig) (hdrs : Array (String × String)) (nowEpochSec : UInt64) : Bool :=
-  if cfg.devMode then true
-  else
-    match extractBearerToken? hdrs nowEpochSec with
-    | none => false
-    | some tok =>
-      (verifyAnySessionTokenExp? (effectiveJwtSecret cfg) tok nowEpochSec).isSome
-
 /-- Resolve `CallerPrincipal` against `users` (`orb-jwt-v2` live session epoch + `!disabled` check
     via `Orb.Kernel.multiuserRbacStep`, or verified single-tenant legacy token; never falls back
     to bootstrap admin on a failed lookup or raw password bearer). -/
@@ -4283,7 +4274,8 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
     if caller.role == "admin" then
       items := items.push "{\"id\":\"core\",\"name\":\"orb-core\",\"status\":\"online\",\"admin_only\":true,\"core_colocated\":true}"
     for vm in visibleVms do
-      if vm.status != "destroyed" then
+      if (vm.status == "ready" || vm.status == "provisioning") &&
+         (vm.expiresAtSec == 0 || vm.expiresAtSec > nowEpochSec) then
         items := items.push s!"\{\"id\":{jsonEscape s!"managed-{vm.id}"},\"name\":{jsonEscape vm.sandboxName},\"provider\":{jsonEscape vm.provider},\"status\":{jsonEscape vm.status},\"admin_only\":false}"
     return .ok (mkJson 200 ("[" ++ String.intercalate "," items.toList ++ "]"))
 

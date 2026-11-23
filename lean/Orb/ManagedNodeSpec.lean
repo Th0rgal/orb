@@ -56,6 +56,36 @@ theorem retainedArchive_neverEnablesCompute (s : VmSliceState) (confirmed : Bool
   · rfl
   · exact h
 
+theorem managedFleetVisible_destroyed_never (expiryPending resumePending : UInt8)
+    (expiresAtSec nowSec : UInt64) :
+    verifyManagedFleetVisible 3 expiryPending resumePending expiresAtSec nowSec = 0 := by
+  simp [verifyManagedFleetVisible]
+
+theorem managedFleetVisible_stopped_without_resume_never (expiryPending : UInt8)
+    (expiresAtSec nowSec : UInt64) :
+    verifyManagedFleetVisible 2 expiryPending 0 expiresAtSec nowSec = 0 := by
+  simp [verifyManagedFleetVisible]
+
+theorem managedFleetVisible_expired_never (phaseCode expiryPending resumePending : UInt8)
+    (expiresAtSec nowSec : UInt64) (hne : expiresAtSec ≠ 0) (hle : expiresAtSec ≤ nowSec) :
+    verifyManagedFleetVisible phaseCode expiryPending resumePending expiresAtSec nowSec = 0 := by
+  unfold verifyManagedFleetVisible
+  have h1 : (expiresAtSec != 0) = true := by simp [hne]
+  have h2 : decide (expiresAtSec ≤ nowSec) = true := decide_eq_true hle
+  split
+  · rfl
+  · simp [h1, h2]
+
+theorem retainedArchive_neverAdmitsFleet (s : VmSliceState) (boot : UInt64)
+    (expiryPending : UInt8) (expiresAtSec nowSec : UInt64)
+    (hboot : s.nodeBootEpoch ≠ 0) (heq : boot = s.nodeBootEpoch)
+    (hphase : s.phaseCode = 0 ∨ s.phaseCode = 3) :
+    verifyManagedFleetVisible (observeVmRetainedArchive s true boot).phaseCode
+      expiryPending 0 expiresAtSec nowSec = 0 := by
+  rcases hphase with h0 | h3
+  · simp [observeVmRetainedArchive, hboot, heq, h0, verifyManagedFleetVisible]
+  · simp [observeVmRetainedArchive, hboot, heq, h3, verifyManagedFleetVisible]
+
 private theorem u8_eq_of_toNat (a : UInt8) (n : Nat) (hn : n < 256) (h : a.toNat = n) :
     a = UInt8.ofNat n := by
   apply UInt8.eq_of_toBitVec_eq

@@ -791,8 +791,11 @@ def hydrateLegacyDataDir
             let rawSt := (((m.fieldStr? "state").orElse (fun _ => m.fieldStr? "status")).getD "ready").trimAscii.toString.toLower
             let (normStatus, phaseCode) : String × UInt8 :=
               if rawSt == "ready" || rawSt == "online" || rawSt == "running" then ("ready", 1)
-              else if rawSt == "stopped" || rawSt == "stopped_in_place" then ("stopped", 2)
-              else if rawSt == "destroyed" || rawSt == "failed" || rawSt == "deleted" then ("destroyed", 3)
+              else if rawSt == "stopped" || rawSt == "stopped_in_place" || rawSt == "archived" ||
+                  rawSt == "archiving" || rawSt == "parked" || rawSt == "offline" then ("stopped", 2)
+              else if rawSt == "destroyed" || rawSt == "failed" || rawSt == "deleted" ||
+                  rawSt == "terminated" || rawSt == "reaped" || rawSt == "expired" ||
+                  rawSt == "destroying" || rawSt == "error" then ("destroyed", 3)
               else ("provisioning", 0)
             let ownerMid := ((m.fieldStr? "owner_mission_id").orElse (fun _ => m.fieldStr? "owner_mission") |>.getD "").trimAscii.toString
             let reqByMid := ((m.fieldStr? "requested_by_mission_id").getD ownerMid).trimAscii.toString
