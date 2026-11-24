@@ -470,12 +470,16 @@ def rasterizeSceneInto (vw vh : Nat) (clearColor : Color) (atlas : Text.GlyphAtl
       let (sr, sg, sb, sa) := unpackColor col
       -- CSS blur-radius is twice Gaussian sigma. Blur coverage, not the distance
       -- field: the old polynomial falloff made broad dark wedges beside dialogs.
-      let (x0, y0, x1, y1) := clampBounds vw vh curClip expanded
+      -- Three box passes of radii (sigma-1, sigma-1, sigma) have exact support `halo`.
+      let sigma := blur / 2
+      let halo : Int := if sigma == 0 then 0 else (sigma + (sigma - 1) * 2 : Nat)
+      let support : Rect :=
+        { x := r.x - halo, y := r.y - halo
+          w := r.w + 2 * halo, h := r.h + 2 * halo }
+      let (x0, y0, x1, y1) := clampBounds vw vh curClip support
       if x1 > x0 && y1 > y0 && sa > 0 then
         -- Each pass reads at most its radius on either side. Include the
         -- entire dependency halo, retaining edge replication at viewport edges.
-        let sigma := blur / 2
-        let halo : Int := (sigma + (sigma - 1) * 2 : Nat)
         let mx := max 0 (x0 - halo)
         let my := max 0 (y0 - halo)
         let mw := (min (vw : Int) (x1 + halo) - mx).toNat
@@ -484,15 +488,23 @@ def rasterizeSceneInto (vw vh : Nat) (clearColor : Color) (atlas : Text.GlyphAtl
         let empty := Text.AtlasPageBuffer.zeroBytes (mw * mh * 4)
         let mask := drawRoundedBox mw mh empty bounds { r with x := r.x - mx, y := r.y - my } radii 0xFFFFFFFF (0, 0, 0, 0) 0
         let blurred := blurBackdrop mask mw mh sigma
-        for py in [y0.toNat : y1.toNat] do
-          for px in [x0.toNat : x1.toNat] do
-            let idx := (py * vw + px) * 4
-            let alpha := ((py - my.toNat) * mw + px - mx.toNat) * 4 + 3
-            let effA := ((sa.toNat * (blurred.get! alpha).toNat + 127) / 255).toUInt8
-            let (nr, ng, nb, na) :=
-              blendOver (fb.get! idx) (fb.get! (idx + 1)) (fb.get! (idx + 2)) (fb.get! (idx + 3))
-                sr sg sb effA
-            fb := fb.set! idx nr |>.set! (idx + 1) ng |>.set! (idx + 2) nb |>.set! (idx + 3) na
+        let sw := (x1 - x0).toNat
+        let sh := (y1 - y0).toNat
+        let sx := (x0 - mx).toNat
+        let sy := (y0 - my).toNat
+        if sh > 0 && sw > 0 && (sy + sh - 1) * mw + sx + sw ≤ blurred.size / 4 then
+          fb := FFI.blitGlyph fb blurred (y0.toNat * vw + x0.toNat).toUSize (sy * mw + sx).toUSize
+            vw.toUSize mw.toUSize sw.toUSize sh.toUSize col false
+        else
+          for py in [y0.toNat : y1.toNat] do
+            for px in [x0.toNat : x1.toNat] do
+              let idx := (py * vw + px) * 4
+              let alpha := ((py - my.toNat) * mw + px - mx.toNat) * 4 + 3
+              let effA := ((sa.toNat * (blurred.get! alpha).toNat + 127) / 255).toUInt8
+              let (nr, ng, nb, na) :=
+                blendOver (fb.get! idx) (fb.get! (idx + 1)) (fb.get! (idx + 2)) (fb.get! (idx + 3))
+                  sr sg sb effA
+              fb := fb.set! idx nr |>.set! (idx + 1) ng |>.set! (idx + 2) nb |>.set! (idx + 3) na
     | .glyph src dst col isColor =>
       instances := instances.push {
         dst, uv := src, clip := curClip,
@@ -598,9 +610,16 @@ def hasGlobalEffect (scene : Scene) : Bool :=
     | .backdropBlur _ | .layerPush _ | .layerPop => true
     | _ => false
 
--- Diff the exact command stream. A structural edit can change the meaning of
--- an identical suffix; never infer local damage across such an edit.
-private def changedBounds (vp : Rect) (old new : Scene) : Option Rect := Id.run do
+private def unionRect (a b : Rect) : Rect :=
+  ⟨min a.x b.x, min a.y b.y, max a.right b.right - min a.x b.x, max a.bottom b.bottom - min a.y b.y⟩
+
+private def horizNear (a b : Rect) (pad : Int := 32) : Bool :=
+  !(a.right + pad ≤ b.x || b.right + pad ≤ a.x)
+
+-- Diff the exact command stream into up to two horizontally disjoint dirty rectangles.
+-- Keeping widely separated columns separate (such as transcript prose and a right-edge
+-- overlay scrollbar) avoids expanding the dirty rectangle across untouched intervening chrome.
+private def changedRects (vp : Rect) (old new : Scene) : Option (Array Rect) := Id.run do
   let n := min old.size new.size
   let mut pre := 0
   while pre < n && old[pre]? == new[pre]? do pre := pre + 1
@@ -613,17 +632,36 @@ private def changedBounds (vp : Rect) (old new : Scene) : Option Rect := Id.run 
     | some .clipPop => clips := match clips with | _ :: _ :: _ => clips.tail! | _ => [vp]
     | _ => pure ()
   let clip := clips.head?.getD vp
-  let mut area : Option Rect := none
+  let mut rects : Array Rect := #[]
   for cmds in #[old, new] do
     for i in [pre:cmds.size-suf] do
       let some p := cmds[i]? | return none
       let some r := p.bounds | return none
       let b := intersectRect clip r
       if b.w > 0 && b.h > 0 then
-        area := some (match area with
-          | none => b
-          | some a => ⟨min a.x b.x, min a.y b.y, max a.right b.right - min a.x b.x, max a.bottom b.bottom - min a.y b.y⟩)
-  return some (area.getD ⟨0,0,0,0⟩)
+        if rects.size == 0 then
+          rects := #[b]
+        else if rects.size == 1 then
+          let a := rects[0]!
+          if horizNear a b then
+            rects := #[unionRect a b]
+          else
+            rects := #[a, b]
+        else
+          let r0 := rects[0]!
+          let r1 := rects[1]!
+          let (n0, n1) :=
+            if horizNear r0 b then (unionRect r0 b, r1)
+            else if horizNear r1 b then (r0, unionRect r1 b)
+            else
+              let gap0 := if b.x ≥ r0.right then b.x - r0.right else r0.x - b.right
+              let gap1 := if b.x ≥ r1.right then b.x - r1.right else r1.x - b.right
+              if gap0 ≤ gap1 then (unionRect r0 b, r1) else (r0, unionRect r1 b)
+          if horizNear n0 n1 0 then
+            rects := #[unionRect n0 n1]
+          else
+            rects := #[n0, n1]
+  return some rects
 
 -- Express paints in coordinates relative to a horizontal band. Equality includes
 -- paint order, all style/sampling parameters and the actually visible scissor.
@@ -720,7 +758,7 @@ def renderFrameDamage (ctx : VulkanContext) (clearColor : Color) (atlas : Text.G
   let vp : Rect := ⟨0,0,ctx.width,ctx.height⟩
   let profile := (← IO.getEnv "ORB_U7_PROFILE") == some "1"
   let t0 ← IO.monoNanosNow
-  let some dirty := changedBounds vp prev.scene scene | return ← renderFrame ctx clearColor atlas scene
+  let some dirtyRects := changedRects vp prev.scene scene | return ← renderFrame ctx clearColor atlas scene
   let t1 ← IO.monoNanosNow
   if prev.pages.size != atlas.pages.size then return ← renderFrame ctx clearColor atlas scene
   for i in [:prev.pages.size] do
@@ -728,7 +766,7 @@ def renderFrameDamage (ctx : VulkanContext) (clearColor : Color) (atlas : Text.G
     let b := atlas.pages[i]!
     if !samplesUnchanged prev.scene i a b then
       return ← renderFrame ctx clearColor atlas scene
-  if dirty.w == 0 || dirty.h == 0 then
+  if dirtyRects.isEmpty then
     if profile then IO.eprintln s!"u7-paint-ns {t1-t0} {(← IO.monoNanosNow)-t1} 0 0 0"
     return { ctx with
       previousPaint := some ⟨scene, atlas.pages, clearColor, ctx.width, ctx.height⟩
@@ -741,27 +779,31 @@ def renderFrameDamage (ctx : VulkanContext) (clearColor : Color) (atlas : Text.G
   let initial := if profile then ctx.framebuffer.copySlice 0 ByteArray.empty 0 ctx.framebuffer.size else ctx.framebuffer
   let ctx := { ctx with framebuffer := ByteArray.empty }
   let t3 ← IO.monoNanosNow
-  let mut initial := initial
-  let mut paint := dirty
-  let mut extraStrip : Option Rect := none
-  if let some (band, shift) := scrollBand prev.scene scene dirty vp then
-    initial := FFI.scrollRows initial ((band.y.toNat*ctx.width+band.x.toNat)*4).toUSize
-      (ctx.width*4).toUSize (band.w.toNat*4).toUSize band.h.toNat.toUSize shift.toUSize
-    paint := { dirty with y := band.bottom, h := dirty.bottom - band.bottom }
-    if band.right < dirty.right then
-      extraStrip := some { x := band.right, y := dirty.y, w := dirty.right - band.right, h := band.bottom - dirty.y }
-    if profile then IO.eprintln s!"u7-scroll-reuse dy={shift} pixels={band.w*band.h}"
-  let (fb0, insts0) := rasterizeSceneInto ctx.width ctx.height clearColor atlas (some initial) (some paint) scene
-  let (fb, insts) := match extraStrip with
-    | some strip =>
-      let (fb1, insts1) := rasterizeSceneInto ctx.width ctx.height clearColor atlas (some fb0) (some strip) scene
-      (fb1, insts0 ++ insts1)
-    | none => (fb0, insts0)
+  let mut fb := initial
+  let mut insts : Array GpuPrimInstance := #[]
+  let mut pixels : Nat := 0
+  for dRect in dirtyRects do
+    let mut paint := dRect
+    let mut extraStrip : Option Rect := none
+    if let some (band, shift) := scrollBand prev.scene scene dRect vp then
+      fb := FFI.scrollRows fb ((band.y.toNat*ctx.width+band.x.toNat)*4).toUSize
+        (ctx.width*4).toUSize (band.w.toNat*4).toUSize band.h.toNat.toUSize shift.toUSize
+      paint := { dRect with y := band.bottom, h := dRect.bottom - band.bottom }
+      if band.right < dRect.right then
+        extraStrip := some { x := band.right, y := dRect.y, w := dRect.right - band.right, h := band.bottom - dRect.y }
+      if profile then IO.eprintln s!"u7-scroll-reuse dy={shift} pixels={band.w*band.h}"
+    let (fb0, insts0) := rasterizeSceneInto ctx.width ctx.height clearColor atlas (some fb) (some paint) scene
+    fb := fb0
+    insts := insts ++ insts0
+    if let some strip := extraStrip then
+      let (fb1, insts1) := rasterizeSceneInto ctx.width ctx.height clearColor atlas (some fb) (some strip) scene
+      fb := fb1
+      insts := insts ++ insts1
+    let clipped := intersectRect vp dRect
+    pixels := pixels + (max 0 clipped.w * max 0 clipped.h).toNat
   let t4 ← IO.monoNanosNow
   let _ ← stageInstances ctx insts
   if profile then IO.eprintln s!"u7-paint-ns {t1-t0} {t2-t1} {t3-t2} {t4-t3} {(← IO.monoNanosNow)-t4}"
-  let clipped := intersectRect { x := 0, y := 0, w := (ctx.width : Int), h := (ctx.height : Int) } dirty
-  let pixels := (max 0 clipped.w * max 0 clipped.h).toNat
   return {
     ctx with
     framebuffer := fb
