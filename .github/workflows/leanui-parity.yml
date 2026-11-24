@@ -174,7 +174,7 @@ jobs:
           done
           test -S .ci/leanui/weston/leanui-u2
           export WAYLAND_DISPLAY=leanui-u2
-          WAYLAND_DEBUG=1 scripts/orb_desktop_dev.sh --native > .ci/leanui/u2.log 2>&1 &
+          ORB_DESKTOP_SKIP_BUILD=1 WAYLAND_DEBUG=1 scripts/orb_desktop_dev.sh --native > .ci/leanui/u2.log 2>&1 &
           app_pid=$!
           for _ in $(seq 1 120); do
             kill -0 "$app_pid"
@@ -191,8 +191,8 @@ jobs:
           FONTCONFIG_FILE: ${{ github.workspace }}/.ci/leanui/fontconfig/fonts.conf
         run: |
           set -euo pipefail
-          scripts/build_orb_bins.sh --only orb-desktop-native \
-            --out-dir "$PWD/target/native"
+          test -x target/native/orb-desktop-native || \
+            scripts/build_orb_bins.sh --only orb-desktop-native --out-dir "$PWD/target/native"
           target/native/orb-desktop-native --headless-golden-all \
             .ci/leanui/native --width 1470 --height 923
           python3 scripts/leanui_parity.py \
