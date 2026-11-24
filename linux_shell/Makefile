@@ -11,22 +11,25 @@ ifeq ($(UNAME_S),Linux)
   LDFLAGS += -pie -Wl,-z,relro,-z,now
 endif
 
+TEST_DEPS := orb-desktop
 ifeq ($(HAS_WEBKIT),1)
   CFLAGS += -DORB_HAS_WEBKITGTK $(shell $(PKG_CONFIG) --cflags $(WEBKIT_PKGS))
   LDFLAGS += $(shell $(PKG_CONFIG) --libs $(WEBKIT_PKGS)) -lm
+  TEST_DEPS += orb-sidebar-host.so
 endif
 
 orb-desktop: main.c gtk_chrome.c gtk_icons.c gtk_menu.c gtk_menu_layout.c $(wildcard *.h)
 	$(CC) $(CFLAGS) -o $@ main.c gtk_chrome.c gtk_icons.c gtk_menu.c gtk_menu_layout.c $(LDFLAGS)
 
-test: orb-desktop
+test: $(TEST_DEPS)
 	./orb-desktop --self-test
+	printf '#include "gtk_leanui_palette.h"\nint main(void){return orb_palette_self_test()?0:1;}\n' | $(CC) -std=gnu11 -O2 -Wall -Wextra -Werror -I. -x c - -o orb-palette-test && ./orb-palette-test && rm -f orb-palette-test
 
 clean:
-	rm -f orb-desktop orb-sidebar-host.so
+	rm -f orb-desktop orb-sidebar-host.so orb-palette-test
 
 .PHONY: test clean
 
 # Loaded by Lean only for the opt-in hybrid launcher.
-orb-sidebar-host.so: main.c gtk_chrome.c gtk_icons.c gtk_menu.c gtk_menu_layout.c gtk_leanui.c gtk_leanui_model.c $(wildcard *.h) ../lean/OrbDesktop/c/sidebar_host.h
+orb-sidebar-host.so: main.c gtk_chrome.c gtk_icons.c gtk_menu.c gtk_menu_layout.c gtk_leanui.c gtk_leanui_model.c gtk_leanui_palette.c gtk_leanui_palette_rpc.c $(wildcard *.h) ../lean/OrbDesktop/c/sidebar_host.h
 	$(CC) $(CFLAGS) -fPIC -shared -DORB_LEANUI_HOST -Dmain=orb_gtk_main -o $@ $(filter %.c,$^) $(shell $(PKG_CONFIG) --libs $(WEBKIT_PKGS)) -lm -Wl,-z,defs,-z,relro,-z,now

@@ -6,6 +6,11 @@
 static OrbSidebarPaint paint;
 static void *renderer;
 
+int orb_leanui_paint(const char *request, uint8_t *argb, size_t capacity,
+                     OrbSidebarHits hits, void *view) {
+    return paint ? paint(renderer, request, argb, capacity, hits, view) : 0;
+}
+
 extern int orb_gtk_main(int argc, char **argv);
 int orb_sidebar_host(OrbSidebarPaint callback, void *context) {
     char name[] = "orb-desktop";
