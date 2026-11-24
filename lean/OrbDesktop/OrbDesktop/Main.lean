@@ -635,10 +635,15 @@ def liveViewportRegression : Bool := Id.run do
   return !before.any visible && after.any visible && bottom.rosterTopSub == down.rosterTopSub &&
     atBottom.hitRegions.any (·.1 == 2)
 
-/-- `--self-test`: check live viewports and quiescent rendering. -/
+/-- `--self-test`: check live viewports, embedded palette, and quiescent rendering. -/
 def runSelfTest (cfg : Runtime.RuntimeConfig) (initSt : DesktopState) : IO UInt32 := do
   unless liveViewportRegression do
     IO.eprintln "orb-desktop self-test: live viewport regression"
+    return 1
+  try
+    embeddedPaletteSelfTest
+  catch e =>
+    IO.eprintln s!"orb-desktop self-test: embedded palette regression: {e}"
     return 1
   let rt0Raw ← Runtime.initRuntime { cfg with headless := true } initSt
   let rt0 := { rt0Raw with focus := initSt.initialFocusState }

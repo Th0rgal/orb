@@ -153,7 +153,7 @@ static void on_foot_clicked(GtkButton *b, gpointer ud) { (void)b; OrbGtkChrome *
 static void on_win_destroy(GtkWidget *w, gpointer ud) { (void)w; OrbGtkChrome *c = (OrbGtkChrome *)ud; c->closed = 1; orb_spinner_stop(&c->spin); }
 static gboolean on_win_key_press(GtkWidget *w, GdkEventKey *ev, gpointer ud) { OrbGtkChrome *c = ud; return (ORB_EMBEDDED && orb_leanui_palette_key(c->palette, ev)) || orb_gtk_window_shortcut(GTK_WINDOW(w), ev, c->wv, c->sb_list); }
 static void on_script_msg(WebKitUserContentManager *ucm, WebKitJavascriptResult *jr, gpointer ud) {
-    (void)ucm; OrbGtkChrome *c = (OrbGtkChrome *)ud; JSCValue *v = webkit_javascript_result_get_js_value(jr); if (!v || !jsc_value_is_object(v)) { return; }
+    (void)ucm; OrbGtkChrome *c = (OrbGtkChrome *)ud; if (c->closed) { return; } JSCValue *v = webkit_javascript_result_get_js_value(jr); if (!v || !jsc_value_is_object(v)) { return; }
     char *cmd = jv_str(v, "command"); JSCValue *args = jsc_value_object_get_property(v, "args");
     if (strcmp(cmd, "set_native_sidebar") == 0) { gboolean open = (args && jsc_value_is_object(args)) ? jv_bool(args, "open") : !gtk_widget_get_visible(c->sb_box); gtk_widget_set_visible(c->sb_box, open); }
     else if (strcmp(cmd, "set_window_theme") == 0 && args && jsc_value_is_object(args)) { char *t = jv_str(args, "theme"); gboolean light = !g_strcmp0(t, "light"); orb_gtk_apply_theme(c->css, light); if (ORB_EMBEDDED) { orb_leanui_theme(c->sb_box, light); orb_leanui_palette_theme(c->palette, light); } gtk_widget_queue_draw(c->win); g_free(t); }
@@ -189,7 +189,6 @@ static void build_classic_sidebar(OrbGtkChrome *c) {
 static void embedded_action(gpointer data, const char *kind, const char *target) {
     OrbGtkChrome *c = data;
     if (!strcmp(kind, "expand")) { toggle_row_expand(c, target); return; }
-    if (!strcmp(kind, "nav") && !strcmp(target, "search")) { orb_leanui_palette_open(c->palette); return; }
     gtk_widget_grab_focus(c->wv);
     if (!strcmp(kind, "hide")) on_tb_sb_clicked(NULL, c); else eval_wv_target(c, kind, target);
 }

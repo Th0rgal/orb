@@ -22,6 +22,19 @@ static inline void orb_palette_sanitize(const char *src, char *dst, size_t cap) 
         char ch = src[i];
         dst[i] = (ch == '\t' || ch == '\r' || ch == '\n') ? ' ' : ch;
     }
+    if (i > 0 && ((unsigned char)dst[i - 1] & 0x80u) != 0) {
+        size_t k = i - 1;
+        while (k > 0 && ((unsigned char)dst[k] & 0xC0u) == 0x80u) --k;
+        unsigned char lead = (unsigned char)dst[k];
+        if ((lead & 0x80u) == 0) {
+            i = k + 1;
+        } else {
+            size_t need = (lead & 0xE0u) == 0xC0u ? 2
+                        : (lead & 0xF0u) == 0xE0u ? 3
+                        : (lead & 0xF8u) == 0xF0u ? 4 : 0;
+            if (need == 0 || i - k < need) i = k;
+        }
+    }
     dst[i] = '\0';
 }
 
@@ -35,15 +48,17 @@ static inline int orb_palette_format_header(char *out, size_t cap, int w, int h,
 
 static inline int orb_palette_format_item(char *out, size_t cap, unsigned idx, const char *id,
                                           const char *kind, const char *title, const char *subtitle,
-                                          const char *status, const char *shortcut) {
-    char sid[160], skind[48], stitle[256], ssub[256], sstat[64], ssc[48];
+                                          const char *status, const char *shortcut, const char *color) {
+    char sid[160], skind[48], stitle[256], ssub[256], sstat[64], ssc[48], scol[48];
     orb_palette_sanitize(id, sid, sizeof(sid));
     orb_palette_sanitize(kind, skind, sizeof(skind));
     orb_palette_sanitize(title, stitle, sizeof(stitle));
     orb_palette_sanitize(subtitle, ssub, sizeof(ssub));
     orb_palette_sanitize(status, sstat, sizeof(sstat));
     orb_palette_sanitize(shortcut, ssc, sizeof(ssc));
-    int n = snprintf(out, cap, "%u\t%s\t%s\t%s\t%s\t%s\t%s\n", idx, sid, skind, stitle, ssub, sstat, ssc);
+    orb_palette_sanitize(color, scol, sizeof(scol));
+    int n = snprintf(out, cap, "%u\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+                     idx, sid, skind, stitle, ssub, sstat, ssc, scol);
     return (n > 0 && (size_t)n < cap) ? n : -1;
 }
 
@@ -91,10 +106,24 @@ static inline int orb_palette_self_test(void) {
     char hdr[512], row[512], san[32];
     orb_palette_sanitize("a\tb\rc\nd", san, sizeof(san));
     if (strcmp(san, "a b c d") != 0) return 0;
+    /* UTF-8 multi-byte truncation boundaries: 3-byte CJK ("漢" = E6 BC A2) & 4-byte emoji ("🚀" = F0 9F 9A 80). */
+    const char *cjk = "a\xE6\xBC\xA2" "b";
+    orb_palette_sanitize(cjk, san, 2); if (strcmp(san, "a") != 0) return 0;
+    orb_palette_sanitize(cjk, san, 3); if (strcmp(san, "a") != 0) return 0;
+    orb_palette_sanitize(cjk, san, 4); if (strcmp(san, "a") != 0) return 0;
+    orb_palette_sanitize(cjk, san, 5); if (strcmp(san, "a\xE6\xBC\xA2") != 0) return 0;
+    const char *emoji = "x\xF0\x9F\x9A\x80" "y";
+    orb_palette_sanitize(emoji, san, 2); if (strcmp(san, "x") != 0) return 0;
+    orb_palette_sanitize(emoji, san, 3); if (strcmp(san, "x") != 0) return 0;
+    orb_palette_sanitize(emoji, san, 4); if (strcmp(san, "x") != 0) return 0;
+    orb_palette_sanitize(emoji, san, 5); if (strcmp(san, "x") != 0) return 0;
+    orb_palette_sanitize(emoji, san, 6); if (strcmp(san, "x\xF0\x9F\x9A\x80") != 0) return 0;
+    orb_palette_sanitize("\xC3\xA9", san, 2); if (strcmp(san, "") != 0) return 0;
+    orb_palette_sanitize("\xC3\xA9", san, 3); if (strcmp(san, "\xC3\xA9") != 0) return 0;
     if (orb_palette_format_header(hdr, sizeof(hdr), 900, 620, 2, 1, 3, "foo\tbar\nbaz") < 0) return 0;
     if (strcmp(hdr, "P\t900\t620\t2\t1\t3\tfoo bar baz\n") != 0) return 0;
-    if (orb_palette_format_item(row, sizeof(row), 2, "m:1\t2", "mission", "Fix\nbug", "proj\r1", "running", "⌘K") < 0) return 0;
-    if (strcmp(row, "2\tm:1 2\tmission\tFix bug\tproj 1\trunning\t⌘K\n") != 0) return 0;
+    if (orb_palette_format_item(row, sizeof(row), 2, "m:1\t2", "mission", "Fix\nbug", "proj\r1", "running", "⌘K", "blue") < 0) return 0;
+    if (strcmp(row, "2\tm:1 2\tmission\tFix bug\tproj 1\trunning\t⌘K\tblue\n") != 0) return 0;
     OrbPaletteHit hits[8], card = {0};
     size_t n = 0;
     int has_card = 0;
