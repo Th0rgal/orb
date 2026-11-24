@@ -1489,8 +1489,9 @@ export default function App() {
       return;
     }
     if (hasPrimaryModifier(e) && !e.altKey && !e.shiftKey && e.key === "/") {
-      // Core-hosted reference files render through ProjectFileView.
-      if (currentProjectFile()) {
+      // Core-hosted reference files render through ProjectFileView; skills render through SkillPage.
+      const skillPage = skillPageName(selected());
+      if (currentProjectFile() || (skillPage && !skillPage.history)) {
         e.preventDefault();
         toggleMdSource();
       }

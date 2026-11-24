@@ -29,7 +29,7 @@ import * as SidebarIcon from "./sidebarIcons";
 import { pendingMissionInteraction } from "./missionAttention";
 import { MissionGlyph, missionStatusPresentation } from "./MissionGlyph";
 import { isMissionUnread } from "./missionUnread";
-import { MdSource, MdView, mdSource, setMdSource } from "./Markdown";
+import { isMarkdownFile, MdSource, MdView, mdSource, setMdSource } from "./Markdown";
 import { missionDestination } from "./missionLaunch";
 import type { NativeProjectAction } from "./nativeChromeBridge";
 import {
@@ -2837,6 +2837,7 @@ export function ProjectFileView(p: { slug: string; path: string }) {
   };
 
   const name = () => p.path.split("/").pop() ?? p.path;
+  const markdown = () => isMarkdownFile(name());
 
   return (
     <>
@@ -2851,9 +2852,11 @@ export function ProjectFileView(p: { slug: string; path: string }) {
         <Show when={state() === "saved"}>
           <span class="pf-state dim">Saved</span>
         </Show>
-        <button class="s-btn" title="Toggle source and preview (⌘/)" onClick={() => setEditing(!editing())}>
-          {editing() ? "Preview" : "Edit"}
-        </button>
+        <Show when={markdown()}>
+          <button class="s-btn" title="Toggle source and preview (⌘/)" onClick={() => setEditing(!editing())}>
+            {editing() ? "Preview" : "Edit"}
+          </button>
+        </Show>
       </div>
       <FileDocument text={text()} name={name()} error={state() === "error" ? error() : null} onInput={onInput} />
     </>
@@ -2863,7 +2866,7 @@ export function ProjectFileView(p: { slug: string; path: string }) {
 /** The body of an open text file: rendered Markdown, or its source while editing
  * (⌘/ toggles both, shared with project files). Used by project files and skills. */
 export function FileDocument(p: { text: string | null; name: string; error?: string | null; onInput: (text: string) => void; readOnly?: boolean; markdown?: boolean }) {
-  const markdown = () => p.markdown ?? /\.(md|markdown)$/i.test(p.name);
+  const markdown = () => p.markdown ?? isMarkdownFile(p.name);
   return (
     <>
       <ErrorToast error={p.error} title={`Couldn’t save ${p.name}`} />
@@ -2873,7 +2876,7 @@ export function FileDocument(p: { text: string | null; name: string; error?: str
           <div class="scroll">
             <div class="col">
               <Show when={p.text !== null} fallback={<FileSkeleton />}>
-                <MdView text={p.text ?? ""} />
+                <MdView text={p.text ?? ""} editorial />
               </Show>
             </div>
           </div>

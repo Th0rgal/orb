@@ -3,7 +3,7 @@ import { ConfirmDialog } from "./Dialog";
 import { ErrorToast } from "./toast";
 import { PopupMenu, type MenuEntry } from "./Menu";
 import { FileDocument } from "./ProjectFiles";
-import { mdSource, setMdSource } from "./Markdown";
+import { isMarkdownFile, mdSource, setMdSource } from "./Markdown";
 import { cachedSkill } from "./skillCache";
 import { isConnected, listProjects } from "./api";
 import { SidebarTree, TreeConnectors } from "./Tree";
@@ -234,8 +234,12 @@ export function SkillPage(p: { name: string; initialView?: "edit" | "history"; o
         <Show when={state() === "saving"}><span class="pf-state">Saving…</span></Show>
         <Show when={state() === "saved" && !dirty()}><span class="pf-state dim" role="status">Saved to repo</span></Show>
         <ErrorToast error={state() === "error" ? error() : null} title={`Couldn’t save ${p.name}`} onDismiss={() => { setState("idle"); setError(null); }} action={{ label: "Retry", run: () => save() }} />
+        <Show when={view() === "edit" && isMarkdownFile(openFile())}>
+          <button class="s-btn" title="Toggle source and preview (⌘/)" onClick={() => setMdSource(!mdSource())}>
+            {mdSource() ? "Preview" : editable() ? "Edit" : "Source"}
+          </button>
+        </Show>
         <Show when={editable() && view() === "edit"}>
-          <button class="s-btn" title="Toggle source and preview (⌘/)" onClick={() => setMdSource(!mdSource())}>{mdSource() ? "Preview" : "Edit"}</button>
           <button class="s-btn primary" title="Save (⌘S)" disabled={!dirty() || state() === "saving"} onClick={() => void save()}>Save</button>
         </Show>
         <button type="button" class="icon-btn" aria-label={`Actions for ${p.name}`} aria-haspopup="menu" onClick={(e) => { const r = e.currentTarget.getBoundingClientRect(); setMenu({ x: r.right - 200, y: r.bottom + 4 }); }}><span aria-hidden="true">···</span></button>
