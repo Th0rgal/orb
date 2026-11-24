@@ -332,10 +332,27 @@ structure SceneOutput where
   nodeRecords : Array SceneNodeRecord := #[]
   deriving Repr, Inhabited
 
+/-- Whether a widget node paints a visible focus ring: bordered text inputs step their 1px border
+whenever focused, borderless text inputs (e.g. search bar `701`) rely on their vertical caret, and
+non-text controls paint `focusRing` only on keyboard `:focus-visible`. -/
+def nodeShowsFocusRing (id : Option WidgetId) (style : BoxStyle) (payload : WidgetPayload)
+    (focusState : FocusState) (focusVisible : Bool) : Bool :=
+  let isFocused := match id, focusState.owner with
+    | some wid, some owner => wid == owner
+    | _, _ => false
+  let isTextInput := match id with
+    | some wid => isTextInputEntity wid
+    | none => false
+  let hasVisibleBorder : Bool :=
+    match payload with
+    | .rrect _ _ border => border.isVisible
+    | _ => style.border.isVisible
+  isFocused && (if isTextInput then hasVisibleBorder else focusVisible)
+
 /-- Fingerprint paint-affecting node content without including child nodes, which are tracked by
 separate records. -/
-def nodeFingerprint (node : WidgetNode) (box : ComputedBox) : UInt64 :=
-  hash s!"{repr node.styleOf}|{repr node.payloadOf}|{repr box.rectDev}|{repr box.lines}|{repr box.focusedBorderPrim}"
+def nodeFingerprint (node : WidgetNode) (box : ComputedBox) (showFocusRing : Bool := false) : UInt64 :=
+  hash s!"{repr node.styleOf}|{repr node.payloadOf}|{repr box.rectDev}|{repr box.lines}|{repr box.focusedBorderPrim}|{showFocusRing}"
 
 /-- Expand a node's layout damage enough to cover local shadows, focus rings, and decorative
 branches. This is deliberately conservative: under-invalidation leaves stale pixels, while a
@@ -345,24 +362,28 @@ def effectBounds (r : Rect) : Rect :=
 
 /-- Collect explicitly identified nodes in document order. Anonymous nodes remain covered by the
 existing conservative root damage path. -/
-def collectNodeRecords : WidgetNode → ComputedBox → Array SceneNodeRecord
+def collectNodeRecords (focusState : FocusState := {}) (focusVisible : Bool := true) :
+    WidgetNode → ComputedBox → Array SceneNodeRecord
   | node, box =>
     match node with
-    | .mk id _ _ _ _ children =>
+    | .mk id _ _ style payload children =>
       let self := match id with
         | none => #[]
         | some wid =>
+          let showRing := nodeShowsFocusRing id style payload focusState focusVisible
           let record : SceneNodeRecord :=
             { id := wid
               effectBoundsDev := effectBounds box.damageRectDev
-              fingerprint := nodeFingerprint node box }
+              fingerprint := nodeFingerprint node box showRing }
           #[record]
-      self ++ collectChildren children box.children
+      self ++ collectChildren focusState focusVisible children box.children
 where
-  collectChildren : List WidgetNode → List ComputedBox → Array SceneNodeRecord
+  collectChildren (focusState : FocusState) (focusVisible : Bool) :
+      List WidgetNode → List ComputedBox → Array SceneNodeRecord
     | [], _ => #[]
     | _, [] => #[]
-    | n :: ns, b :: bs => collectNodeRecords n b ++ collectChildren ns bs
+    | n :: ns, b :: bs =>
+      collectNodeRecords focusState focusVisible n b ++ collectChildren focusState focusVisible ns bs
 
 private def findNodeRecord (records : Array SceneNodeRecord) (id : WidgetId) : Option SceneNodeRecord :=
   records.find? (·.id == id)
@@ -506,21 +527,11 @@ def lowerWidgetPair (scale120 : Nat) (focusState : FocusState) (theme : Theme)
     let selfPayloadPrims := emitPayloadPrims scale120 focusState box payload
     let (childPrims, childFocusOrder, childHitsSub, childHitsDev) :=
       lowerWidgetChildren scale120 focusState theme nextClipSub nextClipDev focusVisible children box.children
-    let isFocused := match id, focusState.owner with
-      | some wid, some owner => wid == owner
-      | _, _ => false
-    let isTextInput := match id with
-      | some wid => isTextInputEntity wid
-      | none => false
-    let hasVisibleBorder : Bool :=
-      match payload with
-      | .rrect _ _ border => border.isVisible
-      | _ => style.border.isVisible
     -- Cursor-style quiet focus (`AGENTS.md`): buttons/pills/dropdowns/tabs show `focusRing`
     -- only on keyboard `:focus-visible`; bordered text inputs step their 1px border while
     -- borderless text inputs (e.g. search bar `701`) rely on their vertical text caret.
     let showFocusRing : Bool :=
-      isFocused && (if isTextInput then hasVisibleBorder else focusVisible)
+      nodeShowsFocusRing id style payload focusState focusVisible
     let focusRadius : SubPx :=
       match payload with
       | .rrect _ radii _ => radii.topLeft
@@ -606,7 +617,7 @@ def buildSceneFromLayout (scale120 : Nat) (focusState : FocusState) (theme : The
     hitRegionsSub := hitsSub,
     hitRegionsDev := hitsDev,
     boundsDamage := dmg,
-    nodeRecords := if recordNodes then collectNodeRecords rootWidget rootBox else #[] }
+    nodeRecords := if recordNodes then collectNodeRecords focusState focusVisible rootWidget rootBox else #[] }
 
 /-- Perform layout and scene lowering in one pure pass from a declarative `WidgetNode` root. -/
 def renderWidgetTree (scale120 : Nat) (availW availH : SubPx)

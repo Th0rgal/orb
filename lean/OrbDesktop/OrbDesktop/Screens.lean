@@ -1300,14 +1300,22 @@ def buildDesktopScreen (st : DesktopState) (availW availH : SubPx)
         else []
       let editor := if create || st.cloudAllows "send" then
         let placeholder := if create then "Describe a task for your cloud agent" else "Send follow-up"
-        let runs := buildComposerInlineRuns theme { st.cloudDraft with placeholder }
+        let hasText := !st.cloudDraft.text.isEmpty || !st.cloudDraft.imePreeditText.isEmpty
+        let rawRuns := buildComposerInlineRuns theme { st.cloudDraft with placeholder }
+        let runs := if hasText then buildComposerEditorRuns rawRuns else rawRuns
         let innerW := w - pxToSub 32
         let editorH := max (pxToSub (if create then 74 else 50)) (min (pxToSub 150) ((wrapInlineRuns innerW (pxToSub 20) runs).2.2 + pxToSub 20))
-        let field := WidgetNode.rrect
+        let caretPos := ComposerBuffer.clampCursor st.cloudDraft.text st.cloudDraft.cursorOffset + st.cloudDraft.imePreeditText.length
+        let caretLen := st.cloudDraft.text.length + st.cloudDraft.imePreeditText.length
+        let caretSpec : Option TextCaretSpec :=
+          some { owner := 1, pos := caretPos, length := caretLen, color := pal.textPrimary }
+        let fieldBg := if hoverRow == some 1 then pal.plusBg else pal.elevatedSurface
+        let field := WidgetNode.focusable 1 <| WidgetNode.rrect
           (BoxStyle.col 0 |>.withPadding (Edges.xy (pxToSub 16) (pxToSub 10)) |>.withFixedSize w editorH)
-          pal.elevatedSurface (CornerRadii.uniform (pxToSub 12)) (BorderStyle.uniform theme.borderWidth pal.border)
-          [WidgetNode.text (BoxStyle.row 0 |>.withFixedSize innerW (editorH - pxToSub 20)) (pxToSub 20) runs]
-        [inventoryTarget theme hoverRow 1 w editorH field] ++
+          fieldBg (CornerRadii.uniform (pxToSub 12)) (BorderStyle.uniform theme.borderWidth pal.border)
+          [WidgetNode.text (BoxStyle.row 0 |>.withFixedSize innerW (editorH - pxToSub 20)) (pxToSub 20) runs none caretSpec]
+          (some 1)
+        [field] ++
           (if st.cloudDraft.text.trimAscii.isEmpty || !st.cloudDraft.imePreeditText.isEmpty then [] else [button 968 (w / 3) (if create then "Create cloud agent" else "Send")])
         else []
       let actions := picks ++ editor ++ (if st.cloudAllows "cancel" then [button 969 (w / 3) "Stop"] else [])

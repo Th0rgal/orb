@@ -83,9 +83,18 @@ structure ScrollRegion where
 structure ScrollbarDragState where
   regionId : EntityId
   grabOffsetSub : Int
-  initialOffsetY : SubPx
+  lastPy : Int
   geom : ScrollbarGeometry
   deriving DecidableEq, Repr, Inhabited
+
+/-- Refresh an active scrollbar drag's geometry against the latest `scrollRegions` produced by
+`view`, clearing the drag if its region vanished or became non-scrollable (`limitY == 0`). -/
+def reconcileScrollbarDrag (drag? : Option ScrollbarDragState)
+    (scrollRegions : List ScrollRegion) : Option ScrollbarDragState :=
+  drag?.bind fun drag =>
+    (scrollRegions.find? (·.id == drag.regionId)).bind fun r =>
+      (scrollbarGeometry r.bounds r.limitY r.offsetY).map fun geom =>
+        { drag with geom }
 
 /-- Find the topmost scrollable `ScrollRegion` whose right-edge scrollbar gutter contains `(px, py)`. -/
 def hitTestScrollbar (regions : List ScrollRegion) (px py : Int) :
@@ -149,6 +158,17 @@ def entityDeviceRect (rt : RuntimeState σ) (id : EntityId) : Rect :=
   | some (_, r) => roundRectOut rt.wayland.scale120 r
   | none => rt.viewportDeviceRect
 
+/-- Update modal focus traps; whenever traps change (e.g. a modal/menu opens or closes),
+cancel any active scrollbar drag and pressed entity and damage the viewport. -/
+def applyFocusTraps (rt : RuntimeState σ) (traps' : List (List EntityId)) : RuntimeState σ :=
+  if traps' != rt.focus.traps then
+    { rt with
+      focus := { rt.focus with traps := traps' }
+      activeScrollbarDrag := none
+      pressedEntity := none
+      damage := Damage.add rt.damage rt.viewportDeviceRect }
+  else rt
+
 /-- Clear keyboard `:focus-visible` modality (e.g. on pointer interaction), damaging any previously
 visible non-text focus ring so it disappears cleanly. -/
 def clearFocusVisible (rt : RuntimeState σ) : RuntimeState σ :=
@@ -199,7 +219,7 @@ def stepEvent (rt : RuntimeState σ) (onEvent : σ → Event → σ × Damage) (
     if let some (region, geom) := hitTestScrollbar rt.scrollRegions px py then
       let (nextOff, grabOffsetSub) := geom.pointerPress region.offsetY px py
       let drag : ScrollbarDragState :=
-        { regionId := region.id, grabOffsetSub, initialOffsetY := region.offsetY, geom }
+        { regionId := region.id, grabOffsetSub, lastPy := py, geom }
       let rt0 := { rt.clearFocusVisible with pressedEntity := none, activeScrollbarDrag := some drag }
       let (app', appDmg) := onEvent rt0.app (.scrollTo region.id nextOff)
       let finalDmg := appDmg.elim rt0.damage (Damage.add rt0.damage)
@@ -208,10 +228,15 @@ def stepEvent (rt : RuntimeState σ) (onEvent : σ → Event → σ × Damage) (
       stepEventNormal rt onEvent ev
   | .pointerMove _px py =>
     if let some drag := rt.activeScrollbarDrag then
-      let nextOff := drag.geom.offsetForThumbTop (py - drag.grabOffsetSub)
-      let (app', appDmg) := onEvent rt.app (.scrollTo drag.regionId nextOff)
-      let finalDmg := appDmg.elim rt.damage (Damage.add rt.damage)
-      { rt with app := app', damage := finalDmg }
+      if py == drag.lastPy then rt
+      else
+        let nextOff := drag.geom.offsetForThumbTop (py - drag.grabOffsetSub)
+        let (app', appDmg) := onEvent rt.app (.scrollTo drag.regionId nextOff)
+        let finalDmg := appDmg.elim rt.damage (Damage.add rt.damage)
+        { rt with
+          app := app'
+          activeScrollbarDrag := some { drag with lastPy := py }
+          damage := finalDmg }
     else
       stepEventNormal rt onEvent ev
   | .pointerButton _px _py 0x110 false =>
@@ -252,7 +277,8 @@ where
       | .pointerLeave =>
         { rt with hoveredEntity := none }
       | .pointerButton px py button down =>
-        if button != 0x110 then rt
+        if button != 0x110 then
+          if down then rt.clearFocusVisible else rt
         else if down then
           match hitTest rt.hitRegions px py with
           | some id =>
@@ -357,9 +383,10 @@ def effectiveEvent (rt : RuntimeState σ) (ev : Event) : Event :=
         (keysym == 0xff0d || keysym == 0xff8d || keysym == 0x20) then
       match rt.focus.owner with
       | some id =>
-        let editorReturn := id == 1 && keysym != 0x20
-        if (editorReturn || id != 1) && state == .repeated then ev
-        else if editorReturn then .composerReturn (mods &&& 1 != 0)
+        let isInput := isTextInputEntity id && (rt.focusableOrder.isEmpty || rt.focusableOrder.contains id)
+        if isInput && keysym == 0x20 then ev
+        else if state == .repeated then ev
+        else if isInput then .composerReturn (mods &&& 1 != 0)
         else .activate id
       | none => ev
     else ev
@@ -426,9 +453,7 @@ def stepFrameWithRegions {σ : Type} (rt : RuntimeState σ)
     let prevOwner := st.focus.owner
     let dispatched := st.effectiveEvent ev
     st := st.stepEvent (onEvent st) ev
-    let traps' := focusTraps st.app
-    if traps' != st.focus.traps then
-      st := { st with focus := { st.focus with traps := traps' }, damage := Damage.add st.damage st.viewportDeviceRect }
+    st := st.applyFocusTraps (focusTraps st.app)
     if let some target := focusChange before st.app dispatched then
       st := st.requestFocus target st.viewportDeviceRect
       if prevOwner.any isTextInputEntity && st.focus.owner != prevOwner then
@@ -445,6 +470,7 @@ def stepFrameWithRegions {σ : Type} (rt : RuntimeState σ)
         framebuffer := ByteArray.empty }
     else st.vulkan
   let ((atlas', clearColor, scene, regions, focusOrder), scrollRegions) ← view { st with vulkan := vk0 }
+  let activeScrollbarDrag := reconcileScrollbarDrag st.activeScrollbarDrag scrollRegions
   -- Transfer the old surface into the painter; retaining it in `st` forces
   -- a framebuffer-sized copy even for a small in-place repaint.
   st := { st with vulkan := default }
@@ -457,6 +483,7 @@ def stepFrameWithRegions {σ : Type} (rt : RuntimeState σ)
     atlas := atlas'
     hitRegions := regions
     scrollRegions
+    activeScrollbarDrag
     focusableOrder := focusOrder
     damage := none
     framesRendered := st.framesRendered + 1
@@ -660,11 +687,7 @@ def runWindow {σ : Type} (rt0 : RuntimeState σ)
     else
       let before := rt.app
       let (app, damage) ← pollFrame rt
-      let traps' := focusTraps app
-      let rtTraps := if traps' != rt.focus.traps then
-          { rt with app, focus := { rt.focus with traps := traps' }, damage := Damage.add rt.damage rt.viewportDeviceRect }
-        else { rt with app }
-      rt := rtTraps
+      rt := ({ rt with app }).applyFocusTraps (focusTraps app)
       if let some rect := damage then rt := rt.markDirty rect
       if let some target := focusChange before app (.time 0) then
         rt := rt.requestFocus target rt.viewportDeviceRect

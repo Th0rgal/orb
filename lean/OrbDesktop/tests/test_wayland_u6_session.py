@@ -1334,8 +1334,9 @@ class WaylandU6SessionTest(unittest.TestCase):
                 # Keyboard Tab focuses first focusable button (sidebar toggle) with visible focusRing.
                 comp.key_tap("tab")
                 comp.wait_frame_change(h_init, timeout=5.0)
+                sidebar_top_tabbed = comp.region_hash(0, 0, 120, 40)
                 self.assertNotEqual(
-                    comp.region_hash(0, 0, 120, 40),
+                    sidebar_top_tabbed,
                     sidebar_top_init,
                     "Tab navigation must paint keyboard :focus-visible ring on sidebar toggle",
                 )
@@ -1343,7 +1344,7 @@ class WaylandU6SessionTest(unittest.TestCase):
                 # Pointer click on Project pill transfers logical focus quietly (clears sidebar toggle's
                 # keyboard ring, leaves Project pill visually quiet with no harsh focusRing border).
                 comp.pointer_click(575, 390)
-                comp.wait_region_change(0, 0, 120, 40, comp.region_hash(0, 0, 120, 40), timeout=5.0)
+                comp.wait_region_change(0, 0, 120, 40, sidebar_top_tabbed, timeout=5.0)
                 self.assertEqual(
                     comp.region_hash(0, 0, 120, 40),
                     sidebar_top_init,

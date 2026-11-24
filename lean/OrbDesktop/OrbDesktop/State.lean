@@ -174,13 +174,16 @@ def onLayout (s : ScrollPolicyState) (contentSub viewportSub : SubPx) : ScrollPo
     { pinned := false, topSub := clampScrollOffset contentSub viewportSub s.topSub }
 
 /-- Apply an explicit user scroll target offset in `SubPx` (e.g. scrollbar drag / track jump),
-    matching `Orb.Scroll.userScroll` (`gap < near`). -/
+    matching `Orb.Scroll.userScroll` (`gap < near`). Stationary presses or horizontal jitter
+    (`nextTop == s.topSub && nextTop < lim`) leave pinning unchanged. -/
 def onUserScrollTo (s : ScrollPolicyState) (contentSub viewportSub targetTopSub : SubPx) : ScrollPolicyState :=
   let lim := scrollLimit contentSub viewportSub
   let nextTop := min lim targetTopSub
   if nextTop < s.topSub then
     { pinned := false, topSub := nextTop }
-  else if lim - min lim nextTop < nearBottomSub then
+  else if nextTop == s.topSub && nextTop < lim then
+    s
+  else if lim - nextTop < nearBottomSub then
     { pinned := true, topSub := nextTop }
   else
     { s with topSub := nextTop }

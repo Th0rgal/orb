@@ -152,6 +152,30 @@ private def verifyFocusTransfer : IO Unit := do
     throw <| IO.userError "focus: borderless search input 701 must not draw a box focus outline"
   unless hasCaret701 do
     throw <| IO.userError "focus: borderless search input 701 must still draw its vertical text caret"
+  -- 5. SceneOutput.diff invalidates when focusVisible flips true -> false on a focused button (same owner).
+  let sceneVisTrue := view { owner := some 10 } true
+  let sceneVisFalse := view { owner := some 10 } false
+  let visDiff := sceneVisTrue.diff sceneVisFalse
+  unless visDiff.damage.isSome && visDiff.changed.contains 10 do
+    throw <| IO.userError s!"focus: SceneOutput.diff missed focusVisible true -> false on button 10: {repr visDiff}"
+  -- 6. Right-click press clears focusVisible and damages the previously visible keyboard ring.
+  let rightPressed := ({ tabbed with damage := none }).stepEvent (fun s _ => (s, none))
+    (.pointerButton (btn20Sub.x + 1) (btn20Sub.y + 1) 0x111 true)
+  unless !rightPressed.focusVisible && rightPressed.damage.isSome do
+    throw <| IO.userError "focus: right-click press must clear focusVisible and damage visible ring"
+  -- 7. effectiveEvent applies the shared isTextInputEntity predicate to inputs 1, 701, and 604.
+  for tid in ([1, 701, 604] : List EntityId) do
+    let rtIn : Runtime.RuntimeState Unit := { app := (), focus := { owner := some tid }, focusableOrder := [tid] }
+    match rtIn.effectiveEvent (.key 0xff0d 0 .pressed) with
+    | .composerReturn false => pure ()
+    | other => throw <| IO.userError s!"effectiveEvent: Return on input {tid} expected composerReturn false, got {repr other}"
+    match rtIn.effectiveEvent (.key 0x20 0 .pressed) with
+    | .key 0x20 0 .pressed => pure ()
+    | other => throw <| IO.userError s!"effectiveEvent: Space on input {tid} must not activate, got {repr other}"
+  let rtBtn : Runtime.RuntimeState Unit := { app := (), focus := { owner := some 10 }, focusableOrder := [10] }
+  match rtBtn.effectiveEvent (.key 0x20 0 .pressed) with
+  | .activate 10 => pure ()
+  | other => throw <| IO.userError s!"effectiveEvent: Space on button 10 expected activate 10, got {repr other}"
 
 private def verifyCaretAndScrollbar : IO Unit := do
   let theme := orbDarkTheme
@@ -259,6 +283,57 @@ private def verifyCaretAndScrollbar : IO Unit := do
   let unfocused := jumped.stepEvent reduce (.windowFocus false)
   unless unfocused.activeScrollbarDrag.isNone do
     throw <| IO.userError "scrollbar: windowFocus false must end active drag"
+  -- Stationary thumb press / horizontal jitter at lim - 10px (< nearBottomSub) must not re-pin.
+  let nearTop := limitY - pxToSub 10
+  let unpinnedNear : ScrollPolicyState := { pinned := false, topSub := nearTop }
+  let sameTarget := unpinnedNear.onUserScrollTo (limitY + vpBounds.h.toNat) vpBounds.h.toNat nearTop
+  unless !sameTarget.pinned && sameTarget.topSub == nearTop do
+    throw <| IO.userError s!"scrollbar: stationary onUserScrollTo at lim-10px re-pinned ({repr sameTarget})"
+  let some gNear := scrollbarGeometry vpBounds limitY nearTop
+    | throw <| IO.userError "scrollbar: missing geometry at lim-10px"
+  let regionNear : Runtime.ScrollRegion := { id := transcriptViewportId, bounds := vpBounds, limitY, offsetY := nearTop }
+  let reduceNear (st : DesktopState) (ev : Event) : DesktopState × Damage :=
+    match ev with
+    | .scrollTo rid off => applyScrollRegionTo 120 rid regionNear.bounds regionNear.limitY regionNear.offsetY off st
+    | _ => (st, none)
+  let rtNear : Runtime.RuntimeState DesktopState := {
+    app := { txInit with scroll := unpinnedNear }
+    scrollRegions := [regionNear]
+  }
+  let nearGx := gNear.thumbHitRectSub.x + gNear.thumbHitRectSub.w / 2
+  let nearGy := gNear.thumbHitRectSub.y + gNear.thumbHitRectSub.h / 2
+  let pressNear := rtNear.stepEvent reduceNear (.pointerButton nearGx nearGy 0x110 true)
+  let jitterNear := pressNear.stepEvent reduceNear (.pointerMove (nearGx + pxToSub 4) nearGy)
+  unless !pressNear.app.scroll.pinned && pressNear.app.scroll.topSub == nearTop &&
+      !jitterNear.app.scroll.pinned && jitterNear.app.scroll.topSub == nearTop do
+    throw <| IO.userError s!"scrollbar: stationary thumb press or horizontal jitter at lim-10px re-pinned ({repr jitterNear.app.scroll})"
+  -- Modal-open trap change cancels active scrollbar drag and pressedEntity so subsequent moves do not scroll.
+  let modalSt := (stepDesktopEvent 120 { x := 0, y := 0, w := 1280, h := 800 } draggedUp.app (.key 0x6b 2 .pressed)).1
+  let trapped := ({ draggedUp with app := modalSt, pressedEntity := some 105 }).applyFocusTraps (desktopFocusTraps modalSt)
+  unless trapped.activeScrollbarDrag.isNone && trapped.pressedEntity.isNone do
+    throw <| IO.userError "scrollbar: modal focus trap change must cancel active drag and pressedEntity"
+  let afterTrapMove := trapped.stepEvent reduce (.pointerMove gx (vpBounds.y - pxToSub 100))
+  unless afterTrapMove.app.scroll == trapped.app.scroll do
+    throw <| IO.userError "scrollbar: pointerMove after modal drag cancellation must not scroll"
+  -- Fresh scrollRegions reconcile updates drag.geom on limitY growth and clears drag when non-scrollable/absent.
+  let grownLimitY : SubPx := pxToSub 2400
+  let grownRegion : Runtime.ScrollRegion :=
+    { id := transcriptViewportId, bounds := vpBounds, limitY := grownLimitY, offsetY := draggedUp.app.scroll.topSub }
+  let grownDrag := Runtime.reconcileScrollbarDrag draggedUp.activeScrollbarDrag [grownRegion]
+  unless grownDrag.any (fun d => d.geom.limitY == grownLimitY) do
+    throw <| IO.userError s!"scrollbar: reconcileScrollbarDrag did not refresh limitY ({repr grownDrag})"
+  let reduceGrown (st : DesktopState) (ev : Event) : DesktopState × Damage :=
+    match ev with
+    | .scrollTo rid off => applyScrollRegionTo 120 rid grownRegion.bounds grownRegion.limitY grownRegion.offsetY off st
+    | _ => (st, none)
+  let rtGrown := { draggedUp with scrollRegions := [grownRegion], activeScrollbarDrag := grownDrag }
+  let draggedGrownBot := rtGrown.stepEvent reduceGrown (.pointerMove gx (vpBounds.bottom + pxToSub 200))
+  unless draggedGrownBot.app.scroll.topSub == grownLimitY && draggedGrownBot.app.scroll.pinned do
+    throw <| IO.userError s!"scrollbar: drag after limitY growth remained clamped to stale limit ({repr draggedGrownBot.app.scroll})"
+  if (Runtime.reconcileScrollbarDrag grownDrag []).isSome then
+    throw <| IO.userError "scrollbar: reconcileScrollbarDrag must clear drag when region disappears"
+  if (Runtime.reconcileScrollbarDrag grownDrag [{ grownRegion with limitY := 0 }]).isSome then
+    throw <| IO.userError "scrollbar: reconcileScrollbarDrag must clear drag when limitY becomes 0"
 
 def verifyDesktopEdges (view : Runtime.RuntimeState DesktopState → IO Runtime.FrameView)
     (shape : Text.GlyphAtlasCache → Text.FontHandle → Nat → TextStyle → String →
@@ -309,6 +384,33 @@ def verifyDesktopEdges (view : Runtime.RuntimeState DesktopState → IO Runtime.
           next.resolved.map (·.text) == resolved && next.resolvedMap.size == Text.maxResolvedRuns do
         throw <| IO.userError s!"shape caches: oversized {text.utf8ByteSize}-byte input not shaped or retained keys changed"
       ac := next
+    -- Verify stepFrameWithRegions refreshes activeScrollbarDrag geometry when limitY grows mid-drag
+    -- and clears activeScrollbarDrag when the scroll region becomes non-scrollable.
+    let dragBounds : Rect := { x := pxToSub 220, y := pxToSub 35, w := pxToSub 740, h := pxToSub 400 }
+    let lim1 : SubPx := pxToSub 1000
+    let lim2 : SubPx := pxToSub 2200
+    let some g1 := scrollbarGeometry dragBounds lim1 lim1
+      | throw <| IO.userError "stepFrameWithRegions: missing initial scrollbar geometry"
+    let dragInit : Runtime.ScrollbarDragState := { regionId := transcriptViewportId, grabOffsetSub := pxToSub 10, lastPy := g1.thumbRectSub.y + pxToSub 10, geom := g1 }
+    let rtDrag0 := { rt with
+      atlas := atlas'
+      activeScrollbarDrag := some dragInit
+      scrollRegions := [{ id := transcriptViewportId, bounds := dragBounds, limitY := lim1, offsetY := lim1 }]
+      damage := some rt.viewportDeviceRect }
+    let rtDragGrown ← Runtime.stepFrameWithRegions rtDrag0
+      (fun _ s _ => (s, none))
+      (fun r => do
+        let fv ← view r
+        return (fv, [{ id := transcriptViewportId, bounds := dragBounds, limitY := lim2, offsetY := lim1 }]))
+    unless rtDragGrown.activeScrollbarDrag.any (fun d => d.geom.limitY == lim2) do
+      throw <| IO.userError "stepFrameWithRegions: activeScrollbarDrag geometry was not refreshed on limitY growth"
+    let rtDragCleared ← Runtime.stepFrameWithRegions { rtDragGrown with damage := some rtDragGrown.viewportDeviceRect }
+      (fun _ s _ => (s, none))
+      (fun r => do
+        let fv ← view r
+        return (fv, [{ id := transcriptViewportId, bounds := dragBounds, limitY := 0, offsetY := 0 }]))
+    unless rtDragCleared.activeScrollbarDrag.isNone do
+      throw <| IO.userError "stepFrameWithRegions: activeScrollbarDrag was not cleared when limitY became 0"
     -- Verify scroll event coalescing handles interleaved Wayland `.time` events safely.
     let coalesced := Runtime.coalesceScrollEvents #[
       .time 10, .scroll 100 200 0 12, .time 11, .scroll 100 200 0 18,

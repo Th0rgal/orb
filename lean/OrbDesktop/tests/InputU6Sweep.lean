@@ -493,6 +493,48 @@ private def verifyScrollbarQuietFocusAndCaret : IO Unit := do
   let (_, searchScene) := renderScreenScene (DesktopState.forScreen .searchDialog) 120
   if hasFocusRing searchScene orbDarkTheme.palette.focusRing then
     throw <| IO.userError "search input 701 must stay borderless (no focusRing box outline)"
+  -- Cloud Agent prompt editor (`id = 1` on `ScreenId.cloud`) steps its 1px border AND draws its caret even on pointer click (`focusVisible = false`).
+  let cloudFocusSt : DesktopState := {
+    DesktopState.liveUnavailable with
+    screen := .cloud
+    connectionBinding := "u6-live"
+    cloudLines := some ["Cursor · Ready"]
+    cloudAccounts := [("cursor_cloud", "c1", "Team 1")]
+    cloudDraft := { text := "deploy check", cursorOffset := 6 }
+    sidebarRows := [{ widgetId := 1000, rowId := "project:p1", kind := "project", title := "P1" }]
+  }
+  let cloudTree := buildDesktopScreen cloudFocusSt vpW vpH {}
+  let (_, cloudFocusedScene) := renderWidgetTree 120 vpW vpH { owner := some 1 } cloudFocusSt.theme cloudTree (focusVisible := false)
+  let hasCaretPrim (s : SceneOutput) (col : Color) : Bool :=
+    s.prims.any fun p => match p with
+      | .quad r c 0 0 0 => c == col && r.w >= 1 && r.h >= 10
+      | _ => false
+  unless hasFocusRing cloudFocusedScene cloudFocusSt.theme.palette.focusRing do
+    throw <| IO.userError "cloud editor (id=1) must step its border when focused even with focusVisible = false"
+  unless hasCaretPrim cloudFocusedScene cloudFocusSt.theme.palette.textPrimary do
+    throw <| IO.userError "cloud editor (id=1) must render its vertical text caret when focused"
+  -- Rename menu inline editor (`item.id = 1` in `buildMissionMenu`) renders its vertical caret when focused.
+  let renameSt : DesktopState := {
+    DesktopState.liveUnavailable with
+    connectionBinding := "u6-live"
+    missionCards := [{ (default : MissionSummaryCard) with widgetId := 1001, missionId := "m1", title := "Old Title" }]
+  }
+  let renameMenu : MissionMenu := { mission := "m1", x := 0, y := 0, page := .rename, draft := { text := "New Title", cursorOffset := 3 } }
+  let menuTree := buildMissionMenu renameSt renameMenu (pxToSub 228) 4
+  let (_, menuScene) := renderWidgetTree 120 (pxToSub 228) (pxToSub 120) { owner := some 1 } renameSt.theme menuTree (focusVisible := false)
+  unless hasCaretPrim menuScene renameSt.theme.palette.textPrimary do
+    throw <| IO.userError "missionMenu rename input (id=1) must render its vertical text caret when focused"
+  -- Right-click press clears focusVisible; effectiveEvent handles inputs 1, 701, 604 consistently.
+  let rtRight : Runtime.RuntimeState Unit := { app := (), focus := { owner := some 105 }, focusVisible := true, focusableOrder := [105] }
+  let afterRight := rtRight.stepEvent (fun s _ => (s, none)) (.pointerButton (pxToSub 40) (pxToSub 80) 0x111 true)
+  unless !afterRight.focusVisible && afterRight.damage.isSome do
+    throw <| IO.userError "right-click press must clear focusVisible"
+  for tid in ([1, 701, 604] : List EntityId) do
+    let rtIn : Runtime.RuntimeState Unit := { app := (), focus := { owner := some tid }, focusableOrder := [tid] }
+    unless (match rtIn.effectiveEvent (.key 0xff0d 0 .pressed) with | .composerReturn false => true | _ => false) do
+      throw <| IO.userError s!"effectiveEvent Return mismatch on text input {tid}"
+    unless (match rtIn.effectiveEvent (.key 0x20 0 .pressed) with | .key 0x20 0 .pressed => true | _ => false) do
+      throw <| IO.userError s!"effectiveEvent Space mismatch on text input {tid}"
 
   -- 3. Scrollbar geometry, thumb drag, track jump, clamping [0, limitY], and Orb.Scroll unpinning across viewports.
   let bounds : Rect := { x := pxToSub 220, y := pxToSub 35, w := pxToSub 1250, h := pxToSub 461 }
@@ -534,6 +576,30 @@ private def verifyScrollbarQuietFocusAndCaret : IO Unit := do
   let done := heldDown.stepEvent reduce (.pointerButton gx bounds.bottom 0x110 false)
   unless done.activeScrollbarDrag.isNone do
     throw <| IO.userError "pointer release did not finish scrollbar drag"
+  -- Stationary thumb press / horizontal jitter at lim - 10px (< nearBottomSub) leaves pinned == false and topSub unchanged.
+  let nearOff := lim - pxToSub 10
+  let unpinnedNear : ScrollPolicyState := { pinned := false, topSub := nearOff }
+  let afterZero := unpinnedNear.onUserScrollTo (lim + bounds.h.toNat) bounds.h.toNat nearOff
+  unless !afterZero.pinned && afterZero.topSub == nearOff do
+    throw <| IO.userError s!"stationary onUserScrollTo at lim-10px re-pinned: {repr afterZero}"
+  -- Modal-open trap change cancels active scrollbar drag and pressedEntity; limitY growth refreshes drag.geom.
+  let searchOpened := (stepDesktopEvent 120 vpDev jumped.app (.key 0x6b 2 .pressed)).1
+  let cancelled := ({ jumped with app := searchOpened, pressedEntity := some 101 }).applyFocusTraps (desktopFocusTraps searchOpened)
+  unless cancelled.activeScrollbarDrag.isNone && cancelled.pressedEntity.isNone do
+    throw <| IO.userError "opening modal during scrollbar drag did not clear activeScrollbarDrag and pressedEntity"
+  let limGrown : SubPx := pxToSub 1800
+  let grownReg : Runtime.ScrollRegion := { id := transcriptViewportId, bounds, limitY := limGrown, offsetY := jumped.app.scroll.topSub }
+  let refreshed := Runtime.reconcileScrollbarDrag jumped.activeScrollbarDrag [grownReg]
+  unless refreshed.any (fun d => d.geom.limitY == limGrown) do
+    throw <| IO.userError s!"reconcileScrollbarDrag failed to update limitY to {limGrown}"
+  let reduceGrown (st : DesktopState) (ev : Event) :=
+    match ev with
+    | .scrollTo rid off => applyScrollRegionTo 120 rid grownReg.bounds grownReg.limitY grownReg.offsetY off st
+    | _ => (st, none)
+  let rtGrown := { jumped with scrollRegions := [grownReg], activeScrollbarDrag := refreshed }
+  let toNewBot := rtGrown.stepEvent reduceGrown (.pointerMove gx (bounds.bottom + pxToSub 100))
+  unless toNewBot.app.scroll.topSub == limGrown && toNewBot.app.scroll.pinned do
+    throw <| IO.userError s!"drag after limitY growth did not reach new limit {limGrown}: {repr toNewBot.app.scroll}"
 
   -- 4. Scroll event coalescing (matching coords + same-sign deltas + interleaved .time).
   let coalesced := Runtime.coalesceScrollEvents #[
