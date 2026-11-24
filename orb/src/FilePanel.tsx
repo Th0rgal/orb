@@ -45,7 +45,7 @@ import {
   FileReferenceContext,
   type ReferenceResolver,
 } from "./fileReferenceContext";
-import { MdView, ReadOnlySource } from "./Markdown";
+import { isMarkdownFile, MdView, ReadOnlySource } from "./Markdown";
 import { FileSkeleton } from "./Skeleton";
 import { ErrorToast } from "./toast";
 import { connectionVersion } from "./api";
@@ -173,8 +173,9 @@ export function FilePanelProvider(p: {
   };
   const setOpened = (value: boolean | ((previous: boolean) => boolean)) => {
     const next = typeof value === "function" ? value(untrack(opened)) : value;
-    if (next) closeSidePanel();
-    else setSideVisible(false);
+    if (next) {
+      if (untrack(sideVisible)) closeSidePanel();
+    } else setSideVisible(false);
     return setFilesOpened(next);
   };
   const [directories, setDirectories] = createSignal<
@@ -349,6 +350,7 @@ export function FilePanelProvider(p: {
     const key = identity(ref);
     setPanelTab("files");
     setOpened(true);
+    rightPaneFocused = true;
     setSearch(null);
     setChoices([]);
     setTabs((ts) => {
@@ -705,7 +707,14 @@ export function FilePanelProvider(p: {
       requestAnimationFrame(() => searchInput?.focus());
       return;
     }
-    if (hasPrimaryModifier(e) && !e.altKey && !e.shiftKey && e.key === "/" && panel?.contains(document.activeElement)) {
+    if (
+      opened() &&
+      hasPrimaryModifier(e) &&
+      !e.altKey &&
+      !e.shiftKey &&
+      e.key === "/" &&
+      (panel?.contains(document.activeElement) || rightPaneFocused)
+    ) {
       e.preventDefault();
       e.stopImmediatePropagation();
       setSourceMode((v) => !v);
@@ -1153,7 +1162,7 @@ export function FilePanelProvider(p: {
                   )}
                 </For>
               </div>
-              <Show when={selected()?.name.match(/\.(mdx?|markdown)$/i)}>
+              <Show when={isMarkdownFile(selected()?.name ?? "")}>
                 <button
                   class="file-mode"
                   title="Toggle Markdown/source (⌘/)"
@@ -1442,7 +1451,7 @@ export function FilePanelProvider(p: {
                         >
                           <Show
                             when={
-                              selected()?.name.match(/\.(mdx?|markdown)$/i) &&
+                              isMarkdownFile(selected()?.name ?? "") &&
                               !sourceMode()
                             }
                             fallback={

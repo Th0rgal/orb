@@ -39,6 +39,11 @@ const [mdSource, setMdSource] = createSignal(false);
 export { mdSource, setMdSource };
 export const toggleMdSource = () => setMdSource((on) => !on);
 
+/** True for Markdown files rendered in editorial preview mode (.md, .mdx, .markdown). */
+export function isMarkdownFile(path: string): boolean {
+  return /\.(mdx?|markdown)$/i.test(path);
+}
+
 // Rendered formulas by source: a transcript row that remounts while scrolling
 // reuses the markup instead of running KaTeX again in that frame.
 const formulas = new Map<string, string>();
