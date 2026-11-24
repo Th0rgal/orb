@@ -1,6 +1,7 @@
 import OrbDesktop.State
 import OrbDesktop.Screens
 import Orb.Scroll
+import LeanUI.Runtime
 
 /-!
 # InputU6Sweep — Exhaustive 9-Screen Hit-Testing, `Orb.Scroll` Policy & Control Verification
@@ -442,9 +443,114 @@ private def verifyInteractionRegressions : IO Unit := do
   unless deltaOpen == expectedDelta do
     throw <| IO.userError s!"measurePrependedHeightDelta sidePanelOpen mismatch: got {deltaOpen}, expected {expectedDelta}"
 
+private def verifyScrollbarQuietFocusAndCaret : IO Unit := do
+  -- 1. Pure caret positioning (empty, mid-string, multi-byte UTF-8, IME preedit).
+  let theme := orbDarkTheme
+  let caretX (txt : String) (pos : Nat) : Option Int :=
+    let st : TextStyle := Theme.bodyText theme
+    let run := { Widgets.overlaySynthRun st txt with editorStart := if txt.isEmpty then none else some 0 }
+    let node := WidgetNode.focusable 701 <|
+      WidgetNode.text (BoxStyle.row 0 |>.withFixedSize (pxToSub 260) (pxToSub 22)) (pxToSub 22)
+        [run] none (some { owner := 701, pos, length := txt.length, color := theme.palette.textPrimary })
+    let (_, scene) := renderWidgetTree 120 (pxToSub 260) (pxToSub 22) { owner := some 701 } theme node (focusVisible := false)
+    scene.prims.toList.findSome? fun p => match p with
+      | .quad r col 0 0 0 => if col == theme.palette.textPrimary then some r.x else none
+      | _ => none
+  unless caretX "" 0 == some 0 do
+    throw <| IO.userError "caret: empty string caret must sit at x=0"
+  let some xMid := caretX "hello world" 5 | throw <| IO.userError "caret: mid-string missing"
+  let some xEnd := caretX "hello world" 11 | throw <| IO.userError "caret: end-string missing"
+  unless 0 < xMid && xMid < xEnd do
+    throw <| IO.userError s!"caret: ASCII ordering broken ({xMid}, {xEnd})"
+  let multi := "a日🚀z"
+  let mut lastX : Int := -1
+  for i in [0 : multi.length + 1] do
+    let some xi := caretX multi i | throw <| IO.userError s!"caret: missing at UTF-8 scalar {i}"
+    unless xi > lastX do
+      throw <| IO.userError s!"caret: UTF-8 scalar {i} did not advance ({xi} <= {lastX})"
+    lastX := xi
+  let imeBuf := ({ text := "ab", cursorOffset := 1 } : Widgets.ComposerBuffer).setPreedit "検索"
+  let imePos := Widgets.ComposerBuffer.clampCursor imeBuf.text imeBuf.cursorOffset + imeBuf.imePreeditText.length
+  let some xBeforeIme := caretX imeBuf.displayText 1 | throw <| IO.userError "caret: missing before preedit"
+  let some xAfterIme := caretX imeBuf.displayText imePos | throw <| IO.userError "caret: missing after preedit"
+  unless imeBuf.displayText == "a検索b" && imePos == 3 && xAfterIme > xBeforeIme do
+    throw <| IO.userError "caret: IME preedit caret did not advance past preedit"
+
+  -- 2. Quiet pointer focus vs keyboard Tab :focus-visible on real controlPopulated pills + borderless search 701.
+  let popSt := DesktopState.forScreen .controlPopulated
+  let popTree := buildDesktopScreen popSt vpW vpH {}
+  let (_, popQuiet) := renderWidgetTree 120 vpW vpH { owner := some draftProjectPickerId } popSt.theme popTree (focusVisible := false)
+  let (_, popKeyboard) := renderWidgetTree 120 vpW vpH { owner := some draftProjectPickerId } popSt.theme popTree (focusVisible := true)
+  let hasFocusRing (s : SceneOutput) (col : Color) : Bool :=
+    s.prims.any fun p => match p with
+      | .quad _ 0 _ bw c => bw > 0 && c == col
+      | _ => false
+  if hasFocusRing popQuiet popSt.theme.palette.focusRing then
+    throw <| IO.userError "quiet focus: pointer-focused pill must not paint focusRing"
+  unless hasFocusRing popKeyboard popSt.theme.palette.focusRing do
+    throw <| IO.userError "keyboard focus: Tab-focused pill must paint focusRing"
+  -- Borderless search input 701 never draws a box outline even with focusVisible = true.
+  let (_, searchScene) := renderScreenScene (DesktopState.forScreen .searchDialog) 120
+  if hasFocusRing searchScene orbDarkTheme.palette.focusRing then
+    throw <| IO.userError "search input 701 must stay borderless (no focusRing box outline)"
+
+  -- 3. Scrollbar geometry, thumb drag, track jump, clamping [0, limitY], and Orb.Scroll unpinning across viewports.
+  let bounds : Rect := { x := pxToSub 220, y := pxToSub 35, w := pxToSub 1250, h := pxToSub 461 }
+  let lim : SubPx := pxToSub 900
+  let some g := scrollbarGeometry bounds lim lim | throw <| IO.userError "scrollbarGeometry returned none for limitY > 0"
+  let gx := g.trackRectSub.x + g.trackRectSub.w / 2
+  let mut rosterSt : DesktopState := { DesktopState.liveUnavailable with connectionBinding := "u6", rosterTopSub := 0 }
+  let (rosterMoved, rosterDmg) := applyScrollRegionTo 120 rosterViewportId bounds lim 0 (pxToSub 9999) rosterSt
+  unless rosterMoved.rosterTopSub == lim && rosterDmg.isSome do
+    throw <| IO.userError "applyScrollRegionTo did not clamp rosterViewportId to limitY"
+  let fleetSt : DesktopState := { DesktopState.liveUnavailable with screen := .machinesFleet, connectionBinding := "u6", fleetTopSub := 0 }
+  let (fleetMoved, _) := applyScrollRegionTo 120 fleetViewportId bounds lim 0 (pxToSub 320) fleetSt
+  unless fleetMoved.fleetTopSub == pxToSub 320 do
+    throw <| IO.userError "applyScrollRegionTo failed on fleetViewportId"
+  let compSt : DesktopState := { DesktopState.liveUnavailable with connectionBinding := "u6" }
+  let (compMoved, _) := applyScrollRegionTo 120 Widgets.composerViewportId bounds lim 0 (pxToSub 150) compSt
+  unless compMoved.composer.wheelTop == some (pxToSub 150) do
+    throw <| IO.userError "applyScrollRegionTo failed on composerViewportId"
+  -- Transcript drag upward unpins Orb.Scroll and track jump starts continuous drag.
+  let txSt : DesktopState := {
+    DesktopState.liveUnavailable with
+    screen := .missionTranscript
+    connectionBinding := "u6"
+    openMission := some "m1"
+    scroll := { pinned := true, topSub := lim }
+  }
+  let region : Runtime.ScrollRegion := { id := transcriptViewportId, bounds, limitY := lim, offsetY := lim }
+  let reduce (st : DesktopState) (ev : Event) :=
+    match ev with
+    | .scrollTo rid off => applyScrollRegionTo 120 rid region.bounds region.limitY region.offsetY off st
+    | _ => (st, none)
+  let rt : Runtime.RuntimeState DesktopState := { app := txSt, scrollRegions := [region] }
+  let jumped := rt.stepEvent reduce (.pointerButton gx (bounds.y + pxToSub 40) 0x110 true)
+  unless jumped.activeScrollbarDrag.isSome && !jumped.app.scroll.pinned && jumped.app.scroll.topSub < lim / 2 do
+    throw <| IO.userError s!"track jump did not unpin transcript: {repr jumped.app.scroll}"
+  let heldDown := jumped.stepEvent reduce (.pointerMove gx (bounds.bottom + pxToSub 100))
+  unless heldDown.app.scroll.topSub == lim && heldDown.app.scroll.pinned do
+    throw <| IO.userError s!"drag-to-bottom after track jump did not re-pin: {repr heldDown.app.scroll}"
+  let done := heldDown.stepEvent reduce (.pointerButton gx bounds.bottom 0x110 false)
+  unless done.activeScrollbarDrag.isNone do
+    throw <| IO.userError "pointer release did not finish scrollbar drag"
+
+  -- 4. Scroll event coalescing (matching coords + same-sign deltas + interleaved .time).
+  let coalesced := Runtime.coalesceScrollEvents #[
+    .time 1, .scroll 300 400 0 10, .time 2, .scroll 300 400 0 25,
+    .time 3, .scroll 300 400 0 (-8), .scroll 300 400 0 0,
+    .scroll 500 400 0 12]
+  let expected : Array Event := #[
+    .time 2, .scroll 300 400 0 35,
+    .time 3, .scroll 300 400 0 (-8),
+    .scroll 500 400 0 12]
+  unless reprStr coalesced == reprStr expected do
+    throw <| IO.userError s!"coalesceScrollEvents mismatch: {reprStr coalesced}"
+
 def main : IO UInt32 := do
   verifyOrbScrollEquivalence
   verifyNineScreenControls
   verifyInteractionRegressions
-  IO.println "InputU6Sweep: all 9 screens, live panels, Inference VPN/routing, Orb.Scroll, and regression checks passed"
+  verifyScrollbarQuietFocusAndCaret
+  IO.println "InputU6Sweep: all 9 screens, live panels, Inference VPN/routing, Orb.Scroll, caret, scrollbar drag, quiet focus, and regression checks passed"
   return 0

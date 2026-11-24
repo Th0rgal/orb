@@ -51,6 +51,12 @@ structure FlexItem where
 /-- Stable identity of a UI entity (focus target, hit region, cache owner). -/
 abbrev EntityId := Nat
 
+/-- Widget IDs that host editable text and Wayland `zwp-text-input-v3` IME sessions:
+    composer / inline rename / directory editor (`1`), search palette input (`701`),
+    and settings URL input (`604`). -/
+@[inline] def isTextInputEntity (id : EntityId) : Bool :=
+  id == 1 || id == 701 || id == 604
+
 /-- Backend-agnostic scene primitive, already in device pixels. Paint order is array order. -/
 inductive Prim where
   /-- SDF rounded rect with optional inner border. -/
@@ -123,6 +129,8 @@ inductive Event where
   | pointerMove (x y : Int)
   | pointerButton (x y : Int) (button : Nat) (down : Bool)
   | scroll (x y : Int) (dx dy : Int)
+  /-- Absolute vertical scroll offset (in logical `SubPx`) emitted during scrollbar thumb drag / track jump. -/
+  | scrollTo (regionId : EntityId) (offsetY : Nat)
   | key (keysym : UInt32) (mods : UInt32) (state : KeyState)
   /-- Committed text (plain key text or IME commit). -/
   | text (utf8 : String)

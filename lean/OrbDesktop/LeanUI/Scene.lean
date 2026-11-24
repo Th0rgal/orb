@@ -386,9 +386,86 @@ def diffSceneNodes (before after : Array SceneNodeRecord) : SceneDiff :=
 @[inline] def SceneOutput.diff (before after : SceneOutput) : SceneDiff :=
   diffSceneNodes before.nodeRecords after.nodeRecords
 
+/-- Shared pure geometry for a vertical overlay scrollbar in logical `SubPx` coordinates.
+Used as the single source of truth by both `scrollbarPrims` painting and pointer hit-testing/drag math. -/
+structure ScrollbarGeometry where
+  /-- Right-edge pointer hit gutter (`12px` wide, clamped to viewport width) over full viewport height. -/
+  trackRectSub : Rect
+  /-- Painted `6px` overlay thumb rectangle in logical `SubPx`. -/
+  thumbRectSub : Rect
+  /-- Pointer hit rectangle for the thumb (full hit gutter width, thumb vertical span). -/
+  thumbHitRectSub : Rect
+  /-- Top Y of the thumb travel track (`bounds.y + padY`) in logical `SubPx`. -/
+  trackTopSub : Int
+  /-- Maximum vertical thumb travel (`usableH - thumbH`) in logical `SubPx`. -/
+  travelSub : Int
+  /-- Vertical scroll limit (`limitY`) in logical `SubPx`. -/
+  limitY : SubPx
+  deriving DecidableEq, Repr, Inhabited
+
+/-- Compute vertical overlay scrollbar geometry in logical `SubPx` from container `boundsSub`,
+vertical scroll limit `limitY`, and current `offsetY`. Returns `none` when non-scrollable (`limitY == 0`). -/
+def scrollbarGeometry (boundsSub : Rect) (limitY offsetY : SubPx) : Option ScrollbarGeometry :=
+  if limitY == 0 || boundsSub.w ≤ 0 || boundsSub.h ≤ 0 then none
+  else
+    let viewH := boundsSub.h
+    let limitInt : Int := Int.ofNat limitY
+    let contentH := viewH + limitInt
+    let offInt : Int := min (Int.ofNat offsetY) limitInt
+    let padY : Int := Int.ofNat (pxToSub 4)
+    let minThumb : Int := Int.ofNat (pxToSub 28)
+    let usableH : Int := max 1 (viewH - 2 * padY)
+    let thumbH : Int := min usableH (max minThumb ((usableH * viewH) / max 1 contentH))
+    let travel : Int := max 0 (usableH - thumbH)
+    let trackTop : Int := boundsSub.y + padY
+    let thumbY : Int := trackTop + (offInt * travel) / limitInt
+    let thumbW : Int := Int.ofNat (pxToSub 6)
+    let rightInset : Int := Int.ofNat (pxToSub 3)
+    let thumbX : Int := boundsSub.right - thumbW - rightInset
+    let gutterW : Int := min boundsSub.w (Int.ofNat (pxToSub 12))
+    let trackRectSub : Rect :=
+      { x := boundsSub.right - gutterW, y := boundsSub.y, w := gutterW, h := boundsSub.h }
+    let thumbRectSub : Rect :=
+      { x := thumbX, y := thumbY, w := thumbW, h := thumbH }
+    let thumbHitRectSub : Rect :=
+      { x := trackRectSub.x, y := thumbY, w := trackRectSub.w, h := thumbH }
+    some { trackRectSub, thumbRectSub, thumbHitRectSub, trackTopSub := trackTop, travelSub := travel, limitY }
+
+namespace ScrollbarGeometry
+
+/-- Compute clamped vertical scroll offset (`[0, limitY]`) for a desired thumb top coordinate. -/
+def offsetForThumbTop (g : ScrollbarGeometry) (desiredThumbTopSub : Int) : SubPx :=
+  if g.limitY == 0 || g.travelSub ≤ 0 then 0
+  else
+    let clampedPos := max 0 (min g.travelSub (desiredThumbTopSub - g.trackTopSub))
+    let num := clampedPos * Int.ofNat g.limitY + g.travelSub / 2
+    min g.limitY (num / g.travelSub).toNat
+
+/-- Compute thumb top Y coordinate in `SubPx` corresponding to a given `offsetY`. -/
+def thumbTopForOffset (g : ScrollbarGeometry) (offsetY : SubPx) : Int :=
+  if g.limitY == 0 then g.trackTopSub
+  else
+    let offInt : Int := min (Int.ofNat offsetY) (Int.ofNat g.limitY)
+    g.trackTopSub + (offInt * g.travelSub) / Int.ofNat g.limitY
+
+/-- Compute `(targetOffsetY, grabOffsetSub)` for a pointer press at `(px, py)` inside `g.trackRectSub`:
+- On the thumb: keeps `currentOffsetY` (clamped) and anchors `grabOffsetSub = py - thumbY`.
+- On the track above/below the thumb: jumps thumb center to `py` (clamped to `[0, limitY]`)
+  and anchors `grabOffsetSub` at the jumped thumb top so holding and dragging works seamlessly. -/
+def pointerPress (g : ScrollbarGeometry) (currentOffsetY : SubPx) (px py : Int) : SubPx × Int :=
+  if g.thumbHitRectSub.contains px py then
+    (min g.limitY currentOffsetY, py - g.thumbRectSub.y)
+  else
+    let desiredTop := py - g.thumbRectSub.h / 2
+    let nextOff := g.offsetForThumbTop desiredTop
+    let jumpedTop := g.thumbTopForOffset nextOff
+    (nextOff, py - jumpedTop)
+
+end ScrollbarGeometry
+
 /-- Lower a widget node and its paired `ComputedBox` into balanced `Prim` list, focusable tab order, and hit regions. -/
 def lowerWidgetPair (scale120 : Nat) (focusState : FocusState) (theme : Theme)
-    (clipSub : Option Rect) (clipDev : Option Rect) :
+    (clipSub : Option Rect) (clipDev : Option Rect) (focusVisible : Bool := true) :
     WidgetNode → ComputedBox →
     List Prim × List WidgetId × List (WidgetId × Rect) × List (WidgetId × Rect)
   | .mk id focusable hitTestable style payload children, box =>
@@ -428,10 +505,22 @@ def lowerWidgetPair (scale120 : Nat) (focusState : FocusState) (theme : Theme)
     let selfBoxPrims := emitBoxStylePrims scale120 box.rectDev style
     let selfPayloadPrims := emitPayloadPrims scale120 focusState box payload
     let (childPrims, childFocusOrder, childHitsSub, childHitsDev) :=
-      lowerWidgetChildren scale120 focusState theme nextClipSub nextClipDev children box.children
+      lowerWidgetChildren scale120 focusState theme nextClipSub nextClipDev focusVisible children box.children
     let isFocused := match id, focusState.owner with
       | some wid, some owner => wid == owner
       | _, _ => false
+    let isTextInput := match id with
+      | some wid => isTextInputEntity wid
+      | none => false
+    let hasVisibleBorder : Bool :=
+      match payload with
+      | .rrect _ _ border => border.isVisible
+      | _ => style.border.isVisible
+    -- Cursor-style quiet focus (`AGENTS.md`): buttons/pills/dropdowns/tabs show `focusRing`
+    -- only on keyboard `:focus-visible`; bordered text inputs step their 1px border while
+    -- borderless text inputs (e.g. search bar `701`) rely on their vertical text caret.
+    let showFocusRing : Bool :=
+      isFocused && (if isTextInput then hasVisibleBorder else focusVisible)
     let focusRadius : SubPx :=
       match payload with
       | .rrect _ radii _ => radii.topLeft
@@ -439,8 +528,8 @@ def lowerWidgetPair (scale120 : Nat) (focusState : FocusState) (theme : Theme)
       | _ => style.radii.topLeft
     -- `Kernel.focusBorder`, following the corner radius of the widget it outlines.
     let focusPrim : List Prim :=
-      if focusable || isFocused then
-        [match focusBorder isFocused box.rectDev theme.palette.focusRing with
+      if focusable || showFocusRing then
+        [match focusBorder showFocusRing box.rectDev theme.palette.focusRing with
           | .quad r fill _ bw col => .quad r fill (scaleSubPx scale120 focusRadius) bw col
           | p => p]
       else []
@@ -471,23 +560,12 @@ def lowerWidgetPair (scale120 : Nat) (focusState : FocusState) (theme : Theme)
     let scrollbarPrims : List Prim :=
       match payload, box.scrollLimitXY with
       | .scrollClip _, some (_, limitY) =>
-        if limitY == 0 then []
-        else
-          let viewH := box.contentRectDev.h
-          let limitDev := Int.ofNat (max 1 (scaleSubPx scale120 limitY))
-          let contentH := viewH + limitDev
-          let offDev := Int.ofNat (scaleSubPx scale120 (box.scrollOffset.getD (0, 0)).2)
-          let minThumb := Int.ofNat (scaleSubPx scale120 (pxToSub 28))
-          let padY := Int.ofNat (scaleSubPx scale120 (pxToSub 4))
-          let usableH := max 1 (viewH - 2 * padY)
-          let thumbH := min usableH (max minThumb ((usableH * viewH) / max 1 contentH))
-          let travel := max 0 (usableH - thumbH)
-          let thumbY := box.contentRectDev.y + padY + (min offDev limitDev * travel) / limitDev
-          let thumbW := Int.ofNat (max 4 (scaleSubPx scale120 (pxToSub 6)))
-          let thumbX := box.contentRectDev.right - thumbW - Int.ofNat (scaleSubPx scale120 (pxToSub 3))
+        match scrollbarGeometry box.contentRectSub limitY (box.scrollOffset.getD (0, 0)).2 with
+        | none => []
+        | some geom =>
+          let thumbDev := roundRect scale120 geom.thumbRectSub
           let thumbCol : Color := if theme.isDark then 0xFFFFFF38 else 0x00000030
-          [Prim.quad { x := thumbX, y := thumbY, w := thumbW, h := thumbH } thumbCol
-            (scaleSubPx scale120 (pxToSub 3)) 0 0]
+          [Prim.quad thumbDev thumbCol (scaleSubPx scale120 (pxToSub 3)) 0 0]
       | _, _ => []
     let allPrims :=
       layerPushPrims ++
@@ -506,21 +584,22 @@ def lowerWidgetPair (scale120 : Nat) (focusState : FocusState) (theme : Theme)
      selfHitDev ++ childHitsDev)
 where
   lowerWidgetChildren (scale120 : Nat) (focusState : FocusState) (theme : Theme)
-      (clipSub : Option Rect) (clipDev : Option Rect) :
+      (clipSub : Option Rect) (clipDev : Option Rect) (focusVisible : Bool) :
       List WidgetNode → List ComputedBox →
       List Prim × List WidgetId × List (WidgetId × Rect) × List (WidgetId × Rect)
     | [], _ => ([], [], [], [])
     | _, [] => ([], [], [], [])
     | w :: ws, b :: bs =>
-      let (p1, f1, hs1, hd1) := lowerWidgetPair scale120 focusState theme clipSub clipDev w b
-      let (p2, f2, hs2, hd2) := lowerWidgetChildren scale120 focusState theme clipSub clipDev ws bs
+      let (p1, f1, hs1, hd1) := lowerWidgetPair scale120 focusState theme clipSub clipDev focusVisible w b
+      let (p2, f2, hs2, hd2) := lowerWidgetChildren scale120 focusState theme clipSub clipDev focusVisible ws bs
       (p1 ++ p2, f1 ++ f2, hs1 ++ hs2, hd1 ++ hd2)
 
 /-- Lower a laid-out widget tree (`WidgetNode` + `ComputedBox`) into a `SceneOutput`. -/
 def buildSceneFromLayout (scale120 : Nat) (focusState : FocusState) (theme : Theme)
-    (rootWidget : WidgetNode) (rootBox : ComputedBox) (recordNodes := true) : SceneOutput :=
+    (rootWidget : WidgetNode) (rootBox : ComputedBox) (recordNodes := true)
+    (focusVisible : Bool := true) : SceneOutput :=
   let (primsList, focusOrder, hitsSub, hitsDev) :=
-    lowerWidgetPair scale120 focusState theme none none rootWidget rootBox
+    lowerWidgetPair scale120 focusState theme none none focusVisible rootWidget rootBox
   let dmg := Damage.add none rootBox.damageRectDev
   { prims := primsList.toArray,
     focusableOrder := focusOrder,
@@ -531,11 +610,12 @@ def buildSceneFromLayout (scale120 : Nat) (focusState : FocusState) (theme : The
 
 /-- Perform layout and scene lowering in one pure pass from a declarative `WidgetNode` root. -/
 def renderWidgetTree (scale120 : Nat) (availW availH : SubPx)
-    (focusState : FocusState) (theme : Theme) (rootWidget : WidgetNode) :
+    (focusState : FocusState) (theme : Theme) (rootWidget : WidgetNode)
+    (focusVisible : Bool := true) :
     ComputedBox × SceneOutput :=
   let layoutRoot := rootWidget.toLayoutNode
   let rootBox := layoutNode scale120 focusState.owner theme.palette.focusRing 0 0 availW availH layoutRoot
-  let sceneOut := buildSceneFromLayout scale120 focusState theme rootWidget rootBox
+  let sceneOut := buildSceneFromLayout scale120 focusState theme rootWidget rootBox (focusVisible := focusVisible)
   (rootBox, sceneOut)
 
 /-- Hit-test a `SceneOutput` at `(x, y)` (in logical `SubPx` coordinates) using `Kernel.hitTest`. -/

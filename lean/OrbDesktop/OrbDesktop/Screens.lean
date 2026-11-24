@@ -118,6 +118,14 @@ def buildNewAgentBody (st : DesktopState) (mainW bodyH : SubPx) : WidgetNode :=
       , sendBtn
       ]
 
+  let newAgentCaretPos :=
+    if hasText then ComposerBuffer.clampCursor st.composer.text st.composer.cursorOffset + st.composer.imePreeditText.length
+    else 0
+  let newAgentCaretLen := if hasText then composedText.length else 0
+  let newAgentRun :=
+    let stRun : TextStyle := { Theme.bodyText theme with sizeSub := pxToSub 13, lineHeightSub := pxToSub 20, color := txtCol, weight := 400 }
+    let baseRun := overlaySynthRun stRun dispText
+    if hasText then { baseRun with editorStart := some 0 } else baseRun
   let tallComposer : WidgetNode :=
     WidgetNode.rrect
       (BoxStyle.col (pxToSub 6)
@@ -130,7 +138,9 @@ def buildNewAgentBody (st : DesktopState) (mainW bodyH : SubPx) : WidgetNode :=
           WidgetNode.box
             (BoxStyle.col 0 |>.withPadding (Edges.trbl (pxToSub 2) 0 0 (pxToSub 2))
               |>.withFixedSize (pxToSub 582) (pxToSub 48))
-            [screenTextLine theme (pxToSub 580) (pxToSub 20) (pxToSub 13) (pxToSub 20) txtCol dispText]
+            [WidgetNode.text (BoxStyle.row 0 |>.withFixedSize (pxToSub 580) (pxToSub 20)) (pxToSub 20)
+              [newAgentRun] none
+              (some { owner := 1, pos := newAgentCaretPos, length := newAgentCaretLen, color := pal.textPrimary })]
       , bottomRow
       ]
 
@@ -704,7 +714,8 @@ def buildMachinesFleetBody (st : DesktopState) (mainW bodyH : SubPx) : WidgetNod
 /-- Build one `.s-row` inside a Settings `.s-card`. -/
 def buildSettingsRow (theme : Theme) (rowW h : SubPx) (title desc rightLabel : String)
     (isButton : Bool := false) (isCode : Bool := false) (hasBottomBorder : Bool := false)
-    (isInput : Bool := false) (isSelect : Bool := false) (controlId : Option WidgetId := none) : WidgetNode :=
+    (isInput : Bool := false) (isSelect : Bool := false) (controlId : Option WidgetId := none)
+    (caret : Option TextCaretSpec := none) : WidgetNode :=
   let pal := theme.palette
   let bdr := theme.borderWidth
   let inputBg : Color := if theme.isDark then 0x202020FF else 0xFFFFFFFF
@@ -717,12 +728,15 @@ def buildSettingsRow (theme : Theme) (rowW h : SubPx) (title desc rightLabel : S
     | none => n
   let rightNode : WidgetNode :=
     if isInput then
+      let txtSt : TextStyle := { Theme.bodyText theme with sizeSub := pxToSub 12, lineHeightSub := pxToSub 16, color := pal.textPrimary, weight := 400 }
+      let baseRun := overlaySynthRun txtSt rightLabel
+      let run := if caret.isSome && !rightLabel.isEmpty then { baseRun with editorStart := some 0 } else baseRun
       wrapCtrl <| WidgetNode.rrect
         (BoxStyle.row 0 |>.withAlign .center |>.withPadding (Edges.xy (pxToSub 10) 0) |>.withFixedSize (pxToSub 260) (pxToSub 32))
         inputBg
         (CornerRadii.uniform (pxToSub 6))
         (BorderStyle.uniform bdr inputBdr)
-        [screenTextLine theme (pxToSub 240) (pxToSub 16) (pxToSub 12) (pxToSub 16) pal.textPrimary rightLabel]
+        [WidgetNode.text (BoxStyle.row 0 |>.withFixedSize (pxToSub 240) (pxToSub 16)) (pxToSub 16) [run] none caret]
     else if isSelect then
       wrapCtrl <| WidgetNode.rrect
         (BoxStyle.row 0 |>.withAlign .center |>.withPadding (Edges.xy (pxToSub 10) 0) |>.withFixedSize (pxToSub 80) (pxToSub 32))
@@ -911,12 +925,17 @@ def buildSettingsGeneralBody (st : DesktopState) (mainW bodyH : SubPx) : WidgetN
       (BoxStyle.row 0 |>.withPadding (Edges.trbl (pxToSub 26) (pxToSub 8) (pxToSub 8) (pxToSub 8)) |>.withFixedSize colW (pxToSub 51))
       [screenTextLine theme (pxToSub 584) (pxToSub 17) (pxToSub 12) (pxToSub 17) pal.textSecondary txt]
 
-  let apiUrlText := st.settingsApiUrl.text ++ st.settingsApiUrl.imePreeditText
+  let apiUrlText := st.settingsApiUrl.displayText
+  let apiUrlCaret : Option TextCaretSpec :=
+    some { owner := settingsApiUrlId
+           pos := ComposerBuffer.clampCursor st.settingsApiUrl.text st.settingsApiUrl.cursorOffset + st.settingsApiUrl.imePreeditText.length
+           length := apiUrlText.length
+           color := pal.textPrimary }
   let connectedDesc :=
     if st.settingsActionNote.isEmpty then "Signed in to http://127.0.0.1:14470."
     else "Status: " ++ st.settingsActionNote
   let backendCard := sCard (pxToSub 125)
-    [ buildSettingsRow theme rowW (pxToSub 63) "API URL" "Base URL of the Core backend." apiUrlText false false true true false (some settingsApiUrlId)
+    [ buildSettingsRow theme rowW (pxToSub 63) "API URL" "Base URL of the Core backend." apiUrlText false false true true false (some settingsApiUrlId) apiUrlCaret
     , buildSettingsRow theme rowW (pxToSub 62) "Connected" connectedDesc "Disconnect" true false false false false (some settingsDisconnectId)
     ]
 

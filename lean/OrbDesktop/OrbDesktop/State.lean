@@ -173,16 +173,21 @@ def onLayout (s : ScrollPolicyState) (contentSub viewportSub : SubPx) : ScrollPo
   else
     { pinned := false, topSub := clampScrollOffset contentSub viewportSub s.topSub }
 
-/-- Apply reader scroll delta in `SubPx`, matching `Orb.Scroll.userScroll` (`gap < near`). -/
-def onUserScroll (s : ScrollPolicyState) (contentSub viewportSub : SubPx) (deltaY : Int) : ScrollPolicyState :=
-  let nextTop := scrollStep contentSub viewportSub s.topSub deltaY
+/-- Apply an explicit user scroll target offset in `SubPx` (e.g. scrollbar drag / track jump),
+    matching `Orb.Scroll.userScroll` (`gap < near`). -/
+def onUserScrollTo (s : ScrollPolicyState) (contentSub viewportSub targetTopSub : SubPx) : ScrollPolicyState :=
   let lim := scrollLimit contentSub viewportSub
+  let nextTop := min lim targetTopSub
   if nextTop < s.topSub then
     { pinned := false, topSub := nextTop }
   else if lim - min lim nextTop < nearBottomSub then
     { pinned := true, topSub := nextTop }
   else
     { s with topSub := nextTop }
+
+/-- Apply reader scroll delta in `SubPx`, matching `Orb.Scroll.userScroll` (`gap < near`). -/
+def onUserScroll (s : ScrollPolicyState) (contentSub viewportSub : SubPx) (deltaY : Int) : ScrollPolicyState :=
+  s.onUserScrollTo contentSub viewportSub (scrollStep contentSub viewportSub s.topSub deltaY)
 
 /-- Apply a scroll event in `SubPx`, matching `Orb.Scroll.scrollEvent`:
     passive geometry updates (`intent = false, resized = true`) never change `pinned`. -/
@@ -713,6 +718,20 @@ def requestOlderHistory (st : DesktopState) : DesktopState :=
     { st with historyLoading := true, historyLoadError := false }
   else st
 
+/-- Apply an absolute user scroll target offset to the transcript viewport (e.g. scrollbar drag /
+track jump), automatically triggering an on-demand older-history page fetch when moving upward into
+the top threshold. -/
+def stepTranscriptScrollTo (st : DesktopState) (contentSub viewportSub targetTopSub : SubPx) :
+    Option DesktopState :=
+  let current := st.scroll.onLayout contentSub viewportSub
+  let next := current.onUserScrollTo contentSub viewportSub targetTopSub
+  let nearTop := next.topSub < current.topSub && next.topSub <= transcriptNearTopSub && st.canAutoLoadOlderHistory
+  if next == current && !nearTop then none
+  else
+    let scrolled := if nearTop && next.pinned then { next with pinned := false } else next
+    let st' := { st with scroll := scrolled }
+    some (if nearTop then requestOlderHistory st' else st')
+
 /-- Apply a vertical scroll delta to the transcript viewport, automatically triggering
 an on-demand older-history page fetch when scrolling upward into the top threshold. -/
 def stepTranscriptScroll (st : DesktopState) (contentSub viewportSub : SubPx) (dy : Int) :
@@ -725,6 +744,38 @@ def stepTranscriptScroll (st : DesktopState) (contentSub viewportSub : SubPx) (d
     let scrolled := if nearTop && next.pinned then { next with pinned := false } else next
     let st' := { st with scroll := scrolled }
     some (if nearTop then requestOlderHistory st' else st')
+
+/-- Apply an absolute vertical scroll target (`Event.scrollTo`) to a scrollable desktop viewport
+(`composerViewportId`, `rosterViewportId`, `fleetViewportId`, or `transcriptViewportId`), clamped
+to `[0, limitY]` and updating `Orb.Scroll` pinning for `transcriptViewportId`. -/
+def applyScrollRegionTo (scale : Nat) (regionId : WidgetId) (bounds : Rect)
+    (limitY currentOffsetY targetOffsetY : SubPx) (st : DesktopState) : DesktopState × Damage := Id.run do
+  if !st.missionMenu.isNone || st.modal != .none then
+    return (st, none)
+  let h := bounds.h.toNat
+  let content := limitY + h
+  let clamped := min limitY targetOffsetY
+  let damage := some (roundRectOut scale bounds)
+  if regionId == Widgets.composerViewportId then
+    let current := st.composer.wheelTop.getD currentOffsetY
+    if clamped == current then return (st, none)
+    return ({ st with composer := { st.composer with wheelTop := some clamped } }, damage)
+  if regionId == rosterViewportId then
+    if clamped == st.rosterTopSub then return (st, none)
+    return ({ st with rosterTopSub := clamped }, damage)
+  if regionId == fleetViewportId && (st.screen == .machinesFleet || st.screen == .inference) then
+    if clamped == st.fleetTopSub then return (st, none)
+    return ({ st with fleetTopSub := clamped }, damage)
+  if regionId == transcriptViewportId && (st.screen == .missionTranscript || st.screen == .missionSplitDiff) then
+    if st.liveData then
+      let some st' := stepTranscriptScrollTo st content h clamped | return (st, none)
+      return (st', damage)
+    else
+      let current := if !st.scrolledManually then { pinned := false, topSub := 0 } else st.scroll.onLayout content h
+      let next := current.onUserScrollTo content h clamped
+      if next == current && st.scrolledManually then return (st, none)
+      return ({ st with scroll := next, scrolledManually := true }, damage)
+  return (st, none)
 
 /-! ## 3. Canonical Screen Fixtures (`01` .. `09`) -/
 
