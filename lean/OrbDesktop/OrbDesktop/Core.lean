@@ -571,7 +571,8 @@ def readLiveFrame (slot : IO.Ref (Option LiveSubscription)) (scale : Nat) (viewp
         let wid := nextMissionWidget st
         let card := { (default : MissionSummaryCard) with widgetId := wid, missionId := id, title, status, machine, backend, model, effort, permissionMode, project }
         let row := { (default : ChromeSidebarRow) with widgetId := wid, rowId := "mission:" ++ id, kind := "mission", title, status }
-        return (resetSelection { st with screen := .missionTranscript, missionCards := card :: st.missionCards, sidebarRows := row :: st.sidebarRows } (some card), some viewport)
+        let base := pushNavScreen { st with missionCards := card :: st.missionCards, sidebarRows := row :: st.sidebarRows } .missionTranscript (some id)
+        return (resetSelection base (some card), some viewport)
       | .archive _ =>
         let next := { st with
           missionCards := st.missionCards.map fun m => if m.missionId == mid then { m with status := "acknowledged" } else m,
@@ -615,7 +616,7 @@ def readLiveFrame (slot : IO.Ref (Option LiveSubscription)) (scale : Nat) (viewp
         return (st.openCloud mid, some viewport)
       | .cloudSend .. => return ({ st with cloudDraft := {}, cloudAttempt := "", cloudLines := none }, some viewport)
       | .cloudCancel .. => return ({ st with cloudLines := none }, some viewport)
-      | .send .. => return ({ st with unconfirmedSend := none, composer := { isRunning := st.composer.isRunning } }, some viewport)
+      | .send .. => return ({ st with unconfirmedSend := none, scroll := st.scroll.pinBottom, composer := { isRunning := st.composer.isRunning } }, some viewport)
       | .stop _ => return (st, some viewport)
     catch _ =>
       let message := if action == "inbox-read" then "Couldn't mark this item read. Check the Inbox and try again."
