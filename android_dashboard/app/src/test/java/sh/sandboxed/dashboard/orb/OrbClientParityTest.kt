@@ -273,5 +273,11 @@ class OrbClientParityTest {
             listOf("hermes", "claudecode", "codex"),
             OrbAgentCatalog.backendOptions(nativeBackends, existing = true, activeCloudBackend = "hermes")
         )
+
+        assertEquals("cursor_cloud", OrbAdminFormatting.normalizeCloudProvider("cloud_cursor"))
+        assertEquals("grok_bot", OrbAdminFormatting.normalizeCloudProvider("cloud_grok"))
+        assertEquals("hermes", OrbAdminFormatting.normalizeCloudProvider("cloud_hermes"))
+        assertEquals("cursor_cloud", OrbAdminFormatting.normalizeCloudProvider("cloud_cursor", mapOf("provider" to "cursor_cloud")))
+        assertNull(OrbAdminFormatting.normalizeCloudProvider("claudecode"))
     }
 }

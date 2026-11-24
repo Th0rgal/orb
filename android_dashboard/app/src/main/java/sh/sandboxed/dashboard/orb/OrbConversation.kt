@@ -579,7 +579,6 @@ fun OrbConversationPage(
     var currentMission by remember(initialMission?.id) { mutableStateOf(initialMission) }
     val missionId = currentMission?.id
     var missionBoard by remember(missionId) { mutableStateOf<OrbMissionBoardSummary?>(null) }
-    var showMissionBoard by remember(missionId) { mutableStateOf(false) }
 
     LaunchedEffect(missionId, project.id) {
         missionBoard = null
@@ -651,7 +650,6 @@ fun OrbConversationPage(
     var showModePicker by remember { mutableStateOf(false) }
     // Core's durable follow-up queue merged with optimistic sends/edits (OrbSendFlow.kt).
     var followUps by remember(missionId) { mutableStateOf(OrbFollowUpQueue()) }
-    var showQueuedDrawer by remember { mutableStateOf(true) }
     /** Queued follow-up being edited in the composer (edit in place on send). */
     var editingQueuedId by remember(missionId) { mutableStateOf<String?>(null) }
     /** Send now in flight: one continuous Sending… → Working… state, Stop kept. */
@@ -671,8 +669,7 @@ fun OrbConversationPage(
     var showChanges by remember { mutableStateOf(false) }
     var sharedFiles by remember(missionId) { mutableStateOf<List<OrbSharedFile>>(emptyList()) }
     var showAgentPicker by remember { mutableStateOf(false) }
-    var showAttachMenu by remember { mutableStateOf(false) }
-    var showHeaderMenu by remember { mutableStateOf(false) }
+    var initialHandoffBackend by remember(missionId) { mutableStateOf<String?>(null) }
     var showRenameDialog by remember { mutableStateOf(false) }
     var showShareDialog by remember { mutableStateOf(false) }
     var showMissionSettingsDialog by remember { mutableStateOf(false) }
@@ -683,8 +680,10 @@ fun OrbConversationPage(
     var userExplicitlyPickedAgent by remember(currentMission?.id) { mutableStateOf(false) }
     // Agent configuration state
     var selectedBackend by remember(currentMission?.id, backends) {
+        val rawBackend = currentMission?.str("backend", "harness", "backend_id")
         mutableStateOf(
-            currentMission?.str("backend", "harness", "backend_id")?.removePrefix("cloud_")
+            OrbAdminFormatting.normalizeCloudProvider(rawBackend, currentMission?.dict("cloud"))
+                ?: rawBackend
                 ?: backends.firstOrNull()?.str("id", "name")
                 ?: "claudecode"
         )
@@ -2288,7 +2287,6 @@ fun OrbConversationPage(
     remember(context) { OrbDictationSettings.init(context); OrbBtwSettings.init(context); true }
     val sparkRecorder = remember { OrbSparkRecorder() }
     var dictationElapsed by remember { mutableIntStateOf(0) }
-    var showDictationLanguages by remember { mutableStateOf(false) }
 
     fun appendTranscript(spoken: String) {
         inputText = if (inputText.trim().isEmpty()) spoken else "${inputText.trimEnd()} $spoken"
@@ -2483,201 +2481,50 @@ fun OrbConversationPage(
             .background(OrbStyle.background)
     ) {
         // Top Header Bar
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 16.dp, vertical = 10.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(10.dp)
-        ) {
-            Box(
-                modifier = Modifier
-                    .size(40.dp)
-                    .clip(CircleShape)
-                    .background(OrbStyle.surface)
-                    .border(1.dp, OrbStyle.border, CircleShape)
-                    .orbPressClickable { onBack() },
-                contentAlignment = Alignment.Center
-            ) {
-                Icon(
-                    imageVector = Icons.AutoMirrored.Filled.ArrowBack,
-                    contentDescription = "Back",
-                    tint = Color.White,
-                    modifier = Modifier.size(18.dp)
-                )
-            }
-
-            Column(
-                modifier = Modifier.weight(1f),
-                verticalArrangement = Arrangement.spacedBy(1.dp)
-            ) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
-                ) {
-                    Text(
-                        text = headline,
-                        color = Color.White,
-                        fontSize = 15.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.weight(1f, fill = false)
-                    )
-                    if (liveRow != null && OrbMissionTree.isGoal(liveRow)) {
-                        Text(
-                            text = remoteGoalPhase?.let { OrbRemoteGoal.label(it, (liveRow.raw["goal_iteration"] as? Number)?.toInt() ?: 0) } ?: "Goal",
-                            color = OrbStyle.textSecondary,
-                            fontSize = 10.sp,
-                            fontWeight = FontWeight.SemiBold,
-                            maxLines = 1,
-                            softWrap = false,
-                            modifier = Modifier
-                                .clip(CircleShape)
-                                .background(OrbStyle.surface)
-                                .border(1.dp, OrbStyle.border, CircleShape)
-                                .padding(horizontal = 7.dp, vertical = 2.dp)
-                        )
-                    }
-                }
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
-                ) {
-                    Box(
-                        modifier = Modifier
-                            .size(6.dp)
-                            .clip(CircleShape)
-                            .background(OrbProjectAppearance.color(project))
-                    )
-                    Text(
-                        text = projectName,
-                        color = OrbStyle.textMuted,
-                        fontSize = 11.sp,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.weight(1f, fill = false)
-                    )
-                    val contCount = liveRow?.int("_continuation_count") ?: 1
-                    if (contCount > 1) {
-                        Text(
-                            text = "· $contCount continuations",
-                            color = OrbStyle.textMuted,
-                            fontSize = 11.sp,
-                            maxLines = 1,
-                            softWrap = false
-                        )
-                    }
-                }
-            }
-
-            if (!prUrl.isNullOrEmpty()) {
-                Row(
-                    modifier = Modifier
-                        .clip(CircleShape)
-                        .background(OrbStyle.surface)
-                        .border(1.dp, OrbStyle.border, CircleShape)
-                        .orbPressClickable {
-                            runCatching {
-                                context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(prUrl)))
-                            }
-                        }
-                        .padding(horizontal = 10.dp, vertical = 6.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(4.dp)
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.OpenInNew,
-                        contentDescription = "PR",
-                        tint = OrbStyle.success,
-                        modifier = Modifier.size(12.dp)
-                    )
-                    Text(
-                        text = "PR",
-                        color = Color.White,
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        maxLines = 1,
-                        softWrap = false
-                    )
-                }
-            }
-
-            if (missionId != null || onOpenDocuments != null) {
-                if (missionBoard != null) {
-                    Box(
-                        modifier = Modifier.size(40.dp).clip(CircleShape).background(OrbStyle.surface).border(1.dp, OrbStyle.border, CircleShape).orbPressClickable { showMissionBoard = true }.testTag("conversation.board"),
-                        contentAlignment = Alignment.Center
-                    ) { Icon(Icons.Default.ListAlt, contentDescription = "Mission board", tint = Color.White, modifier = Modifier.size(19.dp)) }
-                }
-                Box {
-                    Box(
-                        modifier = Modifier
-                            .size(40.dp)
-                            .clip(CircleShape)
-                            .background(OrbStyle.surface)
-                            .border(1.dp, OrbStyle.border, CircleShape)
-                            .orbPressClickable { showHeaderMenu = true }
-                            .testTag("conversation.menu"),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.MoreHoriz,
-                            contentDescription = "Conversation actions",
-                            tint = Color.White,
-                            modifier = Modifier.size(19.dp)
-                        )
-                    }
-                    OrbConversationHeaderMenu(
-                        expanded = showHeaderMenu,
-                        onDismiss = { showHeaderMenu = false },
-                        missionId = missionId,
-                        liveRow = liveRow,
-                        project = project,
-                        core = core,
-                        backends = backends,
-                        selectedBackend = selectedBackend,
-                        selectedModel = selectedModel,
-                        isLive = isLive,
-                        liveHasText = live.hasText,
-                        baseTurns = baseTurns.turns,
-                        turns = turns,
-                        latestTurns = latestTurns,
-                        isParticipant = isParticipant,
-                        isCloudMission = isCloudMission,
-                        onOpenFiles = { showFiles = true },
-                        onOpenChanges = { showChanges = true },
-                        onOpenMissionSettings = { showMissionSettingsDialog = true },
-                        onOpenShare = { showShareDialog = true },
-                        onOpenRename = { draft ->
-                            renameDraft = draft
-                            showRenameDialog = true
-                        },
-                        onOpenDocuments = onOpenDocuments,
-                        onStartSideAgent = { session -> sideAgentSession = session },
-                        onOpenCloudHandoff = { fallbackBackend ->
-                            if (fallbackBackend != null) {
-                                selectedBackend = fallbackBackend
-                                selectedModel = ""
-                            }
-                            showAgentPicker = true
-                        },
-                        onRunCommand = { cmd -> runMissionCommand(cmd, "") },
-                        onSetCommandBanner = { commandBanner = it },
-                        onStopMission = { stopMission() },
-                        onRefreshAfterStatus = { id ->
-                            core.refreshMissionsQuietly()
-                            loadHistory(id)
-                        },
-                        onLeaveShared = { onBack() },
-                        onError = { errorMessage = it }
-                    )
-                }
-            }
-            if (showMissionBoard && missionBoard != null) {
-                OrbMissionBoardView(core, missionBoard!!, project.id, OrbMissionTree.placementOf(missionId ?: "")?.revision ?: 0) { showMissionBoard = false }
-            }
-        }
+        OrbConversationTopBar(
+            core = core,
+            project = project,
+            projectName = projectName,
+            headline = headline,
+            missionId = missionId,
+            liveRow = liveRow,
+            remoteGoalPhase = remoteGoalPhase,
+            prUrl = prUrl,
+            missionBoard = missionBoard,
+            backends = backends,
+            selectedBackend = selectedBackend,
+            selectedModel = selectedModel,
+            isLive = isLive,
+            liveHasText = live.hasText,
+            baseTurns = baseTurns.turns,
+            turns = turns,
+            latestTurns = latestTurns,
+            isParticipant = isParticipant,
+            isCloudMission = isCloudMission,
+            onBack = onBack,
+            onOpenFiles = { showFiles = true },
+            onOpenChanges = { showChanges = true },
+            onOpenMissionSettings = { showMissionSettingsDialog = true },
+            onOpenShare = { showShareDialog = true },
+            onOpenRename = { draft ->
+                renameDraft = draft
+                showRenameDialog = true
+            },
+            onOpenDocuments = onOpenDocuments,
+            onStartSideAgent = { session -> sideAgentSession = session },
+            onOpenCloudHandoff = { fallbackBackend ->
+                initialHandoffBackend = fallbackBackend
+                showAgentPicker = true
+            },
+            onRunCommand = { cmd -> runMissionCommand(cmd, "") },
+            onSetCommandBanner = { commandBanner = it },
+            onStopMission = { stopMission() },
+            onRefreshAfterStatus = { id ->
+                core.refreshMissionsQuietly()
+                loadHistory(id)
+            },
+            onError = { errorMessage = it }
+        )
 
         // Pinned state comes from the reader's own drags and flings, never from content growth.
         LaunchedEffect(listState, missionId) {
@@ -3070,462 +2917,63 @@ fun OrbConversationPage(
         }
 
         // Composer Area
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 14.dp, vertical = 8.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            if (nativeLaunchWarning != null) {
-                Text(nativeLaunchWarning, color = OrbStyle.textSecondary, fontSize = 12.sp)
-            }
-            // @ context file mention popup
-            if (matchingContextFiles.isNotEmpty()) {
-                OrbContextFilesPopup(
-                    files = matchingContextFiles,
-                    onPick = { filePath ->
-                        val atIdx = inputText.lastIndexOf('@')
-                        inputText = if (atIdx >= 0) {
-                            inputText.substring(0, atIdx) + "@$filePath "
-                        } else {
-                            "${inputText.trimEnd()} @$filePath "
-                        }
-                    }
-                )
-            }
-
-            // Slash mode & skill menu popup
-            val slashQuery = remember(inputText, isCloudComposer) {
-                if (isCloudComposer) OrbSkillQuery(open = false, query = "", start = -1)
-                else OrbSkillSlash.skillQuery(inputText, inputText.length)
-            }
-            val slashModes = remember(showModePicker, slashQuery, composeMode, offersGoal) {
-                when {
-                    showModePicker -> OrbComposeMode.entries.filter { it != OrbComposeMode.Goal || offersGoal }
-                    slashQuery.open && slashQuery.start == 0 && composeMode == OrbComposeMode.Message ->
-                        OrbComposeMode.entries.filter { (it != OrbComposeMode.Goal || offersGoal) && (slashQuery.query.isEmpty() || it.id.startsWith(slashQuery.query)) }
-                    else -> emptyList()
-                }
-            }
-            val slashCommands = remember(showModePicker, slashQuery, missionId, isParticipant) {
-                if (isParticipant || missionId == null || (!showModePicker && !(slashQuery.open && slashQuery.start == 0))) emptyList()
-                else OrbMissionCommand.entries.filter {
-                    showModePicker || slashQuery.query.isEmpty() || it.trigger.removePrefix("/").startsWith(slashQuery.query)
-                }
-            }
-            val slashSkills = remember(slashQuery, skillItems, selectedSkillNames, isCloudComposer) {
-                if (isCloudComposer || !slashQuery.open) emptyList()
-                else OrbSkillSlash.filterSkills(skillItems, slashQuery.query, selectedSkillNames)
-            }
-            val showSlashMenu = showModePicker || (slashQuery.open && (slashModes.isNotEmpty() || slashCommands.isNotEmpty() || slashSkills.isNotEmpty() || skillCatalogError != null))
-            if (showSlashMenu) {
-                OrbSlashMenuPopup(
-                    slashModes = slashModes,
-                    composeMode = composeMode,
-                    slashCommands = slashCommands,
-                    slashSkills = slashSkills,
-                    skillCatalogError = skillCatalogError,
-                    onPickMode = { mode ->
-                        composeMode = mode
-                        showModePicker = false
-                        if (inputText.startsWith("/")) {
-                            inputText = ""
-                        }
-                    },
-                    onPickCommand = { command ->
-                        showModePicker = false
-                        when (command) {
-                            OrbMissionCommand.Btw -> inputText = "/btw "
-                            OrbMissionCommand.Clone -> inputText = "/clone "
-                            else -> runMissionCommand(command, "")
-                        }
-                    },
-                    onPickSkill = { skillName ->
-                        val inserted = OrbSkillSlash.insertSkill(inputText, inputText.length, skillName)
-                        inputText = inserted.first
-                        showModePicker = false
-                    }
-                )
-            }
-
-            commandBanner?.let { msg ->
-                Text(
-                    text = msg,
-                    color = OrbStyle.success,
-                    fontSize = 12.sp,
-                    fontWeight = FontWeight.Medium,
-                    modifier = Modifier.padding(horizontal = 6.dp)
-                )
-            }
-
-            // Queued follow-ups: compact rows (edit / send now / remove), Codex-style.
-            OrbFollowUpQueueView(
-                rows = followUps.rows,
-                expanded = showQueuedDrawer,
-                onToggle = { showQueuedDrawer = !showQueuedDrawer },
-                editingId = editingQueuedId,
-                reducedMotion = reducedMotion,
-                onEdit = { row ->
-                    editingQueuedId = row.id
-                    inputText = OrbMessagePresentation.parse(row.content).text
-                },
-                onSendNow = { row -> sendQueuedNow(row.id) },
-                onRemove = { row -> removeQueued(row.id) }
-            )
-            if (editingQueuedId != null) {
-                Row(
-                    modifier = Modifier.padding(horizontal = 6.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    Text("Editing queued message", color = OrbStyle.textSecondary, fontSize = 12.sp, modifier = Modifier.weight(1f))
-                    Text(
-                        "Cancel",
-                        color = Color.White,
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        modifier = Modifier.orbPressClickable { editingQueuedId = null; inputText = "" }
-                    )
-                }
-            }
-
-            if (dictationPhase != OrbAndroidDictationPhase.Idle) {
-                OrbAndroidDictationCapsule(
-                    phase = dictationPhase,
-                    elapsedSeconds = dictationElapsed,
-                    onCancel = {
-                        sparkDictation.cancel()
-                    },
-                    onFinish = {
-                        if (dictationPhase == OrbAndroidDictationPhase.Recording) finishSparkRecording()
-                        else if (dictationPhase != OrbAndroidDictationPhase.Transcribing) sparkDictation.cancel()
-                    },
-                    onRetry = { launchSpeech() }
-                )
-            } else {
-                // Shared composer surface; touch targets are sized separately from its border.
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clip(RoundedCornerShape(OrbStyle.panelRadius))
-                        .background(OrbStyle.surface)
-                        .border(1.dp, OrbStyle.borderStrong, RoundedCornerShape(OrbStyle.panelRadius))
-                        .padding(horizontal = 12.dp, vertical = 10.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    if (pendingAttachments.isNotEmpty()) {
-                        OrbAttachmentStrip(
-                            items = pendingAttachments,
-                            onRemove = { id -> pendingAttachments.removeAll { it.id == id } }
-                        )
-                    }
-
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .heightIn(min = 24.dp, max = 140.dp)
-                            .padding(horizontal = 4.dp)
-                    ) {
-                        if (inputText.isEmpty()) {
-                            Text(
-                                text = when (composeMode) {
-                                    OrbComposeMode.Message -> "Message agent…"
-                                    OrbComposeMode.Plan -> "Ask agent to draft a plan…"
-                                    OrbComposeMode.Goal -> "Describe autonomous goal…"
-                                },
-                                color = OrbStyle.textMuted,
-                                fontSize = 15.sp
-                            )
-                        }
-                        BasicTextField(
-                            value = inputText,
-                            onValueChange = { inputText = it },
-                            textStyle = TextStyle(
-                                color = Color.White,
-                                fontSize = 15.sp,
-                                lineHeight = 20.sp
-                            ),
-                            cursorBrush = SolidColor(Color.White),
-                            modifier = Modifier.fillMaxWidth()
-                        )
-                    }
-
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(6.dp)
-                    ) {
-                        // + Attachment button
-                        Box {
-                            Box(
-                                modifier = Modifier
-                                    .size(44.dp)
-                                    .orbPressClickable { showAttachMenu = true }
-                                    .padding(7.dp)
-                                    .clip(CircleShape)
-                                    .background(OrbStyle.card)
-                                    .border(1.dp, OrbStyle.border, CircleShape),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Default.Add,
-                                    contentDescription = "Attach",
-                                    tint = OrbStyle.textSecondary,
-                                    modifier = Modifier.size(16.dp)
-                                )
-                            }
-                            DropdownMenu(
-                                expanded = showAttachMenu,
-                                onDismissRequest = { showAttachMenu = false },
-                                containerColor = OrbStyle.elevated
-                            ) {
-                                DropdownMenuItem(
-                                    text = { Text("Photo Library", color = Color.White, fontSize = 14.sp) },
-                                    leadingIcon = {
-                                        Icon(Icons.Default.PhotoLibrary, contentDescription = null, tint = Color.White)
-                                    },
-                                    onClick = {
-                                        showAttachMenu = false
-                                        photoPickerLauncher.launch("image/*")
-                                    }
-                                )
-                                DropdownMenuItem(
-                                    text = { Text("Attach File", color = Color.White, fontSize = 14.sp) },
-                                    leadingIcon = {
-                                        Icon(Icons.Default.AttachFile, contentDescription = null, tint = Color.White)
-                                    },
-                                    onClick = {
-                                        showAttachMenu = false
-                                        filePickerLauncher.launch("*/*")
-                                    }
-                                )
-                                DropdownMenuItem(
-                                    text = { Text("Tag Context (@)", color = Color.White, fontSize = 14.sp) },
-                                    leadingIcon = {
-                                        Icon(Icons.Default.AlternateEmail, contentDescription = null, tint = Color.White)
-                                    },
-                                    onClick = {
-                                        showAttachMenu = false
-                                        inputText = if (inputText.isEmpty() || inputText.endsWith(" ")) {
-                                            "$inputText@"
-                                        } else {
-                                            "$inputText @"
-                                        }
-                                    }
-                                )
-                            }
-                        }
-
-                        // Mode pill if Plan or Goal
-                        composeMode.badge?.let { badge ->
-                            Row(
-                                modifier = Modifier
-                                    .clip(CircleShape)
-                                    .background(OrbStyle.card)
-                                    .border(1.dp, OrbStyle.borderStrong, CircleShape)
-                                    .orbPressClickable { showModePicker = !showModePicker }
-                                    .padding(horizontal = 9.dp, vertical = 5.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(4.dp)
-                            ) {
-                                Text(
-                                    text = badge,
-                                    color = Color.White,
-                                    fontSize = 11.sp,
-                                    fontWeight = FontWeight.SemiBold,
-                                    maxLines = 1,
-                                    softWrap = false
-                                )
-                                Icon(
-                                    imageVector = Icons.Default.Close,
-                                    contentDescription = "Reset mode",
-                                    tint = OrbStyle.textMuted,
-                                    modifier = Modifier
-                                        .size(11.dp)
-                                        .orbPressClickable { composeMode = OrbComposeMode.Message }
-                                )
-                            }
-                        }
-                        selectedSkillNames.forEach { name ->
-                            Row(
-                                modifier = Modifier
-                                    .clip(CircleShape)
-                                    .background(OrbStyle.card)
-                                    .border(1.dp, OrbStyle.borderStrong, CircleShape)
-                                    .orbPressClickable { inputText = OrbSkillSlash.removeSkill(inputText, name) }
-                                    .padding(horizontal = 9.dp, vertical = 5.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(4.dp)
-                            ) {
-                                Text("/$name", color = Color.White, fontSize = 11.sp, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.SemiBold, maxLines = 1, softWrap = false)
-                                Icon(Icons.Default.Close, contentDescription = "Remove skill $name", tint = OrbStyle.textMuted, modifier = Modifier.size(11.dp))
-                            }
-                        }
-
-                        // Compact Agent / Harness + Machine selector pill (matching iOS)
-                        Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.CenterStart) {
-                            val selectedWorkspaceName = remember(selectedWorkspaceId, workspaces) {
-                                workspaces.firstOrNull { (it.str("id") ?: it.id) == selectedWorkspaceId }
-                                    ?.str("name", "title", "slug")
-                                    ?.replace(Regex("-[0-9a-f]{8}$"), "")
-                            }
-                            val selectedMachineLabel = remember(selectedWorkspaceName, selectedNodeId, nodes, selectedBackend) {
-                                val isCloudService = selectedBackend in setOf("cursor_cloud", "grok_bot", "hermes")
-                                when {
-                                    isCloudService -> null
-                                    !selectedWorkspaceName.isNullOrEmpty() -> selectedWorkspaceName
-                                    OrbManagedMachines.isAutoManagedTarget(selectedNodeId) ->
-                                        OrbManagedMachines.autoManagedLabel(selectedNodeId)
-                                    selectedNodeId.isNotEmpty() && selectedNodeId != "core" -> {
-                                        val found = nodes.firstOrNull { (it.str("id") ?: it.id) == selectedNodeId }
-                                        found?.str("display_name", "name", "id") ?: selectedNodeId
-                                    }
-                                    selectedNodeId == "core" -> "Core"
-                                    else -> null
-                                }
-                            }
-                            Row(
-                                modifier = Modifier
-                                    .clip(RoundedCornerShape(OrbStyle.controlRadius))
-                                    .orbPressClickable(enabled = !isParticipant) { showAgentPicker = true }
-                                    .heightIn(min = 44.dp)
-                                    .padding(horizontal = 8.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(5.dp)
-                            ) {
-                                OrbSfIcons.CpuIcon(
-                                    color = OrbStyle.textSecondary,
-                                    size = 13.dp
-                                )
-                                Text(
-                                    text = buildString {
-                                        append(OrbAgentCatalog.backendLabel(selectedBackend.ifEmpty { "Agent" }, backends))
-                                        if (selectedModel.isNotEmpty()) {
-                                            append(" · ")
-                                            append(selectedModel.substringAfterLast('/'))
-                                        }
-                                        if (!selectedMachineLabel.isNullOrEmpty()) {
-                                            append(" · ")
-                                            append(selectedMachineLabel)
-                                        }
-                                    },
-                                    color = OrbStyle.textSecondary,
-                                    fontSize = 12.sp,
-                                    fontWeight = FontWeight.Medium,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis,
-                                    modifier = Modifier.weight(1f, fill = false)
-                                )
-                                if (!isParticipant) {
-                                    Icon(
-                                        imageVector = Icons.Default.ExpandMore,
-                                        contentDescription = null,
-                                        tint = OrbStyle.textMuted,
-                                        modifier = Modifier.size(13.dp)
-                                    )
-                                }
-                            }
-                        }
-
-                        // Microphone dictation button
-                        Box {
-                            Box(
-                                modifier = Modifier
-                                    .size(44.dp)
-                                    .combinedClickable(
-                                        onClick = { launchSpeech() },
-                                        onLongClick = { showDictationLanguages = true }
-                                    )
-                                    .padding(7.dp)
-                                    .clip(CircleShape)
-                                    .background(OrbStyle.card)
-                                    .border(1.dp, OrbStyle.border, CircleShape),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Default.Mic,
-                                    contentDescription = "Dictate message (hold to choose language: ${OrbDictationSettings.name(OrbDictationSettings.resolve())})",
-                                    tint = OrbStyle.textSecondary,
-                                    modifier = Modifier.size(16.dp)
-                                )
-                            }
-                            DropdownMenu(
-                                expanded = showDictationLanguages,
-                                onDismissRequest = { showDictationLanguages = false },
-                                containerColor = OrbStyle.elevated
-                            ) {
-                                val current = OrbDictationSettings.stored
-                                DropdownMenuItem(
-                                    text = {
-                                        Text(
-                                            "Device language (${OrbDictationSettings.name(OrbDictationSettings.deviceLanguage)})",
-                                            color = Color.White
-                                        )
-                                    },
-                                    trailingIcon = { if (current.isEmpty()) Icon(Icons.Default.Check, null, tint = Color.White) },
-                                    onClick = {
-                                        OrbDictationSettings.update("")
-                                        showDictationLanguages = false
-                                    }
-                                )
-                                OrbDictationSettings.languages.forEach { (code, label) ->
-                                    DropdownMenuItem(
-                                        text = { Text(label, color = Color.White) },
-                                        trailingIcon = { if (current == code) Icon(Icons.Default.Check, null, tint = Color.White) },
-                                        onClick = {
-                                            OrbDictationSettings.update(code)
-                                            showDictationLanguages = false
-                                        }
-                                    )
-                                }
-                            }
-                        }
-
-                        if ((isLive || remoteGoalPhase == "active") && missionId != null) {
-                            Box(
-                                modifier = Modifier
-                                    .size(44.dp)
-                                    .orbPressClickable(enabled = !isStopping) { stopMission() }
-                                    .padding(7.dp)
-                                    .clip(CircleShape)
-                                    .background(OrbStyle.card)
-                                    .border(1.dp, OrbStyle.borderStrong, CircleShape),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Default.Stop,
-                                    contentDescription = "Stop",
-                                    tint = Color.White,
-                                    modifier = Modifier.size(14.dp)
-                                )
-                            }
-                        }
-
-                        val canSend = nativeLaunchWarning == null && (inputText.trim().isNotEmpty() || pendingAttachments.isNotEmpty())
-                        Box(
-                            modifier = Modifier
-                                .size(44.dp)
-                                .orbPressClickable(enabled = canSend) { sendTurn() }
-                                .padding(7.dp)
-                                .clip(CircleShape)
-                                .background(if (canSend) Color.White else OrbStyle.card),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.ArrowUpward,
-                                contentDescription = "Send",
-                                tint = if (canSend) Color.Black else OrbStyle.textMuted,
-                                modifier = Modifier.size(16.dp)
-                            )
-                        }
-                    }
-                }
-            }
-        }
+        OrbConversationComposerArea(
+            nativeLaunchWarning = nativeLaunchWarning,
+            matchingContextFiles = matchingContextFiles,
+            inputText = inputText,
+            onInputTextChange = { inputText = it },
+            isCloudComposer = isCloudComposer,
+            showModePicker = showModePicker,
+            onShowModePickerChange = { showModePicker = it },
+            composeMode = composeMode,
+            onComposeModeChange = { composeMode = it },
+            offersGoal = offersGoal,
+            missionId = missionId,
+            isParticipant = isParticipant,
+            skillItems = skillItems,
+            selectedSkillNames = selectedSkillNames,
+            skillCatalogError = skillCatalogError,
+            onRunMissionCommand = { cmd -> runMissionCommand(cmd, "") },
+            commandBanner = commandBanner,
+            followUps = followUps,
+            editingQueuedId = editingQueuedId,
+            onEditingQueuedIdChange = { editingQueuedId = it },
+            reducedMotion = reducedMotion,
+            onSendQueuedNow = { id -> sendQueuedNow(id) },
+            onRemoveQueued = { id -> removeQueued(id) },
+            dictationPhase = dictationPhase,
+            dictationElapsed = dictationElapsed,
+            onCancelDictation = { sparkDictation.cancel() },
+            onFinishDictation = {
+                if (dictationPhase == OrbAndroidDictationPhase.Recording) finishSparkRecording()
+                else if (dictationPhase != OrbAndroidDictationPhase.Transcribing) sparkDictation.cancel()
+            },
+            onLaunchSpeech = { launchSpeech() },
+            pendingAttachments = pendingAttachments,
+            onLaunchPhotoPicker = { photoPickerLauncher.launch("image/*") },
+            onLaunchFilePicker = { filePickerLauncher.launch("*/*") },
+            selectedWorkspaceId = selectedWorkspaceId,
+            workspaces = workspaces,
+            selectedNodeId = selectedNodeId,
+            nodes = nodes,
+            backends = backends,
+            selectedBackend = selectedBackend,
+            selectedModel = selectedModel,
+            onOpenAgentPicker = {
+                initialHandoffBackend = null
+                showAgentPicker = true
+            },
+            isLive = isLive,
+            remoteGoalPhase = remoteGoalPhase,
+            isStopping = isStopping,
+            onStopMission = { stopMission() },
+            onSendTurn = { sendTurn() }
+        )
     }
 
     OrbConversationAgentSheetHost(
         showAgentPicker = showAgentPicker,
+        initialHandoffBackend = initialHandoffBackend,
         core = core,
         scope = scope,
         missionId = missionId,
@@ -3588,7 +3036,10 @@ fun OrbConversationPage(
         onErrorMessageChanged = { errorMessage = it },
         onUserExplicitlyPickedAgent = { userExplicitlyPickedAgent = true },
         onPersistMissionModel = { persistMissionModelIfNeeded(it) },
-        onDismiss = { showAgentPicker = false }
+        onDismiss = {
+            showAgentPicker = false
+            initialHandoffBackend = null
+        }
     )
 
     OrbConversationAuxiliaryOverlays(
@@ -4832,7 +4283,7 @@ private fun rememberOrbCloudComposerState(
         state.userEditedSelection = false
         onConnectionReset()
         val fetched = try {
-            val raw = core.request("/api/cloud/accounts", explicitBaseURL = baseURL, explicitToken = token)
+            val raw = core.request("/api/cloud/accounts", explicitBaseURL = baseURL, explicitToken = token.orEmpty())
             val dict = OrbJSON.dict(raw)
             OrbJSON.dictList(dict?.get("items") ?: raw).map { OrbRow(it) }
         } catch (e: CancellationException) {
@@ -4883,7 +4334,7 @@ private fun rememberOrbCloudComposerState(
             return@LaunchedEffect
         }
         val opts = try {
-            OrbJSON.dict(core.request("/api/cloud/hermes/options", explicitBaseURL = baseURL, explicitToken = token))
+            OrbJSON.dict(core.request("/api/cloud/hermes/options", explicitBaseURL = baseURL, explicitToken = token.orEmpty()))
         } catch (e: CancellationException) {
             throw e
         } catch (_: Throwable) {
@@ -4908,8 +4359,742 @@ private fun rememberOrbCloudComposerState(
 }
 
 @Composable
+private fun OrbConversationTopBar(
+    core: OrbCore,
+    project: OrbRow,
+    projectName: String,
+    headline: String,
+    missionId: String?,
+    liveRow: OrbRow?,
+    remoteGoalPhase: String?,
+    prUrl: String?,
+    missionBoard: OrbMissionBoardSummary?,
+    backends: List<OrbRow>,
+    selectedBackend: String,
+    selectedModel: String,
+    isLive: Boolean,
+    liveHasText: Boolean,
+    baseTurns: List<OrbTurn>,
+    turns: List<OrbTurn>,
+    latestTurns: List<OrbTurn>,
+    isParticipant: Boolean,
+    isCloudMission: Boolean,
+    onBack: () -> Unit,
+    onOpenFiles: () -> Unit,
+    onOpenChanges: () -> Unit,
+    onOpenMissionSettings: () -> Unit,
+    onOpenShare: () -> Unit,
+    onOpenRename: (String) -> Unit,
+    onOpenDocuments: ((String) -> Unit)?,
+    onStartSideAgent: (OrbSideAgentSession) -> Unit,
+    onOpenCloudHandoff: (String?) -> Unit,
+    onRunCommand: (OrbMissionCommand) -> Unit,
+    onSetCommandBanner: (String) -> Unit,
+    onStopMission: () -> Unit,
+    onRefreshAfterStatus: suspend (String) -> Unit,
+    onError: (String?) -> Unit
+) {
+    val context = LocalContext.current
+    var showHeaderMenu by remember { mutableStateOf(false) }
+    var showMissionBoard by remember(missionId) { mutableStateOf(false) }
+
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
+        Box(
+            modifier = Modifier
+                .size(40.dp)
+                .clip(CircleShape)
+                .background(OrbStyle.surface)
+                .border(1.dp, OrbStyle.border, CircleShape)
+                .orbPressClickable { onBack() },
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(
+                imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                contentDescription = "Back",
+                tint = Color.White,
+                modifier = Modifier.size(18.dp)
+            )
+        }
+
+        Column(
+            modifier = Modifier.weight(1f),
+            verticalArrangement = Arrangement.spacedBy(1.dp)
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                Text(
+                    text = headline,
+                    color = Color.White,
+                    fontSize = 15.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f, fill = false)
+                )
+                if (liveRow != null && OrbMissionTree.isGoal(liveRow)) {
+                    Text(
+                        text = remoteGoalPhase?.let { OrbRemoteGoal.label(it, (liveRow.raw["goal_iteration"] as? Number)?.toInt() ?: 0) } ?: "Goal",
+                        color = OrbStyle.textSecondary,
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        softWrap = false,
+                        modifier = Modifier
+                            .clip(CircleShape)
+                            .background(OrbStyle.surface)
+                            .border(1.dp, OrbStyle.border, CircleShape)
+                            .padding(horizontal = 7.dp, vertical = 2.dp)
+                    )
+                }
+            }
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(6.dp)
+                        .clip(CircleShape)
+                        .background(OrbProjectAppearance.color(project))
+                )
+                Text(
+                    text = projectName,
+                    color = OrbStyle.textMuted,
+                    fontSize = 11.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f, fill = false)
+                )
+                val contCount = liveRow?.int("_continuation_count") ?: 1
+                if (contCount > 1) {
+                    Text(
+                        text = "· $contCount continuations",
+                        color = OrbStyle.textMuted,
+                        fontSize = 11.sp,
+                        maxLines = 1,
+                        softWrap = false
+                    )
+                }
+            }
+        }
+
+        if (!prUrl.isNullOrEmpty()) {
+            Row(
+                modifier = Modifier
+                    .clip(CircleShape)
+                    .background(OrbStyle.surface)
+                    .border(1.dp, OrbStyle.border, CircleShape)
+                    .orbPressClickable {
+                        runCatching {
+                            context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(prUrl)))
+                        }
+                    }
+                    .padding(horizontal = 10.dp, vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Default.OpenInNew,
+                    contentDescription = "PR",
+                    tint = OrbStyle.success,
+                    modifier = Modifier.size(12.dp)
+                )
+                Text(
+                    text = "PR",
+                    color = Color.White,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    softWrap = false
+                )
+            }
+        }
+
+        if (missionId != null || onOpenDocuments != null) {
+            if (missionBoard != null) {
+                Box(
+                    modifier = Modifier.size(40.dp).clip(CircleShape).background(OrbStyle.surface).border(1.dp, OrbStyle.border, CircleShape).orbPressClickable { showMissionBoard = true }.testTag("conversation.board"),
+                    contentAlignment = Alignment.Center
+                ) { Icon(Icons.Default.ListAlt, contentDescription = "Mission board", tint = Color.White, modifier = Modifier.size(19.dp)) }
+            }
+            Box {
+                Box(
+                    modifier = Modifier
+                        .size(40.dp)
+                        .clip(CircleShape)
+                        .background(OrbStyle.surface)
+                        .border(1.dp, OrbStyle.border, CircleShape)
+                        .orbPressClickable { showHeaderMenu = true }
+                        .testTag("conversation.menu"),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.MoreHoriz,
+                        contentDescription = "Conversation actions",
+                        tint = Color.White,
+                        modifier = Modifier.size(19.dp)
+                    )
+                }
+                OrbConversationHeaderMenu(
+                    expanded = showHeaderMenu,
+                    onDismiss = { showHeaderMenu = false },
+                    missionId = missionId,
+                    liveRow = liveRow,
+                    project = project,
+                    core = core,
+                    backends = backends,
+                    selectedBackend = selectedBackend,
+                    selectedModel = selectedModel,
+                    isLive = isLive,
+                    liveHasText = liveHasText,
+                    baseTurns = baseTurns,
+                    turns = turns,
+                    latestTurns = latestTurns,
+                    isParticipant = isParticipant,
+                    isCloudMission = isCloudMission,
+                    onOpenFiles = onOpenFiles,
+                    onOpenChanges = onOpenChanges,
+                    onOpenMissionSettings = onOpenMissionSettings,
+                    onOpenShare = onOpenShare,
+                    onOpenRename = onOpenRename,
+                    onOpenDocuments = onOpenDocuments,
+                    onStartSideAgent = onStartSideAgent,
+                    onOpenCloudHandoff = onOpenCloudHandoff,
+                    onRunCommand = onRunCommand,
+                    onSetCommandBanner = onSetCommandBanner,
+                    onStopMission = onStopMission,
+                    onRefreshAfterStatus = onRefreshAfterStatus,
+                    onLeaveShared = onBack,
+                    onError = onError
+                )
+            }
+        }
+        if (showMissionBoard && missionBoard != null) {
+            OrbMissionBoardView(core, missionBoard, project.id, OrbMissionTree.placementOf(missionId ?: "")?.revision ?: 0) { showMissionBoard = false }
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class, androidx.compose.foundation.ExperimentalFoundationApi::class)
+@Composable
+private fun OrbConversationComposerArea(
+    nativeLaunchWarning: String?,
+    matchingContextFiles: List<String>,
+    inputText: String,
+    onInputTextChange: (String) -> Unit,
+    isCloudComposer: Boolean,
+    showModePicker: Boolean,
+    onShowModePickerChange: (Boolean) -> Unit,
+    composeMode: OrbComposeMode,
+    onComposeModeChange: (OrbComposeMode) -> Unit,
+    offersGoal: Boolean,
+    missionId: String?,
+    isParticipant: Boolean,
+    skillItems: List<OrbSkillChoice>,
+    selectedSkillNames: List<String>,
+    skillCatalogError: String?,
+    onRunMissionCommand: (OrbMissionCommand) -> Unit,
+    commandBanner: String?,
+    followUps: OrbFollowUpQueue,
+    editingQueuedId: String?,
+    onEditingQueuedIdChange: (String?) -> Unit,
+    reducedMotion: Boolean,
+    onSendQueuedNow: (String) -> Unit,
+    onRemoveQueued: (String) -> Unit,
+    dictationPhase: OrbAndroidDictationPhase,
+    dictationElapsed: Int,
+    onCancelDictation: () -> Unit,
+    onFinishDictation: () -> Unit,
+    onLaunchSpeech: () -> Unit,
+    pendingAttachments: MutableList<OrbPendingAttachment>,
+    onLaunchPhotoPicker: () -> Unit,
+    onLaunchFilePicker: () -> Unit,
+    selectedWorkspaceId: String,
+    workspaces: List<OrbRow>,
+    selectedNodeId: String,
+    nodes: List<OrbRow>,
+    backends: List<OrbRow>,
+    selectedBackend: String,
+    selectedModel: String,
+    onOpenAgentPicker: () -> Unit,
+    isLive: Boolean,
+    remoteGoalPhase: String?,
+    isStopping: Boolean,
+    onStopMission: () -> Unit,
+    onSendTurn: () -> Unit
+) {
+    var showQueuedDrawer by remember { mutableStateOf(true) }
+    var showAttachMenu by remember { mutableStateOf(false) }
+    var showDictationLanguages by remember { mutableStateOf(false) }
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 14.dp, vertical = 8.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        if (nativeLaunchWarning != null) {
+            Text(nativeLaunchWarning, color = OrbStyle.textSecondary, fontSize = 12.sp)
+        }
+        // @ context file mention popup
+        if (matchingContextFiles.isNotEmpty()) {
+            OrbContextFilesPopup(
+                files = matchingContextFiles,
+                onPick = { filePath ->
+                    val atIdx = inputText.lastIndexOf('@')
+                    onInputTextChange(
+                        if (atIdx >= 0) {
+                            inputText.substring(0, atIdx) + "@$filePath "
+                        } else {
+                            "${inputText.trimEnd()} @$filePath "
+                        }
+                    )
+                }
+            )
+        }
+
+        // Slash mode & skill menu popup
+        val slashQuery = remember(inputText, isCloudComposer) {
+            if (isCloudComposer) OrbSkillQuery(open = false, query = "", start = -1)
+            else OrbSkillSlash.skillQuery(inputText, inputText.length)
+        }
+        val slashModes = remember(showModePicker, slashQuery, composeMode, offersGoal) {
+            when {
+                showModePicker -> OrbComposeMode.entries.filter { it != OrbComposeMode.Goal || offersGoal }
+                slashQuery.open && slashQuery.start == 0 && composeMode == OrbComposeMode.Message ->
+                    OrbComposeMode.entries.filter { (it != OrbComposeMode.Goal || offersGoal) && (slashQuery.query.isEmpty() || it.id.startsWith(slashQuery.query)) }
+                else -> emptyList()
+            }
+        }
+        val slashCommands = remember(showModePicker, slashQuery, missionId, isParticipant) {
+            if (isParticipant || missionId == null || (!showModePicker && !(slashQuery.open && slashQuery.start == 0))) emptyList()
+            else OrbMissionCommand.entries.filter {
+                showModePicker || slashQuery.query.isEmpty() || it.trigger.removePrefix("/").startsWith(slashQuery.query)
+            }
+        }
+        val slashSkills = remember(slashQuery, skillItems, selectedSkillNames, isCloudComposer) {
+            if (isCloudComposer || !slashQuery.open) emptyList()
+            else OrbSkillSlash.filterSkills(skillItems, slashQuery.query, selectedSkillNames)
+        }
+        val showSlashMenu = showModePicker || (slashQuery.open && (slashModes.isNotEmpty() || slashCommands.isNotEmpty() || slashSkills.isNotEmpty() || skillCatalogError != null))
+        if (showSlashMenu) {
+            OrbSlashMenuPopup(
+                slashModes = slashModes,
+                composeMode = composeMode,
+                slashCommands = slashCommands,
+                slashSkills = slashSkills,
+                skillCatalogError = skillCatalogError,
+                onPickMode = { mode ->
+                    onComposeModeChange(mode)
+                    onShowModePickerChange(false)
+                    if (inputText.startsWith("/")) {
+                        onInputTextChange("")
+                    }
+                },
+                onPickCommand = { command ->
+                    onShowModePickerChange(false)
+                    when (command) {
+                        OrbMissionCommand.Btw -> onInputTextChange("/btw ")
+                        OrbMissionCommand.Clone -> onInputTextChange("/clone ")
+                        else -> onRunMissionCommand(command)
+                    }
+                },
+                onPickSkill = { skillName ->
+                    val inserted = OrbSkillSlash.insertSkill(inputText, inputText.length, skillName)
+                    onInputTextChange(inserted.first)
+                    onShowModePickerChange(false)
+                }
+            )
+        }
+
+        commandBanner?.let { msg ->
+            Text(
+                text = msg,
+                color = OrbStyle.success,
+                fontSize = 12.sp,
+                fontWeight = FontWeight.Medium,
+                modifier = Modifier.padding(horizontal = 6.dp)
+            )
+        }
+
+        // Queued follow-ups: compact rows (edit / send now / remove), Codex-style.
+        OrbFollowUpQueueView(
+            rows = followUps.rows,
+            expanded = showQueuedDrawer,
+            onToggle = { showQueuedDrawer = !showQueuedDrawer },
+            editingId = editingQueuedId,
+            reducedMotion = reducedMotion,
+            onEdit = { row ->
+                onEditingQueuedIdChange(row.id)
+                onInputTextChange(OrbMessagePresentation.parse(row.content).text)
+            },
+            onSendNow = { row -> onSendQueuedNow(row.id) },
+            onRemove = { row -> onRemoveQueued(row.id) }
+        )
+        if (editingQueuedId != null) {
+            Row(
+                modifier = Modifier.padding(horizontal = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Text("Editing queued message", color = OrbStyle.textSecondary, fontSize = 12.sp, modifier = Modifier.weight(1f))
+                Text(
+                    "Cancel",
+                    color = Color.White,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier.orbPressClickable {
+                        onEditingQueuedIdChange(null)
+                        onInputTextChange("")
+                    }
+                )
+            }
+        }
+
+        if (dictationPhase != OrbAndroidDictationPhase.Idle) {
+            OrbAndroidDictationCapsule(
+                phase = dictationPhase,
+                elapsedSeconds = dictationElapsed,
+                onCancel = onCancelDictation,
+                onFinish = onFinishDictation,
+                onRetry = onLaunchSpeech
+            )
+        } else {
+            // Shared composer surface; touch targets are sized separately from its border.
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(OrbStyle.panelRadius))
+                    .background(OrbStyle.surface)
+                    .border(1.dp, OrbStyle.borderStrong, RoundedCornerShape(OrbStyle.panelRadius))
+                    .padding(horizontal = 12.dp, vertical = 10.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                if (pendingAttachments.isNotEmpty()) {
+                    OrbAttachmentStrip(
+                        items = pendingAttachments,
+                        onRemove = { id -> pendingAttachments.removeAll { it.id == id } }
+                    )
+                }
+
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = 24.dp, max = 140.dp)
+                        .padding(horizontal = 4.dp)
+                ) {
+                    if (inputText.isEmpty()) {
+                        Text(
+                            text = when (composeMode) {
+                                OrbComposeMode.Message -> "Message agent…"
+                                OrbComposeMode.Plan -> "Ask agent to draft a plan…"
+                                OrbComposeMode.Goal -> "Describe autonomous goal…"
+                            },
+                            color = OrbStyle.textMuted,
+                            fontSize = 15.sp
+                        )
+                    }
+                    BasicTextField(
+                        value = inputText,
+                        onValueChange = onInputTextChange,
+                        textStyle = TextStyle(
+                            color = Color.White,
+                            fontSize = 15.sp,
+                            lineHeight = 20.sp
+                        ),
+                        cursorBrush = SolidColor(Color.White),
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    // + Attachment button
+                    Box {
+                        Box(
+                            modifier = Modifier
+                                .size(44.dp)
+                                .orbPressClickable { showAttachMenu = true }
+                                .padding(7.dp)
+                                .clip(CircleShape)
+                                .background(OrbStyle.card)
+                                .border(1.dp, OrbStyle.border, CircleShape),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Add,
+                                contentDescription = "Attach",
+                                tint = OrbStyle.textSecondary,
+                                modifier = Modifier.size(16.dp)
+                            )
+                        }
+                        DropdownMenu(
+                            expanded = showAttachMenu,
+                            onDismissRequest = { showAttachMenu = false },
+                            containerColor = OrbStyle.elevated
+                        ) {
+                            DropdownMenuItem(
+                                text = { Text("Photo Library", color = Color.White, fontSize = 14.sp) },
+                                leadingIcon = {
+                                    Icon(Icons.Default.PhotoLibrary, contentDescription = null, tint = Color.White)
+                                },
+                                onClick = {
+                                    showAttachMenu = false
+                                    onLaunchPhotoPicker()
+                                }
+                            )
+                            DropdownMenuItem(
+                                text = { Text("Attach File", color = Color.White, fontSize = 14.sp) },
+                                leadingIcon = {
+                                    Icon(Icons.Default.AttachFile, contentDescription = null, tint = Color.White)
+                                },
+                                onClick = {
+                                    showAttachMenu = false
+                                    onLaunchFilePicker()
+                                }
+                            )
+                            DropdownMenuItem(
+                                text = { Text("Tag Context (@)", color = Color.White, fontSize = 14.sp) },
+                                leadingIcon = {
+                                    Icon(Icons.Default.AlternateEmail, contentDescription = null, tint = Color.White)
+                                },
+                                onClick = {
+                                    showAttachMenu = false
+                                    onInputTextChange(
+                                        if (inputText.isEmpty() || inputText.endsWith(" ")) {
+                                            "$inputText@"
+                                        } else {
+                                            "$inputText @"
+                                        }
+                                    )
+                                }
+                            )
+                        }
+                    }
+
+                    // Mode pill if Plan or Goal
+                    composeMode.badge?.let { badge ->
+                        Row(
+                            modifier = Modifier
+                                .clip(CircleShape)
+                                .background(OrbStyle.card)
+                                .border(1.dp, OrbStyle.borderStrong, CircleShape)
+                                .orbPressClickable { onShowModePickerChange(!showModePicker) }
+                                .padding(horizontal = 9.dp, vertical = 5.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            Text(
+                                text = badge,
+                                color = Color.White,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                maxLines = 1,
+                                softWrap = false
+                            )
+                            Icon(
+                                imageVector = Icons.Default.Close,
+                                contentDescription = "Reset mode",
+                                tint = OrbStyle.textMuted,
+                                modifier = Modifier
+                                    .size(11.dp)
+                                    .orbPressClickable { onComposeModeChange(OrbComposeMode.Message) }
+                            )
+                        }
+                    }
+                    selectedSkillNames.forEach { name ->
+                        Row(
+                            modifier = Modifier
+                                .clip(CircleShape)
+                                .background(OrbStyle.card)
+                                .border(1.dp, OrbStyle.borderStrong, CircleShape)
+                                .orbPressClickable { onInputTextChange(OrbSkillSlash.removeSkill(inputText, name)) }
+                                .padding(horizontal = 9.dp, vertical = 5.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            Text("/$name", color = Color.White, fontSize = 11.sp, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.SemiBold, maxLines = 1, softWrap = false)
+                            Icon(Icons.Default.Close, contentDescription = "Remove skill $name", tint = OrbStyle.textMuted, modifier = Modifier.size(11.dp))
+                        }
+                    }
+
+                    // Compact Agent / Harness + Machine selector pill (matching iOS)
+                    Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.CenterStart) {
+                        val selectedWorkspaceName = remember(selectedWorkspaceId, workspaces) {
+                            workspaces.firstOrNull { (it.str("id") ?: it.id) == selectedWorkspaceId }
+                                ?.str("name", "title", "slug")
+                                ?.replace(Regex("-[0-9a-f]{8}$"), "")
+                        }
+                        val selectedMachineLabel = remember(selectedWorkspaceName, selectedNodeId, nodes, selectedBackend) {
+                            val isCloudService = selectedBackend in setOf("cursor_cloud", "grok_bot", "hermes")
+                            when {
+                                isCloudService -> null
+                                !selectedWorkspaceName.isNullOrEmpty() -> selectedWorkspaceName
+                                OrbManagedMachines.isAutoManagedTarget(selectedNodeId) ->
+                                    OrbManagedMachines.autoManagedLabel(selectedNodeId)
+                                selectedNodeId.isNotEmpty() && selectedNodeId != "core" -> {
+                                    val found = nodes.firstOrNull { (it.str("id") ?: it.id) == selectedNodeId }
+                                    found?.str("display_name", "name", "id") ?: selectedNodeId
+                                }
+                                selectedNodeId == "core" -> "Core"
+                                else -> null
+                            }
+                        }
+                        Row(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(OrbStyle.controlRadius))
+                                .orbPressClickable(enabled = !isParticipant) { onOpenAgentPicker() }
+                                .heightIn(min = 44.dp)
+                                .padding(horizontal = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(5.dp)
+                        ) {
+                            OrbSfIcons.CpuIcon(
+                                color = OrbStyle.textSecondary,
+                                size = 13.dp
+                            )
+                            Text(
+                                text = buildString {
+                                    append(OrbAgentCatalog.backendLabel(selectedBackend.ifEmpty { "Agent" }, backends))
+                                    if (selectedModel.isNotEmpty()) {
+                                        append(" · ")
+                                        append(selectedModel.substringAfterLast('/'))
+                                    }
+                                    if (!selectedMachineLabel.isNullOrEmpty()) {
+                                        append(" · ")
+                                        append(selectedMachineLabel)
+                                    }
+                                },
+                                color = OrbStyle.textSecondary,
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Medium,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.weight(1f, fill = false)
+                            )
+                            if (!isParticipant) {
+                                Icon(
+                                    imageVector = Icons.Default.ExpandMore,
+                                    contentDescription = null,
+                                    tint = OrbStyle.textMuted,
+                                    modifier = Modifier.size(13.dp)
+                                )
+                            }
+                        }
+                    }
+
+                    // Microphone dictation button
+                    Box {
+                        Box(
+                            modifier = Modifier
+                                .size(44.dp)
+                                .combinedClickable(
+                                    onClick = onLaunchSpeech,
+                                    onLongClick = { showDictationLanguages = true }
+                                )
+                                .padding(7.dp)
+                                .clip(CircleShape)
+                                .background(OrbStyle.card)
+                                .border(1.dp, OrbStyle.border, CircleShape),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Mic,
+                                contentDescription = "Dictate message (hold to choose language: ${OrbDictationSettings.name(OrbDictationSettings.resolve())})",
+                                tint = OrbStyle.textSecondary,
+                                modifier = Modifier.size(16.dp)
+                            )
+                        }
+                        DropdownMenu(
+                            expanded = showDictationLanguages,
+                            onDismissRequest = { showDictationLanguages = false },
+                            containerColor = OrbStyle.elevated
+                        ) {
+                            val current = OrbDictationSettings.stored
+                            DropdownMenuItem(
+                                text = {
+                                    Text(
+                                        "Device language (${OrbDictationSettings.name(OrbDictationSettings.deviceLanguage)})",
+                                        color = Color.White
+                                    )
+                                },
+                                trailingIcon = { if (current.isEmpty()) Icon(Icons.Default.Check, null, tint = Color.White) },
+                                onClick = {
+                                    OrbDictationSettings.update("")
+                                    showDictationLanguages = false
+                                }
+                            )
+                            OrbDictationSettings.languages.forEach { (code, label) ->
+                                DropdownMenuItem(
+                                    text = { Text(label, color = Color.White) },
+                                    trailingIcon = { if (current == code) Icon(Icons.Default.Check, null, tint = Color.White) },
+                                    onClick = {
+                                        OrbDictationSettings.update(code)
+                                        showDictationLanguages = false
+                                    }
+                                )
+                            }
+                        }
+                    }
+
+                    if ((isLive || remoteGoalPhase == "active") && missionId != null) {
+                        Box(
+                            modifier = Modifier
+                                .size(44.dp)
+                                .orbPressClickable(enabled = !isStopping) { onStopMission() }
+                                .padding(7.dp)
+                                .clip(CircleShape)
+                                .background(OrbStyle.card)
+                                .border(1.dp, OrbStyle.borderStrong, CircleShape),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Stop,
+                                contentDescription = "Stop",
+                                tint = Color.White,
+                                modifier = Modifier.size(14.dp)
+                            )
+                        }
+                    }
+
+                    val canSend = nativeLaunchWarning == null && (inputText.trim().isNotEmpty() || pendingAttachments.isNotEmpty())
+                    Box(
+                        modifier = Modifier
+                            .size(44.dp)
+                            .orbPressClickable(enabled = canSend) { onSendTurn() }
+                            .padding(7.dp)
+                            .clip(CircleShape)
+                            .background(if (canSend) Color.White else OrbStyle.card),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.ArrowUpward,
+                            contentDescription = "Send",
+                            tint = if (canSend) Color.Black else OrbStyle.textMuted,
+                            modifier = Modifier.size(16.dp)
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
 private fun OrbConversationAgentSheetHost(
     showAgentPicker: Boolean,
+    initialHandoffBackend: String?,
     core: OrbCore,
     scope: kotlinx.coroutines.CoroutineScope,
     missionId: String?,
@@ -4967,14 +5152,17 @@ private fun OrbConversationAgentSheetHost(
     var transferredMission by remember(missionId) { mutableStateOf<OrbRow?>(null) }
     if (!showAgentPicker) return
 
-    val activeCloudProvider = currentMission?.str("backend")?.takeIf { it.startsWith("cloud_") }?.removePrefix("cloud_")
+    val activeCloudProvider = OrbAdminFormatting.normalizeCloudProvider(
+        currentMission?.str("backend", "harness", "backend_id"),
+        currentMission?.dict("cloud")
+    )
     val isCloudHandoffSheet = activeCloudProvider != null
     // Keep handoff target selection local to the sheet on existing cloud missions so inspecting a
     // native harness and dismissing without transferring never corrupts Hermes model/effort state.
-    var handoffBackend by remember(missionId, activeCloudProvider) {
-        mutableStateOf(activeCloudProvider ?: selectedBackend)
+    var handoffBackend by remember(missionId, activeCloudProvider, initialHandoffBackend) {
+        mutableStateOf(initialHandoffBackend ?: activeCloudProvider ?: selectedBackend)
     }
-    var handoffModel by remember(missionId, activeCloudProvider) { mutableStateOf("") }
+    var handoffModel by remember(missionId, activeCloudProvider, initialHandoffBackend) { mutableStateOf("") }
     val effectiveBackend = if (isCloudHandoffSheet) handoffBackend else selectedBackend
     val effectiveModel = if (isCloudHandoffSheet && handoffBackend != activeCloudProvider) handoffModel else selectedModel
     val canCloudHandoff = isCloudHandoffSheet && OrbKernel.cloudHandoffStep(

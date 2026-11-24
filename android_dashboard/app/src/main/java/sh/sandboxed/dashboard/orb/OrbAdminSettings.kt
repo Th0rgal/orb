@@ -253,6 +253,28 @@ object OrbAdminFormatting {
             ?: ""
         return model.trim() to effort.trim()
     }
+
+    // Core stores cloud mission backends as "cloud_cursor", "cloud_grok", "cloud_hermes";
+    // normalize to the canonical cloud provider IDs used by pickers and wire requests.
+    fun normalizeCloudProvider(rawBackend: String?, cloudDict: OrbDict? = null): String? {
+        val explicit = OrbJSON.str(cloudDict, "provider")?.trim().orEmpty()
+        if (explicit.isNotEmpty()) {
+            return when (explicit) {
+                "cursor", "cloud_cursor" -> "cursor_cloud"
+                "grok", "cloud_grok" -> "grok_bot"
+                "cloud_hermes" -> "hermes"
+                else -> explicit
+            }
+        }
+        val raw = rawBackend?.trim().orEmpty()
+        if (!raw.startsWith("cloud_")) return null
+        return when (raw) {
+            "cloud_cursor", "cloud_cursor_cloud" -> "cursor_cloud"
+            "cloud_grok", "cloud_grok_bot" -> "grok_bot"
+            "cloud_hermes" -> "hermes"
+            else -> raw.removePrefix("cloud_")
+        }
+    }
 }
 
 @Composable
@@ -1913,6 +1935,7 @@ fun OrbHermesSettingsPage(core: OrbCore, onBack: () -> Unit) {
 
     LaunchedEffect(baseURL, token, reloadNonce) {
         saveGeneration += 1
+        val loadGen = saveGeneration
         saveJob?.cancel()
         saveJob = null
         busy = false
@@ -1926,15 +1949,17 @@ fun OrbHermesSettingsPage(core: OrbCore, onBack: () -> Unit) {
                 core.request(
                     "/api/cloud/hermes/settings",
                     explicitBaseURL = baseURL,
-                    explicitToken = token
+                    explicitToken = token.orEmpty()
                 )
             ) ?: emptyMap()
+            if (saveGeneration != loadGen) return@LaunchedEffect
             applyState(s)
             error = null
             unavailable = null
         } catch (e: CancellationException) {
             throw e
         } catch (e: Throwable) {
+            if (saveGeneration != loadGen) return@LaunchedEffect
             resetDraftState()
             val reason = OrbAdminFormatting.hermesUnavailableMessage(e)
             if (reason != null) {
@@ -1944,7 +1969,7 @@ fun OrbHermesSettingsPage(core: OrbCore, onBack: () -> Unit) {
                 error = e.message
             }
         } finally {
-            loading = false
+            if (saveGeneration == loadGen) loading = false
         }
     }
 
@@ -1990,7 +2015,7 @@ fun OrbHermesSettingsPage(core: OrbCore, onBack: () -> Unit) {
                         "PUT",
                         body = body,
                         explicitBaseURL = subBaseURL,
-                        explicitToken = subToken
+                        explicitToken = subToken.orEmpty()
                     )
                 )
                 if (baseURL != subBaseURL || token != subToken || saveGeneration != subGen) return@launch
