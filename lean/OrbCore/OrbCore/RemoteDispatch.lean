@@ -1961,14 +1961,14 @@ partial def spawnRemoteJobPoller
                   interrupted      := jState != "succeeded"
                 }
                 observeControlTurnFinished tSink missionId turnUsage ownerUid? ownerUname? nowSec
-              if proxyToken.isEmpty then
+              if proxyTok.isEmpty then
                 let bLow := backend.trimAscii.toString.toLower
                 let normHarness := if bLow == "claude" then "claudecode" else bLow
                 let effModel :=
                   (acc.model?.orElse fun _ =>
-                    (mRec?.map (·.modelOverride.trimAscii.toString)).filter (!·.isEmpty)).getD ""
+                    (mRec?.map fun r => r.modelOverride.trimAscii.toString).filter (!·.isEmpty)).getD ""
                 OrbCore.Proxy.recordNativeHarnessUsage store nowSec normHarness effModel missionId
-                  ((mRec?.map (·.parentMissionId)).getD "") ((mRec?.map (·.modelOverride)).getD "")
+                  ((mRec?.map MissionRecord.parentMissionId).getD "") ((mRec?.map MissionRecord.modelOverride).getD "")
                   (acc.inputTokens?.getD 0).toNat (acc.outputTokens?.getD 0).toNat (acc.cacheReadTokens?.getD 0).toNat
 
               let nextQueued? ←
