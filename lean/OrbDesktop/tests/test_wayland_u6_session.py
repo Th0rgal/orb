@@ -1032,10 +1032,11 @@ class WaylandU6SessionTest(unittest.TestCase):
                     frame_search_open = comp.wait_frame_change(frame_diff_panel, timeout=5.0)
                     comp.wait_text_input(True, timeout=5.0)
                     comp.ime_edit(commit="Hello", preedit="検")
-                    comp.wait_frame_change(frame_search_open, timeout=5.0)
+                    h_preedit = comp.wait_frame_change(frame_search_open, timeout=5.0)
                     comp.ime_edit(commit="", preedit="")
+                    # Wait for the preedit-clear frame to settle before verifying interior click stability.
+                    h_in_search = comp.wait_frame_change(h_preedit, timeout=5.0)
                     # Clicking inside the Search modal preview pane (900, 300) must NOT dismiss the modal.
-                    h_in_search = comp.last_frame_hash
                     comp.pointer_click(900, 300)
                     time.sleep(0.15)
                     self.assertEqual(comp.last_frame_hash, h_in_search, "clicking inside Search card must not close modal")
