@@ -51,6 +51,51 @@ private def coldFixture : DesktopState :=
 #guard (applyHistoryTurns 120 vp { coldFixture with liveTurns := ["one"] } "m" ["one"]).2.isNone
 #guard (applyHistoryTurns 120 vp { coldFixture with liveTurns := ["old"] } "m" ["one", "two"]).1.liveTurns == ["one", "two"]
 
+-- On-demand older transcript paging: deduplicates by event/row ID, triggers on
+-- upward scroll near top or "Load older turns" activation, preserves scroll anchor,
+-- rejects stale originating cursors, and merges degraded-recovery `HS` without wiping
+-- already-paged older turns.
+private def pagingUnitChecks : Bool := Id.run do
+  let pagedInit := (applyHistoryBatch 120 vp coldFixture "m" {
+    turns := [("id:10", "Turn 10"), ("id:11", "Turn 11")],
+    hasMore := true, nextCursor := some 10 }).1
+  if !(pagedInit.liveTurns == ["Turn 10", "Turn 11"] && pagedInit.historyHasMore && pagedInit.historyNextCursor == some 10) then return false
+  if !(stepDesktopEvent 120 vp pagedInit (.activate loadOlderTurnsId)).1.historyLoading then return false
+  if !(stepTranscriptScroll { pagedInit with scroll := { pinned := false, topSub := pxToSub 120 } } (pxToSub 2000) (pxToSub 500) (-640)).any (·.historyLoading) then return false
+  if (stepTranscriptScroll { pagedInit with scroll := { pinned := false, topSub := pxToSub 600 } } (pxToSub 2000) (pxToSub 500) (-640)).any (·.historyLoading) then return false
+  let unpinned := { pagedInit with scroll := { pinned := false, topSub := pxToSub 80 }, historyLoading := true }
+  let pagedAfterOlder := (applyOlderHistoryBatch 120 vp unpinned "m" {
+    turns := [("id:8", "Turn 8"), ("id:9", "Turn 9"), ("id:10", "Turn 10 dup")],
+    hasMore := true, nextCursor := some 8 } (some 10)).1
+  if !(pagedAfterOlder.liveTurns == ["Turn 8", "Turn 9", "Turn 10", "Turn 11"] &&
+      !pagedAfterOlder.historyLoading && pagedAfterOlder.historyNextCursor == some 8 &&
+      pagedAfterOlder.scroll.topSub > pxToSub 80 && !pagedAfterOlder.scroll.pinned) then return false
+  let cleared := clearLiveTranscript pagedAfterOlder
+  if !(!cleared.historyHasMore && cleared.liveTurnIds.isEmpty) then return false
+  let stalePayload : HistoryBatch := { turns := [("id:6", "Turn 6"), ("id:7", "Turn 7")], hasMore := true, nextCursor := some 6 }
+  let staleMismatch := applyOlderHistoryBatch 120 vp pagedAfterOlder "m" stalePayload (some 10)
+  let staleAfterClear := applyOlderHistoryBatch 120 vp cleared "m" stalePayload (some 8)
+  if !(staleMismatch.2.isNone && staleMismatch.1.liveTurns == pagedAfterOlder.liveTurns &&
+      staleAfterClear.2.isNone && staleAfterClear.1.liveTurns.isEmpty) then return false
+  let pagedWithLiveTail : DesktopState := { pagedAfterOlder with
+    liveTurns := pagedAfterOlder.liveTurns ++ ["Turn 12"]
+    scroll := { pinned := false, topSub := pxToSub 140 }
+    historyLoading := true }
+  let recoveredMerged := (applyHistoryBatch 120 vp pagedWithLiveTail "m" {
+    turns := [("id:10", "Turn 10"), ("id:11", "Turn 11"), ("id:12", "Turn 12"), ("id:13", "Turn 13")],
+    hasMore := true, nextCursor := some 10 }).1
+  if !(recoveredMerged.liveTurns == ["Turn 8", "Turn 9", "Turn 10", "Turn 11", "Turn 12", "Turn 13"] &&
+      recoveredMerged.historyHasMore && recoveredMerged.historyNextCursor == some 8 &&
+      recoveredMerged.scroll == { pinned := false, topSub := pxToSub 140 } && !recoveredMerged.historyLoading) then return false
+  let pagedToTurn1 := (applyOlderHistoryBatch 120 vp pagedAfterOlder "m" {
+    turns := [("id:1", "Turn 1")], hasMore := false, nextCursor := none } (some 8)).1
+  let recoveredAtTurn1 := applyHistoryBatch 120 vp pagedToTurn1 "m" {
+    turns := [("id:10", "Turn 10"), ("id:11", "Turn 11")], hasMore := true, nextCursor := some 10 }
+  return recoveredAtTurn1.2.isNone && recoveredAtTurn1.1.liveTurns == pagedToTurn1.liveTurns &&
+    !recoveredAtTurn1.1.historyHasMore && recoveredAtTurn1.1.historyNextCursor.isNone
+
+#guard pagingUnitChecks
+
 private def treeRow (depth : Nat) (selected := false) : ChromeSidebarRow :=
   { widgetId := 1001, rowId := "row", kind := "mission", title := "Row", depth, selected }
 private def treeGeometry (rows : List ChromeSidebarRow) :=
@@ -499,6 +544,139 @@ private def diamondSpans : List Nat :=
     (inner + 8 ≥ innerBot) && (innerBot + 8 ≥ inner)
   | _ => false
 
+private partial def findBoxY (marker : String) : ComputedBox → Nat → List Int
+  | _, 0 => []
+  | box, depth + 1 =>
+    let self := if !box.lines.isEmpty && decodeBoxLines box == marker then [box.rectSub.y] else []
+    box.children.foldl (fun acc child => acc ++ findBoxY marker child depth) self
+
+private def anchorY (st : DesktopState) (streamTxt marker : String) : IO Int := do
+  let (rootBox, _) := renderScreen st streamTxt
+  match findBoxY marker rootBox 24 with
+  | [y] => pure y
+  | hits => throw (IO.userError s!"anchor '{marker}' expected once, found {hits.length}")
+
+private def findTranscriptScrollRegion (box : ComputedBox) : Option (SubPx × SubPx) :=
+  let rec go : ComputedBox → Nat → Option (SubPx × SubPx)
+    | _, 0 => none
+    | b, d + 1 =>
+      if b.id == some transcriptViewportId then
+        b.scrollLimitXY.map fun (_, limY) => (limY + b.contentRectSub.h.toNat, b.contentRectSub.h.toNat)
+      else b.children.findSome? (fun c => go c d)
+  go box 24
+
+private def runLongPaging (slot : IO.Ref (Option LiveSubscription)) (st : DesktopState)
+    (a : MissionSummaryCard) : IO Unit := do
+  let st ← clickMission st a
+  let st ← awaitState slot st (fun s =>
+    s.liveTurns.length == 279 && streamedText s == "Turn 1050" &&
+    s.historyHasMore && s.historyNextCursor == some 771)
+  let (root0, _) := renderScreen st "Turn 1050"
+  let some (content0, viewH0) := findTranscriptScrollRegion root0 | throw (IO.userError "missing transcript scroll region")
+  let stNearTop := { st with scroll := { pinned := false, topSub := pxToSub 16 } }
+  let (_, sceneNearTop) := renderScreen stNearTop "Turn 1050"
+  unless sceneNearTop.hitRegionsSub.any (·.1 == loadOlderTurnsId) do
+    throw (IO.userError "Load older turns button missing when scrolled near top of transcript")
+  let some stScrollTriggered := stepTranscriptScroll stNearTop content0 viewH0 (-640)
+    | throw (IO.userError "scroll near top did not step transcript")
+  unless stScrollTriggered.historyLoading do
+    throw (IO.userError "upward scroll near top did not trigger older history load")
+  let y771Before ← anchorY stScrollTriggered "Turn 1050" "You: Turn 0771"
+  let st1 ← awaitState slot stScrollTriggered (fun s =>
+    !s.historyLoading && s.liveTurns.length == 479 && s.historyNextCursor == some 571)
+  let y771After ← anchorY st1 "Turn 1050" "You: Turn 0771"
+  unless y771Before == y771After do
+    throw (IO.userError s!"layout jump on page 1: anchor Turn 0771 moved {y771Before} -> {y771After}")
+  let st1Top := { st1 with scroll := { pinned := false, topSub := pxToSub 64 } }
+  let y571Before ← anchorY st1Top "Turn 1050" "You: Turn 0571"
+  let (st1Req, reqDmg) := stepDesktopEvent 120 vp st1Top (.activate loadOlderTurnsId)
+  unless st1Req.historyLoading && reqDmg.isSome do
+    throw (IO.userError "activating Load older turns did not start fetch")
+  let st2 ← awaitState slot st1Req (fun s =>
+    !s.historyLoading && s.liveTurns.length == 679 && s.historyNextCursor == some 371)
+  let y571After ← anchorY st2 "Turn 1050" "You: Turn 0571"
+  unless y571Before == y571After do
+    throw (IO.userError s!"layout jump on page 2: anchor Turn 0571 moved {y571Before} -> {y571After}")
+  let st2Top := { st2 with scroll := { pinned := false, topSub := pxToSub 64 } }
+  let y371Before ← anchorY st2Top "Turn 1050" "You: Turn 0371"
+  let (st2Req, _) := stepDesktopEvent 120 vp st2Top (.activate loadOlderTurnsId)
+  let st3 ← awaitState slot st2Req (fun s =>
+    !s.historyLoading && s.liveTurns.length == 879 && s.historyNextCursor == some 171)
+  let y371After ← anchorY st3 "Turn 1050" "You: Turn 0371"
+  unless y371Before == y371After do
+    throw (IO.userError s!"layout jump on page 3: anchor Turn 0371 moved {y371Before} -> {y371After}")
+  let st3Top := { st3 with scroll := { pinned := false, topSub := pxToSub 64 } }
+  let y171Before ← anchorY st3Top "Turn 1050" "You: Turn 0171"
+  let (st3Req, _) := stepDesktopEvent 120 vp st3Top (.activate loadOlderTurnsId)
+  let st4 ← awaitState slot st3Req (fun s =>
+    !s.historyLoading && !s.historyHasMore && s.historyNextCursor.isNone && s.liveTurns.length == 1049)
+  let y171After ← anchorY st4 "Turn 1050" "You: Turn 0171"
+  unless y171Before == y171After do
+    throw (IO.userError s!"layout jump on final page (banner removed): anchor Turn 0171 moved {y171Before} -> {y171After}")
+  unless st4.liveTurns.head? == some "You: Turn 0001" && st4.liveTurns.getLast? == some "You: Turn 1049" do
+    throw (IO.userError s!"unexpected bounds: head={st4.liveTurns.head?} last={st4.liveTurns.getLast?}")
+  unless st4.liveTurns.length == (Std.HashSet.ofList st4.liveTurns).size do
+    throw (IO.userError "duplicate turns found after paging to turn 1")
+  let st4AtTop := { st4 with scroll := { pinned := false, topSub := 0 } }
+  let (rootFinal, sceneFinal) := renderScreen st4AtTop "Turn 1050"
+  unless !(findBoxY "You: Turn 0001" rootFinal 24).isEmpty do
+    throw (IO.userError "Turn 0001 missing when scrolled to top after paging completes")
+  unless !sceneFinal.hitRegionsSub.any (·.1 == loadOlderTurnsId) do
+    throw (IO.userError "Load older turns banner still shown after reaching turn 1")
+
+private def runPagingDegradedRecover (slot : IO.Ref (Option LiveSubscription)) (st : DesktopState)
+    (a : MissionSummaryCard) : IO Unit := do
+  let st ← clickMission st a
+  let st ← awaitState slot st (fun s =>
+    s.liveTurns.length == 279 && streamedText s == "Turn 1050" &&
+    s.historyHasMore && s.historyNextCursor == some 771)
+  let stTop := { st with scroll := { pinned := false, topSub := pxToSub 64 } }
+  let (stReq, _) := stepDesktopEvent 120 vp stTop (.activate loadOlderTurnsId)
+  let st1 ← awaitState slot stReq (fun s =>
+    !s.historyLoading && s.liveTurns.length == 479 && s.historyNextCursor == some 571)
+  let y771Before ← anchorY st1 "Turn 1050" "You: Turn 0771"
+  let root := (← IO.getEnv "ORB_STATE_DIR").getD ""
+  IO.FS.writeFile (System.FilePath.mk root / "paging-paged-one") "1"
+  let st2 ← awaitState slot st1 (fun s => streamedText s == "Turn 1052")
+  unless st2.liveTurns.length == 481 && st2.liveTurns.head? == some "You: Turn 0571" &&
+      st2.liveTurns.getLast? == some "You: Turn 1051" do
+    throw (IO.userError s!"degraded recovery wiped paged turns or missed tail: len={st2.liveTurns.length} head={st2.liveTurns.head?} last={st2.liveTurns.getLast?}")
+  unless st2.historyHasMore && st2.historyNextCursor == some 571 do
+    throw (IO.userError s!"degraded recovery reset historyNextCursor to {st2.historyNextCursor}")
+  unless st2.liveTurns.length == (Std.HashSet.ofList st2.liveTurns).size do
+    throw (IO.userError "degraded recovery duplicated transcript turns")
+  let y771After ← anchorY st2 "Turn 1052" "You: Turn 0771"
+  unless y771Before == y771After do
+    throw (IO.userError s!"degraded recovery caused layout jump: {y771Before} -> {y771After}")
+
+private def runStaleOlderRace (slot : IO.Ref (Option LiveSubscription)) (st : DesktopState)
+    (a : MissionSummaryCard) : IO Unit := do
+  let st ← clickMission st a
+  let st ← awaitState slot st (fun s =>
+    s.liveTurns.length == 279 && streamedText s == "Turn 1050" &&
+    s.historyHasMore && s.historyNextCursor == some 771)
+  let (stReq, _) := stepDesktopEvent 120 vp st (.activate loadOlderTurnsId)
+  let stCleared ← awaitState slot stReq (fun s =>
+    s.hasLiveConnection && s.liveTurns.isEmpty && !s.historyHasMore &&
+    s.historyNextCursor.isNone && !s.historyLoading)
+  let root := (← IO.getEnv "ORB_STATE_DIR").getD ""
+  IO.FS.writeFile (System.FilePath.mk root / "stale-race-cleared") "1"
+  let stRec ← awaitState slot stCleared (fun s =>
+    s.hasLiveConnection && s.liveTurns.length == 279 && streamedText s == "Turn 1052" &&
+    s.historyHasMore && s.historyNextCursor == some 773)
+  unless stRec.liveTurns.head? == some "You: Turn 0773" &&
+      stRec.liveTurns.getLast? == some "You: Turn 1051" do
+    throw (IO.userError s!"stale olderFetch corrupted recovered window: head={stRec.liveTurns.head?} last={stRec.liveTurns.getLast?}")
+
+private def runOlder403 (slot : IO.Ref (Option LiveSubscription)) (st : DesktopState)
+    (a : MissionSummaryCard) : IO Unit := do
+  let st ← clickMission st a
+  let st ← awaitState slot st (fun s => s.historyHasMore && s.historyNextCursor == some 771)
+  let (stReq, _) := stepDesktopEvent 120 vp st (.activate loadOlderTurnsId)
+  let next ← awaitState slot stReq (·.openMission.isNone)
+  unless next.liveTurns.isEmpty && (streamedText next).isEmpty && !next.historyHasMore do
+    throw (IO.userError "older-page 403 did not revoke and clear transcript")
+
 def main (args : List String) : IO Unit := do
   for dark in [true, false] do
     for width in [480, 1000] do
@@ -617,6 +795,10 @@ def main (args : List String) : IO Unit := do
   unless st.expandedProjects == ["p"] do throw (IO.userError "single project was collapsed at launch")
   let slot ← IO.mkRef (none : Option LiveSubscription)
   try
+    if args == ["long-paging"] then runLongPaging slot st a; return
+    if args == ["paging-degraded-recover"] then runPagingDegradedRecover slot st a; return
+    if args == ["stale-older-race"] then runStaleOlderRace slot st a; return
+    if args == ["older-403"] then runOlder403 slot st a; return
     if args == ["cold-open"] then
       -- Cold open of a previously completed mission in the real Core persistence
       -- shape: user prompts and plain assistant_message turns, with the final turn

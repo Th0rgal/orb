@@ -260,8 +260,13 @@ inductive BubbleUpdate where
   | unavailable
   | revoked
 
+inductive OlderHistoryUpdate where
+  | page (requestedCursor : Int) (batch : HistoryBatch)
+  | failed (requestedCursor : Int)
+
 inductive LiveUpdate where
-  | sample (roster : Option (List String)) (bubble : Option BubbleUpdate) (history : List String)
+  | sample (roster : Option (List String)) (bubble : Option BubbleUpdate)
+      (history : Option HistoryBatch) (older : Option OlderHistoryUpdate)
   | invalid
 
 structure LiveSubscription where
@@ -270,25 +275,60 @@ structure LiveSubscription where
   binding : String
   latest : Std.Mutex (Option LiveUpdate)
   lastBubble : IO.Ref (Option BubbleUpdate)
+  olderFetch : IO.Ref (Option (Int × IO Unit))
   stop : IO Unit
+
+private def parseHistoryEntries (packed : String) : List (String × String) :=
+  if packed.isEmpty then []
+  else (packed.splitOn "\x1d").filterMap fun raw =>
+    match raw.splitOn "\x1c" with
+    | [tid, body] =>
+      let turn := (body.replace "\x1e" "\n").replace "\x1f" "\t"
+      if turn.isEmpty then none else some (tid, turn)
+    | _ =>
+      let turn := (raw.replace "\x1e" "\n").replace "\x1f" "\t"
+      if turn.isEmpty then none else some ("", turn)
+
+private def parseHistoryBatch (hasMoreStr cursorStr packed : String) : HistoryBatch :=
+  let nextCursor := cursorStr.toInt?
+  let hasMore := hasMoreStr == "1" && nextCursor.isSome
+  { turns := parseHistoryEntries packed, hasMore, nextCursor := if hasMore then nextCursor else none }
 
 private def readSample (line : String) : Option LiveUpdate := do
   match splitTab line with
   | ["R", keys] =>
     guard (keys.startsWith "+")
     let encoded := (keys.drop 1).toString
-    return .sample (some (if encoded.isEmpty then [] else encoded.splitOn "\x1f")) none []
+    return .sample (some (if encoded.isEmpty then [] else encoded.splitOn "\x1f")) none none none
   | ["B", title, status, text] =>
-    return .sample none (some (.text title status ((text.replace "\x1e" "\n").replace "\x1f" "\t"))) []
-  -- One bounded atomic bootstrap message, oldest first (cold-open history).
+    return .sample none (some (.text title status ((text.replace "\x1e" "\n").replace "\x1f" "\t"))) none none
+  -- One bounded atomic bootstrap message, oldest first (cold-open initial window + paging cursor).
+  | ["HS", hasMoreStr, cursorStr, packed] =>
+    return .sample none none (some (parseHistoryBatch hasMoreStr cursorStr packed)) none
   | ["HS", packed] =>
-    let turns := (packed.splitOn "\x1d").filterMap fun raw =>
-      let turn := (raw.replace "\x1e" "\n").replace "\x1f" "\t"
-      if turn.isEmpty then none else some turn
-    return .sample none none turns
-  | ["X"] => return .sample none (some .unavailable) []
-  | ["D"] => return .sample none (some .revoked) []
+    return .sample none none (some { turns := parseHistoryEntries packed }) none
+  -- One on-demand older history page, oldest first (originating cursor stamped by `startOlderFetch`).
+  | ["HO", hasMoreStr, cursorStr, packed] =>
+    return .sample none none none (some (.page 0 (parseHistoryBatch hasMoreStr cursorStr packed)))
+  | ["HE"] => return .sample none none none (some (.failed 0))
+  | ["X"] => return .sample none (some .unavailable) none none
+  | ["D"] => return .sample none (some .revoked) none none
   | _ => none
+
+private def stampOlderCursor (cursor : Int) : OlderHistoryUpdate → OlderHistoryUpdate
+  | .page _ batch => .page cursor batch
+  | .failed _ => .failed cursor
+
+private def mergeLiveUpdate (previous : Option LiveUpdate) (rows : Option (List String))
+    (bubble : Option BubbleUpdate) (history : Option HistoryBatch) (older : Option OlderHistoryUpdate) :
+    Option LiveUpdate :=
+  match previous with
+  | some .invalid => previous
+  | some (.sample _ (some .revoked) _ _) => previous
+  | some (.sample oldRows oldBubble oldHistory oldOlder) =>
+    some (.sample (rows.orElse fun _ => oldRows) (bubble.orElse fun _ => oldBubble)
+      (history.orElse fun _ => oldHistory) (older.orElse fun _ => oldOlder))
+  | none => some (.sample rows bubble history older)
 
 /-- Each process owns its HTTP deadlines. A pending roster and a pending bubble
     coalesce independently, and neither can supersede session invalidation. -/
@@ -305,15 +345,9 @@ private def liveReader (args : Array String) (input : String)
     try
       repeat
         let line ← child.stdout.getLine
-        let some (.sample rows bubble history) := readSample (line.dropEnd 1).toString | break
+        let some (.sample rows bubble history older) := readSample (line.dropEnd 1).toString | break
         if !line.endsWith "\n" then break
-        latest.atomically (modify fun previous => match previous with
-          | some .invalid => previous
-          | some (.sample _ (some .revoked) _) => previous
-          | some (.sample oldRows oldBubble oldHistory) =>
-            some (.sample (rows.orElse fun _ => oldRows) (bubble.orElse fun _ => oldBubble)
-              (oldHistory ++ history))
-          | none => some (.sample rows bubble history))
+        latest.atomically (modify fun previous => mergeLiveUpdate previous rows bubble history older)
         notify
         if let some .revoked := bubble then return
     catch _ => pure ()
@@ -324,9 +358,40 @@ private def liveReader (args : Array String) (input : String)
     discard child.wait
     discard (IO.wait reader)
 
+/-- One-shot background fetch for an on-demand older transcript page. A 401 or
+    session rotation exits without a valid frame and invalidates the session;
+    403/404 emits `D` (revoked); transient errors emit `HE` so the cursor stays retryable. -/
+private def startOlderFetch (mission binding : String) (cursor : Int)
+    (latest : Std.Mutex (Option LiveUpdate)) (notify : IO Unit) : IO (IO Unit) := do
+  let args := #["-I", "-c", transport ++ "\nfetch_older_turns(*sys.argv[1:])",
+    mission, binding, toString cursor]
+  let child ← IO.Process.spawn { cmd := "python3", args, stdin := .null, stdout := .piped, stderr := .null }
+  let cancelled ← IO.mkRef false
+  let reader ← IO.asTask (prio := .dedicated) do
+    try
+      let line ← child.stdout.getLine
+      if (← cancelled.get) then return
+      if line.endsWith "\n" then
+        if let some (.sample rows bubble history older) := readSample (line.dropEnd 1).toString then
+          if bubble.isSome || older.isSome then
+            let stamped := older.map (stampOlderCursor cursor)
+            latest.atomically (modify fun previous => mergeLiveUpdate previous rows bubble history stamped)
+            notify
+            return
+    catch _ => pure ()
+    unless (← cancelled.get) do
+      latest.atomically (set (some LiveUpdate.invalid))
+      notify
+  return do
+    cancelled.set true
+    try child.kill catch _ => pure ()
+    discard child.wait
+    discard (IO.wait reader)
+
 private def subscribe (mission binding : String) (tracked : List MissionSummaryCard) (projects : List String)
     (notify : IO Unit) : IO LiveSubscription := do
   let latest ← Std.Mutex.new (none : Option LiveUpdate)
+  let olderFetch ← IO.mkRef (none : Option (Int × IO Unit))
   let rosterArgs := #["-I", "-c", transport ++ "\npoll(sys.argv[1], sys.argv[2], rules=json.loads(sys.argv[3]))",
     mission, binding, projectHistoryRules]
   let input := String.intercalate "," (tracked.map (·.missionId)) ++ "\n" ++ String.intercalate "\t" projects ++ "\n"
@@ -334,12 +399,15 @@ private def subscribe (mission binding : String) (tracked : List MissionSummaryC
   let stop ← try
     if mission.isEmpty then pure stopRoster else do
       let stopBubble ← liveReader #["-I", "-c", transport ++ "\npoll_bubble(*sys.argv[1:])", mission, binding] "" latest notify
-      pure (do stopBubble; stopRoster)
+      pure (do
+        if let some (_, stopOlder) ← olderFetch.swap none then stopOlder
+        stopBubble
+        stopRoster)
   catch err =>
     stopRoster
     throw err
   let lastBubble ← IO.mkRef none
-  return { mission, binding, projects, latest, lastBubble, stop }
+  return { mission, binding, projects, latest, lastBubble, olderFetch, stop }
 
 def closeLiveSubscription (slot : IO.Ref (Option LiveSubscription)) : IO Unit := do
   if let some sub ← slot.swap none then sub.stop
@@ -464,9 +532,11 @@ def readLiveFrame (slot : IO.Ref (Option LiveSubscription)) (scale : Nat) (viewp
       if (action == "cloud-send" || action == "cloud-create") && r.exitCode != 0 then
         return ({ st with cloudAttempt := r.stdout.trimAscii.toString, writeError := "Core did not confirm the request. Submit again to retry." }, some viewport)
       if r.exitCode != 0 then throw (IO.userError "write failed")
-      match request with
-      | .providerPreference .. => pure ()
-      | _ => closeLiveSubscription slot
+      let st ← match request with
+        | .providerPreference .. => pure st
+        | _ => do
+          closeLiveSubscription slot
+          pure { st with historyLoading := false }
       match request with
       | .inboxRead item openItem =>
         let next := { st with inboxItems := st.inboxItems.filter (· != item) }
@@ -550,10 +620,35 @@ def readLiveFrame (slot : IO.Ref (Option LiveSubscription)) (scale : Nat) (viewp
     if let some mission := target then
       try slot.set (some (← subscribe mission st.connectionBinding st.missionCards st.expandedProjects notify)) catch _ => return invalidate
   let some sub ← slot.get | return (st, none)
-  let some update ← sub.latest.atomically (modifyGet (fun v => (v, none))) | return (st, none)
+  let (st, startDamage) ← do
+    if st.historyLoading && st.openMission == some sub.mission then
+      if st.historyHasMore then
+        if let some cursor := st.historyNextCursor then
+          if (← sub.olderFetch.get).isNone then
+            try
+              let stopOlder ← startOlderFetch sub.mission sub.binding cursor sub.latest notify
+              sub.olderFetch.set (some (cursor, stopOlder))
+              pure (st, none)
+            catch _ =>
+              pure ({ st with historyLoading := false, historyLoadError := true },
+                some (transcriptDamageRect scale viewport st.sidebarWidth))
+          else pure (st, none)
+        else
+          pure ({ st with historyLoading := false },
+            some (transcriptDamageRect scale viewport st.sidebarWidth))
+      else
+        pure ({ st with historyLoading := false },
+          some (transcriptDamageRect scale viewport st.sidebarWidth))
+    else pure (st, none)
+  let some update ← sub.latest.atomically (modifyGet (fun v => (v, none))) | return (st, startDamage)
   match update with
   | .invalid => closeLiveSubscription slot; return invalidate
-  | .sample roster bubble history =>
+  | .sample roster bubble history older =>
+    let isUnavailable := match bubble with | some .unavailable => true | _ => false
+    -- Retire any in-flight older-page fetch when its result arrives, or when a
+    -- fresh `/open` (`HS`) or access-loss (`X`) invalidates the active fetch window.
+    if older.isSome || history.isSome || isUnavailable then
+      if let some (_, stopOlder) ← sub.olderFetch.swap none then stopOlder
     -- The roster can finish after a newer transcript read. Keep the selected
     -- conversation's title, status and text together across that arrival.
     if bubble.isSome then sub.lastBubble.set bubble
@@ -575,9 +670,6 @@ def readLiveFrame (slot : IO.Ref (Option LiveSubscription)) (scale : Nat) (viewp
       closeLiveSubscription slot
       let (st, _) := stepDesktopEvent scale viewport st (.activate 101)
       return (st, some viewport)
-    -- Cold open: the persisted timeline populates completed turns before the
-    -- bubble frame is applied to the same state.
-    let (st, histDamage) := applyHistoryTurns scale viewport st sub.mission history
     if let some .revoked := bubble then
       closeLiveSubscription slot
       let next := { st with
@@ -585,18 +677,39 @@ def readLiveFrame (slot : IO.Ref (Option LiveSubscription)) (scale : Nat) (viewp
         sidebarRows := rows.filter (·.rowId != "mission:" ++ sub.mission) }
       return ((stepDesktopEvent scale viewport next (.activate 101)).1, some viewport)
     if let some .unavailable := bubble then
-      -- Drop the retained reply so later roster frames cannot resurrect cleared
-      -- output, and clear instead of archiving: access loss is not a boundary.
+      -- Drop the retained reply and discard any stale coalesced older page;
+      -- access loss clears the transcript rather than archiving or prepending.
       sub.lastBubble.set none
       let (next, damage) :=
-        if st.liveTurns.isEmpty && (streamedText st).isEmpty then (st, none)
+        if st.liveTurns.isEmpty && (streamedText st).isEmpty && !st.showsHistoryBanner then (st, none)
         else (clearLiveTranscript st, some (transcriptDamageRect scale viewport st.sidebarWidth))
-      return (next, histDamage.orElse (fun _ => if changed then some viewport else damage))
-    let some (.text title status text) := bubble | return (st, histDamage.orElse (fun _ => if changed then some viewport else none))
+      return (next, startDamage.orElse (fun _ => if changed then some viewport else damage))
+    -- Cold open / recovery: the persisted timeline populates or merges completed
+    -- turns before the bubble frame is applied to the same state.
+    let (st, histDamage) := match history with
+      | some batch =>
+        let (st', dmg) := applyHistoryBatch scale viewport st sub.mission batch
+        if st'.historyLoading then
+          ({ st' with historyLoading := false }, dmg.orElse fun _ => some (transcriptDamageRect scale viewport st'.sidebarWidth))
+        else (st', dmg)
+      | none => (st, none)
+    let (st, olderDamage) := match older with
+      | some (.page reqCursor batch) =>
+        if history.isSome then (st, none)
+        else applyOlderHistoryBatch scale viewport st sub.mission batch (some reqCursor)
+      | some (.failed reqCursor) =>
+        if history.isSome then (st, none)
+        else if st.openMission == some sub.mission && st.historyHasMore && st.historyNextCursor == some reqCursor then
+          ({ st with historyLoading := false, historyLoadError := true },
+           some (transcriptDamageRect scale viewport st.sidebarWidth))
+        else (st, none)
+      | none => (st, none)
+    let pageDamage := startDamage.orElse fun _ => histDamage.orElse fun _ => olderDamage
+    let some (.text title status text) := bubble | return (st, pageDamage.orElse (fun _ => if changed then some viewport else none))
     let (next, damage) := applyLiveText scale viewport st sub.mission text
     let some card := next.selectedCard | return invalidate
     if title == card.title && status == card.status then
-      return (next, histDamage.orElse (fun _ => if changed then some viewport else damage))
+      return (next, pageDamage.orElse (fun _ => if changed then some viewport else damage))
     return ({ next with
       composer := { next.composer with isRunning := ({ card with status } : MissionSummaryCard).isRunning }
       missionCards := next.missionCards.map fun m => if m.missionId == sub.mission then { m with title, status } else m
