@@ -1528,12 +1528,14 @@ def joinHarnessText (harness prevText : String) (lastMessageId? : Option String)
     ((if boundary then "\n\n" else "") ++ parsed.textDelta, none)
 
 /-- Options consumed before Antigravity's prompt-valued --print flag. -/
-def antigravityCliOptions (model : String) (effort? sessionId? : Option String) : Array String := Id.run do
+def antigravityCliOptions (model : String) (effort? sessionId? : Option String)
+    (skipPermissions : Bool := true) : Array String := Id.run do
   let (mdl, eff?) := normalizeAntigravityCliModel model effort?
   let mut args := #[]
   if !mdl.isEmpty then args := #["--model", mdl]
   if let some e := eff? then args := args ++ #["--effort", e]
   if let some sid := sessionId? then args := args ++ #["--conversation", sid]
+  if skipPermissions then args := args.push "--dangerously-skip-permissions"
   return args ++ #["--output-format", "stream-json"]
 
 /-- Build CLI invocation `args` for non-Claude local harnesses (`codex`, `opencode`, `antigravity`, `grok`, `vibe`). -/
@@ -1582,7 +1584,7 @@ def buildOneShotHarnessArgs
     args := args ++ #["--", delivered]
     return args
   else if harness == "antigravity" then
-    return (antigravityCliOptions (mdl?.getD "") eff? sid?).push ("--print=" ++ prompt)
+    return (antigravityCliOptions (mdl?.getD "") eff? sid? (skipPermissions := permissionMode != .plan)).push ("--print=" ++ prompt)
   else if harness == "grok" then
     let mut args := #["--always-approve", "--no-plan", "--output-format", "streaming-json"]
     if let some m := mdl? then args := args ++ #["--model", m]

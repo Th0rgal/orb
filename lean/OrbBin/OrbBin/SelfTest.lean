@@ -1094,7 +1094,10 @@ def runAllTests : IO UInt32 := do
   let prompt := "--model is part of this prompt\nwith 'quotes' and a trailing newline\n"
   assertEq "Antigravity delivers a flag-shaped prompt verbatim alongside model, effort and resume"
     (OrbBin.ClaudeControl.buildOneShotHarnessArgs "antigravity" prompt (some "custom-model") (some "high") (some "session"))
-    #["--model", "custom-model", "--effort", "high", "--conversation", "session", "--output-format", "stream-json", "--print=" ++ prompt]
+    #["--model", "custom-model", "--effort", "high", "--conversation", "session", "--dangerously-skip-permissions", "--output-format", "stream-json", "--print=" ++ prompt]
+  assertEq "Antigravity plan mode omits --dangerously-skip-permissions"
+    (OrbBin.ClaudeControl.buildOneShotHarnessArgs "antigravity" prompt (some "custom-model") none none .plan)
+    #["--model", "custom-model", "--output-format", "stream-json", "--print=" ++ prompt]
 
   let agEvent := OrbBin.ClaudeControl.parseOneShotHarnessEvent "antigravity"
   let sid := "a0d4056b-b8c8-476b-937e-e87917513ec0"
