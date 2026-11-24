@@ -651,7 +651,11 @@ def readLiveFrame (slot : IO.Ref (Option LiveSubscription)) (scale : Nat) (viewp
       if let some (_, stopOlder) ← sub.olderFetch.swap none then stopOlder
     -- The roster can finish after a newer transcript read. Keep the selected
     -- conversation's title, status and text together across that arrival.
+    -- A fresh `/open` (`HS`) precedes an incoming `B` frame; if `HS` is drained
+    -- before `B` arrives, drop any pre-recovery retained bubble so stale text
+    -- cannot re-populate `st.stream` and duplicate a turn on the empty `B`.
     if bubble.isSome then sub.lastBubble.set bubble
+    else if history.isSome then sub.lastBubble.set none
     let bubble ← sub.lastBubble.get
     let updated := roster.elim st (mergeRoster st)
     let changed := roster.isSome && (updated.missionCards != st.missionCards ||

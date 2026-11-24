@@ -241,6 +241,39 @@ private def blankDraft : DesktopState := { hierarchyFixture with screen := .cont
 #guard desktopFocusChange blankDraft blankDraft (.key 0x6e 2 .pressed) == some 1
 #guard desktopFocusChange blankDraft blankDraft (.key 0x6e 0 .pressed) == none
 
+-- Live Runtime activation regression (U6a): clicking or keyboard-activating New Agent (101)
+-- while already on `.controlEmpty`/`.controlPopulated` passes `.activate 101` to
+-- `desktopFocusChange` so focus & IME move to composer `1`; dragging off or key repeat does not.
+private def newAgentRuntimeCheck : Bool := Id.run do
+  let navRect : Rect := { x := 100, y := 100, w := 400, h := 200 }
+  let reduce := stepDesktopEvent 120 vp
+  let rt0 : Runtime.RuntimeState DesktopState := {
+    app := blankDraft
+    focus := { owner := some 101 }
+    hitRegions := [(101, navRect)]
+  }
+  -- Pointer press + release on 101 while already on `.controlEmpty` focuses composer 1.
+  let down := rt0.stepEventWithFocus reduce desktopFocusChange (.pointerButton 200 150 0x110 true)
+  let up := down.stepEventWithFocus reduce desktopFocusChange (.pointerButton 200 150 0x110 false)
+  -- Dragging off 101 before release keeps focus on 101 (no activation).
+  let dragOff := down.stepEventWithFocus reduce desktopFocusChange (.pointerButton 900 900 0x110 false)
+  -- Keyboard Return and Space on focused 101 focus composer 1; repeated Return does not.
+  let byReturn := rt0.stepEventWithFocus reduce desktopFocusChange (.key 0xff0d 0 .pressed)
+  let bySpace := rt0.stepEventWithFocus reduce desktopFocusChange (.key 0x20 0 .pressed)
+  let byRepeat := rt0.stepEventWithFocus reduce desktopFocusChange (.key 0xff0d 0 .repeated)
+  -- Also works from `.controlPopulated`.
+  let popRt : Runtime.RuntimeState DesktopState := { rt0 with app := { blankDraft with screen := .controlPopulated } }
+  let popReturn := popRt.stepEventWithFocus reduce desktopFocusChange (.key 0xff0d 0 .pressed)
+  return down.focus.owner == some 101 &&
+    up.focus.owner == some 1 &&
+    dragOff.focus.owner == some 101 &&
+    byReturn.focus.owner == some 1 &&
+    bySpace.focus.owner == some 1 &&
+    byRepeat.focus.owner == some 101 &&
+    popReturn.focus.owner == some 1
+
+#guard newAgentRuntimeCheck
+
 private def collapsed := (stepDesktopEvent 120 vp unsentDraft (.activate sidebarToggleId)).1
 #guard collapsed.sidebarWidth == 0 && collapsed.composer.text == unsentDraft.composer.text
 #guard (stepDesktopEvent 120 vp collapsed (.key 0x62 2 .pressed)).1.sidebarWidth == chromeSidebarWidthSub
@@ -775,6 +808,48 @@ private def runU6aLiveWrites (st0 : DesktopState) : IO Unit := do
       throw (IO.userError "returning to New Agent after archive did not refocus composer")
   finally
     closeLiveSubscription slot
+  -- Split HS-then-B degraded recovery regression: draining `HS` before the incoming `B`
+  -- frame must drop any stale retained `sub.lastBubble` so `st.stream` is not resurrected
+  -- and duplicated when the empty turn-boundary `B` arrives next.
+  let latest ← Std.Mutex.new (none : Option LiveUpdate)
+  let lastBubble ← IO.mkRef (some (BubbleUpdate.text "Mission" "awaiting_user" "Answer 1"))
+  let olderFetch ← IO.mkRef (none : Option (Int × IO Unit))
+  let sub : LiveSubscription := {
+    projects := []
+    mission := "m"
+    binding := "fixture"
+    latest
+    lastBubble
+    olderFetch
+    stop := pure ()
+  }
+  let splitSlot ← IO.mkRef (some sub)
+  let splitInit : DesktopState := {
+    coldFixture with
+    liveTurns := ["You: Turn 1"]
+    liveTurnIds := ["id:1"]
+    livePersistedCount := 1
+    stream := { shown := ["Answer 1"], pending := [], renders := 2 }
+  }
+  latest.atomically (set (some (LiveUpdate.sample none none
+    (some { turns := [("id:1", "You: Turn 1"), ("id:2", "Answer 1"), ("id:3", "You: Follow-up")] }) none)))
+  let (afterHs, hsDmg) ← readLiveFrame splitSlot 120 vp splitInit
+  unless hsDmg.isSome &&
+      afterHs.liveTurns == ["You: Turn 1", "Answer 1", "You: Follow-up"] &&
+      (streamedText afterHs).isEmpty &&
+      (← lastBubble.get).isNone do
+    throw (IO.userError s!"split HS recovery resurrected stale bubble: turns={repr afterHs.liveTurns} stream={repr (streamedText afterHs)}")
+  latest.atomically (set (some (LiveUpdate.sample none (some (BubbleUpdate.text "Mission" "active" "")) none none)))
+  let (afterEmptyB, _) ← readLiveFrame splitSlot 120 vp afterHs
+  unless afterEmptyB.liveTurns == ["You: Turn 1", "Answer 1", "You: Follow-up"] &&
+      (streamedText afterEmptyB).isEmpty &&
+      afterEmptyB.composer.isRunning do
+    throw (IO.userError s!"split HS-then-B duplicated turn: turns={repr afterEmptyB.liveTurns} stream={repr (streamedText afterEmptyB)}")
+  latest.atomically (set (some (LiveUpdate.sample none (some (BubbleUpdate.text "Mission" "active" "Answer 2")) none none)))
+  let (afterReplyB, _) ← readLiveFrame splitSlot 120 vp afterEmptyB
+  unless afterReplyB.liveTurns == ["You: Turn 1", "Answer 1", "You: Follow-up"] &&
+      streamedText afterReplyB == "Answer 2" do
+    throw (IO.userError s!"split HS-then-B follow-up reply broken: turns={repr afterReplyB.liveTurns} stream={repr (streamedText afterReplyB)}")
 
 def main (args : List String) : IO Unit := do
   for dark in [true, false] do
