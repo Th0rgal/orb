@@ -123,20 +123,35 @@ def verifyDesktopEdges (view : Runtime.RuntimeState DesktopState → IO Runtime.
 
     let label ac := shape ac rt.primaryFont 120 (Theme.bodyText st.theme)
     let mut ac : Text.GlyphAtlasCache := {}
-    for i in [:130] do ac := (← label ac s!"label{i}").1
-    let boundary := String.ofList (List.replicate 64 'é') -- exactly 128 UTF-8 bytes
+    for i in [:(Text.maxResolvedRuns + 2)] do ac := (← label ac s!"label{i}").1
+    let boundary := String.ofList (List.replicate (Text.maxShapeCacheBytes / 2) 'é') -- exactly maxShapeCacheBytes UTF-8 bytes
     ac := (← label ac boundary).1
     let shaped := ac.shapeCache.map (·.text)
     let resolved := ac.resolved.map (·.text)
-    unless shaped.size == 64 && resolved.size == 128 && shaped.back? == some boundary &&
-        resolved.back? == some boundary && !shaped.contains "label0" && !resolved.contains "label0" do
+    unless shaped.size == 64 && resolved.size == Text.maxResolvedRuns && ac.resolvedMap.size == Text.maxResolvedRuns &&
+        shaped.back? == some boundary && resolved.back? == some boundary &&
+        !shaped.contains "label0" && !resolved.contains "label0" do
       throw <| IO.userError "shape caches: expected bounded short-label retention"
     for text in [boundary ++ "x", String.ofList (List.replicate 4096 'w')] do
       let (next, runs) ← label ac text
       unless runs.any (fun r => !r.glyphs.isEmpty) && next.shapeCache.map (·.text) == shaped &&
-          next.resolved.map (·.text) == resolved do
+          next.resolved.map (·.text) == resolved && next.resolvedMap.size == Text.maxResolvedRuns do
         throw <| IO.userError s!"shape caches: oversized {text.utf8ByteSize}-byte input not shaped or retained keys changed"
       ac := next
+    -- Verify scroll event coalescing handles interleaved Wayland `.time` events safely.
+    let coalesced := Runtime.coalesceScrollEvents #[
+      .time 10, .scroll 100 200 0 12, .time 11, .scroll 100 200 0 18,
+      .time 12, .scroll 100 200 0 (-5),
+      .time 13, .scroll 400 200 0 9,
+      .pointerMove 400 200, .scroll 400 200 0 9,
+      .scroll 400 200 0 0]
+    let expected : Array Event := #[
+      .time 11, .scroll 100 200 0 30,
+      .time 12, .scroll 100 200 0 (-5),
+      .time 13, .scroll 400 200 0 9,
+      .pointerMove 400 200, .scroll 400 200 0 9]
+    unless reprStr coalesced == reprStr expected do
+      throw <| IO.userError s!"coalesceScrollEvents mismatch: got {reprStr coalesced}"
   finally Runtime.shutdownRuntime rt
 
 end OrbDesktop
