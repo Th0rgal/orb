@@ -118,6 +118,14 @@ def buildNewAgentBody (st : DesktopState) (mainW bodyH : SubPx) : WidgetNode :=
       , sendBtn
       ]
 
+  let newAgentCaretPos :=
+    if hasText then ComposerBuffer.clampCursor st.composer.text st.composer.cursorOffset + st.composer.imePreeditText.length
+    else 0
+  let newAgentCaretLen := if hasText then composedText.length else 0
+  let newAgentRun :=
+    let stRun : TextStyle := { Theme.bodyText theme with sizeSub := pxToSub 13, lineHeightSub := pxToSub 20, color := txtCol, weight := 400 }
+    let baseRun := overlaySynthRun stRun dispText
+    if hasText then { baseRun with editorStart := some 0 } else baseRun
   let tallComposer : WidgetNode :=
     WidgetNode.rrect
       (BoxStyle.col (pxToSub 6)
@@ -130,7 +138,9 @@ def buildNewAgentBody (st : DesktopState) (mainW bodyH : SubPx) : WidgetNode :=
           WidgetNode.box
             (BoxStyle.col 0 |>.withPadding (Edges.trbl (pxToSub 2) 0 0 (pxToSub 2))
               |>.withFixedSize (pxToSub 582) (pxToSub 48))
-            [screenTextLine theme (pxToSub 580) (pxToSub 20) (pxToSub 13) (pxToSub 20) txtCol dispText]
+            [WidgetNode.text (BoxStyle.row 0 |>.withFixedSize (pxToSub 580) (pxToSub 20)) (pxToSub 20)
+              [newAgentRun] none
+              (some { owner := 1, pos := newAgentCaretPos, length := newAgentCaretLen, color := pal.textPrimary })]
       , bottomRow
       ]
 
@@ -704,7 +714,8 @@ def buildMachinesFleetBody (st : DesktopState) (mainW bodyH : SubPx) : WidgetNod
 /-- Build one `.s-row` inside a Settings `.s-card`. -/
 def buildSettingsRow (theme : Theme) (rowW h : SubPx) (title desc rightLabel : String)
     (isButton : Bool := false) (isCode : Bool := false) (hasBottomBorder : Bool := false)
-    (isInput : Bool := false) (isSelect : Bool := false) (controlId : Option WidgetId := none) : WidgetNode :=
+    (isInput : Bool := false) (isSelect : Bool := false) (controlId : Option WidgetId := none)
+    (caret : Option TextCaretSpec := none) : WidgetNode :=
   let pal := theme.palette
   let bdr := theme.borderWidth
   let inputBg : Color := if theme.isDark then 0x202020FF else 0xFFFFFFFF
@@ -717,12 +728,15 @@ def buildSettingsRow (theme : Theme) (rowW h : SubPx) (title desc rightLabel : S
     | none => n
   let rightNode : WidgetNode :=
     if isInput then
+      let txtSt : TextStyle := { Theme.bodyText theme with sizeSub := pxToSub 12, lineHeightSub := pxToSub 16, color := pal.textPrimary, weight := 400 }
+      let baseRun := overlaySynthRun txtSt rightLabel
+      let run := if caret.isSome && !rightLabel.isEmpty then { baseRun with editorStart := some 0 } else baseRun
       wrapCtrl <| WidgetNode.rrect
         (BoxStyle.row 0 |>.withAlign .center |>.withPadding (Edges.xy (pxToSub 10) 0) |>.withFixedSize (pxToSub 260) (pxToSub 32))
         inputBg
         (CornerRadii.uniform (pxToSub 6))
         (BorderStyle.uniform bdr inputBdr)
-        [screenTextLine theme (pxToSub 240) (pxToSub 16) (pxToSub 12) (pxToSub 16) pal.textPrimary rightLabel]
+        [WidgetNode.text (BoxStyle.row 0 |>.withFixedSize (pxToSub 240) (pxToSub 16)) (pxToSub 16) [run] none caret]
     else if isSelect then
       wrapCtrl <| WidgetNode.rrect
         (BoxStyle.row 0 |>.withAlign .center |>.withPadding (Edges.xy (pxToSub 10) 0) |>.withFixedSize (pxToSub 80) (pxToSub 32))
@@ -911,12 +925,17 @@ def buildSettingsGeneralBody (st : DesktopState) (mainW bodyH : SubPx) : WidgetN
       (BoxStyle.row 0 |>.withPadding (Edges.trbl (pxToSub 26) (pxToSub 8) (pxToSub 8) (pxToSub 8)) |>.withFixedSize colW (pxToSub 51))
       [screenTextLine theme (pxToSub 584) (pxToSub 17) (pxToSub 12) (pxToSub 17) pal.textSecondary txt]
 
-  let apiUrlText := st.settingsApiUrl.text ++ st.settingsApiUrl.imePreeditText
+  let apiUrlText := st.settingsApiUrl.displayText
+  let apiUrlCaret : Option TextCaretSpec :=
+    some { owner := settingsApiUrlId
+           pos := ComposerBuffer.clampCursor st.settingsApiUrl.text st.settingsApiUrl.cursorOffset + st.settingsApiUrl.imePreeditText.length
+           length := apiUrlText.length
+           color := pal.textPrimary }
   let connectedDesc :=
     if st.settingsActionNote.isEmpty then "Signed in to http://127.0.0.1:14470."
     else "Status: " ++ st.settingsActionNote
   let backendCard := sCard (pxToSub 125)
-    [ buildSettingsRow theme rowW (pxToSub 63) "API URL" "Base URL of the Core backend." apiUrlText false false true true false (some settingsApiUrlId)
+    [ buildSettingsRow theme rowW (pxToSub 63) "API URL" "Base URL of the Core backend." apiUrlText false false true true false (some settingsApiUrlId) apiUrlCaret
     , buildSettingsRow theme rowW (pxToSub 62) "Connected" connectedDesc "Disconnect" true false false false false (some settingsDisconnectId)
     ]
 
@@ -1281,14 +1300,22 @@ def buildDesktopScreen (st : DesktopState) (availW availH : SubPx)
         else []
       let editor := if create || st.cloudAllows "send" then
         let placeholder := if create then "Describe a task for your cloud agent" else "Send follow-up"
-        let runs := buildComposerInlineRuns theme { st.cloudDraft with placeholder }
+        let hasText := !st.cloudDraft.text.isEmpty || !st.cloudDraft.imePreeditText.isEmpty
+        let rawRuns := buildComposerInlineRuns theme { st.cloudDraft with placeholder }
+        let runs := if hasText then buildComposerEditorRuns rawRuns else rawRuns
         let innerW := w - pxToSub 32
         let editorH := max (pxToSub (if create then 74 else 50)) (min (pxToSub 150) ((wrapInlineRuns innerW (pxToSub 20) runs).2.2 + pxToSub 20))
-        let field := WidgetNode.rrect
+        let caretPos := ComposerBuffer.clampCursor st.cloudDraft.text st.cloudDraft.cursorOffset + st.cloudDraft.imePreeditText.length
+        let caretLen := st.cloudDraft.text.length + st.cloudDraft.imePreeditText.length
+        let caretSpec : Option TextCaretSpec :=
+          some { owner := 1, pos := caretPos, length := caretLen, color := pal.textPrimary }
+        let fieldBg := if hoverRow == some 1 then pal.plusBg else pal.elevatedSurface
+        let field := WidgetNode.focusable 1 <| WidgetNode.rrect
           (BoxStyle.col 0 |>.withPadding (Edges.xy (pxToSub 16) (pxToSub 10)) |>.withFixedSize w editorH)
-          pal.elevatedSurface (CornerRadii.uniform (pxToSub 12)) (BorderStyle.uniform theme.borderWidth pal.border)
-          [WidgetNode.text (BoxStyle.row 0 |>.withFixedSize innerW (editorH - pxToSub 20)) (pxToSub 20) runs]
-        [inventoryTarget theme hoverRow 1 w editorH field] ++
+          fieldBg (CornerRadii.uniform (pxToSub 12)) (BorderStyle.uniform theme.borderWidth pal.border)
+          [WidgetNode.text (BoxStyle.row 0 |>.withFixedSize innerW (editorH - pxToSub 20)) (pxToSub 20) runs none caretSpec]
+          (some 1)
+        [field] ++
           (if st.cloudDraft.text.trimAscii.isEmpty || !st.cloudDraft.imePreeditText.isEmpty then [] else [button 968 (w / 3) (if create then "Create cloud agent" else "Send")])
         else []
       let actions := picks ++ editor ++ (if st.cloudAllows "cancel" then [button 969 (w / 3) "Stop"] else [])

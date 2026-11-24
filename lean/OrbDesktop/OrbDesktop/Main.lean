@@ -312,7 +312,7 @@ def renderDesktopView (rt : Runtime.RuntimeState DesktopState) :
   let rootBox := layoutNode sc rt.focus.owner pal.focusRing 0 0 availW availH layoutRoot
   let t2 ← IO.monoNanosNow
   -- This backend diffs paint commands; it does not consume per-node fingerprints.
-  let sceneOut := buildSceneFromLayout sc rt.focus theme widgetRoot rootBox (recordNodes := false)
+  let sceneOut := buildSceneFromLayout sc rt.focus theme widgetRoot rootBox (recordNodes := false) (focusVisible := rt.focusVisible)
   if profile then IO.eprintln s!"u7-view-ns {t1-t0} {t2-t1} {(← IO.monoNanosNow)-t2}"
   if let some menu := st.missionMenu then
     let w := min availW (pxToSub (if menu.page == .picker .model then 440 else 228))
@@ -323,7 +323,7 @@ def renderDesktopView (rt : Runtime.RuntimeState DesktopState) :
     let raw := buildMissionMenu st menu w count
     let (ac7, widget) ← shapeWidgetTree ac6 rt.primaryFont rt.monoFont rt.boldFont rt.mediumFont rt.semiboldFont sc raw
     let box := layoutNode sc rt.focus.owner pal.focusRing left top w h widget.toLayoutNode
-    let overlay := buildSceneFromLayout sc rt.focus theme widget box (recordNodes := false)
+    let overlay := buildSceneFromLayout sc rt.focus theme widget box (recordNodes := false) (focusVisible := rt.focusVisible)
     let outside : Rect := { x := 0, y := 0, w := availW, h := availH }
     return ((ac7.finishUploads, if liveWindow then 0 else pal.canvas, sceneOut.prims ++ overlay.prims,
       (719, outside) :: overlay.hitRegionsSub, overlay.focusableOrder), [])
@@ -332,7 +332,7 @@ def renderDesktopView (rt : Runtime.RuntimeState DesktopState) :
       st.searchProjectFilter st.searchTimeFilter st.searchSortOrder (!st.liveData) st.searchBuffer
     let (ac7, overWidget) ← shapeWidgetTree ac6 rt.primaryFont rt.monoFont rt.boldFont rt.mediumFont rt.semiboldFont sc overRaw
     let overBox := layoutNode sc none pal.focusRing 0 0 availW availH overWidget.toLayoutNode
-    let overScene := buildSceneFromLayout sc rt.focus theme overWidget overBox (recordNodes := false)
+    let overScene := buildSceneFromLayout sc rt.focus theme overWidget overBox (recordNodes := false) (focusVisible := rt.focusVisible)
     let clearColor := if liveWindow then 0x00000000 else pal.canvas
     let outside : Rect := { x := 0, y := 0, w := availW, h := availH }
     return ((ac7.finishUploads, clearColor, sceneOut.prims ++ #[.backdropBlur (scaleSubPx sc (pxToSub 6))] ++ overScene.prims,
@@ -344,7 +344,7 @@ def renderDesktopView (rt : Runtime.RuntimeState DesktopState) :
     let (ac7, widget) ← shapeWidgetTree ac6 rt.primaryFont rt.monoFont rt.boldFont rt.mediumFont rt.semiboldFont sc notice
     let box := layoutNode sc rt.focus.owner pal.focusRing (availW - w - pxToSub 8 : Nat)
       (availH - chromeComposerHeightSub - h - pxToSub 8 : Nat) w h widget.toLayoutNode
-    let overlay := buildSceneFromLayout sc rt.focus theme widget box (recordNodes := false)
+    let overlay := buildSceneFromLayout sc rt.focus theme widget box (recordNodes := false) (focusVisible := rt.focusVisible)
     return ((ac7.finishUploads, if liveWindow then 0 else pal.canvas, sceneOut.prims ++ overlay.prims,
       sceneOut.hitRegionsSub ++ overlay.hitRegionsSub, sceneOut.focusableOrder ++ overlay.focusableOrder), scrollRegionsOf rootBox)
   else
@@ -444,6 +444,10 @@ def desktopReducer (rt : Runtime.RuntimeState DesktopState) :
             st.multiRows.filterMap fun r => if r.startsWith "mission:" then some (r.drop 8).toString else none
           else [mid]
         return ({ st with missionMenu := some { mission := mid, x, y, trigger := id, targets, mixed } }, some viewport)
+    if let .scrollTo regionId targetY := ev then
+      if st.missionMenu.isNone && st.modal == .none then
+        let some r := regions.find? (·.id == regionId) | return (st, none)
+        return applyScrollRegionTo scale r.id r.bounds r.limitY r.offsetY targetY st
     if let .scroll x y _ dy := ev then
       if st.missionMenu.isNone && st.modal == .none then
         let some r := regions.find? (fun r => r.bounds.contains x y) | return (st, none)

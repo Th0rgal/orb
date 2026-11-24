@@ -93,8 +93,16 @@ def buildMissionMenu (st : DesktopState) (menu : MissionMenu) (width : SubPx) (v
     let hasChevron := item.id == 711 || (menu.page == .settings && (settingTrigger item.id).isSome)
     -- Keep every visible glyph inside the row that receives the click.
     let labelWidth := width - pxToSub (12 + 16 + 14 + 9 + (if hasChevron then 21 else 0))
+    let baseRun := overlaySynthRun (Theme.bodyText st.theme) item.label
+    let isDraftRow := item.id == 1 && (menu.page == .rename || menu.page == .draftDirectory)
+    let draftLen := menu.draft.text.length + menu.draft.imePreeditText.length
+    let draftPos := ComposerBuffer.clampCursor menu.draft.text menu.draft.cursorOffset + menu.draft.imePreeditText.length
+    let run := if isDraftRow && draftLen > 0 then { baseRun with editorStart := some 0 } else baseRun
+    let caret : Option TextCaretSpec :=
+      if isDraftRow then some { owner := 1, pos := draftPos, length := draftLen, color := pal.textPrimary }
+      else none
     let label := WidgetNode.text { (BoxStyle.row 0 |>.withFixedSize labelWidth (pxToSub 18)) with clip := true } (pxToSub 18)
-      [overlaySynthRun (Theme.bodyText st.theme) item.label]
+      [run] none caret
     let row := WidgetNode.focusable item.id <| WidgetNode.box
       (BoxStyle.row (pxToSub 9) |>.withRadius (pxToSub 6)
         |>.withBg (if menu.first + i == menu.highlighted then withAlpha pal.textPrimary 0x18 else pal.elevatedSurface)

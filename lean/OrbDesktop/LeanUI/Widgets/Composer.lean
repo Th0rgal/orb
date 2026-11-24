@@ -281,6 +281,21 @@ def buildComposerInlineRuns (theme : Theme) (buf : ComposerBuffer)
       let afterRun := composerTextRuns bodyStyle afterStr
       beforeRun ++ preeditRun ++ afterRun
 
+/-- Index editor inline runs with monotonically increasing logical scalar `editorStart` / `cluster`
+offsets, appending an empty trailing line when the text ends with a hard line break. -/
+def buildComposerEditorRuns (rs : List InlineRun) : List InlineRun := Id.run do
+  let mut start := 0
+  let mut indexed := #[]
+  for r in rs do
+    let glyphs := r.glyphs.map fun g => { g with cluster := start + g.cluster }
+    indexed := indexed.push { r with editorStart := some start, glyphs }
+    start := start + glyphs.length + (if r.hardBreakAfter then 1 else 0)
+  let out := indexed.toList
+  -- A final newline opens an empty editing line.
+  match out.getLast? with
+  | some r => if r.hardBreakAfter then out ++ [{ r with glyphs := [] }] else out
+  | none => []
+
 /-- Build an attachment chip widget for a single `ComposerAttachment`. -/
 def buildAttachmentChipWidget (theme : Theme) (att : ComposerAttachment) : WidgetNode :=
   let pal := theme.palette
@@ -344,36 +359,22 @@ def buildComposerWidget (theme : Theme) (availW composerH : SubPx)
   let lineH := pxToSub 18
   let editW := colW - pxToSub 26
   let inset := Edges.trbl 0 0 0 (pxToSub 2)
-  let indexEditorRuns (rs : List InlineRun) : List InlineRun := Id.run do
-    let mut start := 0
-    let mut indexed := #[]
-    for r in rs do
-      let glyphs := r.glyphs.map fun g => { g with cluster := start + g.cluster }
-      indexed := indexed.push { r with editorStart := some start, glyphs }
-      start := start + glyphs.length + (if r.hardBreakAfter then 1 else 0)
-    return indexed.toList
   let caretPos := ComposerBuffer.clampCursor buf.text buf.cursorOffset + buf.imePreeditText.length
   let caretLen := buf.text.length + buf.imePreeditText.length
   let caretSpec : Option TextCaretSpec :=
     some { owner := buf.composerWidgetId, pos := caretPos, length := caretLen, color := pal.textPrimary }
-  let buildEditorRuns (rs : List InlineRun) : List InlineRun :=
-    let indexed := indexEditorRuns rs
-    -- A final newline opens an empty editing line.
-    match indexed.getLast? with
-    | some r => if r.hardBreakAfter then indexed ++ [{ r with glyphs := [] }] else indexed
-    | none => []
   let textNode : WidgetNode := if tall then
     let style := { BoxStyle.col 0 with
       minWidth := editW, maxWidth := editW
       minHeight := pxToSub 48, maxHeight := pxToSub 180 }
-    let editorRuns := buildEditorRuns runs
+    let editorRuns := buildComposerEditorRuns runs
     let caret := if buf.wheelTop.isSome then none else some (caretPos, caretLen)
     let childStyle := { BoxStyle.row 0 with
       minWidth := editW, maxWidth := editW, padding := Edges.trbl 0 (pxToSub 12) 0 (pxToSub 2) }
     WidgetNode.scrollClip style { revealCaret := caret, offsetY := buf.wheelTop.getD 0 }
       (WidgetNode.text childStyle lineH editorRuns none caretSpec) (some composerViewportId) (hitTestable := false)
   else if hasText then
-    let editorRuns := buildEditorRuns runs
+    let editorRuns := buildComposerEditorRuns runs
     let clipStyle := { BoxStyle.col 0 with
       grow := 1, maxWidth := placeholderWidth, minHeight := lineH, maxHeight := lineH }
     let childStyle := { BoxStyle.row 0 with maxWidth := placeholderWidth, padding := inset }
