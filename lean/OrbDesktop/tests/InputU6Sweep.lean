@@ -314,6 +314,134 @@ private def verifyInteractionRegressions : IO Unit := do
   unless desktopFocusChange fx0 fxSet (.activate 103) == some settingsTabAccountId do
     throw <| IO.userError "fixture Settings focus change must target settingsTabAccountId"
 
+  -- Review Blocker 1: Live Search modal with >= 8 missions uses disjoint result IDs (10000 + i),
+  -- avoiding collisions with Search controls (706..744) during clicking and Tab-cycling past result #5.
+  let manyCards : List MissionSummaryCard := (List.range 8).map fun i =>
+    { (default : MissionSummaryCard) with
+      widgetId := 1001 + i
+      missionId := s!"m{i}"
+      title := s!"Live Mission {i}"
+      project := "Project 1"
+      status := "completed" }
+  let liveMany0 : DesktopState := {
+    DesktopState.liveUnavailable with
+    connectionBinding := "u6-live"
+    missionCards := manyCards
+    sidebarRows := [
+      { widgetId := 101, rowId := "nav:new", kind := "nav", title := "New Agent", selected := true },
+      settingsFooter
+    ] ++ manyCards.map fun c =>
+      { widgetId := c.widgetId, rowId := "mission:" ++ c.missionId, kind := "mission", title := c.title, status := c.status }
+  }
+  let liveSearchSt := (stepDesktopEvent 120 vpDev liveMany0 (.key 0x6b 2 .pressed)).1
+  match liveSearchSt.modal with
+  | .searchPalette spec =>
+    unless spec.items.length == 8 do
+      throw <| IO.userError s!"live Search modal expected 8 items, got {spec.items.length}"
+    for i in List.range 8 do
+      let expectedWid := liveSearchResultWidgetId i
+      unless spec.items[i]?.map (·.widgetId) == some expectedWid do
+        throw <| IO.userError s!"live Search item #{i} expected widgetId {expectedWid}"
+    assertHitTargets "live_search_8_missions" liveSearchSt
+      ([701, searchClearId, searchEscId, searchOpenId,
+        searchTabAllId, searchTabUserId, searchTabAssistantId, searchTabTitlesId, searchTabToolsId,
+        searchProjectFilterId, searchTimeFilterId, searchSortOrderId] ++
+       (List.range 7).map liveSearchResultWidgetId)
+    -- Tab-cycle from search input (701) through all controls and past result #5 (index 5 -> 10005) & #6 (10006).
+    let (_, liveSearchScene) := renderScreenScene liveSearchSt 120
+    let mut foc := liveSearchSt.initialFocusState
+    let mut visited : List WidgetId := []
+    for _ in List.range liveSearchScene.focusableOrder.length do
+      foc := cycleFocus foc liveSearchScene.focusableOrder
+      match foc.owner with
+      | some wid => visited := visited ++ [wid]
+      | none => throw <| IO.userError "Tab-cycling in live Search modal lost focus"
+    unless visited.contains (liveSearchResultWidgetId 5) && visited.contains (liveSearchResultWidgetId 6) do
+      throw <| IO.userError s!"Tab-cycling in live Search modal did not reach results #5/#6: {repr visited}"
+    let idx4 := visited.findIdx? (· == liveSearchResultWidgetId 4)
+    let idx5 := visited.findIdx? (· == liveSearchResultWidgetId 5)
+    let idx6 := visited.findIdx? (· == liveSearchResultWidgetId 6)
+    unless idx4.isSome && idx5 == idx4.map (· + 1) && idx6 == idx5.map (· + 1) do
+      throw <| IO.userError s!"Tab order across live Search results #4/#5/#6 was broken: {repr visited}"
+    -- Clicking result #5 (10005) selects index 5 (does not trigger searchClearId/searchEscId), and second click opens m5.
+    let typedSearch := (stepDesktopEvent 120 vpDev liveSearchSt (.text "Live")).1
+    let clicked5 := (stepDesktopEvent 120 vpDev typedSearch (.activate (liveSearchResultWidgetId 5))).1
+    match clicked5.modal with
+    | .searchPalette spec5 =>
+      unless spec5.selectedIdx == 5 && spec5.query == "Live" do
+        throw <| IO.userError s!"clicking result #5 must select index 5 without clearing query, got {repr spec5.selectedIdx} / {repr spec5.query}"
+    | _ => throw <| IO.userError "clicking result #5 once closed Search modal prematurely"
+    let opened5 := (stepDesktopEvent 120 vpDev clicked5 (.activate (liveSearchResultWidgetId 5))).1
+    unless opened5.modal == .none && opened5.screen == .missionTranscript && opened5.openMission == some "m5" do
+      throw <| IO.userError s!"second click on result #5 failed to open m5: screen={repr opened5.screen}, openMission={repr opened5.openMission}"
+    -- ArrowDown to result #7 (index 7 -> 10007) scrolls window and activates m7 cleanly.
+    let mut scrolled := liveSearchSt
+    for _ in List.range 7 do
+      scrolled := (stepDesktopEvent 120 vpDev scrolled (.key 0xff54 0 .pressed)).1
+    assertHitTargets "live_search_8_missions_scrolled" scrolled
+      [701, searchClearId, searchEscId, searchOpenId, liveSearchResultWidgetId 5, liveSearchResultWidgetId 6, liveSearchResultWidgetId 7]
+    let opened7 := (stepDesktopEvent 120 vpDev scrolled (.activate (liveSearchResultWidgetId 7))).1
+    unless opened7.modal == .none && opened7.screen == .missionTranscript && opened7.openMission == some "m7" do
+      throw <| IO.userError "clicking selected result #7 failed to open m7"
+    -- searchClearId (706) and searchEscId (707) still function cleanly with 8 live missions.
+    let cleared := (stepDesktopEvent 120 vpDev typedSearch (.activate searchClearId)).1
+    match cleared.modal with
+    | .searchPalette specClr =>
+      unless specClr.query == "" do throw <| IO.userError "searchClearId failed to clear live Search query"
+    | _ => throw <| IO.userError "searchClearId unexpectedly closed Search modal"
+    let escaped := (stepDesktopEvent 120 vpDev cleared (.activate searchEscId)).1
+    unless escaped.modal == .none do
+      throw <| IO.userError "searchEscId failed to close live Search modal"
+  | _ => throw <| IO.userError "Ctrl+K did not open live Search modal"
+
+  -- Review Blocker 2: Embedded GTK hybrid sidebar emits toolbar IDs 117..120 (not 351..353),
+  -- while standalone sidebar emits 117 and 351..353.
+  let embSt : DesktopState := {
+    DesktopState.liveUnavailable with
+    sidebarRows := [
+      { widgetId := 1000, rowId := "nav:new", kind := "nav", title := "New Agent", selected := true },
+      { widgetId := 1001, rowId := "nav:settings", kind := "footer", title := "Settings" }
+    ]
+  }
+  let embRoot := buildSidebarChrome embSt vpH (width := chromeSidebarWidthSub) (embedded := true)
+  let (_, embScene) := renderWidgetTree 120 chromeSidebarWidthSub vpH {} embSt.theme embRoot
+  let embHitDups := findDuplicates (embScene.hitRegionsSub.map (·.1))
+  unless embHitDups.isEmpty do
+    throw <| IO.userError s!"embedded sidebar has duplicate hit IDs: {repr embHitDups}"
+  for tid in ([117, 118, 119, 120] : List WidgetId) do
+    let some (_, r) := embScene.hitRegionsSub.find? (·.1 == tid)
+      | throw <| IO.userError s!"embedded sidebar missing toolbar hit region {tid}"
+    unless r.w > 0 && r.h > 0 && hitTest embScene.hitRegionsSub (r.x + r.w / 2) (r.y + r.h / 2) == some tid do
+      throw <| IO.userError s!"embedded sidebar toolbar hit region {tid} failed center hit-test: {repr r}"
+  for standaloneId in ([sidebarSearchId, sidebarBackId, sidebarForwardId] : List WidgetId) do
+    if embScene.hitRegionsSub.any (·.1 == standaloneId) then
+      throw <| IO.userError s!"embedded sidebar must not emit standalone toolbar ID {standaloneId}"
+
+  -- Review Minor 4: measurePrependedHeightDelta accounts for narrowed leftW when sidePanelOpen is true.
+  let narrowVp : Rect := { x := 0, y := 0, w := 1200, h := 923 }
+  let longTurn := String.intercalate " " (List.replicate 20 "**segment** plain")
+  let txClosed : DesktopState := {
+    DesktopState.liveUnavailable with
+    screen := .missionTranscript
+    connectionBinding := "u6-live"
+    openMission := some "m1"
+    sidePanelOpen := false
+  }
+  let txOpen : DesktopState := { txClosed with sidePanelOpen := true, sidePanelTab := "diff" }
+  let deltaClosed := measurePrependedHeightDelta txClosed 120 narrowVp [longTurn] false false
+  let deltaOpen := measurePrependedHeightDelta txOpen 120 narrowVp [longTurn] false false
+  unless deltaOpen > deltaClosed do
+    throw <| IO.userError s!"measurePrependedHeightDelta with sidePanelOpen=true ({deltaOpen}) must exceed sidePanelOpen=false ({deltaClosed}) for wrapping text"
+  let mainW1200 : SubPx := pxToSub 1200 - txOpen.sidebarWidth
+  let leftW1200 : SubPx := mainW1200 - min (pxToSub 480) (mainW1200 / 2)
+  let colW1200 : SubPx := min (pxToSub 748) (leftW1200 - pxToSub 48)
+  let (expectedRows, _) := buildLiveTurnsNodes txOpen.theme colW1200 (transcriptTextWidth leftW1200) [longTurn]
+  let expectedDelta : Int := expectedRows.foldl (fun acc row =>
+    let (_, rowH) := measureNode leftW1200 row.toLayoutNode
+    acc + (rowH : Int) + (transcriptColumnGapSub : Int)) 0
+  unless deltaOpen == expectedDelta do
+    throw <| IO.userError s!"measurePrependedHeightDelta sidePanelOpen mismatch: got {deltaOpen}, expected {expectedDelta}"
+
 def main : IO UInt32 := do
   verifyOrbScrollEquivalence
   verifyNineScreenControls

@@ -366,6 +366,9 @@ def buildSidebarChrome (st : DesktopState) (availH : SubPx) (useReferenceTree : 
       WidgetNode.scrollClip (BoxStyle.col 0 |>.withFixedSize innerW rosterH)
         { offsetY := st.rosterTopSub } (WidgetNode.box rosterStyle (navRows ++ treeRows)) (some rosterViewportId) (hitTestable := false)
     else WidgetNode.box (rosterStyle.withFixedSize innerW rosterH) (navRows ++ treeRows)
+  let searchToolId := if embedded then 118 else sidebarSearchId
+  let backToolId := if embedded then 119 else sidebarBackId
+  let forwardToolId := if embedded then 120 else sidebarForwardId
   let tool := fun id name color =>
     WidgetNode.focusable id (chromeIcon name color 14)
   WidgetNode.rrect
@@ -379,10 +382,10 @@ def buildSidebarChrome (st : DesktopState) (availH : SubPx) (useReferenceTree : 
     [ WidgetNode.box (BoxStyle.row 10 |>.withAlign .center
         |>.withPadding (Edges.xy (pxToSub 12) 0) |>.withFixedSize innerW chromeHeaderHeightSub)
         [if st.liveData then sidebarToggle theme else WidgetNode.focusable sidebarToggleId (chromeIcon "sidebar" pal.textMuted 14),
-         WidgetNode.box (BoxStyle.row 0 |>.withMargin (Edges.trbl 0 0 0 (pxToSub 12))) [tool sidebarSearchId "search" pal.textMuted],
+         WidgetNode.box (BoxStyle.row 0 |>.withMargin (Edges.trbl 0 0 0 (pxToSub 12))) [tool searchToolId "search" pal.textMuted],
          WidgetNode.box { BoxStyle.row 0 with grow := 1 } [],
-         tool sidebarBackId "back" pal.textMuted,
-         WidgetNode.box (BoxStyle.row 0 |>.withMargin (Edges.trbl 0 0 0 (pxToSub 12))) [tool sidebarForwardId "forward" pal.textFaint]]
+         tool backToolId "back" pal.textMuted,
+         WidgetNode.box (BoxStyle.row 0 |>.withMargin (Edges.trbl 0 0 0 (pxToSub 12))) [tool forwardToolId "forward" pal.textFaint]]
     , roster
     , WidgetNode.rrect
         (BoxStyle.row 0

@@ -380,6 +380,8 @@ def searchProjectFilterId : WidgetId := 741
 def searchTimeFilterId : WidgetId := 742
 def searchSortOrderId : WidgetId := 743
 def searchDialogCardId : WidgetId := 744
+def liveSearchResultBaseId : WidgetId := 10000
+def liveSearchResultWidgetId (index : Nat) : WidgetId := liveSearchResultBaseId + index
 
 /-- Navigation history entry pairing `ScreenId` with optional selected `missionId`. -/
 structure NavEntry where
@@ -1003,7 +1005,7 @@ def openSearchModal (st : DesktopState) : DesktopState :=
   let items : List SearchItem :=
     if st.liveData then
       st.missionCards.mapIdx fun i card =>
-        { widgetId := 702 + i
+        { widgetId := liveSearchResultWidgetId i
           title := card.title
           subtitle := (if card.project.isEmpty then "default" else card.project) ++ " · " ++ card.status
           category := "Mission"
@@ -1133,7 +1135,10 @@ def stepSearchModal (viewport : Rect) (st : DesktopState) (spec : SearchDialogSp
     | none => closed
     | some item =>
       if st.liveData then
-        let card? := st.missionCards[item.widgetId - 702]?
+        let card? :=
+          if item.widgetId >= liveSearchResultBaseId then
+            st.missionCards[item.widgetId - liveSearchResultBaseId]?
+          else none
         match card? with
         | some card => resetSelection (pushNavScreen closed .missionTranscript (some card.missionId)) (some card)
         | none => closed
@@ -2284,12 +2289,14 @@ def measurePrependedHeightDelta (st : DesktopState) (scale120 : Nat) (viewport :
     (addedTurns : List String) (hadBanner willHaveBanner : Bool) : Int := Id.run do
   let availW : SubPx := (viewport.w.toNat * subPerPx * scaleDen) / max 1 scale120
   let mainW : SubPx := availW - st.sidebarWidth
-  let colW : SubPx := min (pxToSub 748) (mainW - pxToSub 48)
-  let width : SubPx := transcriptTextWidth mainW
+  let transcriptW : SubPx :=
+    if st.sidePanelOpen then mainW - min (pxToSub 480) (mainW / 2) else mainW
+  let colW : SubPx := min (pxToSub 748) (transcriptW - pxToSub 48)
+  let width : SubPx := transcriptTextWidth transcriptW
   let (addedRows, _) := buildLiveTurnsNodes st.theme colW width addedTurns
   let mut delta : Int := 0
   for row in addedRows do
-    let (_, rowH) := measureNode mainW row.toLayoutNode
+    let (_, rowH) := measureNode transcriptW row.toLayoutNode
     delta := delta + (rowH : Int) + (transcriptColumnGapSub : Int)
   let bannerStep : Int := (transcriptHistoryBannerHeightSub : Int) + (transcriptColumnGapSub : Int)
   if !hadBanner && willHaveBanner then

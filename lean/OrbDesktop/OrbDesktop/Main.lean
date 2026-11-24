@@ -317,16 +317,6 @@ def renderDesktopView (rt : Runtime.RuntimeState DesktopState) :
     let outside : Rect := { x := 0, y := 0, w := availW, h := availH }
     return ((ac7.finishUploads, if liveWindow then 0 else pal.canvas, sceneOut.prims ++ overlay.prims,
       (719, outside) :: overlay.hitRegionsSub, overlay.focusableOrder), [])
-  if !st.writeError.isEmpty then
-    let w := min availW (pxToSub 440)
-    let h := pxToSub 40
-    let notice := buildToastWidget theme w { id := 904, kind := .warning, title := st.writeError, dismissButtonId := some 914 }
-    let (ac7, widget) ← shapeWidgetTree ac6 rt.primaryFont rt.monoFont rt.boldFont rt.mediumFont rt.semiboldFont sc notice
-    let box := layoutNode sc rt.focus.owner pal.focusRing (availW - w - pxToSub 8 : Nat)
-      (availH - chromeComposerHeightSub - h - pxToSub 8 : Nat) w h widget.toLayoutNode
-    let overlay := buildSceneFromLayout sc rt.focus theme widget box (recordNodes := false)
-    return ((ac7.finishUploads, if liveWindow then 0 else pal.canvas, sceneOut.prims ++ overlay.prims,
-      sceneOut.hitRegionsSub ++ overlay.hitRegionsSub, sceneOut.focusableOrder ++ overlay.focusableOrder), scrollRegionsOf rootBox)
   if let .searchPalette spec := st.modal then
     let overRaw := buildSearchModalOverlay theme availW availH spec st.searchFilterTab
       st.searchProjectFilter st.searchTimeFilter st.searchSortOrder (!st.liveData)
@@ -337,6 +327,16 @@ def renderDesktopView (rt : Runtime.RuntimeState DesktopState) :
     let outside : Rect := { x := 0, y := 0, w := availW, h := availH }
     return ((ac7.finishUploads, clearColor, sceneOut.prims ++ #[.backdropBlur (scaleSubPx sc (pxToSub 6))] ++ overScene.prims,
       (searchBackdropId, outside) :: overScene.hitRegionsSub, overScene.focusableOrder), [])
+  if !st.writeError.isEmpty then
+    let w := min availW (pxToSub 440)
+    let h := pxToSub 40
+    let notice := buildToastWidget theme w { id := 904, kind := .warning, title := st.writeError, dismissButtonId := some 914 }
+    let (ac7, widget) ← shapeWidgetTree ac6 rt.primaryFont rt.monoFont rt.boldFont rt.mediumFont rt.semiboldFont sc notice
+    let box := layoutNode sc rt.focus.owner pal.focusRing (availW - w - pxToSub 8 : Nat)
+      (availH - chromeComposerHeightSub - h - pxToSub 8 : Nat) w h widget.toLayoutNode
+    let overlay := buildSceneFromLayout sc rt.focus theme widget box (recordNodes := false)
+    return ((ac7.finishUploads, if liveWindow then 0 else pal.canvas, sceneOut.prims ++ overlay.prims,
+      sceneOut.hitRegionsSub ++ overlay.hitRegionsSub, sceneOut.focusableOrder ++ overlay.focusableOrder), scrollRegionsOf rootBox)
   else
     let clearColor := if liveWindow then 0x00000000 else pal.canvas
     return ((ac6.finishUploads, clearColor, sceneOut.prims, sceneOut.hitRegionsSub, sceneOut.focusableOrder),
