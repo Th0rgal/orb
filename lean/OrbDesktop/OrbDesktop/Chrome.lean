@@ -364,11 +364,10 @@ def buildSidebarChrome (st : DesktopState) (availH : SubPx) (useReferenceTree : 
     |>.withPadding (Edges.trbl 0 (pxToSub 6) (pxToSub 12) (pxToSub 6))
   let roster := if st.liveData then
       WidgetNode.scrollClip (BoxStyle.col 0 |>.withFixedSize innerW rosterH)
-        { offsetY := st.rosterTopSub } (WidgetNode.box rosterStyle (navRows ++ treeRows)) (some rosterViewportId)
+        { offsetY := st.rosterTopSub } (WidgetNode.box rosterStyle (navRows ++ treeRows)) (some rosterViewportId) (hitTestable := false)
     else WidgetNode.box (rosterStyle.withFixedSize innerW rosterH) (navRows ++ treeRows)
   let tool := fun id name color =>
-    let icon := chromeIcon name color 14
-    if embedded then WidgetNode.focusable id icon else icon
+    WidgetNode.focusable id (chromeIcon name color 14)
   WidgetNode.rrect
     (BoxStyle.col 0
       |>.withPadding (Edges.trbl 0 rightBorder 0 0)
@@ -379,11 +378,11 @@ def buildSidebarChrome (st : DesktopState) (availH : SubPx) (useReferenceTree : 
      else { widths := Edges.trbl 0 rightBorder 0 0, color := pal.borderSubtle })
     [ WidgetNode.box (BoxStyle.row 10 |>.withAlign .center
         |>.withPadding (Edges.xy (pxToSub 12) 0) |>.withFixedSize innerW chromeHeaderHeightSub)
-        [if st.liveData then sidebarToggle theme else chromeIcon "sidebar" pal.textMuted 14,
-         WidgetNode.box (BoxStyle.row 0 |>.withMargin (Edges.trbl 0 0 0 (pxToSub 12))) [tool 118 "search" pal.textMuted],
+        [if st.liveData then sidebarToggle theme else WidgetNode.focusable sidebarToggleId (chromeIcon "sidebar" pal.textMuted 14),
+         WidgetNode.box (BoxStyle.row 0 |>.withMargin (Edges.trbl 0 0 0 (pxToSub 12))) [tool sidebarSearchId "search" pal.textMuted],
          WidgetNode.box { BoxStyle.row 0 with grow := 1 } [],
-         tool 119 "back" pal.textMuted,
-         WidgetNode.box (BoxStyle.row 0 |>.withMargin (Edges.trbl 0 0 0 (pxToSub 12))) [tool 120 "forward" pal.textFaint]]
+         tool sidebarBackId "back" pal.textMuted,
+         WidgetNode.box (BoxStyle.row 0 |>.withMargin (Edges.trbl 0 0 0 (pxToSub 12))) [tool sidebarForwardId "forward" pal.textFaint]]
     , roster
     , WidgetNode.rrect
         (BoxStyle.row 0
@@ -410,20 +409,40 @@ def buildHeaderChrome (st : DesktopState) (mainW : SubPx)
     match st.screen with
     | .missionTranscript | .missionSplitDiff => pxToSub 7
     | _ => 0
-  let rightButtons : List WidgetNode := if st.liveData then [] else
+  let rightButtons : List WidgetNode :=
     match st.screen with
     | .missionTranscript | .missionSplitDiff =>
-      let mutedSt : TextStyle := { (Theme.mutedText theme) with sizeSub := pxToSub 12, lineHeightSub := pxToSub 16 }
-      [ WidgetNode.box
-          (BoxStyle.row (pxToSub 14) |>.withAlign .center |>.withFixedSize (pxToSub 122) (pxToSub 26))
-          [ WidgetNode.rrect
-              (BoxStyle.row (pxToSub 5) |>.withAlign .center |>.withJustify .center |>.withFixedSize (pxToSub 54) (pxToSub 26))
-              0 (CornerRadii.uniform (pxToSub 13)) (BorderStyle.uniform theme.borderWidth pal.borderSubtle)
-              [chromeIcon "list" pal.textMuted 12, chromeLabel (pxToSub 16) [overlaySynthRun mutedSt "20"]]
-          , chromeIcon "file" pal.textSecondary 14
-          , chromeIcon "chat" pal.textSecondary 14
-          ]
-      ]
+      if st.liveData then
+        let panelBtn (id : WidgetId) (icon : String) (active : Bool) : WidgetNode :=
+          WidgetNode.focusable id <|
+            WidgetNode.rrect
+              (BoxStyle.row 0 |>.withAlign .center |>.withJustify .center |>.withFixedSize (pxToSub 26) (pxToSub 26))
+              (if active then pal.rowActive else 0)
+              (CornerRadii.uniform (pxToSub 6))
+              BorderStyle.none
+              [chromeIcon icon (if active then pal.textPrimary else pal.textSecondary) 14]
+              (some id)
+        [ WidgetNode.box
+            (BoxStyle.row (pxToSub 6) |>.withAlign .center |>.withFixedSize (pxToSub 90) (pxToSub 26))
+            [ panelBtn sidePanelDiffId "list" (st.sidePanelOpen && st.sidePanelTab == "diff")
+            , panelBtn sidePanelFilesId "file" (st.sidePanelOpen && st.sidePanelTab == "files")
+            , panelBtn sidePanelChatId "chat" (st.sidePanelOpen && st.sidePanelTab == "chat")
+            ]
+        ]
+      else
+        let mutedSt : TextStyle := { (Theme.mutedText theme) with sizeSub := pxToSub 12, lineHeightSub := pxToSub 16 }
+        [ WidgetNode.box
+            (BoxStyle.row (pxToSub 14) |>.withAlign .center |>.withFixedSize (pxToSub 122) (pxToSub 26))
+            [ WidgetNode.focusable sidePanelDiffId <|
+                WidgetNode.rrect
+                  (BoxStyle.row (pxToSub 5) |>.withAlign .center |>.withJustify .center |>.withFixedSize (pxToSub 54) (pxToSub 26))
+                  0 (CornerRadii.uniform (pxToSub 13)) (BorderStyle.uniform theme.borderWidth pal.borderSubtle)
+                  [chromeIcon "list" pal.textMuted 12, chromeLabel (pxToSub 16) [overlaySynthRun mutedSt "20"]]
+                  (some sidePanelDiffId)
+            , WidgetNode.focusable sidePanelFilesId (chromeIcon "file" pal.textSecondary 14)
+            , WidgetNode.focusable sidePanelChatId (chromeIcon "chat" pal.textSecondary 14)
+            ]
+        ]
     | _ => []
   WidgetNode.rrect
     (BoxStyle.row 0

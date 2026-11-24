@@ -68,30 +68,35 @@ def buildNewAgentBody (st : DesktopState) (mainW bodyH : SubPx) : WidgetNode :=
         |>.withAlign .center
         |>.withPadding (Edges.trbl 0 0 0 (pxToSub 4))
         |>.withFixedSize colW (pxToSub 24))
-       [ WidgetNode.box (BoxStyle.row (pxToSub 4) |>.withAlign .center |>.withFixedSize (pxToSub 60) (pxToSub 24))
-           [screenTextLine theme (pxToSub 46) (pxToSub 18) (pxToSub 13) (pxToSub 18) pal.textSecondary "Default",
-            chromeIcon "chevron-down" pal.textMuted 10]
-        , WidgetNode.box (BoxStyle.row (pxToSub 4) |>.withAlign .center |>.withFixedSize (pxToSub 150) (pxToSub 24))
-            [chromeIcon "server" pal.textMuted 14,
-            screenTextLine theme (pxToSub 112) (pxToSub 18) (pxToSub 13) (pxToSub 18) pal.textSecondary "Core (agent-core)",
-            chromeIcon "chevron-down" pal.textMuted 10]
-        , WidgetNode.box (BoxStyle.row (pxToSub 4) |>.withAlign .center |>.withFixedSize (pxToSub 60) (pxToSub 24))
-            [chromeIcon "folder" pal.textMuted 14,
-            screenTextLine theme (pxToSub 42) (pxToSub 18) (pxToSub 13) (pxToSub 18) pal.textSecondary "Folder"]
+       [ WidgetNode.focusable draftProjectPickerId <|
+           WidgetNode.box (BoxStyle.row (pxToSub 4) |>.withAlign .center |>.withFixedSize (pxToSub 60) (pxToSub 24))
+             [screenTextLine theme (pxToSub 46) (pxToSub 18) (pxToSub 13) (pxToSub 18) pal.textSecondary "Default",
+              chromeIcon "chevron-down" pal.textMuted 10]
+        , WidgetNode.focusable 720 <|
+           WidgetNode.box (BoxStyle.row (pxToSub 4) |>.withAlign .center |>.withFixedSize (pxToSub 150) (pxToSub 24))
+             [chromeIcon "server" pal.textMuted 14,
+             screenTextLine theme (pxToSub 112) (pxToSub 18) (pxToSub 13) (pxToSub 18) pal.textSecondary "Core (agent-core)",
+             chromeIcon "chevron-down" pal.textMuted 10]
+        , WidgetNode.focusable draftDirectoryPickerId <|
+           WidgetNode.box (BoxStyle.row (pxToSub 4) |>.withAlign .center |>.withFixedSize (pxToSub 60) (pxToSub 24))
+             [chromeIcon "folder" pal.textMuted 14,
+             screenTextLine theme (pxToSub 42) (pxToSub 18) (pxToSub 13) (pxToSub 18) pal.textSecondary "Folder"]
       ]
 
   let buttonStyle : BoxStyle :=
     BoxStyle.row 0 |>.withAlign .center |>.withJustify .center
       |>.withFixedSize (pxToSub 24) (pxToSub 24)
   let plusBtn : WidgetNode :=
-    WidgetNode.rrect buttonStyle pal.plusBg (CornerRadii.uniform (pxToSub 12)) BorderStyle.none
-      [chromeIcon "plus" pal.textMuted 16]
+    WidgetNode.focusable 3 <|
+      WidgetNode.rrect buttonStyle pal.plusBg (CornerRadii.uniform (pxToSub 12)) BorderStyle.none
+        [chromeIcon "plus" pal.textMuted 16]
   let sendBtn : WidgetNode :=
-    if hasText then
-      WidgetNode.rrect buttonStyle sendBgCol (CornerRadii.uniform (pxToSub 12)) BorderStyle.none
-        [WidgetNode.rrect (BoxStyle.row 0 |>.withFixedSize (pxToSub 6) (pxToSub 6)) pal.sendFg (CornerRadii.uniform (pxToSub 1))]
-    else
-      WidgetNode.box buttonStyle []
+    WidgetNode.focusable 2 <|
+      if hasText then
+        WidgetNode.rrect buttonStyle sendBgCol (CornerRadii.uniform (pxToSub 12)) BorderStyle.none
+          [WidgetNode.rrect (BoxStyle.row 0 |>.withFixedSize (pxToSub 6) (pxToSub 6)) pal.sendFg (CornerRadii.uniform (pxToSub 1))]
+      else
+        WidgetNode.box buttonStyle []
 
   let bottomRow : WidgetNode :=
     WidgetNode.box
@@ -99,10 +104,11 @@ def buildNewAgentBody (st : DesktopState) (mainW bodyH : SubPx) : WidgetNode :=
         |>.withAlign .center
         |>.withFixedSize (pxToSub 582) (pxToSub 24))
       [ plusBtn
-       , WidgetNode.box (BoxStyle.row (pxToSub 5) |>.withAlign .center
-           |>.withPadding (Edges.xy (pxToSub 4) 0) |>.withFixedSize (pxToSub 518) (pxToSub 24))
-           [screenTextLine theme (pxToSub 151) (pxToSub 18) (pxToSub 13) (pxToSub 18) pal.textMuted "Orb Lorem 4.6 High Fast",
-            chromeIcon "chevron-down" pal.textMuted 12]
+       , WidgetNode.focusable 722 <|
+           WidgetNode.box (BoxStyle.row (pxToSub 5) |>.withAlign .center
+             |>.withPadding (Edges.xy (pxToSub 4) 0) |>.withFixedSize (pxToSub 518) (pxToSub 24))
+             [screenTextLine theme (pxToSub 151) (pxToSub 18) (pxToSub 13) (pxToSub 18) pal.textMuted "Orb Lorem 4.6 High Fast",
+              chromeIcon "chevron-down" pal.textMuted 12]
       , sendBtn
       ]
 
@@ -114,10 +120,11 @@ def buildNewAgentBody (st : DesktopState) (mainW bodyH : SubPx) : WidgetNode :=
       pal.elevatedSurface
       (CornerRadii.uniform (pxToSub 12))
       (BorderStyle.uniform theme.borderWidth bdrCol)
-      [ WidgetNode.box
-           (BoxStyle.col 0 |>.withPadding (Edges.trbl (pxToSub 2) 0 0 (pxToSub 2))
-             |>.withFixedSize (pxToSub 582) (pxToSub 48))
-           [screenTextLine theme (pxToSub 580) (pxToSub 20) (pxToSub 13) (pxToSub 20) txtCol dispText]
+      [ WidgetNode.focusable 1 <|
+          WidgetNode.box
+            (BoxStyle.col 0 |>.withPadding (Edges.trbl (pxToSub 2) 0 0 (pxToSub 2))
+              |>.withFixedSize (pxToSub 582) (pxToSub 48))
+            [screenTextLine theme (pxToSub 580) (pxToSub 20) (pxToSub 13) (pxToSub 20) txtCol dispText]
       , bottomRow
       ]
 
@@ -134,6 +141,10 @@ def buildNewAgentBody (st : DesktopState) (mainW bodyH : SubPx) : WidgetNode :=
         (BoxStyle.col (pxToSub 2) |>.withFixedSize (w - pxToSub 30) (h - pxToSub 18))
         [ screenTextLine theme (w - pxToSub 30) (pxToSub 17) (pxToSub 12) (pxToSub 17) pal.textPrimary t.title 500
         , screenTextLine theme (w - pxToSub 30) (pxToSub 17) (pxToSub 12) (pxToSub 17) pal.textSecondary t.message ]
+    let closeIcon := chromeIcon "close" pal.textMuted 14
+    let closeBtn := match t.dismissButtonId with
+      | some wid => WidgetNode.focusable wid closeIcon
+      | none => closeIcon
     WidgetNode.rrect
       (BoxStyle.row (pxToSub 8)
          |>.withAlign .start |>.withJustify .spaceBetween
@@ -144,20 +155,25 @@ def buildNewAgentBody (st : DesktopState) (mainW bodyH : SubPx) : WidgetNode :=
       (CornerRadii.uniform (pxToSub 8))
       (BorderStyle.uniform theme.borderWidth toastBdr)
       [ textCol
-      , chromeIcon "close" pal.textMuted 14 ]
+      , closeBtn ]
+
+  let toastDims (t : ToastSpec) : SubPx × SubPx :=
+    match t.id with
+    | 901 => (pxToSub 569, pxToSub 54)
+    | 902 => (pxToSub 351, pxToSub 54)
+    | _   => (pxToSub 608, pxToSub 58)
 
   let toastRegion : List WidgetNode :=
-    match st.toasts with
-    | [t1, t2, t3] =>
+    if st.toasts.isEmpty then []
+    else
+      let cards := st.toasts.map fun t =>
+        let (tw, th) := toastDims t
+        toastCard tw th t
       [ WidgetNode.box (BoxStyle.col 0 |>.withFixedSize colW (pxToSub 212)) []
       , WidgetNode.box
           (BoxStyle.col (pxToSub 8) |>.withAlign .center |>.withFixedSize colW (pxToSub 181))
-          [ toastCard (pxToSub 569) (pxToSub 54) t1
-          , toastCard (pxToSub 351) (pxToSub 54) t2
-          , toastCard (pxToSub 608) (pxToSub 58) t3
-          ]
+          cards
       ]
-    | _ => []
 
   WidgetNode.box
     (BoxStyle.col 0
@@ -366,15 +382,17 @@ def buildMissionTranscriptBody (st : DesktopState) (mainW bodyH : SubPx)
     let child := WidgetNode.box (BoxStyle.col 0 |>.withAlign .center
       |>.withPadding (Edges.trbl (pxToSub 3) 0 0 0)) [column]
     let (_, contentH) := measureNode mainW child.toLayoutNode
-    let offset := if !st.liveData && liveStreamRow.isEmpty then 0 else (st.scroll.onLayout contentH bodyH).topSub
+    let offset := if !st.liveData && liveStreamRow.isEmpty && !st.scrolledManually then 0 else (st.scroll.onLayout contentH bodyH).topSub
     return WidgetNode.scrollClip (BoxStyle.col 0 |>.withFixedSize mainW bodyH |>.withBg pal.canvas)
-      { offsetY := offset } child (some transcriptViewportId)
+      { offsetY := offset } child (some transcriptViewportId) (hitTestable := false)
 
 /-! ## 4. `04_mission_split_diff` (`/?screen=mission&id=m-diff&mode=split`) -/
 
 /-- Build the right-hand diff viewer pane (`562 x 888`) for `04_mission_split_diff`. -/
 def buildSplitDiffRightPane (theme : Theme) (paneW paneH : SubPx)
-    (delRuns : List InlineRun := []) (addRuns : List InlineRun := []) : WidgetNode :=
+    (delRuns : List InlineRun := []) (addRuns : List InlineRun := [])
+    (diffMode : String := "split") (diffRef : String := "Working tree vs HEAD")
+    (showClose : Bool := false) : WidgetNode :=
   let pal := theme.palette
   let bdr := theme.borderWidth
   let cardW := paneW - pxToSub 24
@@ -383,6 +401,7 @@ def buildSplitDiffRightPane (theme : Theme) (paneW paneH : SubPx)
   let hunkBg : Color := if theme.isDark then 0x252525FF else 0xEAE9E5FF
   let delRowBg : Color := if theme.isDark then 0x3B2C2EFF else 0xEAD6D6FF
   let addRowBg : Color := if theme.isDark then 0x223126FF else 0xD7E6D8FF
+  let isUnified := diffMode == "unified"
 
   let toolbar : WidgetNode :=
     WidgetNode.rrect
@@ -393,26 +412,38 @@ def buildSplitDiffRightPane (theme : Theme) (paneW paneH : SubPx)
       0x00000000
       CornerRadii.zero
       { widths := Edges.trbl 0 0 bdr 0, color := pal.borderSubtle }
-      [ WidgetNode.rrect
-          (BoxStyle.row 0 |>.withAlign .center |>.withPadding (Edges.xy (pxToSub 10) 0) |>.withFixedSize (pxToSub 158) (pxToSub 26))
-          pal.elevatedSurface (CornerRadii.uniform (pxToSub 6)) (BorderStyle.uniform bdr pal.border)
-          [screenTextLine theme (pxToSub 136) (pxToSub 16) (pxToSub 12) (pxToSub 16) pal.textPrimary "Working tree vs HEAD"]
+      ([ WidgetNode.focusable diffRefId <|
+           WidgetNode.rrect
+             (BoxStyle.row 0 |>.withAlign .center |>.withPadding (Edges.xy (pxToSub 10) 0) |>.withFixedSize (pxToSub 158) (pxToSub 26))
+             pal.elevatedSurface (CornerRadii.uniform (pxToSub 6)) (BorderStyle.uniform bdr pal.border)
+             [screenTextLine theme (pxToSub 136) (pxToSub 16) (pxToSub 12) (pxToSub 16) pal.textPrimary diffRef]
       , WidgetNode.rrect
           (BoxStyle.row 0 |>.withAlign .center |>.withFixedSize (pxToSub 100) (pxToSub 25))
           0x00000000 (CornerRadii.uniform (pxToSub 6)) (BorderStyle.uniform bdr pal.border)
-          [ WidgetNode.box (BoxStyle.row 0 |>.withAlign .center |>.withJustify .center |>.withFixedSize (pxToSub 57) (pxToSub 23))
-              [screenTextLine theme (pxToSub 44) (pxToSub 16) (pxToSub 12) (pxToSub 16) pal.textPrimary "Unified"]
-          , WidgetNode.rrect (BoxStyle.row 0 |>.withAlign .center |>.withJustify .center |>.withFixedSize (pxToSub 41) (pxToSub 23))
-              pal.elevatedSurface CornerRadii.zero BorderStyle.none
-              [screenTextLine theme (pxToSub 30) (pxToSub 16) (pxToSub 12) (pxToSub 16) pal.textStrong "Split" 500]
+          [ WidgetNode.focusable diffUnifiedId <|
+              WidgetNode.rrect (BoxStyle.row 0 |>.withAlign .center |>.withJustify .center |>.withFixedSize (pxToSub 57) (pxToSub 23))
+                (if isUnified then pal.elevatedSurface else 0x00000000) CornerRadii.zero BorderStyle.none
+                [screenTextLine theme (pxToSub 44) (pxToSub 16) (pxToSub 12) (pxToSub 16) (if isUnified then pal.textStrong else pal.textPrimary) "Unified" (if isUnified then 500 else 400)]
+          , WidgetNode.focusable diffSplitId <|
+              WidgetNode.rrect (BoxStyle.row 0 |>.withAlign .center |>.withJustify .center |>.withFixedSize (pxToSub 41) (pxToSub 23))
+                (if isUnified then 0x00000000 else pal.elevatedSurface) CornerRadii.zero BorderStyle.none
+                [screenTextLine theme (pxToSub 30) (pxToSub 16) (pxToSub 12) (pxToSub 16) (if isUnified then pal.textPrimary else pal.textStrong) "Split" (if isUnified then 400 else 500)]
           ]
-      , WidgetNode.rrect
-          (BoxStyle.row 0 |>.withAlign .center |>.withJustify .center |>.withFixedSize (pxToSub 70) (pxToSub 28))
-          0x00000000 (CornerRadii.uniform (pxToSub 6)) (BorderStyle.uniform bdr pal.borderSubtle)
-          [screenTextLine theme (pxToSub 50) (pxToSub 16) (pxToSub 13) (pxToSub 16) pal.textSecondary "Refresh" 500]
-      , WidgetNode.box (BoxStyle.row 0 |>.withFixedSize (pxToSub 110) (pxToSub 16)) []
-      , screenTextLine theme (pxToSub 68) (pxToSub 16) (pxToSub 12) (pxToSub 16) pal.textPrimary "1 file +1 -1"
-      ]
+      , WidgetNode.focusable diffRefreshId <|
+          WidgetNode.rrect
+            (BoxStyle.row 0 |>.withAlign .center |>.withJustify .center |>.withFixedSize (pxToSub 70) (pxToSub 28))
+            0x00000000 (CornerRadii.uniform (pxToSub 6)) (BorderStyle.uniform bdr pal.borderSubtle)
+            [screenTextLine theme (pxToSub 50) (pxToSub 16) (pxToSub 13) (pxToSub 16) pal.textSecondary "Refresh" 500]
+      ] ++ (if showClose then
+          [ WidgetNode.box { BoxStyle.row 0 with grow := 1 } []
+          , WidgetNode.focusable sidePanelCloseId <|
+              WidgetNode.box (BoxStyle.row 0 |>.withAlign .center |>.withJustify .center |>.withFixedSize (pxToSub 24) (pxToSub 24))
+                [chromeIcon "close" pal.textMuted 14]
+          ]
+        else
+          [ WidgetNode.box (BoxStyle.row 0 |>.withFixedSize (pxToSub 110) (pxToSub 16)) []
+          , screenTextLine theme (pxToSub 68) (pxToSub 16) (pxToSub 12) (pxToSub 16) pal.textPrimary "1 file +1 -1"
+          ]))
 
   let filesBar : WidgetNode :=
     WidgetNode.rrect
@@ -423,16 +454,17 @@ def buildSplitDiffRightPane (theme : Theme) (paneW paneH : SubPx)
       0x00000000
       CornerRadii.zero
       { widths := Edges.trbl 0 0 bdr 0, color := pal.borderSubtle }
-      [ WidgetNode.rrect
-          (BoxStyle.row (pxToSub 6)
-            |>.withAlign .center
-            |>.withPadding (Edges.xy (pxToSub 8) (pxToSub 4))
-            |>.withFixedSize (pxToSub 229) (pxToSub 24))
-          pal.elevatedSurface
-          (CornerRadii.uniform (pxToSub 6))
-          (BorderStyle.uniform bdr pal.border)
-          [ screenTextLine theme (pxToSub 210) (pxToSub 16) (pxToSub 12) (pxToSub 16) pal.textPrimary
-               "M  lean/OrbDesktop/OrbDesktop/Main.lean  +1 -1" ]
+      [ WidgetNode.focusable diffFileChipId <|
+          WidgetNode.rrect
+            (BoxStyle.row (pxToSub 6)
+              |>.withAlign .center
+              |>.withPadding (Edges.xy (pxToSub 8) (pxToSub 4))
+              |>.withFixedSize (pxToSub 229) (pxToSub 24))
+            pal.elevatedSurface
+            (CornerRadii.uniform (pxToSub 6))
+            (BorderStyle.uniform bdr pal.border)
+            [ screenTextLine theme (pxToSub 210) (pxToSub 16) (pxToSub 12) (pxToSub 16) pal.textPrimary
+                 "M  lean/OrbDesktop/OrbDesktop/Main.lean  +1 -1" ]
       ]
 
   let shapedCodeLine (w h : SubPx) (fallback : String) (runs : List InlineRun) : WidgetNode :=
@@ -546,7 +578,7 @@ def buildMachinesFleetBody (st : DesktopState) (mainW bodyH : SubPx) : WidgetNod
       pal.elevatedSurface
       (CornerRadii.uniform (pxToSub 10))
       (BorderStyle.uniform bdr pal.borderSubtle)
-      [buildMachineRow theme rowW (pxToSub 60) "This Mac" "Available in the Orb desktop app" "" false]
+      [WidgetNode.focusable fleetLocalId <| buildMachineRow theme rowW (pxToSub 60) "This Mac" "Available in the Orb desktop app" "" false]
 
   let groupBg : Color := if theme.isDark then 0x242424FF else 0xEDECE9FF
   let groupBar : WidgetNode :=
@@ -569,26 +601,27 @@ def buildMachinesFleetBody (st : DesktopState) (mainW bodyH : SubPx) : WidgetNod
       pal.elevatedSurface
       (CornerRadii.uniform (pxToSub 10))
       (BorderStyle.uniform bdr pal.borderSubtle)
-      [ buildMachineRow theme rowW (pxToSub 61) "Core" "Connecting · Control plane" "" true
-      , buildMachineRow theme rowW (pxToSub 61) "orb-core-primary" "online" "3 active" true
+      [ WidgetNode.focusable fleetCoreId <| buildMachineRow theme rowW (pxToSub 61) "Core" "Connecting · Control plane" "" true
+      , WidgetNode.focusable fleetPrimaryId <| buildMachineRow theme rowW (pxToSub 61) "orb-core-primary" "online" "3 active" true
       , groupBar
-      , buildMachineRow theme rowW (pxToSub 61) "large-a   Managed" "online · 8 vCPU · 16 GB" "2 active" true
-      , buildMachineRow theme rowW (pxToSub 60) "default-b   Managed" "online · 4 vCPU · 8 GB" "1 active" false
+      , WidgetNode.focusable fleetLargeAId <| buildMachineRow theme rowW (pxToSub 61) "large-a   Managed" "online · 8 vCPU · 16 GB" "2 active" true
+      , WidgetNode.focusable fleetDefaultBId <| buildMachineRow theme rowW (pxToSub 60) "default-b   Managed" "online · 4 vCPU · 8 GB" "1 active" false
       ]
 
   let swCard : WidgetNode :=
-    WidgetNode.rrect
-      (BoxStyle.row 0
-        |>.withAlign .center
-        |>.withJustify .spaceBetween
-        |>.withPadding (Edges.xy (pxToSub 15) 0)
-        |>.withFixedSize colW (pxToSub 44))
-      pal.elevatedSurface
-      (CornerRadii.uniform (pxToSub 10))
-      (BorderStyle.uniform bdr pal.borderSubtle)
-      [ screenTextLine theme (pxToSub 200) (pxToSub 18) (pxToSub 13) (pxToSub 18) pal.textPrimary "Agent software"
-      , screenTextLine theme (pxToSub 16) (pxToSub 18) (pxToSub 14) (pxToSub 18) pal.textFaint "›"
-      ]
+    WidgetNode.focusable fleetSoftwareId <|
+      WidgetNode.rrect
+        (BoxStyle.row 0
+          |>.withAlign .center
+          |>.withJustify .spaceBetween
+          |>.withPadding (Edges.xy (pxToSub 15) 0)
+          |>.withFixedSize colW (pxToSub 44))
+        pal.elevatedSurface
+        (CornerRadii.uniform (pxToSub 10))
+        (BorderStyle.uniform bdr pal.borderSubtle)
+        [ screenTextLine theme (pxToSub 200) (pxToSub 18) (pxToSub 13) (pxToSub 18) pal.textPrimary "Agent software"
+        , screenTextLine theme (pxToSub 16) (pxToSub 18) (pxToSub 14) (pxToSub 18) pal.textFaint "›"
+        ]
 
   let keyCard : WidgetNode :=
     WidgetNode.rrect
@@ -605,12 +638,13 @@ def buildMachinesFleetBody (st : DesktopState) (mainW bodyH : SubPx) : WidgetNod
           [ screenTextLine theme (pxToSub 480) (pxToSub 18) (pxToSub 13) (pxToSub 18) pal.textPrimary "Paloma public key"
           , screenTextLine theme (pxToSub 480) (pxToSub 17) (pxToSub 12) (pxToSub 17) pal.textSecondary "Couldn't read ~/.ssh/paloma.pub" 400 true
           ]
-      , WidgetNode.rrect
-          (BoxStyle.row 0 |>.withAlign .center |>.withJustify .center |>.withFixedSize (pxToSub 55) (pxToSub 28))
-          0x00000000
-          (CornerRadii.uniform (pxToSub 6))
-          (BorderStyle.uniform bdr pal.border)
-          [screenTextLine theme (pxToSub 36) (pxToSub 16) (pxToSub 13) (pxToSub 16) pal.textSecondary "Copy" 500]
+      , WidgetNode.focusable fleetCopyKeyId <|
+          WidgetNode.rrect
+            (BoxStyle.row 0 |>.withAlign .center |>.withJustify .center |>.withFixedSize (pxToSub 55) (pxToSub 28))
+            0x00000000
+            (CornerRadii.uniform (pxToSub 6))
+            (BorderStyle.uniform bdr pal.border)
+            [screenTextLine theme (pxToSub 36) (pxToSub 16) (pxToSub 13) (pxToSub 16) pal.textSecondary "Copy" 500]
       ]
 
   let innerCol : WidgetNode :=
@@ -643,23 +677,27 @@ def buildMachinesFleetBody (st : DesktopState) (mainW bodyH : SubPx) : WidgetNod
 /-- Build one `.s-row` inside a Settings `.s-card`. -/
 def buildSettingsRow (theme : Theme) (rowW h : SubPx) (title desc rightLabel : String)
     (isButton : Bool := false) (isCode : Bool := false) (hasBottomBorder : Bool := false)
-    (isInput : Bool := false) (isSelect : Bool := false) : WidgetNode :=
+    (isInput : Bool := false) (isSelect : Bool := false) (controlId : Option WidgetId := none) : WidgetNode :=
   let pal := theme.palette
   let bdr := theme.borderWidth
   let inputBg : Color := if theme.isDark then 0x202020FF else 0xFFFFFFFF
   let inputBdr : Color := if theme.isDark then 0x333333FF else 0xD8D8D8FF
   let labelW := rowW - pxToSub (if isInput then 276 else if isSelect then 96 else 148)
   let descH := pxToSub (if desc.contains '\n' then 34 else 17)
+  let wrapCtrl (n : WidgetNode) : WidgetNode :=
+    match controlId with
+    | some cid => WidgetNode.focusable cid n
+    | none => n
   let rightNode : WidgetNode :=
     if isInput then
-      WidgetNode.rrect
+      wrapCtrl <| WidgetNode.rrect
         (BoxStyle.row 0 |>.withAlign .center |>.withPadding (Edges.xy (pxToSub 10) 0) |>.withFixedSize (pxToSub 260) (pxToSub 32))
         inputBg
         (CornerRadii.uniform (pxToSub 6))
         (BorderStyle.uniform bdr inputBdr)
         [screenTextLine theme (pxToSub 240) (pxToSub 16) (pxToSub 12) (pxToSub 16) pal.textPrimary rightLabel]
     else if isSelect then
-      WidgetNode.rrect
+      wrapCtrl <| WidgetNode.rrect
         (BoxStyle.row 0 |>.withAlign .center |>.withPadding (Edges.xy (pxToSub 10) 0) |>.withFixedSize (pxToSub 80) (pxToSub 32))
         inputBg
         (CornerRadii.uniform (pxToSub 6))
@@ -669,7 +707,7 @@ def buildSettingsRow (theme : Theme) (rowW h : SubPx) (title desc rightLabel : S
       WidgetNode.box (BoxStyle.row 0 |>.withFixedSize (pxToSub 10) (pxToSub 16)) []
     else if isButton then
       let bw := pxToSub (max 88 (rightLabel.length * 8 + 20))
-      WidgetNode.rrect
+      wrapCtrl <| WidgetNode.rrect
         (BoxStyle.row 0 |>.withAlign .center |>.withJustify .center |>.withFixedSize bw (pxToSub 28))
         0x00000000
         (CornerRadii.uniform (pxToSub 6))
@@ -744,7 +782,7 @@ private def routeSettingsBody (st : DesktopState) (page : AccountRoutePage) (hov
   let content := WidgetNode.box (BoxStyle.col (pxToSub 4) |>.withAlign .center)
     ([back, heading] ++ status ++ (if options.isEmpty then [] else [card]))
   return WidgetNode.scrollClip (BoxStyle.col 0 |>.withFixedSize width height)
-    { offsetY := st.fleetTopSub } content (some fleetViewportId)
+    { offsetY := st.fleetTopSub } content (some fleetViewportId) (hitTestable := false)
 
 /-- Give long inventories their full scroll extent while shaping only visible rows. -/
 private def buildLiveInventory (st : DesktopState) (hover : Option WidgetId) (width height : SubPx) : WidgetNode := Id.run do
@@ -779,13 +817,14 @@ private def buildLiveInventory (st : DesktopState) (hover : Option WidgetId) (wi
         [inventoryTarget theme hover id primaryW rowH (buildMachineRow theme primaryW rowH account.name detail preference true false),
          inventoryTarget theme hover (providerSettingsId (first + i)) settingsW rowH
            (screenTextLine theme settingsW (pxToSub 20) (pxToSub 13) (pxToSub 20) theme.palette.textSecondary "Settings ›")]
-    else ((st.fleetMachines.drop first).take limit).map fun m =>
+    else ((st.fleetMachines.drop first).take limit).mapIdx fun i m =>
       let detail := String.intercalate " · " ([m.roleLabel, m.cpuRamSpec].filter (!·.isEmpty))
-      buildMachineRow theme colW rowH (if m.name.isEmpty then m.machineId else m.name) detail m.state true false
+      let row := buildMachineRow theme colW rowH (if m.name.isEmpty then m.machineId else m.name) detail m.state true false
+      inventoryTarget theme hover (liveMachineWidgetId (first + i)) colW rowH row
   let content := WidgetNode.box (BoxStyle.col 0 |>.withAlign .center)
     ([spacer first] ++ rows ++ [spacer (count - first - rows.length)])
   return WidgetNode.scrollClip (BoxStyle.col 0 |>.withFixedSize width height)
-    { offsetY := top } content (some fleetViewportId)
+    { offsetY := top } content (some fleetViewportId) (hitTestable := false)
 
 /-- Build the Settings (`Account` tab) screen (`06_settings_general`) matching the `600 px` SolidJS column. -/
 def buildSettingsGeneralBody (st : DesktopState) (mainW bodyH : SubPx) : WidgetNode :=
@@ -807,6 +846,16 @@ def buildSettingsGeneralBody (st : DesktopState) (mainW bodyH : SubPx) : WidgetN
       rows
 
   let tabsBar : WidgetNode :=
+    let tabNode (id : WidgetId) (w : SubPx) (label : String) : WidgetNode :=
+      let active := st.settingsTab == label
+      WidgetNode.focusable id <|
+        if active then
+          WidgetNode.rrect
+            (BoxStyle.row 0 |>.withAlign .center |>.withFixedSize w (pxToSub 30))
+            0x00000000 CornerRadii.zero { widths := Edges.trbl 0 0 bdr 0, color := pal.textPrimary }
+            [screenTextLine theme w (pxToSub 18) (pxToSub 13) (pxToSub 18) pal.textPrimary label]
+        else
+          screenTextLine theme w (pxToSub 18) (pxToSub 13) (pxToSub 18) pal.textMuted label
     WidgetNode.rrect
       (BoxStyle.row (pxToSub 16)
         |>.withAlign .center
@@ -814,12 +863,9 @@ def buildSettingsGeneralBody (st : DesktopState) (mainW bodyH : SubPx) : WidgetN
       0x00000000
       CornerRadii.zero
       { widths := Edges.trbl 0 0 bdr 0, color := pal.borderSubtle }
-      [ WidgetNode.rrect
-          (BoxStyle.row 0 |>.withAlign .center |>.withFixedSize (pxToSub 64) (pxToSub 30))
-          0x00000000 CornerRadii.zero { widths := Edges.trbl 0 0 bdr 0, color := pal.textPrimary }
-          [screenTextLine theme (pxToSub 64) (pxToSub 18) (pxToSub 13) (pxToSub 18) pal.textPrimary "Account"]
-      , screenTextLine theme (pxToSub 48) (pxToSub 18) (pxToSub 13) (pxToSub 18) pal.textMuted "Users"
-      , screenTextLine theme (pxToSub 116) (pxToSub 18) (pxToSub 13) (pxToSub 18) pal.textMuted "Usage telemetry"
+      [ tabNode settingsTabAccountId (pxToSub 64) "Account"
+      , tabNode settingsTabUsersId (pxToSub 48) "Users"
+      , tabNode settingsTabTelemetryId (pxToSub 116) "Usage telemetry"
       ]
 
   let headerBlock : WidgetNode :=
@@ -838,22 +884,23 @@ def buildSettingsGeneralBody (st : DesktopState) (mainW bodyH : SubPx) : WidgetN
       (BoxStyle.row 0 |>.withPadding (Edges.trbl (pxToSub 26) (pxToSub 8) (pxToSub 8) (pxToSub 8)) |>.withFixedSize colW (pxToSub 51))
       [screenTextLine theme (pxToSub 584) (pxToSub 17) (pxToSub 12) (pxToSub 17) pal.textSecondary txt]
 
+  let apiUrlText := st.settingsApiUrl.text ++ st.settingsApiUrl.imePreeditText
   let backendCard := sCard (pxToSub 125)
-    [ buildSettingsRow theme rowW (pxToSub 63) "API URL" "Base URL of the Core backend." "http://127.0.0.1:14470" false false true true false
-    , buildSettingsRow theme rowW (pxToSub 62) "Connected" "Signed in to http://127.0.0.1:14470." "Disconnect" true false false
+    [ buildSettingsRow theme rowW (pxToSub 63) "API URL" "Base URL of the Core backend." apiUrlText false false true true false (some settingsApiUrlId)
+    , buildSettingsRow theme rowW (pxToSub 62) "Connected" "Signed in to http://127.0.0.1:14470." "Disconnect" true false false false false (some settingsDisconnectId)
     ]
 
   let githubCard := sCard (pxToSub 62)
     [ buildSettingsRow theme rowW (pxToSub 62) "Mission git & gh credentials"
-        "Configure GITHUB_OAUTH_CLIENT_ID on Core to connect." "Connect GitHub" true false false ]
+        "Configure GITHUB_OAUTH_CLIENT_ID on Core to connect." "Connect GitHub" true false false false false (some settingsConnectGhId) ]
 
   let cloudCard := sCard (pxToSub 79)
     [ buildSettingsRow theme rowW (pxToSub 79) "Connected services"
-        "Cloud agents use accounts connected to Core. Connecting an account\ndoes not start work." "Refresh accounts" true false false ]
+        "Cloud agents use accounts connected to Core. Connecting an account\ndoes not start work." "Refresh accounts" true false false false false (some settingsRefreshCloudId) ]
 
   let appearCard := sCard (pxToSub 125)
-    [ buildSettingsRow theme rowW (pxToSub 63) "Theme" "Auto follows your desktop appearance." themeLabel false false true false true
-    , buildSettingsRow theme rowW (pxToSub 62) "Background sync" "Active — keeping recent conversations live; pauses automatically on slow links." "Auto" false false false false true
+    [ buildSettingsRow theme rowW (pxToSub 63) "Theme" "Auto follows your desktop appearance." themeLabel false false true false true (some settingsThemeId)
+    , buildSettingsRow theme rowW (pxToSub 62) "Background sync" "Active — keeping recent conversations live; pauses automatically on slow links." st.settingsSyncMode false false false false true (some settingsSyncId)
     ]
 
   let aboutCard := sCard (pxToSub 116)
@@ -890,7 +937,13 @@ def buildSettingsGeneralBody (st : DesktopState) (mainW bodyH : SubPx) : WidgetN
 /-! ## 7. Search Dialog Overlay (`07_search_dialog`) -/
 
 /-- Build the full-window Search Dialog modal overlay (`x=295, y=74, w=880, h=580`) over the backdrop scrim. -/
-def buildSearchModalOverlay (theme : Theme) (availW availH : SubPx) : WidgetNode :=
+def buildSearchModalOverlay (theme : Theme) (availW availH : SubPx)
+    (spec : SearchDialogSpec := defaultSearchDialogSpec)
+    (filterTab : String := "All")
+    (projectFilter : String := "All projects")
+    (timeFilter : String := "Any time")
+    (sortOrder : String := "Relevance")
+    (useReferenceList : Bool := true) : WidgetNode :=
   let pal := theme.palette
   let bdr := theme.borderWidth
   let scrimCol : Color := if theme.isDark then 0x0000006B else 0x1E1E1C40
@@ -900,6 +953,8 @@ def buildSearchModalOverlay (theme : Theme) (availW availH : SubPx) : WidgetNode
   let dlgW : SubPx := pxToSub 880
   let dlgH : SubPx := pxToSub 580
   let innerW : SubPx := pxToSub 878
+  let queryDisplay := if spec.query.isEmpty then spec.placeholder else spec.query
+  let queryColor := if spec.query.isEmpty then pal.textMuted else pal.textStrong
 
   let searchBar : WidgetNode :=
     WidgetNode.box
@@ -908,15 +963,29 @@ def buildSearchModalOverlay (theme : Theme) (availW availH : SubPx) : WidgetNode
         |>.withPadding (Edges.trbl 0 (pxToSub 14) 0 (pxToSub 16))
         |>.withFixedSize innerW (pxToSub 46))
       [ chromeIcon "search" pal.textSecondary 16
-      , screenTextLine theme (pxToSub 748) (pxToSub 22) (pxToSub 15) (pxToSub 22) pal.textStrong "mission"
-      , WidgetNode.box
-          (BoxStyle.row 0 |>.withAlign .center |>.withJustify .center |>.withFixedSize (pxToSub 22) (pxToSub 22))
-          [chromeIcon "close" pal.textMuted 14]
-      , WidgetNode.rrect
-          (BoxStyle.row 0 |>.withAlign .center |>.withJustify .center |>.withFixedSize (pxToSub 32) (pxToSub 20))
-          0x00000000 (CornerRadii.uniform (pxToSub 4)) (BorderStyle.uniform bdr pal.borderSubtle)
-          [screenTextLine theme (pxToSub 22) (pxToSub 15) (pxToSub 11) (pxToSub 15) pal.textMuted "Esc" 500]
+      , WidgetNode.focusable spec.inputWidgetId <|
+          screenTextLine theme (pxToSub 748) (pxToSub 22) (pxToSub 15) (pxToSub 22) queryColor queryDisplay
+      , WidgetNode.focusable searchClearId <|
+          WidgetNode.box
+            (BoxStyle.row 0 |>.withAlign .center |>.withJustify .center |>.withFixedSize (pxToSub 22) (pxToSub 22))
+            [chromeIcon "close" pal.textMuted 14]
+      , WidgetNode.focusable searchEscId <|
+          WidgetNode.rrect
+            (BoxStyle.row 0 |>.withAlign .center |>.withJustify .center |>.withFixedSize (pxToSub 32) (pxToSub 20))
+            0x00000000 (CornerRadii.uniform (pxToSub 4)) (BorderStyle.uniform bdr pal.borderSubtle)
+            [screenTextLine theme (pxToSub 22) (pxToSub 15) (pxToSub 11) (pxToSub 15) pal.textMuted "Esc" 500]
       ]
+
+  let filterPill (id : WidgetId) (w : Nat) (label : String) : WidgetNode :=
+    let active := filterTab == label
+    WidgetNode.focusable id <|
+      if active then
+        WidgetNode.rrect
+          (BoxStyle.row 0 |>.withAlign .center |>.withJustify .center |>.withFixedSize (pxToSub w) (pxToSub 24))
+          selBg (CornerRadii.uniform (pxToSub 6)) BorderStyle.none
+          [screenTextLine theme (pxToSub (w - 11)) (pxToSub 17) (pxToSub 12) (pxToSub 17) pal.textStrong label 500]
+      else
+        screenTextLine theme (pxToSub w) (pxToSub 17) (pxToSub 12) (pxToSub 17) pal.textMuted label
 
   let toolBar : WidgetNode :=
     WidgetNode.box
@@ -927,21 +996,19 @@ def buildSearchModalOverlay (theme : Theme) (availW availH : SubPx) : WidgetNode
         |>.withFixedSize innerW (pxToSub 34))
       [ WidgetNode.box
           (BoxStyle.row (pxToSub 6) |>.withAlign .center |>.withFixedSize (pxToSub 260) (pxToSub 24))
-          [ WidgetNode.rrect
-              (BoxStyle.row 0 |>.withAlign .center |>.withJustify .center |>.withFixedSize (pxToSub 31) (pxToSub 24))
-              selBg (CornerRadii.uniform (pxToSub 6)) BorderStyle.none
-              [screenTextLine theme (pxToSub 20) (pxToSub 17) (pxToSub 12) (pxToSub 17) pal.textStrong "All" 500]
-          , screenTextLine theme (pxToSub 38) (pxToSub 17) (pxToSub 12) (pxToSub 17) pal.textMuted "User"
-          , screenTextLine theme (pxToSub 64) (pxToSub 17) (pxToSub 12) (pxToSub 17) pal.textMuted "Assistant"
-          , screenTextLine theme (pxToSub 42) (pxToSub 17) (pxToSub 12) (pxToSub 17) pal.textMuted "Titles"
-          , screenTextLine theme (pxToSub 42) (pxToSub 17) (pxToSub 12) (pxToSub 17) pal.textMuted "Tools"
+          [ filterPill searchTabAllId 31 "All"
+          , filterPill searchTabUserId 38 "User"
+          , filterPill searchTabAssistantId 64 "Assistant"
+          , filterPill searchTabTitlesId 42 "Titles"
+          , filterPill searchTabToolsId 42 "Tools"
           ]
       , WidgetNode.box (BoxStyle.row (pxToSub 2) |>.withAlign .center |>.withFixedSize (pxToSub 250) (pxToSub 24))
-          ([ ("All projects", 90), ("Any time", 76), ("Relevance", 80) ].map fun (label, width) =>
-            WidgetNode.box
-              (BoxStyle.row (pxToSub 4) |>.withAlign .center |>.withFixedSize (pxToSub width) (pxToSub 24))
-              [screenTextLine theme (pxToSub (width - 20)) (pxToSub 16) (pxToSub 12) (pxToSub 16) pal.textMuted label,
-               chromeIcon "chevron-down" pal.textMuted 12])
+          ([ (searchProjectFilterId, projectFilter, 90), (searchTimeFilterId, timeFilter, 76), (searchSortOrderId, sortOrder, 80) ].map fun (fid, label, width) =>
+            WidgetNode.focusable fid <|
+              WidgetNode.box
+                (BoxStyle.row (pxToSub 4) |>.withAlign .center |>.withFixedSize (pxToSub width) (pxToSub 24))
+                [screenTextLine theme (pxToSub (width - 20)) (pxToSub 16) (pxToSub 12) (pxToSub 16) pal.textMuted label,
+                 chromeIcon "chevron-down" pal.textMuted 12])
       ]
 
   let headerNode : WidgetNode :=
@@ -952,29 +1019,41 @@ def buildSearchModalOverlay (theme : Theme) (availW availH : SubPx) : WidgetNode
       { widths := Edges.trbl 0 0 bdr 0, color := pal.borderSubtle }
       [searchBar, toolBar]
 
-  let resultRow (selected : Bool) (title suffix : String) : WidgetNode :=
-    WidgetNode.rrect
-      (BoxStyle.col (pxToSub 3)
-        |>.withPadding (Edges.xy (pxToSub 10) (pxToSub 7))
-        |>.withFixedSize (pxToSub 347) (pxToSub 52))
-      (if selected then selBg else 0x00000000)
-      (CornerRadii.uniform (pxToSub 7))
-      BorderStyle.none
-      [ WidgetNode.box
-          (BoxStyle.row 0 |>.withAlign .center |>.withJustify .spaceBetween |>.withFixedSize (pxToSub 327) (pxToSub 18))
-          [ screenTextLine theme (pxToSub 210) (pxToSub 18) (pxToSub 13) (pxToSub 18) pal.textStrong title 550
-          , screenTextLine theme (pxToSub 104) (pxToSub 15) (pxToSub 11) (pxToSub 15) pal.textMuted "Project 1 · 15m ago"
-          ]
-      , WidgetNode.box (BoxStyle.row 0 |>.withAlign .center |>.withFixedSize (pxToSub 327) (pxToSub 18))
-          [ screenTextLine theme (pxToSub 29) (pxToSub 18) (pxToSub 11) (pxToSub 18) pal.textMuted "Title"
-          , WidgetNode.rrect
-              (BoxStyle.row 0 |>.withFixedSize (pxToSub 48) (pxToSub 15))
-              (if theme.isDark then 0x635A35FF else 0xDCD5BFFF)
-              (CornerRadii.uniform (pxToSub 2)) BorderStyle.none
-              [screenTextLine theme (pxToSub 48) (pxToSub 15) (pxToSub 12) (pxToSub 15) pal.textStrong "Mission"]
-          , screenTextLine theme (pxToSub 250) (pxToSub 18) (pxToSub 12) (pxToSub 18) pal.textSecondary suffix
-          ]
+  let resultRow (wid : WidgetId) (selected : Bool) (title subtitle suffix : String) : WidgetNode :=
+    WidgetNode.focusable wid <|
+      WidgetNode.rrect
+        (BoxStyle.col (pxToSub 3)
+          |>.withPadding (Edges.xy (pxToSub 10) (pxToSub 7))
+          |>.withFixedSize (pxToSub 347) (pxToSub 52))
+        (if selected then selBg else 0x00000000)
+        (CornerRadii.uniform (pxToSub 7))
+        BorderStyle.none
+        [ WidgetNode.box
+            (BoxStyle.row 0 |>.withAlign .center |>.withJustify .spaceBetween |>.withFixedSize (pxToSub 327) (pxToSub 18))
+            [ screenTextLine theme (pxToSub 210) (pxToSub 18) (pxToSub 13) (pxToSub 18) pal.textStrong title 550
+            , screenTextLine theme (pxToSub 104) (pxToSub 15) (pxToSub 11) (pxToSub 15) pal.textMuted subtitle
+            ]
+        , WidgetNode.box (BoxStyle.row 0 |>.withAlign .center |>.withFixedSize (pxToSub 327) (pxToSub 18))
+            [ screenTextLine theme (pxToSub 29) (pxToSub 18) (pxToSub 11) (pxToSub 18) pal.textMuted "Title"
+            , WidgetNode.rrect
+                (BoxStyle.row 0 |>.withFixedSize (pxToSub 48) (pxToSub 15))
+                (if theme.isDark then 0x635A35FF else 0xDCD5BFFF)
+                (CornerRadii.uniform (pxToSub 2)) BorderStyle.none
+                [screenTextLine theme (pxToSub 48) (pxToSub 15) (pxToSub 12) (pxToSub 15) pal.textStrong "Mission"]
+            , screenTextLine theme (pxToSub 250) (pxToSub 18) (pxToSub 12) (pxToSub 18) pal.textSecondary suffix
+            ]
+        ]
+
+  let filteredItems := filterSearchItems spec
+  let resultNodes : List WidgetNode :=
+    if useReferenceList && spec.query == "mission" && spec.items == defaultSearchDialogSpec.items then
+      [ resultRow 702 (spec.selectedIdx == 0) "Mission 1 doing some work" "Project 1 · 15m ago" " 1 doing some work"
+      , resultRow 703 (spec.selectedIdx == 1) "Mission 2 doing some work" "Project 1 · 15m ago" " 2 doing some work"
+      , resultRow 704 (spec.selectedIdx == 2) "Mission 21 doing some work" "Project 1 · 15m ago" " 21 doing some work"
       ]
+    else
+      (filteredItems.take 7).mapIdx fun i it =>
+        resultRow it.widgetId (i == spec.selectedIdx) it.title it.subtitle (" " ++ it.category)
 
   let leftPane : WidgetNode :=
     WidgetNode.rrect
@@ -984,10 +1063,7 @@ def buildSearchModalOverlay (theme : Theme) (availW availH : SubPx) : WidgetNode
       0x00000000
       CornerRadii.zero
       { widths := Edges.trbl 0 bdr 0 0, color := pal.borderSubtle }
-      [ resultRow true "Mission 1 doing some work" " 1 doing some work"
-      , resultRow false "Mission 2 doing some work" " 2 doing some work"
-      , resultRow false "Mission 21 doing some work" " 21 doing some work"
-      ]
+      resultNodes
 
   let previewTurn (isTarget : Bool) (role body : String) : WidgetNode :=
     WidgetNode.rrect
@@ -1008,6 +1084,20 @@ def buildSearchModalOverlay (theme : Theme) (availW availH : SubPx) : WidgetNode
           (if isTarget then pal.textPrimary else pal.textSecondary) body
       ]
 
+  let selectedTitle :=
+    if useReferenceList && spec.query == "mission" && spec.items == defaultSearchDialogSpec.items then
+      match spec.selectedIdx with
+      | 1 => "Mission 2 doing some work"
+      | 2 => "Mission 21 doing some work"
+      | _ => "Mission 1 doing some work"
+    else
+      (filteredItems[spec.selectedIdx]?.map (·.title)).getD "No matching mission"
+  let selectedMeta :=
+    if useReferenceList && spec.query == "mission" && spec.items == defaultSearchDialogSpec.items then
+      "Project 1 · 15m ago"
+    else
+      (filteredItems[spec.selectedIdx]?.map (·.subtitle)).getD ""
+
   let rightPane : WidgetNode :=
     WidgetNode.rrect
       (BoxStyle.col 0 |>.withFixedSize (pxToSub 518) (pxToSub 468))
@@ -1025,13 +1115,14 @@ def buildSearchModalOverlay (theme : Theme) (availW availH : SubPx) : WidgetNode
           { widths := Edges.trbl 0 0 bdr 0, color := pal.borderSubtle }
           [ WidgetNode.box
               (BoxStyle.col (pxToSub 2) |>.withFixedSize (pxToSub 300) (pxToSub 36))
-              [ screenTextLine theme (pxToSub 300) (pxToSub 19) (pxToSub 14) (pxToSub 19) pal.textStrong "Mission 1 doing some work" 600
-              , screenTextLine theme (pxToSub 300) (pxToSub 16) (pxToSub 12) (pxToSub 16) pal.textMuted "Project 1 · 15m ago"
+              [ screenTextLine theme (pxToSub 300) (pxToSub 19) (pxToSub 14) (pxToSub 19) pal.textStrong selectedTitle 600
+              , screenTextLine theme (pxToSub 300) (pxToSub 16) (pxToSub 12) (pxToSub 16) pal.textMuted selectedMeta
               ]
-          , WidgetNode.rrect
-              (BoxStyle.row 0 |>.withAlign .center |>.withJustify .center |>.withMargin (Edges.trbl (pxToSub 1) 0 0 0) |>.withFixedSize (pxToSub 67) (pxToSub 26))
-              (if theme.isDark then 0x222222FF else 0xF2F2F2FF) (CornerRadii.uniform (pxToSub 6)) (BorderStyle.uniform bdr pal.border)
-              [screenTextLine theme (pxToSub 48) (pxToSub 17) (pxToSub 12) (pxToSub 17) pal.textStrong "Open ↵" 500]
+          , WidgetNode.focusable searchOpenId <|
+              WidgetNode.rrect
+                (BoxStyle.row 0 |>.withAlign .center |>.withJustify .center |>.withMargin (Edges.trbl (pxToSub 1) 0 0 0) |>.withFixedSize (pxToSub 67) (pxToSub 26))
+                (if theme.isDark then 0x222222FF else 0xF2F2F2FF) (CornerRadii.uniform (pxToSub 6)) (BorderStyle.uniform bdr pal.border)
+                [screenTextLine theme (pxToSub 48) (pxToSub 17) (pxToSub 12) (pxToSub 17) pal.textStrong "Open ↵" 500]
           ]
       , WidgetNode.box
           (BoxStyle.col (pxToSub 4)
@@ -1041,6 +1132,10 @@ def buildSearchModalOverlay (theme : Theme) (availW availH : SubPx) : WidgetNode
           , previewTurn false "Assistant" "The change keeps behaviour identical."
           ]
       ]
+
+  let matchCountLabel :=
+    if useReferenceList && spec.query == "mission" && spec.items == defaultSearchDialogSpec.items then "3 matches"
+    else s!"{filteredItems.length} matches"
 
   let footerNode : WidgetNode :=
     WidgetNode.rrect
@@ -1053,7 +1148,7 @@ def buildSearchModalOverlay (theme : Theme) (availW availH : SubPx) : WidgetNode
       CornerRadii.zero
       { widths := Edges.trbl bdr 0 0 0, color := pal.borderSubtle }
       [ screenTextLine theme (pxToSub 160) (pxToSub 16) (pxToSub 11) (pxToSub 16) pal.textMuted "↑↓ Navigate   ↵ Open"
-      , screenTextLine theme (pxToSub 64) (pxToSub 16) (pxToSub 11) (pxToSub 16) pal.textMuted "3 matches"
+      , screenTextLine theme (pxToSub 64) (pxToSub 16) (pxToSub 11) (pxToSub 16) pal.textMuted matchCountLabel
       ]
 
   let dlgCard : WidgetNode :=
@@ -1195,15 +1290,55 @@ def buildDesktopScreen (st : DesktopState) (availW availH : SubPx)
               (if index + 1 < st.inboxItems.length then [button 943 (pxToSub 64) "Next"] else []))]
       return WidgetNode.box (BoxStyle.col 0 |>.withFixedSize mainW availH |>.withBg mainFill) (headerNode :: content)
     | .missionTranscript =>
-      let bodyH := availH - headerH - composerH
-      let bodyNode := buildMissionTranscriptBody st mainW bodyH runs hoverRow
-      let retrySend := st.unconfirmedSend.any (·.2 == st.composer.text)
-      let composerNode := buildComposerWidget theme mainW composerH
-        { st.composer with isRunning := st.composer.isRunning && !retrySend } []
-        (if st.liveData then some (liveComposerControls st (min (pxToSub 748) (mainW - pxToSub 68))) else none)
-      WidgetNode.box
-        (BoxStyle.col 0 |>.withFixedSize mainW availH |>.withBg mainFill)
-        [headerNode, bodyNode, composerNode]
+      let splitH := availH - headerH
+      if st.sidePanelOpen then
+        let rightW : SubPx := min (pxToSub 480) (mainW / 2)
+        let leftW : SubPx := mainW - rightW
+        let leftBodyH := splitH - composerH
+        let leftTranscript := buildMissionTranscriptBody st leftW leftBodyH runs hoverRow
+        let retrySend := st.unconfirmedSend.any (·.2 == st.composer.text)
+        let leftComposer := buildComposerWidget theme leftW composerH
+          { st.composer with isRunning := st.composer.isRunning && !retrySend } []
+          (if st.liveData then some (liveComposerControls st (min (pxToSub 748) (leftW - pxToSub 68))) else none)
+        let leftPane : WidgetNode :=
+          WidgetNode.rrect
+            (BoxStyle.col 0 |>.withFixedSize leftW splitH)
+            st.theme.palette.canvas
+            CornerRadii.zero
+            { widths := Edges.trbl 0 theme.borderWidth 0 0, color := pal.borderSubtle }
+            [leftTranscript, leftComposer]
+        let rightPane : WidgetNode :=
+          if st.sidePanelTab == "diff" then
+            buildSplitDiffRightPane theme rightW splitH runs.diffDelRuns runs.diffAddRuns st.diffMode st.diffRef true
+          else
+            let title := if st.sidePanelTab == "files" then "Files" else "Side question"
+            let bodyMsg := if st.sidePanelTab == "files" then "Workspace files for this mission" else "Ask a side question without interrupting the main turn"
+            WidgetNode.box
+              (BoxStyle.col (pxToSub 8) |>.withPadding (Edges.all (pxToSub 12)) |>.withFixedSize rightW splitH |>.withBg pal.canvas)
+              [ WidgetNode.box (BoxStyle.row 0 |>.withAlign .center |>.withJustify .spaceBetween |>.withFixedSize (rightW - pxToSub 24) (pxToSub 28))
+                  [ screenTextLine theme (rightW - pxToSub 56) (pxToSub 20) (pxToSub 14) (pxToSub 20) pal.textPrimary title 600
+                  , WidgetNode.focusable sidePanelCloseId <|
+                      WidgetNode.box (BoxStyle.row 0 |>.withAlign .center |>.withJustify .center |>.withFixedSize (pxToSub 24) (pxToSub 24))
+                        [chromeIcon "close" pal.textMuted 14]
+                  ]
+              , screenTextLine theme (rightW - pxToSub 24) (pxToSub 20) (pxToSub 12) (pxToSub 20) pal.textSecondary bodyMsg
+              ]
+        let splitBody : WidgetNode :=
+          WidgetNode.box (BoxStyle.row 0 |>.withFixedSize mainW splitH |>.withBg st.theme.palette.canvas)
+            [leftPane, rightPane]
+        WidgetNode.box
+          (BoxStyle.col 0 |>.withFixedSize mainW availH |>.withBg mainFill)
+          [headerNode, splitBody]
+      else
+        let bodyH := availH - headerH - composerH
+        let bodyNode := buildMissionTranscriptBody st mainW bodyH runs hoverRow
+        let retrySend := st.unconfirmedSend.any (·.2 == st.composer.text)
+        let composerNode := buildComposerWidget theme mainW composerH
+          { st.composer with isRunning := st.composer.isRunning && !retrySend } []
+          (if st.liveData then some (liveComposerControls st (min (pxToSub 748) (mainW - pxToSub 68))) else none)
+        WidgetNode.box
+          (BoxStyle.col 0 |>.withFixedSize mainW availH |>.withBg mainFill)
+          [headerNode, bodyNode, composerNode]
     | .missionSplitDiff =>
       let splitH := availH - headerH
       let leftW : SubPx := pxToSub 688
@@ -1218,7 +1353,11 @@ def buildDesktopScreen (st : DesktopState) (availW availH : SubPx)
           CornerRadii.zero
           { widths := Edges.trbl 0 theme.borderWidth 0 0, color := pal.borderSubtle }
           [leftTranscript, leftComposer]
-      let rightPane := buildSplitDiffRightPane theme rightW splitH runs.diffDelRuns runs.diffAddRuns
+      let rightPane :=
+        if st.diffMode == "split" && st.diffRef == "Working tree vs HEAD" then
+          buildSplitDiffRightPane theme rightW splitH runs.diffDelRuns runs.diffAddRuns
+        else
+          buildSplitDiffRightPane theme rightW splitH runs.diffDelRuns runs.diffAddRuns st.diffMode st.diffRef
       let splitBody : WidgetNode :=
         WidgetNode.box
           (BoxStyle.row 0 |>.withFixedSize mainW splitH |>.withBg st.theme.palette.canvas)
@@ -1240,12 +1379,15 @@ def buildDesktopScreen (st : DesktopState) (availW availH : SubPx)
           let line := fun text color => screenTextLine theme width (pxToSub 28) (pxToSub 14) (pxToSub 20) color text
           let status := if st.initialRosterPending then "Connecting to Core…"
             else if st.hasLiveConnection then "Connected" else st.connectionIssue.title
+          let themeLabel := if st.theme.isDark then "Theme · Dark" else "Theme · Light"
           WidgetNode.box (BoxStyle.col (pxToSub 4) |>.withPadding (Edges.all (pxToSub 12)))
             ([line "Account" pal.textPrimary, line status pal.textPrimary] ++
              (if st.accountEndpoint.isEmpty then [] else [line st.accountEndpoint pal.textSecondary]) ++
              (if st.accountUsername.isEmpty then [] else [line ("@" ++ st.accountUsername) pal.textPrimary]) ++
              [inventoryTarget theme hoverRow accountFormId width (pxToSub 40)
-                (line (if st.hasLiveConnection then "Manage account…" else "Open sign-in form…") pal.textPrimary)] ++
+                (line (if st.hasLiveConnection then "Manage account…" else "Open sign-in form…") pal.textPrimary),
+              inventoryTarget theme hoverRow settingsThemeId width (pxToSub 40)
+                (line themeLabel pal.textSecondary)] ++
              (if st.writeError.isEmpty then [] else [line st.writeError pal.textSecondary]))
          else buildSettingsGeneralBody st mainW bodyH]
     | _ =>

@@ -327,17 +327,20 @@ def renderDesktopView (rt : Runtime.RuntimeState DesktopState) :
     let overlay := buildSceneFromLayout sc rt.focus theme widget box (recordNodes := false)
     return ((ac7.finishUploads, if liveWindow then 0 else pal.canvas, sceneOut.prims ++ overlay.prims,
       sceneOut.hitRegionsSub ++ overlay.hitRegionsSub, sceneOut.focusableOrder ++ overlay.focusableOrder), scrollRegionsOf rootBox)
-  if st.screen == .searchDialog then
-    let overRaw := buildSearchModalOverlay theme availW availH
+  if let .searchPalette spec := st.modal then
+    let overRaw := buildSearchModalOverlay theme availW availH spec st.searchFilterTab
+      st.searchProjectFilter st.searchTimeFilter st.searchSortOrder (!st.liveData)
     let (ac7, overWidget) ← shapeWidgetTree ac6 rt.primaryFont rt.monoFont rt.boldFont rt.mediumFont rt.semiboldFont sc overRaw
     let overBox := layoutNode sc none pal.focusRing 0 0 availW availH overWidget.toLayoutNode
     let overScene := buildSceneFromLayout sc rt.focus theme overWidget overBox (recordNodes := false)
     let clearColor := if liveWindow then 0x00000000 else pal.canvas
-    return ((ac7.finishUploads, clearColor, sceneOut.prims ++ #[.backdropBlur (scaleSubPx sc (pxToSub 6))] ++ overScene.prims, sceneOut.hitRegionsSub ++ overScene.hitRegionsSub, sceneOut.focusableOrder ++ overScene.focusableOrder), [])
+    let outside : Rect := { x := 0, y := 0, w := availW, h := availH }
+    return ((ac7.finishUploads, clearColor, sceneOut.prims ++ #[.backdropBlur (scaleSubPx sc (pxToSub 6))] ++ overScene.prims,
+      (searchBackdropId, outside) :: overScene.hitRegionsSub, overScene.focusableOrder), [])
   else
     let clearColor := if liveWindow then 0x00000000 else pal.canvas
     return ((ac6.finishUploads, clearColor, sceneOut.prims, sceneOut.hitRegionsSub, sceneOut.focusableOrder),
-      if st.liveData then scrollRegionsOf rootBox else [])
+      scrollRegionsOf rootBox)
 
 def renderDesktopFrame (rt : Runtime.RuntimeState DesktopState) : IO Runtime.FrameView :=
   Prod.fst <$> renderDesktopView rt
@@ -350,22 +353,39 @@ def desktopReducer (rt : Runtime.RuntimeState DesktopState) :
   let viewport := rt.viewportDeviceRect
   fun st ev => Id.run do
     if let .key key mods state := ev then
-      if rt.focus.owner == some 1 && state != .released && st.hasLiveConnection && st.writeRequest.isNone then
-        if let some menu := st.missionMenu then
-          if menu.page == .rename || menu.page == .draftDirectory then
-            if let some draft := menu.draft.editKey? key mods then
-              return ({ st with missionMenu := some { menu with draft } }, if draft == menu.draft then none else some viewport)
-        else if st.cloudCanCreate || st.cloudAllows "send" then
-          if let some draft := st.cloudDraft.editKey? key mods then
-            return ({ st with cloudDraft := draft, cloudAttempt := if draft.text == st.cloudDraft.text then st.cloudAttempt else "" }, some viewport)
-        else if st.openMission.isSome || st.screen == .controlEmpty || st.screen == .controlPopulated then
-          let rows := if key == 0xff52 || key == 0xff54 then
-              match regions.find? (·.id == Widgets.composerViewportId) with
-              | some r => editorRows r.textLines st.composer.text.length
-              | none => []
-            else []
-          if let some composer := st.composer.editKey? key mods rows then
-            return ({ st with composer }, if composer == st.composer then none else some viewport)
+      if state != .released then
+        if let .searchPalette spec := st.modal then
+          if rt.focus.owner == some spec.inputWidgetId then
+            if let some buf := st.searchBuffer.editKey? key mods then
+              let spec' := { spec with query := buf.text ++ buf.imePreeditText, selectedIdx := 0 }
+              return ({ st with searchBuffer := buf, modal := .searchPalette spec' }, if buf == st.searchBuffer then none else some viewport)
+        else if !st.liveData && st.screen == .settingsGeneral && rt.focus.owner == some settingsApiUrlId then
+          if let some buf := st.settingsApiUrl.editKey? key mods then
+            return ({ st with settingsApiUrl := buf }, if buf == st.settingsApiUrl then none else some viewport)
+        else if rt.focus.owner == some 1 && (!st.liveData || (st.hasLiveConnection && st.writeRequest.isNone)) then
+          if let some menu := st.missionMenu then
+            if menu.page == .rename || menu.page == .draftDirectory then
+              if let some draft := menu.draft.editKey? key mods then
+                return ({ st with missionMenu := some { menu with draft } }, if draft == menu.draft then none else some viewport)
+          else if st.cloudCanCreate || st.cloudAllows "send" then
+            if let some draft := st.cloudDraft.editKey? key mods then
+              return ({ st with cloudDraft := draft, cloudAttempt := if draft.text == st.cloudDraft.text then st.cloudAttempt else "" }, some viewport)
+          else if !st.liveData || st.openMission.isSome || st.screen == .controlEmpty || st.screen == .controlPopulated then
+            let rows := if key == 0xff52 || key == 0xff54 then
+                match regions.find? (·.id == Widgets.composerViewportId) with
+                | some r => editorRows r.textLines st.composer.text.length
+                | none => []
+              else []
+            if let some composer := st.composer.editKey? key mods rows then
+              return ({ st with composer }, if composer == st.composer then none else some viewport)
+    if !st.liveData && st.screen == .settingsGeneral && rt.focus.owner == some settingsApiUrlId then
+      let buf := match ev with
+        | .text text => st.settingsApiUrl.insertText text
+        | .imeBatch db da text preedit _ _ => st.settingsApiUrl.applyImeBatch db da text preedit
+        | .preedit text _ _ => st.settingsApiUrl.setPreedit text
+        | _ => st.settingsApiUrl
+      if buf != st.settingsApiUrl then
+        return ({ st with settingsApiUrl := buf }, some viewport)
     if let .pointerMove x y := ev then
       return (st, st.sidebarHoverDamage rt.hitRegions scale rt.hoveredEntity (hitTest rt.hitRegions x y))
     if let .pointerLeave := ev then
@@ -409,7 +429,7 @@ def desktopReducer (rt : Runtime.RuntimeState DesktopState) :
           else [mid]
         return ({ st with missionMenu := some { mission := mid, x, y, trigger := id, targets, mixed } }, some viewport)
     if let .scroll x y _ dy := ev then
-      if st.missionMenu.isNone && st.liveData then
+      if st.missionMenu.isNone && st.modal == .none then
         let some r := regions.find? (fun r => r.bounds.contains x y) | return (st, none)
         let h := r.bounds.h.toNat
         let content := r.limitY + h
@@ -427,9 +447,15 @@ def desktopReducer (rt : Runtime.RuntimeState DesktopState) :
           let top := scrollStep content h (min r.limitY st.fleetTopSub) dy
           if top == st.fleetTopSub then return (st, none)
           return ({ st with fleetTopSub := top }, damage)
-        if r.id == transcriptViewportId && st.screen == .missionTranscript then
-          let some st' := stepTranscriptScroll st content h dy | return (st, none)
-          return (st', damage)
+        if r.id == transcriptViewportId && (st.screen == .missionTranscript || st.screen == .missionSplitDiff) then
+          if st.liveData then
+            let some st' := stepTranscriptScroll st content h dy | return (st, none)
+            return (st', damage)
+          else
+            let current := if !st.scrolledManually then { pinned := false, topSub := 0 } else st.scroll.onLayout content h
+            let next := current.onUserScroll content h dy
+            if next == current && st.scrolledManually then return (st, none)
+            return ({ st with scroll := next, scrolledManually := true }, damage)
     return stepDesktopEvent scale viewport st ev
 
 /-- Render one `(ScreenId, isDark, scale120)` configuration to `outFile`, verifying that
