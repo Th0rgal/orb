@@ -292,6 +292,21 @@ inductive ActiveModal where
 def rosterViewportId : WidgetId := 970
 def transcriptViewportId : WidgetId := 971
 def fleetViewportId : WidgetId := 972
+def loadOlderTurnsId : WidgetId := 975
+
+/-- Height of the top "Load older turns" banner row in `SubPx`. -/
+@[inline] def transcriptHistoryBannerHeightSub : SubPx := pxToSub 34
+/-- Vertical gap between transcript column rows in `SubPx`. -/
+@[inline] def transcriptColumnGapSub : SubPx := pxToSub 23
+/-- Distance from the top of the transcript at which upward scroll fetches older history. -/
+@[inline] def transcriptNearTopSub : SubPx := pxToSub 180
+
+/-- One page of persisted transcript turns (`(eventId, displayText)` oldest-first) plus paging state. -/
+structure HistoryBatch where
+  turns : List (String × String)
+  hasMore : Bool := false
+  nextCursor : Option Int := none
+  deriving Repr, Inhabited, BEq
 
 structure LaunchSettings where
   machine : String := ""
@@ -448,6 +463,16 @@ structure DesktopState where
   /-- Completed live turns of the open mission, oldest first. `applyLiveText` is the single
   owner: an empty replacement frame (turn boundary) moves the finished turn here. -/
   liveTurns : List String := []
+  /-- Seen event/row IDs of persisted turns in `liveTurns`, for cross-page deduplication. -/
+  liveTurnIds : List String := []
+  /-- Whether Core advertised older transcript history before the current `liveTurns` window. -/
+  historyHasMore : Bool := false
+  /-- Exclusive `before_seq` cursor for the next on-demand older transcript page. -/
+  historyNextCursor : Option Int := none
+  /-- True while an on-demand older-history page request is pending or in flight. -/
+  historyLoading : Bool := false
+  /-- True when the most recent on-demand older-history page fetch failed transiently. -/
+  historyLoadError : Bool := false
   liveData : Bool := false
   initialRosterPending : Bool := false
   connectionIssue : ConnectionIssue := .unavailable
@@ -563,10 +588,38 @@ def resetSelection (st : DesktopState) (card : Option MissionSummaryCard) : Desk
   let mid := if cloud.isSome then none else card.map (·.missionId)
   { st with
     unconfirmedSend := none, writeError := ""
-    voicePhase := .idle, voiceGeneration := st.voiceGeneration + 1, openMission := mid, missionMenu := none, stream := { shown := [], pending := [], renders := 1 }, liveTurns := [], scroll := {}
+    voicePhase := .idle, voiceGeneration := st.voiceGeneration + 1, openMission := mid, missionMenu := none, stream := { shown := [], pending := [], renders := 1 }, liveTurns := [], liveTurnIds := [], historyHasMore := false, historyNextCursor := none, historyLoading := false, historyLoadError := false, scroll := {}
     composer := { isRunning := card.any (·.isRunning) }
     messageSent := false, missionStopped := false, missionArchived := false, sidePanelOpen := false
     sidebarRows := st.sidebarRows.map fun row => { row with selected := row.widgetId == (card.map (·.widgetId)).getD 101 } }
+
+def DesktopState.showsHistoryBanner (st : DesktopState) : Bool :=
+  st.liveData && (st.historyHasMore || st.historyLoading || st.historyLoadError)
+
+def DesktopState.canLoadOlderHistory (st : DesktopState) : Bool :=
+  st.liveData && st.screen == .missionTranscript && st.openMission.isSome &&
+    st.historyHasMore && st.historyNextCursor.isSome && !st.historyLoading
+
+def DesktopState.canAutoLoadOlderHistory (st : DesktopState) : Bool :=
+  st.canLoadOlderHistory && !st.historyLoadError
+
+def requestOlderHistory (st : DesktopState) : DesktopState :=
+  if st.canLoadOlderHistory then
+    { st with historyLoading := true, historyLoadError := false }
+  else st
+
+/-- Apply a vertical scroll delta to the transcript viewport, automatically triggering
+an on-demand older-history page fetch when scrolling upward into the top threshold. -/
+def stepTranscriptScroll (st : DesktopState) (contentSub viewportSub : SubPx) (dy : Int) :
+    Option DesktopState :=
+  let current := st.scroll.onLayout contentSub viewportSub
+  let next := current.onUserScroll contentSub viewportSub dy
+  let nearTop := dy < 0 && next.topSub <= transcriptNearTopSub && st.canAutoLoadOlderHistory
+  if next == current && !nearTop then none
+  else
+    let scrolled := if nearTop && next.pinned then { next with pinned := false } else next
+    let st' := { st with scroll := scrolled }
+    some (if nearTop then requestOlderHistory st' else st')
 
 /-! ## 3. Canonical Screen Fixtures (`01` .. `09`) -/
 
@@ -795,6 +848,14 @@ def composerDamageRect (scale120 : Nat) (viewport : Rect) (sidebarWidth := chrom
   let h := ceilDev scale120 (Int.ofNat chromeComposerHeightSub)
   { x := viewport.x + x0, y := viewport.bottom - h, w := viewport.w - x0, h := h }
 
+/-- Device-pixel band occupied by the live transcript. Stream deltas repaint this band only; the
+sidebar, header and composer retain their framebuffer pixels. -/
+def transcriptDamageRect (scale120 : Nat) (viewport : Rect) (sidebarWidth := chromeSidebarWidthSub) : Rect :=
+  let x0 := floorDev scale120 (Int.ofNat sidebarWidth)
+  let y0 := ceilDev scale120 (Int.ofNat chromeHeaderHeightSub)
+  let bottom := viewport.bottom - ceilDev scale120 (Int.ofNat chromeComposerHeightSub)
+  { x := viewport.x + x0, y := viewport.y + y0, w := viewport.w - x0, h := max 0 (bottom - (viewport.y + y0)) }
+
 /-- Pure event reducer for `DesktopState`. A text, preedit or IME edit damages the composer
 band exactly when it changed the composer buffer; `viewport` is the window in device pixels. -/
 private def stepDesktopInput (scale120 : Nat) (viewport : Rect) (st : DesktopState) (ev : Event) :
@@ -964,7 +1025,8 @@ def DesktopState.cloudItems (st : DesktopState) : List (String × String) := Id.
 def DesktopState.hoverTarget (st : DesktopState) (hit : Option WidgetId) : Option WidgetId := do
   if hit == some voiceLanguageId || hit == some voiceButtonId || hit == some voiceCancelId then return ← hit
   let id ← hit
-  if st.screen == .cloud && id >= 960 && id < 972 then some id
+  if st.screen == .missionTranscript && id == loadOlderTurnsId then some id
+  else if st.screen == .cloud && id >= 960 && id < 972 then some id
   else if st.screen == .resources && id >= 945 && id < 960 then some id
   else if st.screen == .inference && id >= providersBackId then some id else st.sidebarHoverRow hit
 
@@ -1502,6 +1564,8 @@ def stepDesktopEvent (scale120 : Nat) (viewport : Rect) (st : DesktopState) (ev 
           return (next, some viewport)
       if id == 914 then return ({ st with writeError := "" }, some viewport)
       if id == 730 then return ({ st with archivesOpen := !st.archivesOpen }, some viewport)
+      if id == loadOlderTurnsId && st.canLoadOlderHistory then
+        return (requestOlderHistory st, some (transcriptDamageRect scale120 viewport st.sidebarWidth))
       if id == 2 && st.selectedCard.isNone then
         if (st.screen == .controlEmpty || st.screen == .controlPopulated) &&
             !st.composer.text.trimAscii.isEmpty && st.composer.imePreeditText.isEmpty then
@@ -1524,14 +1588,6 @@ def stepDesktopEvent (scale120 : Nat) (viewport : Rect) (st : DesktopState) (ev 
         if st.openMission == some card.missionId then return ({ st with multiRows := [], selectionAnchor := none }, some viewport)
         return (resetSelection { st with screen := .missionTranscript, multiRows := [], selectionAnchor := none } (some card), some viewport)
   return stepDesktopInput scale120 viewport st ev
-
-/-- Device-pixel band occupied by the live transcript. Stream deltas repaint this band only; the
-sidebar, header and composer retain their framebuffer pixels. -/
-def transcriptDamageRect (scale120 : Nat) (viewport : Rect) (sidebarWidth := chromeSidebarWidthSub) : Rect :=
-  let x0 := floorDev scale120 (Int.ofNat sidebarWidth)
-  let y0 := ceilDev scale120 (Int.ofNat chromeHeaderHeightSub)
-  let bottom := viewport.bottom - ceilDev scale120 (Int.ofNat chromeComposerHeightSub)
-  { x := viewport.x + x0, y := viewport.y + y0, w := viewport.w - x0, h := max 0 (bottom - (viewport.y + y0)) }
 
 /-- Queue a streamed text delta without requesting a redraw. The next display tick flushes all
 queued deltas together, using the coalescer proved in `Orb.Stream`. -/
@@ -1575,26 +1631,337 @@ def applyLiveText (scale : Nat) (viewport : Rect) (st : DesktopState) (mission t
       else st.liveTurns
     flushStreamFrame scale viewport { st with liveTurns, stream := { st.stream with shown := [], pending := [text] } }
 
+def transcriptTextWidth (mainW : SubPx) : SubPx :=
+  min (pxToSub 748) (mainW - pxToSub 48) - pxToSub 40
+
+/-- First widget id of the reserved live-diagram band (16 ids per diagram). -/
+def liveDiagramBandBase : Nat := 9311
+/-- Number of widget ids reserved per rendered diagram. -/
+def liveDiagramStride : Nat := 16
+
+/-- Split live text into `(isMermaidFence, content)` segments in source order. An unclosed
+fence stays prose until its closing line arrives, matching the current plain-text behavior. -/
+def splitMermaidFences (src : String) : List (Bool × String) := Id.run do
+  let mut segs : Array (Bool × String) := #[]
+  let mut inFence := false
+  let mut fenceBuf : Array String := #[]
+  let mut proseBuf : Array String := #[]
+  for line in src.splitOn "\n" do
+    let t := mermaidTrim line
+    if !inFence && t.startsWith "```mermaid" then
+      if !proseBuf.isEmpty then
+        segs := segs.push (false, String.intercalate "\n" proseBuf.toList)
+        proseBuf := #[]
+      inFence := true
+      fenceBuf := #[]
+    else if inFence && t == "```" then
+      segs := segs.push (true, String.intercalate "\n" fenceBuf.toList)
+      inFence := false
+      fenceBuf := #[]
+    else if inFence then
+      fenceBuf := fenceBuf.push line
+    else
+      proseBuf := proseBuf.push line
+  if inFence then
+    proseBuf := proseBuf ++ #["```mermaid"] ++ fenceBuf
+  if !proseBuf.isEmpty then
+    segs := segs.push (false, String.intercalate "\n" proseBuf.toList)
+  return segs.toList
+
+/-- Markdown-lite inline span kinds. -/
+private inductive MdKind where
+  | plain | bold | italic | code | link
+
+/-- Style for one markdown-lite span: emphasis without a dedicated italic face uses the
+secondary tone, links use the accent, code uses the mono face. -/
+private def mdKindStyle (theme : Theme) : MdKind → TextStyle
+  | .plain => { (Theme.bodyText theme) with color := theme.palette.textPrimary }
+  | .bold => { (Theme.bodyText theme) with color := theme.palette.textPrimary, weight := 700 }
+  | .italic => { (Theme.bodyText theme) with color := theme.palette.textSecondary, weight := 500 }
+  | .code => { (Theme.codeText theme) with color := theme.palette.textPrimary }
+  | .link => { (Theme.bodyText theme) with color := theme.palette.accent, weight := 500 }
+
+/-- First index of `c` at or after `n` in `xs`. -/
+private partial def mdFindFrom (c : Char) (n : Nat) : List Char → Option Nat
+  | [] => none
+  | x :: rest => if x == c then some n else mdFindFrom c (n + 1) rest
+
+/-- First index at or after `n` where the pair `a b` occurs in `xs`. -/
+private partial def mdFindSeq (a b : Char) (n : Nat) : List Char → Option Nat
+  | x :: y :: rest =>
+    if x == a && y == b then some n else mdFindSeq a b (n + 1) (y :: rest)
+  | _ => none
+
+private def mdFlush (acc : List (String × MdKind)) (buf : List Char) (k : MdKind) :
+    List (String × MdKind) :=
+  if buf.isEmpty then acc else acc ++ [(String.ofList buf.reverse, k)]
+
+/-- Scanner for `mdSpans`: `buf` holds the pending plain-text characters in reverse. -/
+private partial def mdScan (acc : List (String × MdKind)) (buf : List Char) :
+    List Char → List (String × MdKind)
+  | [] => mdFlush acc buf .plain
+  | c :: rest =>
+    if c == '`' then
+      match mdFindFrom '`' 0 rest with
+      | some i =>
+        let span := mdFlush (mdFlush acc buf .plain) (rest.take i).reverse .code
+        mdScan span [] (rest.drop (i + 1))
+      | none => mdScan acc ('`' :: buf) rest
+    else if c == '*' && rest.head? == some '*' then
+      match mdFindSeq '*' '*' 0 (rest.drop 1) with
+      | some i =>
+        let span := mdFlush (mdFlush acc buf .plain) ((rest.drop 1).take i).reverse .bold
+        mdScan span [] (rest.drop (i + 3))
+      | none => mdScan acc ('*' :: buf) rest
+    else if c == '*' then
+      match mdFindFrom '*' 0 rest with
+      | some i =>
+        let span := mdFlush (mdFlush acc buf .plain) (rest.take i).reverse .italic
+        mdScan span [] (rest.drop (i + 1))
+      | none => mdScan acc ('*' :: buf) rest
+    else if c == '[' then
+      match mdFindSeq ']' '(' 0 rest with
+      | some j =>
+        let after := rest.drop (j + 2)
+        match mdFindFrom ')' 0 after with
+        | some k =>
+          let url := String.ofList (after.take k)
+          let span := mdFlush (mdFlush acc buf .plain) (rest.take j).reverse .link
+          let span := mdFlush span ((" (" ++ url ++ ")").toList.reverse) .plain
+          mdScan span [] (after.drop (k + 1))
+        | none => mdScan acc ('[' :: buf) rest
+      | none => mdScan acc ('[' :: buf) rest
+    else mdScan acc (c :: buf) rest
+
+/-- Split one line into markdown-lite spans: `**bold**`, `*italic*`, `` `code` `` and
+`[text](url)` links (the url keeps rendering in parentheses). Unterminated markers stay
+literal. -/
+private def mdSpans (line : String) : List (String × MdKind) :=
+  mdScan [] [] line.toList
+
+/-- True when a single line needs the markdown-lite pipeline: a heading or bullet
+prefix, or any inline marker character (`*`, backtick, `[`). Plain lines keep the
+pre-shaped fast path so stream frames paint their already-shaped runs as-is. -/
+def needsMarkdownLite (line : String) : Bool :=
+  let l := mermaidTrim line
+  let hashes := (l.toList.takeWhile (· == '#')).length
+  let rest := l.toList.drop hashes
+  (hashes >= 1 && hashes <= 6 && rest.length > 1 && rest.head? == some ' ') ||
+  l.startsWith "- " || l.startsWith "* " ||
+  l.any (fun c => c == '*' || c == '`' || c == '[')
+
+/-- One markdown-lite line of the live transcript, synthesized from plain text; the runtime
+`shapeWidgetTree` pass re-shapes synth runs with HarfBuzz on real displays. -/
+def liveProseLine (theme : Theme) (colW width : SubPx) (line0 : String) :
+    Option WidgetNode :=
+  let line := mermaidTrim line0
+  let hashes := (line.toList.takeWhile (· == '#')).length
+  let rest := line.toList.drop hashes
+  if line.isEmpty then none
+  else if hashes >= 1 && hashes <= 6 && rest.length > 1 && rest.head? == some ' ' then
+    let heading := mermaidTrim (String.ofList (rest.drop 1))
+    let hSize := if hashes <= 1 then theme.typo.xl else if hashes == 2 then theme.typo.lg else theme.typo.md
+    let lh := if hashes <= 2 then theme.typo.lineHeading else theme.typo.lineRelaxed
+    let hStyle : TextStyle := { Theme.headingText theme with sizeSub := hSize, lineHeightSub := lh, weight := 700 }
+    let runs := [synthInlineRun { hStyle with color := theme.palette.textPrimary } heading]
+    let (_, _, height) := wrapInlineRuns width lh runs
+    some (WidgetNode.box
+      (BoxStyle.row 0
+        |>.withPadding (Edges.xy (pxToSub 20) (pxToSub 4))
+        |>.withFixedSize colW (height + pxToSub 8))
+      [WidgetNode.text
+        (BoxStyle.row 0 |>.withFixedSize width height)
+        lh runs])
+  else
+    let listed := line.startsWith "- " || line.startsWith "* "
+    let body := if listed then "• " ++ line.drop 2 else line
+    let runs := (mdSpans body).filterMap fun (txt, k) =>
+      if txt.isEmpty then none else some (synthInlineRun (mdKindStyle theme k) txt)
+    let (_, _, height) := wrapInlineRuns width theme.typo.lineBase runs
+    some (WidgetNode.box
+      (BoxStyle.row 0
+        |>.withPadding (Edges.xy (pxToSub 20) (pxToSub 6))
+        |>.withFixedSize colW (height + pxToSub 12))
+      [WidgetNode.text
+        (BoxStyle.row 0 |>.withFixedSize width height)
+        theme.typo.lineBase runs])
+
+/-- One monospace code row of a non-mermaid fence; blank fence lines become thin spacers. -/
+private def liveCodeRow (theme : Theme) (colW width : SubPx) (line : String) : WidgetNode :=
+  let runs := if line.isEmpty then []
+    else [synthInlineRun { (Theme.codeText theme) with color := theme.palette.textPrimary } line]
+  let (_, _, height) := wrapInlineRuns width theme.typo.lineBase runs
+  WidgetNode.box
+    (BoxStyle.row 0
+      |>.withPadding (Edges.xy (pxToSub 20) (pxToSub 2))
+      |>.withFixedSize colW (height + pxToSub 4))
+    [WidgetNode.text
+      (BoxStyle.row 0 |>.withFixedSize width height)
+      theme.typo.lineBase runs]
+
+/-- Render prose text line by line in linear time. -/
+def liveProseLines (theme : Theme) (colW width : SubPx) (text : String) : List WidgetNode :=
+  Id.run do
+    let mut rows : Array WidgetNode := #[]
+    let mut inFence := false
+    for line in text.splitOn "\n" do
+      let t := mermaidTrim line
+      if t.startsWith "```" then
+        inFence := !inFence
+      else if inFence then
+        rows := rows.push (liveCodeRow theme colW width line)
+      else
+        match liveProseLine theme colW width line with
+        | some row => rows := rows.push row
+        | none => pure ()
+    return rows.toList
+
+/-- Render one turn's text: mermaid fences become diagram widgets; everything else becomes
+markdown-lite prose rows. -/
+def buildOneLiveTurn (theme : Theme) (colW width : SubPx) (base : Nat) (text : String) :
+    List WidgetNode × Nat := Id.run do
+  let mut rows : Array WidgetNode := #[]
+  let mut next := base
+  for (isFence, seg) in splitMermaidFences text do
+    if isFence then
+      match parseMermaidFlowchart seg with
+      | some spec0 =>
+        let spec := { spec0 with nodes := spec0.nodes.mapIdx fun i n =>
+          { n with widgetId := some (next + i) } }
+        rows := rows.push (buildMermaidDiagramWidget theme colW spec)
+        next := next + liveDiagramStride
+      | none =>
+        for r in liveProseLines theme colW width seg do
+          rows := rows.push r
+    else
+      for r in liveProseLines theme colW width seg do
+        rows := rows.push r
+  return (rows.toList, next)
+
+/-- Render the completed live turns oldest first in O(N) time. -/
+def buildLiveTurnsNodes (theme : Theme) (colW width : SubPx) (turns : List String) :
+    List WidgetNode × Nat := Id.run do
+  let mut rows : Array WidgetNode := #[]
+  let mut base := liveDiagramBandBase
+  for turn in turns do
+    let (rs, b) := buildOneLiveTurn theme colW width base turn
+    for r in rs do
+      rows := rows.push r
+    base := b
+  return (rows.toList, base)
+
+/-- Exact signed `SubPx` height change above the first previously-loaded turn when
+`addedTurns` are prepended and the top history banner toggles `hadBanner → willHaveBanner`. -/
+def measurePrependedHeightDelta (st : DesktopState) (scale120 : Nat) (viewport : Rect)
+    (addedTurns : List String) (hadBanner willHaveBanner : Bool) : Int := Id.run do
+  let availW : SubPx := (viewport.w.toNat * subPerPx * scaleDen) / max 1 scale120
+  let mainW : SubPx := availW - st.sidebarWidth
+  let colW : SubPx := min (pxToSub 748) (mainW - pxToSub 48)
+  let width : SubPx := transcriptTextWidth mainW
+  let (addedRows, _) := buildLiveTurnsNodes st.theme colW width addedTurns
+  let mut delta : Int := 0
+  for row in addedRows do
+    let (_, rowH) := measureNode mainW row.toLayoutNode
+    delta := delta + (rowH : Int) + (transcriptColumnGapSub : Int)
+  let bannerStep : Int := (transcriptHistoryBannerHeightSub : Int) + (transcriptColumnGapSub : Int)
+  if !hadBanner && willHaveBanner then
+    delta := delta + bannerStep
+  else if hadBanner && !willHaveBanner then
+    delta := delta - bannerStep
+  return delta
+
 /-- Access loss (Core unreachable or an invalid projection) is not a turn boundary: the
 shown content came from a stream the client can no longer read, so clear the earlier
 and current output instead of archiving it, and drop the retained reply so later
 roster frames cannot resurrect it. A fresh bubble read repopulates. Revocation is
 already distinct: it closes the subscription and leaves the mission. -/
 def clearLiveTranscript (st : DesktopState) : DesktopState :=
-  { st with liveTurns := [], stream := { st.stream with shown := [], pending := [] } }
+  { st with
+    liveTurns := []
+    liveTurnIds := []
+    historyHasMore := false
+    historyNextCursor := none
+    historyLoading := false
+    historyLoadError := false
+    stream := { st.stream with shown := [], pending := [] } }
 
-/-- Cold open of a persisted mission: the Core timeline owns completed turns, so a fresh
-history batch read from `GET /events` replaces the client's archive; the live bubble keeps
-owning the current turn (the transport yields the exact-colliding newest turn to the
-stream). Empty, foreign or identical batches are no-ops that never erase or redraw. -/
+/-- Cold open of a persisted mission: the Core `/open` window owns the initial completed
+turns and continuation cursor; the live bubble keeps owning the current turn. Empty,
+foreign or identical batches are no-ops that never erase or redraw. -/
+def applyHistoryBatch (scale : Nat) (viewport : Rect) (st : DesktopState) (mission : String)
+    (batch : HistoryBatch) : DesktopState × Damage := Id.run do
+  if !st.liveData || st.screen != .missionTranscript || st.openMission != some mission then
+    return (st, none)
+  let mut seen : Std.HashSet String := {}
+  let mut texts : Array String := #[]
+  let mut ids : Array String := #[]
+  for (tid, txt) in batch.turns do
+    if txt.isEmpty then continue
+    if !tid.isEmpty then
+      if seen.contains tid then continue
+      seen := seen.insert tid
+      ids := ids.push tid
+    texts := texts.push txt
+  let hasMore := batch.hasMore && batch.nextCursor.isSome
+  let nextCursor := if hasMore then batch.nextCursor else none
+  if texts.isEmpty && !hasMore then
+    return (st, none)
+  let textList := texts.toList
+  let idList := ids.toList
+  if st.liveTurns == textList && st.liveTurnIds == idList &&
+      st.historyHasMore == hasMore && st.historyNextCursor == nextCursor &&
+      !st.historyLoading && !st.historyLoadError then
+    return (st, none)
+  return ({ st with
+    liveTurns := textList
+    liveTurnIds := idList
+    historyHasMore := hasMore
+    historyNextCursor := nextCursor
+    historyLoading := false
+    historyLoadError := false
+    stream := { st.stream with shown := [], pending := [] } },
+    some (transcriptDamageRect scale viewport st.sidebarWidth))
+
+/-- Compatibility wrapper for callers passing plain turn strings without paging metadata. -/
 def applyHistoryTurns (scale : Nat) (viewport : Rect) (st : DesktopState) (mission : String)
     (turns : List String) : DesktopState × Damage :=
-  if !st.liveData || st.screen != .missionTranscript || st.openMission != some mission ||
-      turns.isEmpty || st.liveTurns == turns then (st, none)
-  else
-    ({ st with
-      liveTurns := turns
-      stream := { st.stream with shown := [], pending := [] } },
-      some (transcriptDamageRect scale viewport st.sidebarWidth))
+  applyHistoryBatch scale viewport st mission { turns := turns.map (fun t => ("", t)) }
+
+/-- Prepend an on-demand older history page while deduplicating by event/row ID and
+preserving the reader's scroll anchor so the currently visible turn does not jump. -/
+def applyOlderHistoryBatch (scale : Nat) (viewport : Rect) (st : DesktopState) (mission : String)
+    (batch : HistoryBatch) : DesktopState × Damage := Id.run do
+  if !st.liveData || st.screen != .missionTranscript || st.openMission != some mission then
+    return (st, none)
+  let mut seen : Std.HashSet String := Std.HashSet.ofList st.liveTurnIds
+  let mut addedTexts : Array String := #[]
+  let mut addedIds : Array String := #[]
+  for (tid, txt) in batch.turns do
+    if txt.isEmpty then continue
+    if !tid.isEmpty then
+      if seen.contains tid then continue
+      seen := seen.insert tid
+      addedIds := addedIds.push tid
+    addedTexts := addedTexts.push txt
+  let hadBanner := st.showsHistoryBanner
+  let hasMore := batch.hasMore && batch.nextCursor.isSome
+  let nextCursor := if hasMore then batch.nextCursor else none
+  let willHaveBanner := st.liveData && hasMore
+  let addedList := addedTexts.toList
+  let scroll' :=
+    if st.scroll.pinned then st.scroll
+    else
+      let delta := measurePrependedHeightDelta st scale viewport addedList hadBanner willHaveBanner
+      let adjusted : SubPx := (max 0 ((st.scroll.topSub : Int) + delta)).toNat
+      { st.scroll with topSub := adjusted }
+  return ({ st with
+    liveTurns := addedList ++ st.liveTurns
+    liveTurnIds := addedIds.toList ++ st.liveTurnIds
+    historyHasMore := hasMore
+    historyNextCursor := nextCursor
+    historyLoading := false
+    historyLoadError := false
+    scroll := scroll' },
+    some (transcriptDamageRect scale viewport st.sidebarWidth))
 
 end OrbDesktop

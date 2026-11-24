@@ -574,6 +574,17 @@ class Delivery(unittest.TestCase):
                     (5, 'assistant_message_canonical', MERMAID_TURN)):
                 db.execute("INSERT INTO mission_events VALUES(NULL,'a',?,?,?,?,'{}','')",
                            (seq, seq, kind, json.dumps({'content': content, 'queued': False})))
+        if mode in ('long-paging', 'older-403'):
+            # >1,000-row persisted mission: initial /open serves only the newest
+            # 200 tail rows + 80 spine rows (280 total), and earlier rows page in
+            # on demand via /events?before_seq=...&view=transcript&limit=200.
+            db.execute("DELETE FROM mission_events WHERE mission_id='a'")
+            db.execute("UPDATE missions SET status='completed' WHERE id='a'")
+            for seq in range(1, 1051):
+                kind = 'user_message' if seq % 2 == 1 else 'assistant_message'
+                content = f'Turn {seq:04d}'
+                db.execute("INSERT INTO mission_events VALUES(NULL,'a',?,?,?,?,'{}','')",
+                           (seq, seq, kind, json.dumps({'content': content, 'queued': False})))
         project_started = threading.Event()
         release_project = threading.Event()
         events = '/current-bubble'
@@ -643,10 +654,68 @@ class Delivery(unittest.TestCase):
                         content = payload.get('content') if isinstance(payload.get('content'), str) else row[4]
                         events_page.append(dict(id=row[0], mission_id='a', sequence=row[1],
                                                 event_type=row[2], content=content))
-                    result = dict(protocol=1, mission=dict(id='a'), events=events_page, spine=[],
+                    spine_page = []
+                    spine_has_more = False
+                    spine_next_cursor = None
+                    if events_page:
+                        oldest_tail = events_page[0]['sequence']
+                        spine_rows = db.execute(
+                            "SELECT id, COALESCE(NULLIF(seq,0),sequence), event_type, payload, content"
+                            " FROM mission_events WHERE mission_id='a' AND COALESCE(NULLIF(seq,0),sequence) < ?"
+                            " ORDER BY COALESCE(NULLIF(seq,0),sequence) DESC, id DESC LIMIT 81",
+                            (oldest_tail,)).fetchall()
+                        spine_has_more = len(spine_rows) > 80
+                        for row in reversed(spine_rows[:80]):
+                            payload = json.loads(row[3]) if row[3] else {}
+                            content = payload.get('content') if isinstance(payload.get('content'), str) else row[4]
+                            spine_page.append(dict(id=row[0], mission_id='a', sequence=row[1],
+                                                   event_type=row[2], content=content))
+                        if spine_has_more and spine_page:
+                            spine_next_cursor = spine_page[0]['sequence']
+                    result = dict(protocol=1, mission=dict(id='a'), events=events_page, spine=spine_page,
                                   queue=[], max_seq=events_page[-1]['sequence'] if events_page else 0,
-                                  has_more=False, spine_has_more=False, spine_next_cursor=None,
-                                  next_cursor=None, page_max_seq=None, reset=False)
+                                  has_more=spine_has_more, spine_has_more=spine_has_more,
+                                  spine_next_cursor=spine_next_cursor,
+                                  next_cursor=spine_next_cursor, page_max_seq=None, reset=False)
+                elif path.split('?')[0] == a + '/events':
+                    if mode == 'older-403':
+                        self.send_error(403)
+                        return
+                    qs = live.urllib.parse.parse_qs(live.urllib.parse.urlsplit(path).query)
+                    before_seq = int(qs.get('before_seq', ['0'])[0])
+                    limit = int(qs.get('limit', ['200'])[0])
+                    older_rows = db.execute(
+                        "SELECT id, COALESCE(NULLIF(seq,0),sequence), event_type, payload, content"
+                        " FROM mission_events WHERE mission_id='a' AND COALESCE(NULLIF(seq,0),sequence) < ?"
+                        " ORDER BY COALESCE(NULLIF(seq,0),sequence) DESC, id DESC LIMIT ?",
+                        (before_seq, limit + 1)).fetchall()
+                    has_more = len(older_rows) > limit
+                    page_slice = list(reversed(older_rows[:limit]))
+                    # Deliberately include the boundary row at seq == before_seq to prove
+                    # cross-page deduplication by event/row ID and exclusive cursor handling.
+                    overlap = db.execute(
+                        "SELECT id, COALESCE(NULLIF(seq,0),sequence), event_type, payload, content"
+                        " FROM mission_events WHERE mission_id='a' AND COALESCE(NULLIF(seq,0),sequence) = ? LIMIT 1",
+                        (before_seq,)).fetchone()
+                    if overlap:
+                        page_slice.append(overlap)
+                    events_out = []
+                    for row in page_slice:
+                        payload = json.loads(row[3]) if row[3] else {}
+                        content = payload.get('content') if isinstance(payload.get('content'), str) else row[4]
+                        events_out.append(dict(id=row[0], mission_id='a', sequence=row[1],
+                                               event_type=row[2], content=content))
+                    next_cursor = events_out[0]['sequence'] if (has_more and events_out) else None
+                    self.send_response(200)
+                    self.send_header('X-Has-More', 'true' if has_more else 'false')
+                    if next_cursor is not None:
+                        self.send_header('X-Next-Cursor', str(next_cursor))
+                    self.end_headers()
+                    try:
+                        self.wfile.write(json.dumps(events_out).encode())
+                    except (BrokenPipeError, ConnectionResetError):
+                        pass
+                    return
                 elif path.split('?')[0] in (a + events, b + events):
                     mid = path.split('/')[-2]
                     presence = path.endswith('?presence=1')
@@ -774,6 +843,23 @@ class Delivery(unittest.TestCase):
                     # the persisted archive is re-read exactly once on recovery.
                     self.assertEqual(paths.count(a + '/open'), 2)
                     self.assertGreaterEqual(paths.count(a + events), 3)
+                    self.assertNotIn(b + events, paths)
+                elif mode == 'long-paging':
+                    # Fast initial open: /open runs once, and the 4 older /events pages
+                    # (771 -> 571 -> 371 -> 171 -> 1) are fetched on demand.
+                    self.assertEqual(paths.count(a + '/open'), 1)
+                    page_paths = [p for p in paths if p.startswith(a + '/events?')]
+                    self.assertEqual(page_paths, [
+                        a + '/events?before_seq=771&view=transcript&limit=200',
+                        a + '/events?before_seq=571&view=transcript&limit=200',
+                        a + '/events?before_seq=371&view=transcript&limit=200',
+                        a + '/events?before_seq=171&view=transcript&limit=200',
+                    ])
+                    self.assertNotIn(b + events, paths)
+                elif mode == 'older-403':
+                    # On-demand older page 403 revokes the mission and stops polling it.
+                    self.assertEqual(paths.count(a + '/open'), 1)
+                    self.assertEqual(len([p for p in paths if p.startswith(a + '/events?')]), 1)
                     self.assertNotIn(b + events, paths)
                 elif mode == 'mermaid-backedge':
                     # The driver renders and asserts from the first bubble; mission
@@ -923,68 +1009,154 @@ class Delivery(unittest.TestCase):
             conn.get.return_value = broken
             self.assertEqual(live.history_turns(conn, 'a', ''), [])
 
-    def test_history_pages_the_older_spine_until_complete(self):
-        # The /open bundle bounds the spine (80 rows by default). Long missions
-        # must reach their full history through the same exclusive before-cursor
-        # paging the web client uses, and rows a page repeats dedup so the
-        # archive never duplicates a turn.
+    def test_history_pages_the_older_spine_on_demand_without_fixed_ceiling(self):
+        # U5a: SPINE_MAX_PAGES=3 ceiling is gone. Initial /open loads fast in one
+        # request and advertises (has_more, next_cursor); older pages load on demand
+        # with exclusive before-cursor paging, ID dedup, stuck-cursor protection,
+        # and 401/403 propagation.
+        self.assertFalse(hasattr(live, 'SPINE_MAX_PAGES'))
         conn = Mock(binding='bound')
         conn.get.return_value = dict(
             protocol=1, mission=dict(id='a'),
-            events=[dict(sequence=9, event_type='assistant_message', content='Newest')],
+            events=[dict(id='e9', sequence=9, event_type='assistant_message', content='Newest')],
             spine=[
-                dict(sequence=8, event_type='assistant_message', content='Spine one'),
-                dict(sequence=7, event_type='assistant_message', content='Spine two'),
+                dict(id='e8', sequence=8, event_type='assistant_message', content='Spine one'),
+                dict(id='e7', sequence=7, event_type='assistant_message', content='Spine two'),
             ],
             spine_has_more=True, spine_next_cursor=7)
+        entries, has_more, next_cursor = live.history_page(conn, 'a', 'Newest')
+        self.assertEqual([t for _, t, _ in entries], ['Spine two', 'Spine one'])
+        self.assertTrue(has_more)
+        self.assertEqual(next_cursor, 7)
+        conn.get_page.assert_not_called()
+
+        # On-demand page 1: repeats boundary row seq=7 (overlapping page); exclusive
+        # cursor + ID dedup keep only the older row (seq=6) and advance cursor to 6.
         conn.get_page.side_effect = [
-            # The older page repeats the spine's oldest row; the duplicate must
-            # not become a second turn.
-            ([dict(sequence=6, event_type='assistant_message', content='Older page one'),
-              dict(sequence=7, event_type='assistant_message', content='Spine two')],
-             {'x-has-more': 'true', 'x-next-cursor': '5'}),
-            ([dict(sequence=5, event_type='user_message', content='Oldest')],
+            ([dict(id='e6', sequence=6, event_type='assistant_message', content='Older page one'),
+              dict(id='e6', sequence=6, event_type='assistant_message', content='Older page one duplicate'),
+              dict(id='e7', sequence=7, event_type='assistant_message', content='Spine two')],
+             {'x-has-more': 'true', 'x-next-cursor': '6'}),
+            ([dict(id='e5', sequence=5, event_type='user_message', content='Oldest')],
              {'x-has-more': 'false'}),
         ]
-        self.assertEqual(live.history_turns(conn, 'a', 'Newest'),
-                         ['You: Oldest', 'Older page one', 'Spine two', 'Spine one'])
+        p1, more1, cur1 = live.older_history_page(conn, 'a', 7)
+        self.assertEqual([(tid, txt) for tid, txt, _ in p1], [('id:e6', 'Older page one')])
+        self.assertTrue(more1)
+        self.assertEqual(cur1, 6)
+        p2, more2, cur2 = live.older_history_page(conn, 'a', cur1)
+        self.assertEqual([(tid, txt) for tid, txt, _ in p2], [('id:e5', 'You: Oldest')])
+        self.assertFalse(more2)
+        self.assertIsNone(cur2)
         cursors = [call.args[0] for call in conn.get_page.call_args_list]
         self.assertEqual(cursors, ['/api/control/missions/a/events?before_seq=7&view=transcript&limit=200',
-                                   '/api/control/missions/a/events?before_seq=5&view=transcript&limit=200'])
-        # A cursor that stops advancing must break the loop instead of spinning:
-        # the second page repeats the row the cursor names, so progress halts.
+                                   '/api/control/missions/a/events?before_seq=6&view=transcript&limit=200'])
+
+        # A cursor that stops advancing halts cleanly instead of looping forever.
         conn.get_page.reset_mock()
         conn.get_page.side_effect = [
-            ([dict(sequence=6, event_type='assistant_message', content='Older page one')],
-             {'x-has-more': 'true', 'x-next-cursor': '6'}),
-            ([dict(sequence=6, event_type='assistant_message', content='Older page one')],
+            ([dict(id='e6', sequence=6, event_type='assistant_message', content='Older page one')],
              {'x-has-more': 'true', 'x-next-cursor': '6'}),
         ]
-        conn.get.return_value['spine_next_cursor'] = 7
-        self.assertEqual(live.history_turns(conn, 'a', ''),
-                         ['Older page one', 'Spine two', 'Spine one', 'Newest'])
-        self.assertEqual(conn.get_page.call_count, 2)
-        # A failing page keeps what was read instead of losing the archive.
-        conn.get_page.reset_mock()
-        conn.get_page.side_effect = live.urllib.error.HTTPError('http://localhost', 500, '', {}, None)
-        self.assertEqual(live.history_turns(conn, 'a', ''), ['Spine two', 'Spine one', 'Newest'])
-        # A 401/403 on a page fetch must propagate to the revoked path too.
+        stuck_entries, stuck_more, stuck_cur = live.older_history_page(conn, 'a', 6)
+        self.assertEqual(stuck_entries, [])
+        self.assertFalse(stuck_more)
+        self.assertIsNone(stuck_cur)
+
+        # 401 and 403 must still re-raise on older page fetches.
         conn.get_page.reset_mock()
         for code in (401, 403):
             conn.get_page.side_effect = live.urllib.error.HTTPError('http://localhost', code, '', {}, None)
-            with self.assertRaises(live.urllib.error.HTTPError):
-                live.history_turns(conn, 'a', '')
-        # First paint stays bounded: even with more pages advertised, the
-        # bootstrap waits for at most SPINE_MAX_PAGES older-spine requests.
-        conn.get_page.reset_mock()
-        conn.get.return_value['spine_next_cursor'] = 7
-        conn.get_page.side_effect = [
-            ([dict(sequence=6 - 2 * n, event_type='assistant_message', content='Deep %d' % n)],
-             {'x-has-more': 'true', 'x-next-cursor': str(5 - 2 * n)})
-            for n in range(live.SPINE_MAX_PAGES + 2)]
-        self.assertEqual(live.history_turns(conn, 'a', ''),
-                         ['Deep 2', 'Deep 1', 'Deep 0', 'Spine two', 'Spine one', 'Newest'])
-        self.assertEqual(conn.get_page.call_count, live.SPINE_MAX_PAGES)
+            with self.assertRaises(live.urllib.error.HTTPError) as ctx:
+                live.older_history_page(conn, 'a', 7)
+            self.assertEqual(ctx.exception.code, code)
+
+        # fetch_older_turns maps 403/404 -> D, 500 -> HE (retryable), and re-raises 401.
+        for code, expected in ((403, 'D\n'), (404, 'D\n'), (500, 'HE\n')):
+            with patch.object(live, 'Connection') as factory:
+                c = factory.return_value
+                c.binding = 'bound'
+                c.get_page.side_effect = live.urllib.error.HTTPError('http://localhost', code, '', {}, None)
+                out = io.StringIO()
+                with contextlib.redirect_stdout(out):
+                    live.fetch_older_turns('a', 'bound', '7')
+                self.assertEqual(out.getvalue(), expected)
+        with patch.object(live, 'Connection') as factory:
+            c = factory.return_value
+            c.binding = 'bound'
+            c.get_page.side_effect = live.urllib.error.HTTPError('http://localhost', 401, '', {}, None)
+            with self.assertRaises(live.urllib.error.HTTPError) as ctx:
+                live.fetch_older_turns('a', 'bound', '7')
+            self.assertEqual(ctx.exception.code, 401)
+
+    def test_large_transcript_loads_initial_window_fast_and_pages_to_turn_1(self):
+        # 1,200 persisted turns: initial /open loads 280 rows in 1 request, then 5
+        # on-demand pages walk all the way back to turn 1 with zero duplicates or drops.
+        total_rows = 1200
+        all_rows = [
+            dict(id=f'evt-{seq}', sequence=seq,
+                 event_type='user_message' if seq % 2 == 1 else 'assistant_message',
+                 content=f'Turn {seq:04d}')
+            for seq in range(1, total_rows + 1)
+        ]
+        conn = Mock(binding='bound')
+        conn.get.return_value = dict(
+            protocol=1, mission=dict(id='a'),
+            events=all_rows[1000:],   # 1001..1200 (200 rows)
+            spine=all_rows[920:1000], # 921..1000 (80 rows)
+            spine_has_more=True, spine_next_cursor=921)
+
+        def fake_get_page(path):
+            qs = live.urllib.parse.parse_qs(live.urllib.parse.urlsplit(path).query)
+            before = int(qs['before_seq'][0])
+            limit = int(qs['limit'][0])
+            older = [r for r in all_rows if r['sequence'] < before]
+            page = older[-limit:]
+            has_more = len(older) > limit
+            # Inject an overlapping boundary row to verify dedup.
+            boundary = [r for r in all_rows if r['sequence'] == before]
+            headers = {'x-has-more': 'true' if has_more else 'false'}
+            if has_more and page:
+                headers['x-next-cursor'] = str(page[0]['sequence'])
+            return (page + boundary, headers)
+
+        conn.get_page.side_effect = fake_get_page
+
+        # Fast initial window: 1 /open call, 0 /events calls.
+        entries, has_more, cursor = live.history_page(conn, 'a', '')
+        self.assertEqual(conn.get.call_count, 1)
+        self.assertEqual(conn.get_page.call_count, 0)
+        self.assertEqual(len(entries), 280)
+        self.assertTrue(has_more)
+        self.assertEqual(cursor, 921)
+
+        # Page all the way back to turn 1 on demand.
+        seen_ids = {tid for tid, _, _ in entries}
+        collected = list(entries)
+        pages_fetched = 0
+        while has_more and cursor is not None:
+            older_entries, has_more, cursor = live.older_history_page(conn, 'a', cursor)
+            pages_fetched += 1
+            deduped = []
+            for item in older_entries:
+                self.assertNotIn(item[0], seen_ids)
+                seen_ids.add(item[0])
+                deduped.append(item)
+            collected = deduped + collected
+
+        self.assertEqual(pages_fetched, 5)  # 920 rows at 200/page -> 5 pages
+        self.assertEqual(len(collected), total_rows)
+        expected = [
+            f'You: Turn {seq:04d}' if seq % 2 == 1 else f'Turn {seq:04d}'
+            for seq in range(1, total_rows + 1)
+        ]
+        self.assertEqual([txt for _, txt, _ in collected], expected)
+
+    def test_long_transcript_pages_to_turn_1_without_duplicates_or_layout_jump(self):
+        self.run_wire('long-paging')
+
+    def test_older_page_403_revokes_and_clears_transcript(self):
+        self.run_wire('older-403')
 
     def test_two_turn_live_keeps_history_and_renders_mermaid(self):
         self.run_wire('mermaid-turn')

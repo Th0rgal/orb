@@ -428,10 +428,8 @@ def desktopReducer (rt : Runtime.RuntimeState DesktopState) :
           if top == st.fleetTopSub then return (st, none)
           return ({ st with fleetTopSub := top }, damage)
         if r.id == transcriptViewportId && st.screen == .missionTranscript then
-          let current := st.scroll.onLayout content h
-          let next := current.onUserScroll content h dy
-          if next == current then return (st, none)
-          return ({ st with scroll := next }, damage)
+          let some st' := stepTranscriptScroll st content h dy | return (st, none)
+          return (st', damage)
     return stepDesktopEvent scale viewport st ev
 
 /-- Render one `(ScreenId, isDark, scale120)` configuration to `outFile`, verifying that
