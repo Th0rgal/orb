@@ -2,7 +2,6 @@
 #define _POSIX_C_SOURCE 200809L
 #include "gtk_icons.h"
 #include "gtk_menu.h"
-#include <cairo/cairo.h>
 #include <ctype.h>
 #include <math.h>
 #include <string.h>
@@ -29,6 +28,7 @@ int orb_status_badge_kind(const char *status) {
 }
 
 #if defined(ORB_HAS_WEBKITGTK)
+#include <cairo/cairo.h>
 static void rounded_rect(cairo_t *cr, double x, double y, double w, double h, double r) {
     cairo_new_sub_path(cr); cairo_arc(cr, x + w - r, y + r, r, -1.5708, 0); cairo_arc(cr, x + w - r, y + h - r, r, 0, 1.5708);
     cairo_arc(cr, x + r, y + h - r, r, 1.5708, 3.1416); cairo_arc(cr, x + r, y + r, r, 3.1416, 4.7124); cairo_close_path(cr);

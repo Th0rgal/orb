@@ -19,3 +19,5 @@ typedef struct {
 void orb_sidebar_invalidate(OrbSidebar *s);
 void orb_sidebar_model_free(OrbSidebar *s);
 void orb_sidebar_hits(void *view, const char *regions);
+int orb_leanui_paint(const char *request, uint8_t *argb, size_t capacity,
+                     OrbSidebarHits hits, void *view);

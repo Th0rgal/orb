@@ -28,5 +28,5 @@ clean:
 .PHONY: test clean
 
 # Loaded by Lean only for the opt-in hybrid launcher.
-orb-sidebar-host.so: main.c gtk_chrome.c gtk_icons.c gtk_menu.c gtk_menu_layout.c gtk_leanui.c gtk_leanui_model.c $(wildcard *.h) ../lean/OrbDesktop/c/sidebar_host.h
+orb-sidebar-host.so: main.c gtk_chrome.c gtk_icons.c gtk_menu.c gtk_menu_layout.c gtk_leanui.c gtk_leanui_model.c gtk_leanui_palette.c $(wildcard *.h) ../lean/OrbDesktop/c/sidebar_host.h
 	$(CC) $(CFLAGS) -fPIC -shared -DORB_LEANUI_HOST -Dmain=orb_gtk_main -o $@ $(filter %.c,$^) $(shell $(PKG_CONFIG) --libs $(WEBKIT_PKGS)) -lm -Wl,-z,defs,-z,relro,-z,now
