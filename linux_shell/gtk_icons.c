@@ -5,14 +5,12 @@
 #include <ctype.h>
 #include <math.h>
 #include <string.h>
-
 const char *orb_menu_icon_name(const char *action) {
     return !strcmp(action, "rename") ? "document-edit-symbolic" :
         !strcmp(action, "archive") ? "package-x-generic-symbolic" : !strcmp(action, "restore") ? "edit-undo-symbolic" :
         !strcmp(action, "settings") ? "preferences-system-symbolic" : !strcmp(action, "clear") ? "edit-clear-symbolic" :
         !strcmp(action, "delete") ? "user-trash-symbolic" : !strcmp(action, "move") ? "folder-symbolic" : "edit-copy-symbolic";
 }
-
 int orb_status_badge_kind(const char *status) {
     if (!status || !*status) { return 0; }
     char s[48]; size_t i = 0; for (; status[i] && i + 1 < sizeof(s); ++i) { s[i] = (char)tolower((unsigned char)status[i]); } s[i] = '\0';
@@ -26,7 +24,6 @@ int orb_status_badge_kind(const char *status) {
     if (strcmp(s, "paused") == 0 || strcmp(s, "interrupted") == 0 || strcmp(s, "cancelled") == 0 || strcmp(s, "canceled") == 0) { return 6; }
     return 0;
 }
-
 #if defined(ORB_HAS_WEBKITGTK)
 #include <cairo/cairo.h>
 static void rounded_rect(cairo_t *cr, double x, double y, double w, double h, double r) {
@@ -66,11 +63,13 @@ void orb_gtk_bind_keyboard_focus(GtkWidget *window) {
 void orb_gtk_apply_theme(GtkCssProvider *css, gboolean light) {
     static const char *m[][2] = { {"#141414", "#fafaf9"}, {"#d8d8d7", "#242423"}, {"#e6e6e5", "#101010"}, {"#b1b1b1", "#535250"}, {"#8a8a8a", "#7b7a76"}, {"#6c6c6b", "#939290"}, {"#5c5c5c", "#a9a8a2"}, {"#5b5b5a", "#535250"}, {"#2c2c2c", "#e8e7e2"}, {"rgba(18,19,19,0.78)", "rgba(246,246,244,0.72)"}, {"216,216,215", "36,36,35"} };
     static const char menu_css[] =
-        ".orb-ctx{background-color:#141414;color:#d8d8d7;border:1px solid #2c2c2c;border-radius:6px;}"
-        ".orb-ctx modelbutton{color:inherit;min-height:26px;padding:0 8px;margin:0;border:0;border-radius:4px;"
-        "outline:none;box-shadow:none;}"
-        ".orb-ctx modelbutton:hover{background-color:rgba(216,216,215,0.10);}"
-        ".orb-keyboard-focus .orb-ctx modelbutton:focus{outline:1px solid #8a8a8a;outline-offset:-1px;}";
+        "popover.orb-ctx,popover.orb-ctx.background{background-color:#141414;background-image:none;color:#d8d8d7;border:1px solid #2c2c2c;border-radius:8px;padding:4px;font-size:12.5px;box-shadow:0 8px 24px rgba(0,0,0,0.38);}"
+        "popover.orb-ctx>box,popover.orb-ctx stack{background:transparent;padding:0;margin:0;}"
+        "popover.orb-ctx modelbutton,popover.orb-ctx modelbutton.flat,popover.orb-ctx modelbutton:focus{color:#d8d8d7;min-height:26px;padding:0 8px;margin:0;border:none;border-radius:3px;background:transparent;background-image:none;outline:none;box-shadow:none;font-size:12.5px;}"
+        "popover.orb-ctx modelbutton:hover,popover.orb-ctx modelbutton.flat:hover{background-color:rgba(216,216,215,0.09);color:#e6e6e5;}"
+        "popover.orb-ctx .orb-ico{color:#8a8a8a;}popover.orb-ctx modelbutton:hover .orb-ico{color:#e6e6e5;}"
+        "popover.orb-ctx separator{background-color:#2c2c2c;min-height:1px;margin:4px 6px;}"
+        ".orb-keyboard-focus popover.orb-ctx modelbutton:focus{background-color:rgba(216,216,215,0.09);outline:none;}";
     char *s = g_strconcat(ORB_CHROME_CSS, menu_css, NULL); for (size_t i = 0; light && i < G_N_ELEMENTS(m); i++) { char **parts = g_strsplit(s, m[i][0], -1); g_free(s); s = g_strjoinv(m[i][1], parts); g_strfreev(parts); }
     gtk_css_provider_load_from_data(css, s, -1, NULL); g_free(s); orb_icons_light = light;
 }
@@ -107,8 +106,14 @@ static gboolean on_draw_icon(GtkWidget *w, cairo_t *cr, gpointer ud) {
     else if (strcmp(ic, "machines") == 0) { rounded_rect(cr, 2.0, 2.4, 12.0, 8.2, 1.5); cairo_move_to(cr, 8.0, 10.6); cairo_line_to(cr, 8.0, 13.2); cairo_move_to(cr, 5.2, 13.5); cairo_line_to(cr, 10.8, 13.5); }
     else if (strcmp(ic, "cube") == 0) { cairo_move_to(cr, 8.0, 2.4); cairo_line_to(cr, 13.4, 5.4); cairo_line_to(cr, 13.4, 10.6); cairo_line_to(cr, 8.0, 13.6); cairo_line_to(cr, 2.6, 10.6); cairo_line_to(cr, 2.6, 5.4); cairo_close_path(cr); cairo_move_to(cr, 2.6, 5.4); cairo_line_to(cr, 8.0, 8.4); cairo_line_to(cr, 13.4, 5.4); cairo_move_to(cr, 8.0, 8.4); cairo_line_to(cr, 8.0, 13.6); }
     else if (strcmp(ic, "resources") == 0) { cairo_move_to(cr, 2.4, 4.4); cairo_line_to(cr, 5.2, 4.4); cairo_line_to(cr, 9.2, 8.0); cairo_line_to(cr, 13.6, 8.0); cairo_move_to(cr, 2.4, 11.6); cairo_line_to(cr, 5.2, 11.6); cairo_line_to(cr, 9.2, 8.0); cairo_move_to(cr, 11.4, 5.8); cairo_line_to(cr, 13.8, 8.0); cairo_line_to(cr, 11.4, 10.2); }
-    else if (strcmp(ic, "gear") == 0) { cairo_arc(cr, 8.0, 8.0, 2.1, 0, 6.29); cairo_new_sub_path(cr); cairo_arc(cr, 8.0, 8.0, 4.7, 0, 6.29); for (int a = 0; a < 8; ++a) { static const double dx[8] = {1,.71,0,-.71,-1,-.71,0,.71}, dy[8] = {0,.71,1,.71,0,-.71,-1,-.71}; cairo_move_to(cr, 8.0 + dx[a] * 4.7, 8.0 + dy[a] * 4.7); cairo_line_to(cr, 8.0 + dx[a] * 6.1, 8.0 + dy[a] * 6.1); } }
-    else if (strcmp(ic, "folder") == 0 || strcmp(ic, "folder-open") == 0) { cairo_move_to(cr, 2.0, 4.2); cairo_line_to(cr, 2.0, 12.6); cairo_line_to(cr, 13.8, 12.6); cairo_line_to(cr, 13.8, 5.2); cairo_line_to(cr, 7.6, 5.2); cairo_line_to(cr, 6.1, 3.4); cairo_line_to(cr, 2.6, 3.4); cairo_close_path(cr); if (ic[6] == '-') { cairo_move_to(cr, 2.2, 8.2); cairo_line_to(cr, 13.8, 8.2); } }
+    else if (strcmp(ic, "gear") == 0 || strcmp(ic, "preferences-system-symbolic") == 0) { cairo_arc(cr, 8.0, 8.0, 2.1, 0, 6.29); cairo_new_sub_path(cr); cairo_arc(cr, 8.0, 8.0, 4.7, 0, 6.29); for (int a = 0; a < 8; ++a) { static const double dx[8] = {1,.71,0,-.71,-1,-.71,0,.71}, dy[8] = {0,.71,1,.71,0,-.71,-1,-.71}; cairo_move_to(cr, 8.0 + dx[a] * 4.7, 8.0 + dy[a] * 4.7); cairo_line_to(cr, 8.0 + dx[a] * 6.1, 8.0 + dy[a] * 6.1); } }
+    else if (strcmp(ic, "folder") == 0 || strcmp(ic, "folder-open") == 0 || strcmp(ic, "folder-symbolic") == 0) { cairo_move_to(cr, 2.0, 4.2); cairo_line_to(cr, 2.0, 12.6); cairo_line_to(cr, 13.8, 12.6); cairo_line_to(cr, 13.8, 5.2); cairo_line_to(cr, 7.6, 5.2); cairo_line_to(cr, 6.1, 3.4); cairo_line_to(cr, 2.6, 3.4); cairo_close_path(cr); if (strcmp(ic, "folder-open") == 0) { cairo_move_to(cr, 2.2, 8.2); cairo_line_to(cr, 13.8, 8.2); } }
+    else if (strcmp(ic, "document-edit-symbolic") == 0) { cairo_move_to(cr, 10.8, 2.6); cairo_line_to(cr, 13.4, 5.2); cairo_line_to(cr, 5.6, 13.0); cairo_line_to(cr, 2.6, 13.4); cairo_line_to(cr, 3.0, 10.4); cairo_close_path(cr); }
+    else if (strcmp(ic, "package-x-generic-symbolic") == 0) { rounded_rect(cr, 2.2, 2.8, 11.6, 3.0, 0.8); cairo_move_to(cr, 3.2, 5.8); cairo_line_to(cr, 3.2, 12.8); cairo_line_to(cr, 12.8, 12.8); cairo_line_to(cr, 12.8, 5.8); cairo_move_to(cr, 6.4, 8.8); cairo_line_to(cr, 9.6, 8.8); }
+    else if (strcmp(ic, "edit-copy-symbolic") == 0) { rounded_rect(cr, 5.8, 5.8, 7.6, 7.6, 1.2); cairo_move_to(cr, 4.0, 10.2); cairo_line_to(cr, 3.2, 10.2); cairo_line_to(cr, 2.6, 9.6); cairo_line_to(cr, 2.6, 3.2); cairo_line_to(cr, 3.2, 2.6); cairo_line_to(cr, 9.6, 2.6); cairo_line_to(cr, 10.2, 3.2); cairo_line_to(cr, 10.2, 4.0); }
+    else if (strcmp(ic, "edit-undo-symbolic") == 0) { cairo_move_to(cr, 5.6, 4.0); cairo_line_to(cr, 2.8, 6.6); cairo_line_to(cr, 5.6, 9.2); cairo_move_to(cr, 3.2, 6.6); cairo_line_to(cr, 10.4, 6.6); cairo_arc(cr, 10.4, 9.6, 3.0, -1.57, 1.57); cairo_line_to(cr, 6.2, 12.6); }
+    else if (strcmp(ic, "user-trash-symbolic") == 0) { cairo_move_to(cr, 2.6, 4.4); cairo_line_to(cr, 13.4, 4.4); cairo_move_to(cr, 6.0, 4.4); cairo_line_to(cr, 6.4, 2.6); cairo_line_to(cr, 9.6, 2.6); cairo_line_to(cr, 10.0, 4.4); cairo_move_to(cr, 4.2, 4.4); cairo_line_to(cr, 4.8, 13.2); cairo_line_to(cr, 11.2, 13.2); cairo_line_to(cr, 11.8, 4.4); }
+    else if (strcmp(ic, "edit-clear-symbolic") == 0) { cairo_move_to(cr, 4.2, 4.2); cairo_line_to(cr, 11.8, 11.8); cairo_move_to(cr, 11.8, 4.2); cairo_line_to(cr, 4.2, 11.8); }
     else if (strcmp(ic, "file") == 0) { cairo_move_to(cr, 3.5, 2.0); cairo_line_to(cr, 9.2, 2.0); cairo_line_to(cr, 12.2, 5.0); cairo_line_to(cr, 12.2, 13.8); cairo_line_to(cr, 3.5, 13.8); cairo_close_path(cr); cairo_move_to(cr, 9.0, 2.0); cairo_line_to(cr, 9.0, 5.2); cairo_line_to(cr, 12.2, 5.2); }
     else if (strcmp(ic, "skills") == 0) { cairo_move_to(cr, 2.5, 5.2); cairo_line_to(cr, 8.0, 2.4); cairo_line_to(cr, 13.5, 5.2); cairo_line_to(cr, 8.0, 8.0); cairo_close_path(cr); cairo_move_to(cr, 2.5, 8.2); cairo_line_to(cr, 8.0, 11.0); cairo_line_to(cr, 13.5, 8.2); cairo_move_to(cr, 2.5, 11.2); cairo_line_to(cr, 8.0, 14.0); cairo_line_to(cr, 13.5, 11.2); }
     else if (strcmp(ic, "key") == 0) { cairo_arc(cr, 5.8, 8.0, 2.4, 0, 6.29); cairo_move_to(cr, 8.2, 8.0); cairo_line_to(cr, 13.4, 8.0); cairo_line_to(cr, 12.1, 9.4); cairo_move_to(cr, 11.0, 8.0); cairo_line_to(cr, 11.0, 9.7); }
@@ -125,7 +130,6 @@ gboolean orb_button_enter(GtkWidget *row, GdkEventKey *event, gpointer data) {
     gtk_button_clicked(GTK_BUTTON(row));
     return TRUE;
 }
-
 /* A model button normally chooses between its text and icon. Keep the
  * native submenu indicator and add the leading glyph beside its label. */
 GtkWidget *orb_menu_row(GtkWidget *page, const char *label, const char *icon) {
@@ -141,12 +145,9 @@ void orb_menu_separator(GtkWidget *page) {
 }
 void orb_add_menu_icon(GtkWidget *button, const char *icon) {
     GtkBox *content = GTK_BOX(gtk_bin_get_child(GTK_BIN(button)));
-    GtkWidget *image = gtk_image_new_from_icon_name(icon, GTK_ICON_SIZE_MENU);
-    gtk_widget_set_margin_end(image, 7);
-    gtk_box_pack_start(content, image, FALSE, FALSE, 0);
-    gtk_box_reorder_child(content, image, 0);
+    GtkWidget *ico = orb_make_icon_widget(NULL, icon, NULL, NULL);
+    gtk_widget_set_margin_end(ico, 7); gtk_box_pack_start(content, ico, FALSE, FALSE, 0); gtk_box_reorder_child(content, ico, 0);
 }
-
 GtkWidget *orb_make_icon_widget(OrbIconSpinner *sp, const char *icon, const char *color, const char *status) {
     int is_bot = icon && strcmp(icon, "bot") == 0, bk = is_bot ? orb_status_badge_kind(status) : 0;
     GtkWidget *da = gtk_drawing_area_new(); gtk_widget_set_size_request(da, is_bot ? 20 : 16, is_bot ? 20 : 16);
@@ -208,7 +209,6 @@ void orb_gtk_bind_pointer_cursor(GtkWidget *w) {
     g_signal_connect(w, "leave-notify-event", G_CALLBACK(on_ptr_leave), NULL);
 }
 #endif
-
 int orb_gtk_icons_self_test(void) {
     return orb_status_badge_kind("active") == 1 && orb_status_badge_kind("RUNNING") == 1 &&
            orb_status_badge_kind("waiting_background") == 2 && orb_status_badge_kind("queued") == 3 &&
