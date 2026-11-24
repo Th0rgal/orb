@@ -599,6 +599,7 @@ def renderAll36GpuReadback (width height : Nat) (gpuMode : Vulkan.GpuModeRequest
     (outDir : System.FilePath) (screenOpt : Option ScreenId) : IO UInt32 := do
   IO.FS.createDirAll outDir
   let enableVal := (← IO.getEnv "ORB_LEANUI_VK_VALIDATION") == some "1"
+  let effMode ← Vulkan.resolveGpuMode gpuMode
   let rbInit ← match ← Vk.createOffscreenReadback enableVal with
     | .error e =>
       IO.eprintln s!"gpu-readback: failed to create Vulkan offscreen context: {e}"
@@ -623,7 +624,7 @@ def renderAll36GpuReadback (width height : Nat) (gpuMode : Vulkan.GpuModeRequest
           let (bw, bh) := rt0.wayland.deviceBufferSize
           let curRb ← rbRef.get
           let pixels ←
-            if gpuMode == .present then
+            if effMode == .present then
               let (cpuFb, _) := Vulkan.rasterizeScene bw bh clearColor atlas scene
               match ← Vk.renderOffscreenPresent curRb bw bh cpuFb with
               | .error e =>
@@ -632,7 +633,7 @@ def renderAll36GpuReadback (width height : Nat) (gpuMode : Vulkan.GpuModeRequest
                 return 1
               | .ok (rb', px) => rbRef.set rb'; pure px
             else
-              match ← Vk.renderOffscreenInstanced curRb bw bh clearColor atlas scene with
+              match ← Vk.renderOffscreenInstanced curRb bw bh clearColor atlas scene true with
               | .error e =>
                 Runtime.shutdownRuntime rt0
                 IO.eprintln s!"gpu-readback(instanced) failed: {e}"
@@ -658,6 +659,7 @@ def renderAllPrimsFixture (useGpu : Bool) (gpuMode : Vulkan.GpuModeRequest)
     IO.FS.writeBinFile outPath (Vulkan.encodeRGBA8ToPNG w h fb)
     IO.println s!"Rendered CPU all-primitives fixture to {outPath}"
     return 0
+  let effMode ← Vulkan.resolveGpuMode gpuMode
   let enableVal := (← IO.getEnv "ORB_LEANUI_VK_VALIDATION") == some "1"
   let rbInit ← match ← Vk.createOffscreenReadback enableVal with
     | .error e => IO.eprintln s!"gpu-readback-all-prims failed: {e}"; return 1
@@ -666,11 +668,11 @@ def renderAllPrimsFixture (useGpu : Bool) (gpuMode : Vulkan.GpuModeRequest)
   try
     let curRb ← rbRef.get
     let res ←
-      if gpuMode == .present then
+      if effMode == .present then
         let (cpuFb, _) := Vulkan.rasterizeScene w h clearColor atlas scene
         Vk.renderOffscreenPresent curRb w h cpuFb
       else
-        Vk.renderOffscreenInstanced curRb w h clearColor atlas scene
+        Vk.renderOffscreenInstanced curRb w h clearColor atlas scene true
     match res with
     | .error e => IO.eprintln s!"gpu-readback-all-prims render failed: {e}"; return 1
     | .ok (rb', px) =>
@@ -763,9 +765,12 @@ def runWsiBench (cfg : Runtime.RuntimeConfig) (iterations : Nat) : IO UInt32 := 
       | .cpuShm => "cpuShm"
       | .vkPresent => "vkPresent"
       | .vkInstanced => "vkInstanced"
-    let fallbackStr := rt.vulkan.fallbackReason.getD ""
+    let escJson (s : String) : String :=
+      s.replace "\\" "\\\\" |>.replace "\"" "\\\"" |>.replace "\n" "\\n" |>.replace "\r" "\\r"
+    let fallbackStr := escJson (rt.vulkan.fallbackReason.getD "")
+    let icdStr := escJson rt.vulkan.icdName
     let errors : Nat := if quiescentRedraws == 0 && rt.presentCount >= iters then 0 else 1
-    IO.println s!"\{\"backend\": \"{backendStr}\", \"icd_name\": \"{rt.vulkan.icdName}\", \"present_mode\": {rt.vulkan.presentMode}, \"fallback_reason\": \"{fallbackStr}\", \"cold_ms\": {fmtMs coldUs}, \"frame_p50_ms\": {fmtMs p50Us}, \"frame_p99_ms\": {fmtMs p99Us}, \"frames_rendered\": {rt.framesRendered}, \"present_count\": {rt.presentCount}, \"quiescent_redraws\": {quiescentRedraws}, \"recreates\": {rt.vulkan.swapchainRecreates}, \"gpu_allocated_bytes\": {rt.vulkan.gpuAllocatedBytes}, \"rss_anon_kib\": {rssAnonKiB}, \"width\": {rt.vulkan.width}, \"height\": {rt.vulkan.height}, \"error_count\": {errors}}"
+    IO.println s!"\{\"backend\": \"{backendStr}\", \"icd_name\": \"{icdStr}\", \"present_mode\": {rt.vulkan.presentMode}, \"fallback_reason\": \"{fallbackStr}\", \"cold_ms\": {fmtMs coldUs}, \"frame_p50_ms\": {fmtMs p50Us}, \"frame_p99_ms\": {fmtMs p99Us}, \"frames_rendered\": {rt.framesRendered}, \"present_count\": {rt.presentCount}, \"quiescent_redraws\": {quiescentRedraws}, \"recreates\": {rt.vulkan.swapchainRecreates}, \"gpu_allocated_bytes\": {rt.vulkan.gpuAllocatedBytes}, \"rss_anon_kib\": {rssAnonKiB}, \"width\": {rt.vulkan.width}, \"height\": {rt.vulkan.height}, \"error_count\": {errors}}"
     return (if errors == 0 then 0 else 1)
   finally
     Runtime.shutdownRuntime (← rtRef.get)

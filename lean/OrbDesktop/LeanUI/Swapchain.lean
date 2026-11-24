@@ -228,7 +228,8 @@ def onSubmitAndPresent (s : SwapchainState) (bw bh imgIdx : Nat) (presentRes : W
       images := s.images.set imgIdx .withPresentEngine
       imageFence := s.imageFence.set imgIdx (some slot)
       submitCount := s.submitCount + 1
-      presentCount := s.presentCount + 1
+      presentCount :=
+        if presentRes == .success || presentRes == .suboptimal then s.presentCount + 1 else s.presentCount
     }
     match s.phase, presentRes with
     | .ready w h _, .outOfDate | .ready w h _, .suboptimal | .ready w h _, .surfaceLost =>

@@ -490,7 +490,7 @@ jobs:
           sudo apt-get -o Dir::Cache::archives="$HOME/orb-desktop-debs" install -y --no-install-recommends libwebkit2gtk-4.1-dev \
             libgtk-3-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-dev libssl-dev libsqlite3-dev zstd \
             libwayland-dev libxkbcommon-dev libfreetype-dev libharfbuzz-dev libfontconfig-dev \
-            mesa-vulkan-drivers vulkan-validationlayers libvulkan-dev glslang-tools python3-numpy python3-pil
+            mesa-vulkan-drivers vulkan-validationlayers libvulkan-dev glslang-tools spirv-tools python3-numpy python3-pil
           sudo rm -rf "$HOME/orb-desktop-debs/partial" "$HOME/orb-desktop-debs/lock"
       - name: Build orb-locald + sandboxed-mcp
         if: steps.desktop-bins.outputs.cache-hit != 'true' && steps.promoted-desktop.outcome != 'success'

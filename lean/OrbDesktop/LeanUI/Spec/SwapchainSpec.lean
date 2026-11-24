@@ -217,12 +217,196 @@ theorem onSubmitAndPresent_acquiredCount_le (s : SwapchainState) (bw bh imgIdx :
     all_goals exact hstep
   · simp [hcan, hwf.2]
 
-/-- Invariant 2 (ScopedAuthority): `renderFinishedSemIndex` is strictly injective across swapchain
+/-- Invariant 2a (ScopedAuthority): `renderFinishedSemIndex` is strictly injective across swapchain
 images, so distinct swapchain images never alias a `renderFinished` semaphore even when
 `imageCount ≥ 3`. -/
 theorem renderFinishedSemIndex_injective (i j : Nat) (h : i ≠ j) :
     SwapchainState.renderFinishedSemIndex i ≠ SwapchainState.renderFinishedSemIndex j :=
   h
+
+/-- Invariant 2b: `imageAvailableSemIndex` is injective across frame slots `Fin 2`. -/
+theorem imageAvailableSemIndex_injective (a b : Fin 2) (h : a ≠ b) :
+    SwapchainState.imageAvailableSemIndex a ≠ SwapchainState.imageAvailableSemIndex b := by
+  intro heq
+  exact h (Fin.ext heq)
+
+/-- Inductive `SwapchainWF` preservation for `waitSlotFence`. -/
+theorem waitSlotFence_wf (s : SwapchainState) (slot : Fin 2) (hwf : SwapchainWF s) :
+    SwapchainWF (s.waitSlotFence slot) := by
+  unfold SwapchainState.waitSlotFence
+  cases hph : s.phase with
+  | destroyed | deviceLostFallbackShm => exact hwf
+  | uninitialized | ready _ _ _ | suspendedZeroExtent | needsRecreate _ _ =>
+    refine ⟨?_, hwf.2⟩
+    intro w h n hEq
+    have hprev := hwf.1 w h n (hph.trans hEq)
+    exact ⟨hprev.1, hprev.2.1, hprev.2.2.1, hprev.2.2.2.1, by simp [hprev.2.2.2.2]⟩
+
+/-- Inductive `SwapchainWF` preservation for `onExtentChanged`. -/
+theorem onExtentChanged_wf (s : SwapchainState) (bw bh : Nat) (hwf : SwapchainWF s) :
+    SwapchainWF (s.onExtentChanged bw bh) := by
+  unfold SwapchainState.onExtentChanged
+  cases hph : s.phase with
+  | destroyed | deviceLostFallbackShm => exact hwf
+  | ready w h n =>
+    by_cases h0 : (bw == 0 || bh == 0) = true
+    · simp only [h0, ↓reduceIte]
+      exact ⟨fun _ _ _ hEq => (by cases hEq), by simp [SwapchainState.acquiredCount]⟩
+    · simp only [h0, Bool.false_eq_true, ↓reduceIte]
+      by_cases hne : (w != bw || h != bh) = true
+      · simp only [hne, ↓reduceIte]
+        exact ⟨fun _ _ _ hEq => (by cases hEq), hwf.2⟩
+      · simp only [hne, Bool.false_eq_true, ↓reduceIte]; exact hwf
+  | suspendedZeroExtent =>
+    by_cases hp : (bw > 0 && bh > 0) = true
+    · simp only [hp, ↓reduceIte]
+      exact ⟨fun _ _ _ hEq => (by cases hEq), hwf.2⟩
+    · simp only [hp, Bool.false_eq_true, ↓reduceIte]; exact hwf
+  | needsRecreate _ _ =>
+    by_cases h0 : (bw == 0 || bh == 0) = true
+    · simp only [h0, ↓reduceIte]
+      exact ⟨fun _ _ _ hEq => (by cases hEq), hwf.2⟩
+    · simp only [h0, Bool.false_eq_true, ↓reduceIte]
+      exact ⟨fun _ _ _ hEq => (by cases hEq), hwf.2⟩
+  | uninitialized =>
+    by_cases h0 : (bw == 0 || bh == 0) = true
+    · simp only [h0, ↓reduceIte]
+      exact ⟨fun _ _ _ hEq => (by cases hEq), hwf.2⟩
+    · simp only [h0, Bool.false_eq_true, ↓reduceIte]; exact hwf
+
+/-- Inductive `SwapchainWF` preservation for `onAcquire`. -/
+theorem onAcquire_wf (s : SwapchainState) (res : WsiResult) (imgIdx : Nat) (hwf : SwapchainWF s) :
+    SwapchainWF (s.onAcquire res imgIdx) := by
+  refine ⟨?_, onAcquire_acquiredCount_le_one s res imgIdx hwf⟩
+  unfold SwapchainState.onAcquire
+  cases hph : s.phase with
+  | ready w h n =>
+    by_cases ha : s.acquiredCount != 0
+    · simp only [ha, ↓reduceIte]; exact hwf.1
+    · simp only [ha, Bool.false_eq_true, ↓reduceIte]
+      cases res with
+      | success | suboptimal =>
+        dsimp only
+        by_cases hlt : imgIdx < n
+        · simp only [hlt, ↓reduceIte]
+          intro w' h' n' hEq
+          have hprev := hwf.1 w h n hph
+          unfold SwapchainState.guardImageFence at hEq ⊢
+          dsimp only at hEq ⊢
+          cases hget : s.imageFence[imgIdx]? with
+          | none =>
+            simp only [hget] at hEq ⊢
+            injection hEq with hw hh hn
+            subst hw hh hn
+            exact ⟨hprev.1, hprev.2.1, hprev.2.2.1, by simp [hprev.2.2.2.1], hprev.2.2.2.2⟩
+          | some o =>
+            cases o with
+            | none =>
+              simp only [hget] at hEq ⊢
+              injection hEq with hw hh hn
+              subst hw hh hn
+              exact ⟨hprev.1, hprev.2.1, hprev.2.2.1, by simp [hprev.2.2.2.1], hprev.2.2.2.2⟩
+            | some prev =>
+              simp only [hget] at hEq ⊢
+              by_cases hne : (prev != s.curSlot) = true
+              · simp only [hne, ↓reduceIte, SwapchainState.waitSlotFence] at hEq ⊢
+                injection hEq with hw hh hn
+                subst hw hh hn
+                exact ⟨hprev.1, hprev.2.1, hprev.2.2.1, by simp [hprev.2.2.2.1], by simp [hprev.2.2.2.2]⟩
+              · simp only [hne, Bool.false_eq_true, ↓reduceIte] at hEq ⊢
+                injection hEq with hw hh hn
+                subst hw hh hn
+                exact ⟨hprev.1, hprev.2.1, hprev.2.2.1, by simp [hprev.2.2.2.1], hprev.2.2.2.2⟩
+        · simp only [hlt, ↓reduceIte]; exact hwf.1
+      | outOfDate | surfaceLost => intro _ _ _ hEq; cases hEq
+      | deviceLost => intro _ _ _ hEq; cases hEq
+  | uninitialized | suspendedZeroExtent | needsRecreate _ _ | deviceLostFallbackShm | destroyed =>
+    exact hwf.1
+
+/-- Inductive `SwapchainWF` preservation for `onSubmitAndPresent`. -/
+theorem onSubmitAndPresent_wf (s : SwapchainState) (bw bh imgIdx : Nat) (res : WsiResult)
+    (hwf : SwapchainWF s) : SwapchainWF (s.onSubmitAndPresent bw bh imgIdx res) := by
+  refine ⟨?_, onSubmitAndPresent_acquiredCount_le s bw bh imgIdx res hwf⟩
+  unfold SwapchainState.onSubmitAndPresent
+  by_cases hcan : s.canSubmit bw bh imgIdx = true
+  · simp only [hcan, Bool.not_true, Bool.false_eq_true, ↓reduceIte]
+    cases hph : s.phase with
+    | ready w h n =>
+      have hprev := hwf.1 w h n hph
+      cases res with
+      | outOfDate | suboptimal | surfaceLost => intro _ _ _ hEq; cases hEq
+      | deviceLost => intro _ _ _ hEq; cases hEq
+      | success =>
+        intro w' h' n' hEq
+        dsimp only at hEq ⊢
+        injection hEq with hw hh hn
+        subst hw hh hn
+        exact ⟨hprev.1, hprev.2.1, hprev.2.2.1,
+          by simpa using hprev.2.2.2.1,
+          by simpa using hprev.2.2.2.2⟩
+    | uninitialized | suspendedZeroExtent | needsRecreate _ _ | deviceLostFallbackShm | destroyed =>
+      simp [SwapchainState.canSubmit, SwapchainState.isReadyForExtent, hph] at hcan
+  · simp only [hcan, Bool.not_false, ↓reduceIte]; exact hwf.1
+
+/-- Inductive `SwapchainWF` preservation for `onDeviceLost` and `destroy`. -/
+theorem onDeviceLost_wf (s : SwapchainState) (hwf : SwapchainWF s) :
+    SwapchainWF s.onDeviceLost := by
+  unfold SwapchainState.onDeviceLost
+  cases s.phase with
+  | destroyed => exact hwf
+  | _ => exact ⟨fun _ _ _ hEq => (by cases hEq), by simp [SwapchainState.acquiredCount]⟩
+
+theorem destroy_wf (s : SwapchainState) : SwapchainWF s.destroy :=
+  ⟨fun _ _ _ hEq => (by cases hEq), by simp [SwapchainState.destroy, SwapchainState.acquiredCount]⟩
+
+/-- Universal `MAILBOX` cross-slot re-acquire readiness: after `onAcquire .success imgIdx` on an
+idle slot in a well-formed ready swapchain, `canSubmit w h imgIdx = true` regardless of whether
+another slot previously owned `imageFence[imgIdx]`. -/
+theorem onAcquire_success_enables_canSubmit (s : SwapchainState) (w h n imgIdx : Nat)
+    (hwf : SwapchainWF s) (hph : s.phase = .ready w h n)
+    (hacq : s.acquiredCount = 0) (hidle : s.frameSlots s.curSlot = .idle) (hlt : imgIdx < n) :
+    (s.onAcquire .success imgIdx).canSubmit w h imgIdx = true := by
+  have hprev := hwf.1 w h n hph
+  have himLen : imgIdx < s.images.length := by rw [hprev.2.2.2.1]; exact hlt
+  have hifLen : imgIdx < s.imageFence.length := by rw [hprev.2.2.2.2]; exact hlt
+  unfold SwapchainState.onAcquire
+  rw [hph]
+  simp only [hacq, bne_self_eq_false, Bool.false_eq_true, ↓reduceIte, hlt]
+  unfold SwapchainState.guardImageFence
+  dsimp only
+  cases hget : s.imageFence[imgIdx]? with
+  | none =>
+    simp [List.getElem?_eq_getElem hifLen] at hget
+  | some o =>
+    cases o with
+    | none =>
+      unfold SwapchainState.canSubmit SwapchainState.isReadyForExtent
+      simp [hprev.1, hprev.2.1, hprev.2.2.1, List.getElem?_set_self himLen, hidle, hget]
+    | some prev =>
+      dsimp only
+      by_cases hne : (prev != s.curSlot) = true
+      · simp only [hne, ↓reduceIte, SwapchainState.waitSlotFence]
+        unfold SwapchainState.canSubmit SwapchainState.isReadyForExtent
+        simp [hprev.1, hprev.2.1, hprev.2.2.1, List.getElem?_set_self himLen, hidle, List.getElem?_map, hget]
+      · simp only [hne, Bool.false_eq_true, ↓reduceIte]
+        have heq : prev = s.curSlot := by
+          simp only [bne_iff_ne, ne_eq, Decidable.not_not] at hne
+          exact hne
+        subst heq
+        unfold SwapchainState.canSubmit SwapchainState.isReadyForExtent
+        simp [hprev.1, hprev.2.1, hprev.2.2.1, List.getElem?_set_self himLen, hidle, hget]
+
+/-- Failed `vkQueuePresentKHR` (`outOfDate` / `surfaceLost` / `deviceLost`) never increments
+`presentCount` in `SwapchainState`. -/
+theorem onSubmitAndPresent_failed_presentCount_unchanged (s : SwapchainState)
+    (bw bh imgIdx : Nat) (res : WsiResult)
+    (hfail : res = .outOfDate ∨ res = .surfaceLost ∨ res = .deviceLost) :
+    (s.onSubmitAndPresent bw bh imgIdx res).presentCount = s.presentCount := by
+  unfold SwapchainState.onSubmitAndPresent
+  by_cases hcan : s.canSubmit bw bh imgIdx = true
+  · simp only [hcan, Bool.not_true, Bool.false_eq_true, ↓reduceIte]
+    rcases hfail with rfl | rfl | rfl <;> cases s.phase <;> rfl
+  · simp [hcan]
 
 /-- Invariant 3a (Zero-extent guard): `initOrRecreate` with `w = 0 ∨ h = 0` transitions any live
 swapchain to `suspendedZeroExtent` rather than creating a zero-extent swapchain. -/

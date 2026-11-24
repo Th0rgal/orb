@@ -352,7 +352,9 @@ private def savePipelineCache (dev : VkDeviceCtx) (cache : UInt64) : IO Unit := 
   if let some bytes := bytesOpt then
     try
       if let some parent := path.parent then IO.FS.createDirAll parent
-      IO.FS.writeBinFile path bytes
+      let tmpPath := System.FilePath.mk (path.toString ++ ".tmp")
+      IO.FS.writeBinFile tmpPath bytes
+      IO.FS.rename tmpPath path
     catch _ => pure ()
 
 private def createShaderModule (dev : VkDeviceCtx) (spv : ByteArray) : IO (Except String UInt64) :=
@@ -648,10 +650,8 @@ private def ensureAuxTargets (dev : VkDeviceCtx) (p : VkInstancedPipeline)
   let mut out := p
   let mut changed := false
   if needLayers && (out.layerImage.width != vw || out.layerImage.height != vh || out.layerAttachViews.size != 4) then
-    waitDeviceIdle dev
-    for v in out.layerAttachViews do
-      if v != 0 then callVoid dev.fns.destroyImageView dev.device v 0
-    destroyGpuImage dev out.layerImage
+    -- Allocate replacement layer image + attachment views BEFORE destroying old ones so
+    -- any error leaves `out` valid (zero double-destroy, zero partial handle leaks).
     match ← createGpuImage dev vw vh 4 VK_FORMAT_R8G8B8A8_UNORM
         (VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT ||| VK_IMAGE_USAGE_SAMPLED_BIT ||| VK_IMAGE_USAGE_TRANSFER_SRC_BIT ||| VK_IMAGE_USAGE_TRANSFER_DST_BIT)
         VK_IMAGE_VIEW_TYPE_2D_ARRAY with
@@ -660,23 +660,33 @@ private def ensureAuxTargets (dev : VkDeviceCtx) (p : VkInstancedPipeline)
       let mut views : Array UInt64 := #[]
       for layer in [:4] do
         match ← createImageView dev im.image VK_IMAGE_VIEW_TYPE_2D VK_FORMAT_R8G8B8A8_UNORM layer.toUInt32 1 with
-        | .error e => return .error e
+        | .error e =>
+          for v in views do
+            if v != 0 then callVoid dev.fns.destroyImageView dev.device v 0
+          destroyGpuImage dev im
+          return .error e
         | .ok v => views := views.push v
+      waitDeviceIdle dev
+      for v in out.layerAttachViews do
+        if v != 0 then callVoid dev.fns.destroyImageView dev.device v 0
+      destroyGpuImage dev out.layerImage
       out := { out with layerImage := im, layerAttachViews := views }
       changed := true
 
   if needBlur && (out.blurP0.width != vw || out.blurP0.height != vh) then
-    waitDeviceIdle dev
-    destroyGpuImage dev out.blurP0
-    destroyGpuImage dev out.blurP1
     let blurUsage := VK_IMAGE_USAGE_STORAGE_BIT ||| VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |||
       VK_IMAGE_USAGE_TRANSFER_SRC_BIT ||| VK_IMAGE_USAGE_TRANSFER_DST_BIT ||| VK_IMAGE_USAGE_SAMPLED_BIT
     match ← createGpuImage dev vw vh 1 VK_FORMAT_R8G8B8A8_UNORM blurUsage VK_IMAGE_VIEW_TYPE_2D with
     | .error e => return .error e
     | .ok p0 =>
       match ← createGpuImage dev vw vh 1 VK_FORMAT_R8G8B8A8_UNORM blurUsage VK_IMAGE_VIEW_TYPE_2D with
-      | .error e => return .error e
+      | .error e =>
+        destroyGpuImage dev p0
+        return .error e
       | .ok p1 =>
+        waitDeviceIdle dev
+        destroyGpuImage dev out.blurP0
+        destroyGpuImage dev out.blurP1
         out := { out with blurP0 := p0, blurP1 := p1 }
         changed := true
 
@@ -695,11 +705,11 @@ private def ensureSsboCapacity (dev : VkDeviceCtx) (p : VkInstancedPipeline) (sl
     let mut nextSz := curI.size
     while nextSz < instBytes && nextSz < 16 * 1024 * 1024 do nextSz := nextSz * 2
     if nextSz < instBytes then nextSz := instBytes
-    destroyGpuBuffer dev curI
     match ← createGpuBuffer dev nextSz VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
         (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT ||| VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) true with
     | .error e => return .error e
     | .ok nb =>
+      destroyGpuBuffer dev curI
       out := { out with instanceBufs := out.instanceBufs.set! slotIdx nb }
       changed := true
 
@@ -708,11 +718,11 @@ private def ensureSsboCapacity (dev : VkDeviceCtx) (p : VkInstancedPipeline) (sl
     let mut nextSz := curC.size
     while nextSz < clipBytes && nextSz < 4 * 1024 * 1024 do nextSz := nextSz * 2
     if nextSz < clipBytes then nextSz := clipBytes
-    destroyGpuBuffer dev curC
     match ← createGpuBuffer dev nextSz VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
         (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT ||| VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) true with
     | .error e => return .error e
     | .ok nb =>
+      destroyGpuBuffer dev curC
       out := { out with clipBufs := out.clipBufs.set! slotIdx nb }
       changed := true
 
@@ -721,11 +731,12 @@ private def ensureSsboCapacity (dev : VkDeviceCtx) (p : VkInstancedPipeline) (sl
   return .ok out
 
 /-- Upload dirty glyph atlas rectangles (or full populated pages on first use / `resetAll` clear)
-into the 8-layer `uAtlas` `VK_IMAGE_VIEW_TYPE_2D_ARRAY`. -/
-private def recordAtlasSync (dev : VkDeviceCtx) (p : VkInstancedPipeline) (cb : UInt64)
-    (stag : VkGpuBuffer) (atlas : Text.GlyphAtlasCache) :
-    IO (VkInstancedPipeline × Nat) := do
-  let needReset := !p.atlasInitialized || p.lastAtlasGen != atlas.generation
+into the 8-layer `uAtlas` `VK_IMAGE_VIEW_TYPE_2D_ARRAY`. Chunks uploads across `submitAndWaitSync`
+batches if total dirty data exceeds `stag.size` (4 MiB) so glyphs are never dropped. -/
+private def recordAtlasSync (dev : VkDeviceCtx) (p : VkInstancedPipeline) (cb fence : UInt64)
+    (stag : VkGpuBuffer) (atlas : Text.GlyphAtlasCache) (forceReset : Bool := false) :
+    IO (Except String (VkInstancedPipeline × Nat)) := do
+  let needReset := forceReset || !p.atlasInitialized || p.lastAtlasGen != atlas.generation
   let mut rectsToUpload : Array (Nat × Rect) := #[]
   if needReset then
     for pageIdx in [:min 8 atlas.pages.size] do
@@ -739,11 +750,12 @@ private def recordAtlasSync (dev : VkDeviceCtx) (p : VkInstancedPipeline) (cb : 
     rectsToUpload := atlas.gpuDirtyRects
 
   if !needReset && rectsToUpload.isEmpty then
-    return (p, 0)
+    return .ok (p, 0)
 
   let oldLayout := if p.atlasInitialized then VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL else VK_IMAGE_LAYOUT_UNDEFINED
+  let srcAccess := if p.atlasInitialized then VK_ACCESS_2_SHADER_READ_BIT else VK_ACCESS_2_NONE
   cmdTransitionImage dev cb p.atlasImage.image
-    VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT VK_ACCESS_2_SHADER_READ_BIT
+    VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT srcAccess
     VK_PIPELINE_STAGE_2_TRANSFER_BIT VK_ACCESS_2_TRANSFER_WRITE_BIT
     oldLayout VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL 0 8
 
@@ -753,10 +765,31 @@ private def recordAtlasSync (dev : VkDeviceCtx) (p : VkInstancedPipeline) (cb : 
       let rng ← a.write (encSubresourceRange 0 8)
       callVoid dev.fns.cmdClearColorImage cb p.atlasImage.image VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL.toUInt64 clr.toUInt64 1 rng.toUInt64
 
-  -- Pack all dirty rects sequentially into `stag` (up to stag.size) and emit one vkCmdCopyBufferToImage2
+  -- Pack dirty rects into `stag`, flushing via `submitAndWaitSync` whenever a batch fills `stag.size`.
   let mut stagOff : Nat := 0
+  let mut totalBytes : Nat := 0
   let mut copyRegions := ByteArray.empty
   let mut regCount : UInt32 := 0
+
+  let flushBatch (regs : ByteArray) (cnt : UInt32) : IO (Except String Unit) := do
+    if cnt > 0 then
+      withArena fun a => do
+        let regPtr ← a.write regs
+        let info ← a.write (encCopyBufferToImageInfo2 stag.buffer p.atlasImage.image VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL cnt regPtr)
+        callVoid dev.fns.cmdCopyBufferToImage2 cb info.toUInt64
+    let _ ← callRes dev.fns.endCommandBuffer cb
+    let sr ← submitAndWaitSync dev cb fence
+    if sr != VK_SUCCESS then return .error s!"atlas chunk upload failed ({sr})"
+    let _ ← callRes dev.fns.resetCommandBuffer cb 0
+    withArena fun a => do
+      let bi ← a.write encCommandBufferBeginInfo
+      let _ ← callRes dev.fns.beginCommandBuffer cb bi.toUInt64
+    cmdTransitionImage dev cb p.atlasImage.image
+      VK_PIPELINE_STAGE_2_TRANSFER_BIT VK_ACCESS_2_TRANSFER_WRITE_BIT
+      VK_PIPELINE_STAGE_2_TRANSFER_BIT VK_ACCESS_2_TRANSFER_WRITE_BIT
+      VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL 0 8
+    return .ok ()
+
   for (pageIdx, rect) in rectsToUpload do
     if pageIdx >= 8 then continue
     let some page := atlas.pages[pageIdx]? | continue
@@ -770,14 +803,28 @@ private def recordAtlasSync (dev : VkDeviceCtx) (p : VkInstancedPipeline) (cb : 
     let rh := min (min (min ph 1024) maxRows - min (min (min ph 1024) maxRows) ry) (max 0 rect.h).toNat
     if rw == 0 || rh == 0 then continue
     let rowBytes := rw * 4
-    let needed := rowBytes * rh
-    let alignedOff := ((stagOff + 15) / 16) * 16
-    if alignedOff + needed > stag.size then continue
-    LeanUI.FFI.vkCopyRect (stag.mappedPtr + alignedOff.toUSize) (stag.size - alignedOff).toUSize
-      page.rgba ((ry * pw + rx) * 4).toUSize (pw * 4).toUSize rowBytes.toUSize rh.toUSize
-    copyRegions := copyRegions ++ encBufferImageCopy2 alignedOff.toUInt64 pageIdx.toUInt32 rx ry rw.toUInt32 rh.toUInt32
-    regCount := regCount + 1
-    stagOff := alignedOff + needed
+    let stripMaxH := max 1 (stag.size / max 4 rowBytes)
+    let mut curY := ry
+    let endY := ry + rh
+    while curY < endY do
+      let sh := min stripMaxH (endY - curY)
+      let needed := rowBytes * sh
+      let alignedOff := ((stagOff + 15) / 16) * 16
+      if alignedOff + needed > stag.size then
+        match ← flushBatch copyRegions regCount with
+        | .error e => return .error e
+        | .ok () =>
+          stagOff := 0
+          copyRegions := ByteArray.empty
+          regCount := 0
+      let off := ((stagOff + 15) / 16) * 16
+      LeanUI.FFI.vkCopyRect (stag.mappedPtr + off.toUSize) (stag.size - off).toUSize
+        page.rgba ((curY * pw + rx) * 4).toUSize (pw * 4).toUSize rowBytes.toUSize sh.toUSize
+      copyRegions := copyRegions ++ encBufferImageCopy2 off.toUInt64 pageIdx.toUInt32 rx curY rw.toUInt32 sh.toUInt32
+      regCount := regCount + 1
+      stagOff := off + needed
+      totalBytes := totalBytes + needed
+      curY := curY + sh
 
   if regCount > 0 then
     withArena fun a => do
@@ -790,7 +837,7 @@ private def recordAtlasSync (dev : VkDeviceCtx) (p : VkInstancedPipeline) (cb : 
     VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT VK_ACCESS_2_SHADER_READ_BIT
     VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL 0 8
 
-  return ({ p with atlasInitialized := true, lastAtlasGen := atlas.generation }, stagOff)
+  return .ok ({ p with atlasInitialized := true, lastAtlasGen := atlas.generation }, totalBytes)
 
 /-- Record the 6-pass separable exact uint32 compute box blur (`[σ-1, σ-1, σ]`, H+V) on `blurP0`/`blurP1`.
 Input MUST be in `blurP0` (`GENERAL`); output ALWAYS lands in `blurP0` (`GENERAL`). -/
@@ -835,11 +882,13 @@ private def unpackClearFloats (c : Color) : Float × Float × Float × Float :=
   -- Clear color is stored premultiplied in RGBA8 target
   (r * a, g * a, b * a, a)
 
-/-- Record full Phase 2 instanced rendering commands targeting `(targetImg, targetView)` (already
-transitioned to `COLOR_ATTACHMENT_OPTIMAL`, left in `COLOR_ATTACHMENT_OPTIMAL` on return). -/
+/-- Record full Phase 2 instanced rendering commands targeting `(targetImg, targetView)`:
+syncs atlas (chunking via `fence` if > 4 MiB), transitions `targetImg` from `UNDEFINED` to
+`COLOR_ATTACHMENT_OPTIMAL`, renders all passes, and leaves `targetImg` in `COLOR_ATTACHMENT_OPTIMAL`. -/
 def recordInstancedScene (dev : VkDeviceCtx) (p : VkInstancedPipeline) (slotIdx : Nat)
-    (cb : UInt64) (stag : VkGpuBuffer) (targetImg targetView : UInt64) (vw vh : Nat)
-    (clearColor : Color) (atlas : Text.GlyphAtlasCache) (scene : Scene) :
+    (cb fence : UInt64) (stag : VkGpuBuffer) (targetImg targetView : UInt64)
+    (targetSrcStage : UInt64) (vw vh : Nat) (clearColor : Color)
+    (atlas : Text.GlyphAtlasCache) (scene : Scene) (forceAtlasReset : Bool := false) :
     IO (Except String (VkInstancedPipeline × Nat × Nat × Nat)) := do
   let lowered := lowerScene vw vh scene
   let p1 ← match ← ensureAuxTargets dev p lowered.needsLayers lowered.needsBlur vw vh with
@@ -854,7 +903,14 @@ def recordInstancedScene (dev : VkDeviceCtx) (p : VkInstancedPipeline) (slotIdx 
   LeanUI.FFI.memWrite (p2.instanceBufs[slotIdx]!.mappedPtr) instRaw
   LeanUI.FFI.memWrite (p2.clipBufs[slotIdx]!.mappedPtr) clipRaw
 
-  let (p3, atlasBytes) ← recordAtlasSync dev p2 cb stag atlas
+  let (p3, atlasBytes) ← match ← recordAtlasSync dev p2 cb fence stag atlas forceAtlasReset with
+    | .error e => return .error e
+    | .ok r => pure r
+
+  cmdTransitionImage dev cb targetImg
+    targetSrcStage VK_ACCESS_2_NONE
+    VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT
+    VK_IMAGE_LAYOUT_UNDEFINED VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL
 
   let ds := p3.gfxDescSets[slotIdx]!
   let bindGfxState (pipeHandle : UInt64) (curW curH : Nat) : IO Unit :=
@@ -927,54 +983,61 @@ def recordInstancedScene (dev : VkDeviceCtx) (p : VkInstancedPipeline) (slotIdx 
       setScissor clip
       callVoid dev.fns.cmdDraw cb 4 1 0 compIdx.toUInt64
     | .backdropBlur sigma =>
-      if let (curImg, _, _, layerOpt, _) :: _ := targetStack then
+      if let (curImg, _, _, layerOpt, cl) :: _ := targetStack then
         let baseL := layerOpt.getD 0
-        callVoid dev.fns.cmdEndRendering cb
-        cmdTransitionImage dev cb curImg
-          VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT
-          VK_PIPELINE_STAGE_2_BLIT_BIT VK_ACCESS_2_TRANSFER_READ_BIT
-          VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL baseL 1
-        cmdTransitionImage dev cb p3.blurP0.image
-          VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT VK_ACCESS_2_NONE
-          VK_PIPELINE_STAGE_2_BLIT_BIT VK_ACCESS_2_TRANSFER_WRITE_BIT
-          VK_IMAGE_LAYOUT_UNDEFINED VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL
-        withArena fun a => do
-          let reg ← a.write (encImageBlit2 0 0 vw vh 0 0 vw vh baseL 0)
-          let info ← a.write (encBlitImageInfo2 curImg VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL
-            p3.blurP0.image VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL 1 reg VK_FILTER_NEAREST)
-          callVoid dev.fns.cmdBlitImage2 cb info.toUInt64
-        cmdTransitionImage dev cb p3.blurP0.image
-          VK_PIPELINE_STAGE_2_BLIT_BIT VK_ACCESS_2_TRANSFER_WRITE_BIT
-          VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT (VK_ACCESS_2_SHADER_STORAGE_READ_BIT ||| VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT)
-          VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL VK_IMAGE_LAYOUT_GENERAL
-        cmdTransitionImage dev cb p3.blurP1.image
-          VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT VK_ACCESS_2_NONE
-          VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT (VK_ACCESS_2_SHADER_STORAGE_READ_BIT ||| VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT)
-          VK_IMAGE_LAYOUT_UNDEFINED VK_IMAGE_LAYOUT_GENERAL
-        recordComputeBoxBlur dev p3 cb vw vh sigma
-        cmdTransitionImage dev cb p3.blurP0.image
-          VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT
-          VK_PIPELINE_STAGE_2_BLIT_BIT VK_ACCESS_2_TRANSFER_READ_BIT
-          VK_IMAGE_LAYOUT_GENERAL VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL
-        cmdTransitionImage dev cb curImg
-          VK_PIPELINE_STAGE_2_BLIT_BIT VK_ACCESS_2_TRANSFER_READ_BIT
-          VK_PIPELINE_STAGE_2_BLIT_BIT VK_ACCESS_2_TRANSFER_WRITE_BIT
-          VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL baseL 1
-        withArena fun a => do
-          let reg ← a.write (encImageBlit2 0 0 vw vh 0 0 vw vh 0 baseL)
-          let info ← a.write (encBlitImageInfo2 p3.blurP0.image VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL
-            curImg VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL 1 reg VK_FILTER_NEAREST)
-          callVoid dev.fns.cmdBlitImage2 cb info.toUInt64
-        cmdTransitionImage dev cb curImg
-          VK_PIPELINE_STAGE_2_BLIT_BIT VK_ACCESS_2_TRANSFER_WRITE_BIT
-          VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT (VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT ||| VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT)
-          VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL baseL 1
-        resumeTopTarget targetStack
+        -- When blurring inside a clipped layer, restrict blit/blur to `cl` so uninitialized
+        -- texels outside the cleared `layerPush` region never bleed into the blur kernel.
+        let bx0 : Nat := if layerOpt.isSome then min vw (max 0 cl.x).toNat else 0
+        let by0 : Nat := if layerOpt.isSome then min vh (max 0 cl.y).toNat else 0
+        let bw : Nat := if layerOpt.isSome then min (vw - bx0) (max 0 cl.w).toNat else vw
+        let bh : Nat := if layerOpt.isSome then min (vh - by0) (max 0 cl.h).toNat else vh
+        if bw > 0 && bh > 0 then
+          callVoid dev.fns.cmdEndRendering cb
+          cmdTransitionImage dev cb curImg
+            VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT
+            VK_PIPELINE_STAGE_2_BLIT_BIT VK_ACCESS_2_TRANSFER_READ_BIT
+            VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL baseL 1
+          cmdTransitionImage dev cb p3.blurP0.image
+            VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT VK_ACCESS_2_NONE
+            VK_PIPELINE_STAGE_2_BLIT_BIT VK_ACCESS_2_TRANSFER_WRITE_BIT
+            VK_IMAGE_LAYOUT_UNDEFINED VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL
+          withArena fun a => do
+            let reg ← a.write (encImageBlit2 bx0 by0 (bx0 + bw) (by0 + bh) 0 0 bw bh baseL 0)
+            let info ← a.write (encBlitImageInfo2 curImg VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL
+              p3.blurP0.image VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL 1 reg VK_FILTER_NEAREST)
+            callVoid dev.fns.cmdBlitImage2 cb info.toUInt64
+          cmdTransitionImage dev cb p3.blurP0.image
+            VK_PIPELINE_STAGE_2_BLIT_BIT VK_ACCESS_2_TRANSFER_WRITE_BIT
+            VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT (VK_ACCESS_2_SHADER_STORAGE_READ_BIT ||| VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT)
+            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL VK_IMAGE_LAYOUT_GENERAL
+          cmdTransitionImage dev cb p3.blurP1.image
+            VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT VK_ACCESS_2_NONE
+            VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT (VK_ACCESS_2_SHADER_STORAGE_READ_BIT ||| VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT)
+            VK_IMAGE_LAYOUT_UNDEFINED VK_IMAGE_LAYOUT_GENERAL
+          recordComputeBoxBlur dev p3 cb bw bh sigma
+          cmdTransitionImage dev cb p3.blurP0.image
+            VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT
+            VK_PIPELINE_STAGE_2_BLIT_BIT VK_ACCESS_2_TRANSFER_READ_BIT
+            VK_IMAGE_LAYOUT_GENERAL VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL
+          cmdTransitionImage dev cb curImg
+            VK_PIPELINE_STAGE_2_BLIT_BIT VK_ACCESS_2_TRANSFER_READ_BIT
+            VK_PIPELINE_STAGE_2_BLIT_BIT VK_ACCESS_2_TRANSFER_WRITE_BIT
+            VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL baseL 1
+          withArena fun a => do
+            let reg ← a.write (encImageBlit2 0 0 bw bh bx0 by0 (bx0 + bw) (by0 + bh) 0 baseL)
+            let info ← a.write (encBlitImageInfo2 p3.blurP0.image VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL
+              curImg VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL 1 reg VK_FILTER_NEAREST)
+            callVoid dev.fns.cmdBlitImage2 cb info.toUInt64
+          cmdTransitionImage dev cb curImg
+            VK_PIPELINE_STAGE_2_BLIT_BIT VK_ACCESS_2_TRANSFER_WRITE_BIT
+            VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT (VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT ||| VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT)
+            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL baseL 1
+          resumeTopTarget targetStack
     | .shadow _mx _my mw mh sigma maskIdx compIdx sc =>
       callVoid dev.fns.cmdEndRendering cb
-      -- Render white rounded-rect mask into blurP0 (0..mw, 0..mh)
+      -- Render white rounded-rect mask into blurP0 (0..mw, 0..mh); cover all prior stages (BLIT/COMPUTE/FRAGMENT)
       cmdTransitionImage dev cb p3.blurP0.image
-        VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT VK_ACCESS_2_SHADER_READ_BIT
+        VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT VK_ACCESS_2_NONE
         VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT
         VK_IMAGE_LAYOUT_UNDEFINED VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL
       beginPass p3.blurP0.view 0 0 mw mh VK_ATTACHMENT_LOAD_OP_CLEAR 0.0 0.0 0.0 0.0
@@ -1015,23 +1078,28 @@ def presentInstancedScene (wsi : VkWsiState) (pipe : VkInstancedPipeline)
     (dirtyOpt : Option Rect) (prePresent onPresentAborted : IO Unit) :
     IO (VkWsiState × VkInstancedPipeline × PresentOutcome × Nat × Nat × Nat) := do
   if vw == 0 || vh == 0 then
-    return (wsi, pipe, .skipped, 0, 0, 0)
+    let (st0, r) ← recreateSwapchain wsi 0 0
+    return match r with
+      | .ok () => (st0, pipe, .skipped, 0, 0, 0)
+      | .error e => (st0, pipe, .deviceLost e, 0, 0, 0)
   let (st1, acq) ← acquireSwapchainImage wsi vw vh
-  let (st2, imgIdx, slot, bundle, acqNs) ← match acq with
+  let (st2, imgIdx, slot, bundle, acqNs, recreated) ← match acq with
     | .error .needsRecreate =>
-      match ← recreateSwapchain st1 vw vh with
-      | .error e => return (st1, pipe, .deviceLost e, 0, 0, 0)
-      | .ok stR =>
+      let (stR, rRec) ← recreateSwapchain st1 vw vh
+      match rRec with
+      | .error e => return (stR, pipe, .deviceLost e, 0, 0, 0)
+      | .ok () =>
         let (stR2, acq2) ← acquireSwapchainImage stR vw vh
         match acq2 with
         | .error e2 => return (stR2, pipe, e2, 0, 0, 0)
-        | .ok tup => pure (stR2, tup.1, tup.2.1, tup.2.2.1, tup.2.2.2)
+        | .ok tup => pure (stR2, tup.1, tup.2.1, tup.2.2.1, tup.2.2.2.1, true)
     | .error e => return (st1, pipe, e, 0, 0, 0)
-    | .ok tup => pure (st1, tup.1, tup.2.1, tup.2.2.1, tup.2.2.2)
+    | .ok tup => pure (st1, tup.1, tup.2.1, tup.2.2.1, tup.2.2.2.1, tup.2.2.2.2)
 
   let dev := st2.dev
   let slotIdx := slot.val
   let cb := st2.sync.cmdBufs[slotIdx]!
+  let fence := st2.sync.inFlightFences[slotIdx]!
   let stag := st2.sync.stagingBufs[slotIdx]!
   let scImg := bundle.images[imgIdx]!
   let scView := bundle.imageViews[imgIdx]!
@@ -1041,12 +1109,9 @@ def presentInstancedScene (wsi : VkWsiState) (pipe : VkInstancedPipeline)
   withArena fun a => do
     let bi ← a.write encCommandBufferBeginInfo
     let _ ← callRes dev.fns.beginCommandBuffer cb bi.toUInt64
-  cmdTransitionImage dev cb scImg
-    VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT VK_ACCESS_2_NONE
-    VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT
-    VK_IMAGE_LAYOUT_UNDEFINED VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL
 
-  let recRes ← recordInstancedScene dev pipe slotIdx cb stag scImg scView bundle.extentW bundle.extentH clearColor atlas scene
+  let recRes ← recordInstancedScene dev pipe slotIdx cb fence stag scImg scView
+    VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT bundle.extentW bundle.extentH clearColor atlas scene
   match recRes with
   | .error e =>
     let _ ← callRes dev.fns.endCommandBuffer cb
@@ -1059,13 +1124,16 @@ def presentInstancedScene (wsi : VkWsiState) (pipe : VkInstancedPipeline)
     let _ ← callRes dev.fns.endCommandBuffer cb
     let tr1 ← IO.monoNanosNow
 
-    let (st3, subNs, presNs, res) ← submitAndPresentSwapchain st2 slot imgIdx bundle dirtyOpt prePresent
+    let presentDirty := if recreated then none else dirtyOpt
+    let (st3, subNs, presNs, res) ← submitAndPresentSwapchain st2 slot imgIdx bundle presentDirty prePresent
     match res with
     | .error e =>
       onPresentAborted
       return (st3, pipe', .deviceLost e, primCount, ssboBytes, atlasBytes)
     | .ok committed =>
-      if !committed then onPresentAborted
+      if !committed then
+        onPresentAborted
+        return (st3, pipe', .needsRecreate, primCount, ssboBytes, atlasBytes)
       return (st3, pipe', .presented ssboBytes acqNs (tr1 - tr0).toUInt64 subNs presNs, primCount, ssboBytes, atlasBytes)
 
 /-- Offscreen headless Vulkan 1.3 readback context (no Wayland display required — runs in CI
@@ -1102,9 +1170,6 @@ private def ensureOffscreenTarget (ctx : VkOffscreenReadback) (w h : Nat) :
     IO (Except String VkOffscreenReadback) := do
   if ctx.width == w && ctx.height == h && ctx.targetImg.image != 0 then
     return .ok ctx
-  waitDeviceIdle ctx.dev
-  destroyGpuBuffer ctx.dev ctx.readbackBuf
-  destroyGpuImage ctx.dev ctx.targetImg
   let usage := VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT ||| VK_IMAGE_USAGE_TRANSFER_SRC_BIT ||| VK_IMAGE_USAGE_TRANSFER_DST_BIT
   match ← createGpuImage ctx.dev w h 1 VK_FORMAT_R8G8B8A8_UNORM usage VK_IMAGE_VIEW_TYPE_2D with
   | .error e => return .error e
@@ -1119,11 +1184,15 @@ private def ensureOffscreenTarget (ctx : VkOffscreenReadback) (w h : Nat) :
           (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT ||| VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) true
     match rbRes with
     | .error e => destroyGpuImage ctx.dev im; return .error e
-    | .ok rb => return .ok { ctx with targetImg := im, readbackBuf := rb, width := w, height := h }
+    | .ok rb =>
+      waitDeviceIdle ctx.dev
+      destroyGpuBuffer ctx.dev ctx.readbackBuf
+      destroyGpuImage ctx.dev ctx.targetImg
+      return .ok { ctx with targetImg := im, readbackBuf := rb, width := w, height := h }
 
 /-- Render a scene offscreen through Phase 2 (`vkInstanced`) and read back RGBA8 pixels. -/
 def renderOffscreenInstanced (ctx : VkOffscreenReadback) (w h : Nat) (clearColor : Color)
-    (atlas : Text.GlyphAtlasCache) (scene : Scene) :
+    (atlas : Text.GlyphAtlasCache) (scene : Scene) (forceAtlasReset : Bool := false) :
     IO (Except String (VkOffscreenReadback × ByteArray)) := do
   let c1 ← match ← ensureOffscreenTarget ctx w h with
     | .error e => return .error e
@@ -1136,11 +1205,8 @@ def renderOffscreenInstanced (ctx : VkOffscreenReadback) (w h : Nat) (clearColor
   withArena fun a => do
     let bi ← a.write encCommandBufferBeginInfo
     let _ ← callRes dev.fns.beginCommandBuffer cb bi.toUInt64
-  cmdTransitionImage dev cb c1.targetImg.image
-    VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT VK_ACCESS_2_NONE
-    VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT
-    VK_IMAGE_LAYOUT_UNDEFINED VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL
-  match ← recordInstancedScene dev c1.pipe 0 cb stag c1.targetImg.image c1.targetImg.view w h clearColor atlas scene with
+  match ← recordInstancedScene dev c1.pipe 0 cb fence stag c1.targetImg.image c1.targetImg.view
+      VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT w h clearColor atlas scene forceAtlasReset with
   | .error e => return .error e
   | .ok (pipe', _, _, _) =>
     cmdTransitionImage dev cb c1.targetImg.image

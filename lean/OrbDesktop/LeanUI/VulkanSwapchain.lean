@@ -65,6 +65,10 @@ structure VkWsiState where
   sm : SwapchainState := {}
   bundle : Option SwapchainBundle := none
   sync : FrameSync := {}
+  /-- Last requested buffer extent `(reqW, reqH)` to avoid infinite recreate loops if the
+  compositor clamps `surfaceCaps.currentExtent` to a different size. -/
+  lastRequestedW : Nat := 0
+  lastRequestedH : Nat := 0
 
 private def createFence (dev : VkDeviceCtx) (signaled : Bool) : IO (Except String UInt64) :=
   withArena fun a => do
@@ -181,21 +185,25 @@ private def selectPresentMode (dev : VkDeviceCtx) : IO UInt32 :=
     return VK_PRESENT_MODE_FIFO_KHR
 
 /-- Create or recreate the swapchain for `(reqW, reqH)`. Unconditionally destroys `oldBundle`
-even if `vkCreateSwapchainKHR` fails (Invariant 3). -/
-def recreateSwapchain (wsi : VkWsiState) (reqW reqH : Nat) : IO (Except String VkWsiState) := do
+even if `vkCreateSwapchainKHR` fails (Invariant 3), and always returns an updated `VkWsiState`
+with `bundle := none` on error so callers can never double-destroy freed handles. -/
+def recreateSwapchain (wsi : VkWsiState) (reqW reqH : Nat) : IO (VkWsiState × Except String Unit) := do
   let dev := wsi.dev
   waitDeviceIdle dev
   if reqW == 0 || reqH == 0 then
     if let some old := wsi.bundle then
       destroySwapchainBundle dev old true
-    return .ok { wsi with bundle := none, sm := wsi.sm.initOrRecreate 0 0 0 }
+    return ({ wsi with bundle := none, sm := wsi.sm.initOrRecreate 0 0 0, lastRequestedW := reqW, lastRequestedH := reqH }, .ok ())
 
   let oldHandle : UInt64 := wsi.bundle.map (·.swapchain) |>.getD 0
   if let some old := wsi.bundle then
     destroySwapchainBundle dev old false
+  let cleared : VkWsiState := { wsi with bundle := none }
 
   let destroyOldHandle : IO Unit := do
     if oldHandle != 0 then callVoid dev.fns.destroySwapchainKHR dev.device oldHandle 0
+  let fail (e : String) : IO (VkWsiState × Except String Unit) := do
+    return ({ cleared with sm := cleared.sm.onDeviceLost }, .error e)
 
   -- Query surface capabilities
   let capsRes ← withArena fun a => do
@@ -204,7 +212,7 @@ def recreateSwapchain (wsi : VkWsiState) (reqW reqH : Nat) : IO (Except String V
     if r != VK_SUCCESS then return Except.error s!"vkGetPhysicalDeviceSurfaceCapabilitiesKHR failed ({r})"
     return Except.ok (← LeanUI.FFI.memRead p 52)
   let capsRaw ← match capsRes with
-    | .error e => destroyOldHandle; return .error e
+    | .error e => destroyOldHandle; return ← fail e
     | .ok raw => pure raw
 
   let minCount := getU32 capsRaw 0
@@ -220,7 +228,7 @@ def recreateSwapchain (wsi : VkWsiState) (reqW reqH : Nat) : IO (Except String V
   let supUsage := getU32 capsRaw 48
 
   let (fmt, colorSpace) ← match ← selectSurfaceFormat dev with
-    | .error e => destroyOldHandle; return .error e
+    | .error e => destroyOldHandle; return ← fail e
     | .ok p => pure p
   let presentMode ← selectPresentMode dev
 
@@ -232,10 +240,10 @@ def recreateSwapchain (wsi : VkWsiState) (reqW reqH : Nat) : IO (Except String V
   let canBlitSrc := (fmtFeats &&& VK_FORMAT_FEATURE_BLIT_SRC_BIT) != 0
   if !hasColorAttach || !hasTransferDst then
     destroyOldHandle
-    return .error "swapchain lacks required COLOR_ATTACHMENT | TRANSFER_DST usage"
+    return ← fail "swapchain lacks required COLOR_ATTACHMENT | TRANSFER_DST usage"
   if fmt != VK_FORMAT_R8G8B8A8_UNORM && !canBlitDst then
     destroyOldHandle
-    return .error "swapchain format lacks VK_FORMAT_FEATURE_BLIT_DST_BIT for hardware swizzle"
+    return ← fail "swapchain format lacks VK_FORMAT_FEATURE_BLIT_DST_BIT for hardware swizzle"
 
   let usage : UInt32 :=
     VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT ||| VK_IMAGE_USAGE_TRANSFER_DST_BIT |||
@@ -251,7 +259,7 @@ def recreateSwapchain (wsi : VkWsiState) (reqW reqH : Nat) : IO (Except String V
     if curH != 0xFFFFFFFF then curH.toNat else max minH (min maxH reqH)
   if extentW == 0 || extentH == 0 then
     destroyOldHandle
-    return .ok { wsi with bundle := none, sm := wsi.sm.initOrRecreate 0 0 0 }
+    return ({ cleared with sm := cleared.sm.initOrRecreate 0 0 0, lastRequestedW := reqW, lastRequestedH := reqH }, .ok ())
 
   let desiredCount : UInt32 :=
     let base := if presentMode == VK_PRESENT_MODE_MAILBOX_KHR then max 3 minCount else max 2 (minCount + 1)
@@ -269,7 +277,7 @@ def recreateSwapchain (wsi : VkWsiState) (reqW reqH : Nat) : IO (Except String V
   destroyOldHandle
 
   let swapchain ← match scRes with
-    | .error e => return .error e
+    | .error e => return ← fail e
     | .ok h => pure h
 
   -- Fetch swapchain images
@@ -290,7 +298,7 @@ def recreateSwapchain (wsi : VkWsiState) (reqW reqH : Nat) : IO (Except String V
   let images ← match imgsRes with
     | .error e =>
       callVoid dev.fns.destroySwapchainKHR dev.device swapchain 0
-      return .error e
+      return ← fail e
     | .ok arr => pure arr
 
   let mut views : Array UInt64 := #[]
@@ -299,12 +307,12 @@ def recreateSwapchain (wsi : VkWsiState) (reqW reqH : Nat) : IO (Except String V
     match ← createImageView dev img VK_IMAGE_VIEW_TYPE_2D fmt 0 1 with
     | .error e =>
       destroySwapchainBundle dev { swapchain, imageViews := views, renderFinishedSems := sems } true
-      return .error e
+      return ← fail e
     | .ok v => views := views.push v
     match ← createSemaphore dev with
     | .error e =>
       destroySwapchainBundle dev { swapchain, imageViews := views, renderFinishedSems := sems } true
-      return .error e
+      return ← fail e
     | .ok s => sems := sems.push s
 
   -- Allocate persistent Phase 1 backing image (`R8G8B8A8_UNORM`)
@@ -312,7 +320,7 @@ def recreateSwapchain (wsi : VkWsiState) (reqW reqH : Nat) : IO (Except String V
       (VK_IMAGE_USAGE_TRANSFER_DST_BIT ||| VK_IMAGE_USAGE_TRANSFER_SRC_BIT ||| VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT ||| VK_IMAGE_USAGE_SAMPLED_BIT) with
     | .error e =>
       destroySwapchainBundle dev { swapchain, imageViews := views, renderFinishedSems := sems } true
-      return .error e
+      return ← fail e
     | .ok im => pure im
 
   let bundle : SwapchainBundle := {
@@ -321,7 +329,11 @@ def recreateSwapchain (wsi : VkWsiState) (reqW reqH : Nat) : IO (Except String V
     images, imageViews := views, renderFinishedSems := sems
     backingImage := backing, backingNeedsFullUpload := true, backingInitialized := false
   }
-  return .ok { wsi with bundle := some bundle, sm := wsi.sm.initOrRecreate extentW extentH images.size }
+  return ({ cleared with
+    bundle := some bundle
+    sm := cleared.sm.initOrRecreate extentW extentH images.size
+    lastRequestedW := reqW
+    lastRequestedH := reqH }, .ok ())
 
 /-- Initialize a `VkWsiState` on `(wlDisplay, wlSurface)` for `(initW, initH)`. -/
 def createWsi (wlDisplay wlSurface : USize) (initW initH : Nat)
@@ -335,12 +347,13 @@ def createWsi (wlDisplay wlSurface : USize) (initW initH : Nat)
       return .error e
     | .ok sync =>
       let wsi0 : VkWsiState := { dev, sm := {}, bundle := none, sync }
-      match ← recreateSwapchain wsi0 initW initH with
+      let (wsi1, r) ← recreateSwapchain wsi0 initW initH
+      match r with
       | .error e =>
         destroyFrameSync dev sync
         destroyDevice dev
         return .error e
-      | .ok wsi1 => return .ok wsi1
+      | .ok () => return .ok wsi1
 
 /-- Destroy all WSI swapchain/sync/device resources in strict reverse lifecycle order (Invariant 4). -/
 def destroyWsi (wsi : VkWsiState) : IO SwapchainState := do
@@ -384,22 +397,31 @@ def submitAndWaitSync (dev : VkDeviceCtx) (cb fence : UInt64) : IO Int :=
     waitFence dev fence
 
 /-- Acquire next swapchain image following `SwapchainState` (waits on slot fence,
-NEVER resets fence before acquire, enforces cross-slot `MAILBOX` `imageFence` wait). -/
+NEVER resets fence before acquire, enforces cross-slot `MAILBOX` `imageFence` wait).
+Returns `(imgIdx, slot, bundle, acqNs, recreated)` on success. -/
 def acquireSwapchainImage (wsi : VkWsiState) (reqW reqH : Nat) :
-    IO (VkWsiState × Except PresentOutcome (Nat × Fin 2 × SwapchainBundle × UInt64)) := do
+    IO (VkWsiState × Except PresentOutcome (Nat × Fin 2 × SwapchainBundle × UInt64 × Bool)) := do
   let mut st := wsi
+  let mut recreated := false
   if reqW == 0 || reqH == 0 then
-    match ← recreateSwapchain st 0 0 with
-    | .ok st' => return (st', .error .skipped)
-    | .error e => return (st, .error (.deviceLost e))
-  if st.bundle.isNone || !st.sm.isReadyForExtent reqW reqH then
-    match ← recreateSwapchain st reqW reqH with
-    | .ok st' => st := st'
-    | .error e => return (st, .error (.deviceLost e))
+    let (st', r) ← recreateSwapchain st 0 0
+    match r with
+    | .ok () => return (st', .error .skipped)
+    | .error e => return (st', .error (.deviceLost e))
+  let isPhaseReady : Bool := match st.sm.phase with
+    | .ready w h n => w > 0 && h > 0 && n ≥ 2
+    | _ => false
+  let extentChanged : Bool :=
+    !st.sm.isReadyForExtent reqW reqH && (st.lastRequestedW != reqW || st.lastRequestedH != reqH)
+  if st.bundle.isNone || !isPhaseReady || extentChanged then
+    let (st', r) ← recreateSwapchain st reqW reqH
+    match r with
+    | .ok () => st := st'; recreated := true
+    | .error e => return (st', .error (.deviceLost e))
   let some bundle := st.bundle | return (st, .error .skipped)
   let dev := st.dev
   let slot := st.sm.curSlot
-  let slotIdx := slot.val
+  let slotIdx := SwapchainState.imageAvailableSemIndex slot
   let fence := st.sync.inFlightFences[slotIdx]!
   let imgAvail := st.sync.imageAvailableSems[slotIdx]!
 
@@ -433,7 +455,7 @@ def acquireSwapchainImage (wsi : VkWsiState) (reqW reqH : Nat) :
 
   let wsiRes : WsiResult := if acqRes == VK_SUBOPTIMAL_KHR then .suboptimal else .success
   st := { st with sm := st.sm.onAcquire wsiRes imgIdx }
-  return (st, .ok (imgIdx, slot, bundle, (t1 - t0).toUInt64))
+  return (st, .ok (imgIdx, slot, bundle, (t1 - t0).toUInt64, recreated))
 
 /-- Submit the recorded `cb` and call `vkQueuePresentKHR` (calling `prePresent` right before
 present so `wp_viewport.set_destination` + `wl_surface.frame` commit atomically). -/
@@ -441,11 +463,11 @@ def submitAndPresentSwapchain (wsi : VkWsiState) (slot : Fin 2) (imgIdx : Nat)
     (bundle : SwapchainBundle) (dirtyOpt : Option Rect) (prePresent : IO Unit) :
     IO (VkWsiState × UInt64 × UInt64 × Except String Bool) := do
   let dev := wsi.dev
-  let slotIdx := slot.val
+  let slotIdx := SwapchainState.imageAvailableSemIndex slot
   let cb := wsi.sync.cmdBufs[slotIdx]!
   let fence := wsi.sync.inFlightFences[slotIdx]!
   let imgAvail := wsi.sync.imageAvailableSems[slotIdx]!
-  let renderFin := bundle.renderFinishedSems[imgIdx]!
+  let renderFin := bundle.renderFinishedSems[SwapchainState.renderFinishedSemIndex imgIdx]!
 
   let ts0 ← IO.monoNanosNow
   -- No-deadlock fence rule: reset strictly AFTER acquire succeeded and right before submit!
@@ -507,35 +529,43 @@ GPU-blit/copy to the acquired swapchain image and present. -/
 def presentCpuDirty (wsi : VkWsiState) (fb : ByteArray) (fbW fbH : Nat)
     (dirtyOpt : Option Rect) (prePresent : IO Unit) (onPresentAborted : IO Unit) :
     IO (VkWsiState × PresentOutcome) := do
-  if fbW == 0 || fbH == 0 || fb.size != fbW * fbH * 4 then
+  if fbW == 0 || fbH == 0 then
+    let (st0, r) ← recreateSwapchain wsi 0 0
+    return match r with
+      | .ok () => (st0, .skipped)
+      | .error e => (st0, .deviceLost e)
+  if fb.size != fbW * fbH * 4 then
     return (wsi, .skipped)
   let (st1, acq) ← acquireSwapchainImage wsi fbW fbH
   match acq with
   | .error .needsRecreate =>
     -- Retry once after immediate recreation on OUT_OF_DATE
-    match ← recreateSwapchain st1 fbW fbH with
-    | .error e => return (st1, .deviceLost e)
-    | .ok st2 =>
+    let (st2, rRec) ← recreateSwapchain st1 fbW fbH
+    match rRec with
+    | .error e => return (st2, .deviceLost e)
+    | .ok () =>
       let (st3, acq2) ← acquireSwapchainImage st2 fbW fbH
       match acq2 with
       | .error e2 => return (st3, e2)
-      | .ok (imgIdx, slot, bundle, acqNs) =>
-        presentCpuAcquired st3 imgIdx slot bundle fb fbW fbH dirtyOpt acqNs prePresent onPresentAborted
+      | .ok (imgIdx, slot, bundle, acqNs, _) =>
+        presentCpuAcquired st3 imgIdx slot bundle fb fbW fbH dirtyOpt acqNs true prePresent onPresentAborted
   | .error e => return (st1, e)
-  | .ok (imgIdx, slot, bundle, acqNs) =>
-    presentCpuAcquired st1 imgIdx slot bundle fb fbW fbH dirtyOpt acqNs prePresent onPresentAborted
+  | .ok (imgIdx, slot, bundle, acqNs, recreated) =>
+    presentCpuAcquired st1 imgIdx slot bundle fb fbW fbH dirtyOpt acqNs recreated prePresent onPresentAborted
 where
   presentCpuAcquired (st : VkWsiState) (imgIdx : Nat) (slot : Fin 2) (bundle : SwapchainBundle)
-      (fb : ByteArray) (fbW fbH : Nat) (dirtyOpt : Option Rect) (acqNs : UInt64)
+      (fb : ByteArray) (fbW fbH : Nat) (dirtyOpt : Option Rect) (acqNs : UInt64) (recreated : Bool)
       (prePresent onPresentAborted : IO Unit) : IO (VkWsiState × PresentOutcome) := do
     let dev := st.dev
     let slotIdx := slot.val
     let cb := st.sync.cmdBufs[slotIdx]!
     let fence := st.sync.inFlightFences[slotIdx]!
     let stag := st.sync.stagingBufs[slotIdx]!
-    let fullRect : Rect := ⟨0, 0, fbW, fbH⟩
+    let maxW := min fbW bundle.extentW
+    let maxH := min fbH bundle.extentH
+    let fullRect : Rect := ⟨0, 0, maxW, maxH⟩
     let uploadRect : Option Rect :=
-      if bundle.backingNeedsFullUpload then some fullRect else dirtyOpt
+      if bundle.backingNeedsFullUpload || recreated then some fullRect else dirtyOpt
 
     let tu0 ← IO.monoNanosNow
     let mut uploadedBytes : Nat := 0
@@ -547,8 +577,8 @@ where
     if let some r := uploadRect then
       let rx := max 0 r.x |>.toNat
       let ry := max 0 r.y |>.toNat
-      let rw := min (fbW - min fbW rx) (max 0 r.w).toNat
-      let rh := min (fbH - min fbH ry) (max 0 r.h).toNat
+      let rw := min (maxW - min maxW rx) (max 0 r.w).toNat
+      let rh := min (maxH - min maxH ry) (max 0 r.h).toNat
       if rw > 0 && rh > 0 then
         let rowBytes := rw * 4
         let stripMaxH := max 1 (stag.size / max 4 rowBytes)
@@ -566,8 +596,10 @@ where
             withArena fun a => do
               let bi ← a.write (encCommandBufferBeginInfo)
               let _ ← callRes dev.fns.beginCommandBuffer cb bi.toUInt64
+              let srcAcc := if backingLayout == VK_IMAGE_LAYOUT_UNDEFINED then VK_ACCESS_2_NONE
+                else (VK_ACCESS_2_TRANSFER_READ_BIT ||| VK_ACCESS_2_TRANSFER_WRITE_BIT)
               cmdTransitionImage dev cb bundle.backingImage.image
-                VK_PIPELINE_STAGE_2_TRANSFER_BIT VK_ACCESS_2_TRANSFER_READ_BIT
+                VK_PIPELINE_STAGE_2_TRANSFER_BIT srcAcc
                 VK_PIPELINE_STAGE_2_COPY_BIT VK_ACCESS_2_TRANSFER_WRITE_BIT
                 backingLayout VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL
               let reg ← a.write (encBufferImageCopy2 0 0 rx curY rw.toUInt32 sh.toUInt32)
@@ -593,8 +625,10 @@ where
       let _ ← callRes dev.fns.beginCommandBuffer cb bi.toUInt64
       let mut curBL := backingLayout
       if let some (rx, ry, rw, sh) := pendingFinalStrip then
+        let srcAcc := if curBL == VK_IMAGE_LAYOUT_UNDEFINED then VK_ACCESS_2_NONE
+          else (VK_ACCESS_2_TRANSFER_READ_BIT ||| VK_ACCESS_2_TRANSFER_WRITE_BIT)
         cmdTransitionImage dev cb bundle.backingImage.image
-          VK_PIPELINE_STAGE_2_TRANSFER_BIT (VK_ACCESS_2_TRANSFER_READ_BIT ||| VK_ACCESS_2_TRANSFER_WRITE_BIT)
+          VK_PIPELINE_STAGE_2_TRANSFER_BIT srcAcc
           VK_PIPELINE_STAGE_2_COPY_BIT VK_ACCESS_2_TRANSFER_WRITE_BIT
           curBL VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL
         let reg ← a.write (encBufferImageCopy2 0 0 rx ry rw.toUInt32 sh.toUInt32)
@@ -632,13 +666,17 @@ where
 
     let bundle' := { bundle with backingNeedsFullUpload := false, backingInitialized := true }
     let stB := { st with bundle := some bundle' }
-    let (st2, subNs, presNs, res) ← submitAndPresentSwapchain stB slot imgIdx bundle' uploadRect prePresent
+    let presentDirty := if recreated || bundle.backingNeedsFullUpload then none else uploadRect
+    let (st2, subNs, presNs, res) ← submitAndPresentSwapchain stB slot imgIdx bundle' presentDirty prePresent
     match res with
     | .error e =>
       onPresentAborted
       return (st2, .deviceLost e)
     | .ok committed =>
-      if !committed then onPresentAborted
+      if !committed then
+        onPresentAborted
+        let stRetry := { st2 with bundle := some { bundle' with backingNeedsFullUpload := true } }
+        return (stRetry, .needsRecreate)
       return (st2, .presented uploadedBytes acqNs (tu1 - tu0).toUInt64 subNs presNs)
 
 end LeanUI.Vk

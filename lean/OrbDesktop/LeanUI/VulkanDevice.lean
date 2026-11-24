@@ -328,7 +328,8 @@ def createDevice (wlDisplay wlSurface : USize) (needSwapchain allowSoftwareIcd e
       for i in [:n] do
         let flags := getU32 raw (i * 24)
         let qcnt := getU32 raw (i * 24 + 4)
-        let req := VK_QUEUE_GRAPHICS_BIT ||| VK_QUEUE_COMPUTE_BIT ||| VK_QUEUE_TRANSFER_BIT
+        -- Per Vulkan 1.x spec, GRAPHICS and COMPUTE queues implicitly support transfer.
+        let req := VK_QUEUE_GRAPHICS_BIT ||| VK_QUEUE_COMPUTE_BIT
         if qcnt > 0 && (flags &&& req) == req then
           if !needSwapchain then
             return some i.toUInt32
@@ -472,6 +473,28 @@ def createDevice (wlDisplay wlSurface : USize) (needSwapchain allowSoftwareIcd e
     cmdDraw := ← rD "vkCmdDraw"
     cmdDispatch := ← rD "vkCmdDispatch"
   }
+
+  let requiredCoreOk : Bool :=
+    fns.destroyDevice != 0 && fns.getDeviceQueue != 0 && fns.deviceWaitIdle != 0 &&
+    fns.createCommandPool != 0 && fns.destroyCommandPool != 0 && fns.allocateCommandBuffers != 0 &&
+    fns.beginCommandBuffer != 0 && fns.endCommandBuffer != 0 && fns.resetCommandBuffer != 0 &&
+    fns.createFence != 0 && fns.destroyFence != 0 && fns.waitForFences != 0 && fns.resetFences != 0 &&
+    fns.createSemaphore != 0 && fns.destroySemaphore != 0 && fns.queueSubmit2 != 0 &&
+    fns.createBuffer != 0 && fns.destroyBuffer != 0 && fns.getBufferMemoryRequirements != 0 && fns.bindBufferMemory != 0 &&
+    fns.createImage != 0 && fns.destroyImage != 0 && fns.getImageMemoryRequirements != 0 && fns.bindImageMemory != 0 &&
+    fns.createImageView != 0 && fns.destroyImageView != 0 && fns.createSampler != 0 && fns.destroySampler != 0 &&
+    fns.allocateMemory != 0 && fns.freeMemory != 0 && fns.mapMemory != 0 && fns.unmapMemory != 0 &&
+    fns.invalidateMappedMemoryRanges != 0 &&
+    fns.cmdPipelineBarrier2 != 0 && fns.cmdCopyBufferToImage2 != 0 && fns.cmdCopyImageToBuffer2 != 0 &&
+    fns.cmdBlitImage2 != 0 && fns.cmdCopyImage2 != 0 && fns.cmdClearColorImage != 0
+  let requiredWsiOk : Bool :=
+    !needSwapchain ||
+    (fns.createSwapchainKHR != 0 && fns.destroySwapchainKHR != 0 && fns.getSwapchainImagesKHR != 0 &&
+     fns.acquireNextImageKHR != 0 && fns.queuePresentKHR != 0)
+  if !requiredCoreOk || !requiredWsiOk then
+    if fns.destroyDevice != 0 then callVoid fns.destroyDevice device 0
+    cleanupInst surface
+    return .error "missing required Vulkan 1.3 or VK_KHR_swapchain device entry points"
 
   let (queue, cmdPool, memPropsRaw) ← withArena fun a => do
     let qPtr ← a.alloc 8

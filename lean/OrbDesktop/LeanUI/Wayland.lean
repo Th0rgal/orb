@@ -745,10 +745,8 @@ def stepWireEvent (c : WaylandClient) (ev : WlWireEvent) : IO (WaylandClient × 
   let mut st := c
   let mut out : Array Event := #[]
   if ev.tag == tagFrameCallback && ev.opcode == 0 then
-    if !st.headless && ev.proxy != 0 && st.window.fnProxyDestroy != 0 then
-      let _ ← nativeCall st.window.fnProxyDestroy ev.proxy.toUInt64
     if ev.proxy == st.frameCallbackProxy then
-      st := { st with frameCallbackProxy := 0, frameCallbackPending := false }
+      st ← cancelFrameCallback st
   else if ev.tag == tagShmBufferA && ev.opcode == 0 then
     st := { st with shm := { st.shm with bufABusy := false } }
   else if ev.tag == tagShmBufferB && ev.opcode == 0 then

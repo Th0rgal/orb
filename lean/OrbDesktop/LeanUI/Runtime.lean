@@ -508,25 +508,42 @@ def stepFrameWithRegions {σ : Type} (rt : RuntimeState σ)
     let onAborted : IO Unit := do
       let wlC ← Wayland.cancelFrameCallback (← wlRef.get)
       wlRef.set wlC
-    let (vkGpu, atlasGpu, presentedByVk) ←
+    let (vkGpu, atlasGpu, handledByVk, didPresent) ←
       Vulkan.renderAndPresentGpu vk0 clearColor atlas' scene st.damage prePresent onAborted
     let wlAfter ← wlRef.get
-    if presentedByVk then
+    if handledByVk then
       let frameT1 ← IO.monoNanosNow
-      return {
-        st with
-        wayland := wlAfter
-        vulkan := vkGpu
-        atlas := atlasGpu
-        hitRegions := regions
-        scrollRegions
-        activeScrollbarDrag
-        focusableOrder := focusOrder
-        damage := none
-        framesRendered := st.framesRendered + 1
-        presentCount := st.presentCount + 1
-        lastFrameTotalNs := (frameT1 - frameT0).toUInt64
-      }
+      if didPresent then
+        return {
+          st with
+          wayland := wlAfter
+          vulkan := vkGpu
+          atlas := atlasGpu
+          hitRegions := regions
+          scrollRegions
+          activeScrollbarDrag
+          focusableOrder := focusOrder
+          damage := none
+          framesRendered := st.framesRendered + 1
+          presentCount := st.presentCount + 1
+          lastFrameTotalNs := (frameT1 - frameT0).toUInt64
+        }
+      else
+        -- Swapchain recreation / zero-extent suspension: preserve damage so next frame retries
+        let retainedDamage :=
+          if bw > 0 && bh > 0 then some ⟨0, 0, bw, bh⟩ else st.damage
+        return {
+          st with
+          wayland := wlAfter
+          vulkan := vkGpu
+          atlas := atlasGpu
+          hitRegions := regions
+          scrollRegions
+          activeScrollbarDrag
+          focusableOrder := focusOrder
+          damage := retainedDamage
+          lastFrameTotalNs := (frameT1 - frameT0).toUInt64
+        }
     -- Runtime DEVICE_LOST fallback: render CPU frame so `runWindow` presents via `wl_shm`.
     let vkCpu ← Vulkan.renderFrame vkGpu clearColor atlasGpu scene
     let frameT1 ← IO.monoNanosNow

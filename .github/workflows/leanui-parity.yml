@@ -15,6 +15,8 @@ on:
       - 'scripts/orb_desktop_dev.sh'
       - 'scripts/leanui_parity.py'
       - 'scripts/test_leanui_*.py'
+      - 'scripts/gen_leanui_shaders.py'
+      - 'shaders/**'
       - 'docs/ui/**'
       - 'orb/tests/leanui-reference.capture.ts'
       - 'orb/playwright.leanui-reference.config.ts'
@@ -30,6 +32,8 @@ on:
       - 'scripts/leanui_parity.py'
       - 'scripts/test_leanui_*.py'
       - 'scripts/bench_desktop.sh'
+      - 'scripts/gen_leanui_shaders.py'
+      - 'shaders/**'
       - 'docs/ui/**'
       - 'orb/tests/leanui-reference.capture.ts'
       - 'orb/playwright.leanui-reference.config.ts'
@@ -72,7 +76,7 @@ jobs:
             libwayland-dev libxkbcommon-dev libfreetype-dev libharfbuzz-dev \
             libfontconfig-dev weston fonts-inter fonts-dejavu-core unzip \
             xvfb imagemagick python3-numpy python3-pil ripgrep \
-            mesa-vulkan-drivers vulkan-validationlayers libvulkan-dev glslang-tools
+            mesa-vulkan-drivers vulkan-validationlayers libvulkan-dev glslang-tools spirv-tools
 
       - name: Install pinned Chrome for Testing and private fonts
         run: |

@@ -99,6 +99,9 @@ float sdRoundedBox16(vec2 p, vec2 b, vec4 r) {
     vec2 m16 = max(q16, vec2(0.0));
     float d2 = dot(m16, m16);
     float outLen16 = floor(sqrt(d2));
+    if (outLen16 * outLen16 > d2) {
+        outLen16 -= 1.0;
+    }
     if ((outLen16 + 1.0) * (outLen16 + 1.0) <= d2) {
         outLen16 += 1.0;
     }

@@ -49,11 +49,47 @@ def find_vulkan_include() -> Path | None:
 
 
 def has_vulkan_icd() -> bool:
-    for d in ("/usr/share/vulkan/icd.d", "/etc/vulkan/icd.d"):
+    for env_var in ("VK_ICD_FILENAMES", "VK_DRIVER_FILES"):
+        val = os.environ.get(env_var, "")
+        for entry in val.split(os.pathsep):
+            if entry and Path(entry).is_file():
+                return True
+    for d in ("/usr/share/vulkan/icd.d", "/etc/vulkan/icd.d", "/run/opengl-driver/share/vulkan/icd.d"):
         p = Path(d)
         if p.is_dir() and any(p.glob("*.json")):
             return True
     return False
+
+
+def has_vulkan_validation_layers() -> bool:
+    for d in (
+        "/usr/share/vulkan/explicit_layer.d",
+        "/etc/vulkan/explicit_layer.d",
+        "/run/opengl-driver/share/vulkan/explicit_layer.d",
+    ):
+        p = Path(d)
+        if p.is_dir() and any("validation" in f.name.lower() for f in p.glob("*.json")):
+            return True
+    return False
+
+
+def find_host_cc() -> str:
+    """Resolve a system C compiler with standard libc headers (avoiding Lean's bundled clang)."""
+    env_cc = os.environ.get("HOST_CC")
+    if env_cc:
+        return env_cc
+    for cand in ("/usr/bin/cc", "/usr/bin/gcc", "/usr/bin/clang"):
+        if Path(cand).is_file():
+            return cand
+    return shutil.which("gcc") or shutil.which("cc") or shutil.which("clang") or "cc"
+
+
+def assert_no_vk_validation_errors(tc: unittest.TestCase, stderr: str) -> None:
+    bad = [
+        ln for ln in stderr.splitlines()
+        if "Validation Error:" in ln or "VUID-" in ln or "SYNC-HAZARD" in ln
+    ]
+    tc.assertEqual(bad, [], f"Vulkan validation layer errors detected:\n" + "\n".join(bad))
 
 
 class LeanUIVulkanTests(unittest.TestCase):
@@ -81,7 +117,7 @@ class LeanUIVulkanTests(unittest.TestCase):
             self.skipTest("vulkan/vulkan.h not installed")
         with tempfile.TemporaryDirectory() as tmp:
             exe = Path(tmp) / "vk_abi_check"
-            cc = shutil.which("clang") or shutil.which("cc") or "gcc"
+            cc = find_host_cc()
             comp = subprocess.run(
                 [cc, "-std=c11", "-O2", "-Wall", "-Wextra", "-Werror",
                  f"-I{inc}", str(ROOT / "lean/OrbDesktop/tests/VkStructAbiCheck.c"), "-o", str(exe)],
@@ -132,23 +168,30 @@ class LeanUIVulkanTests(unittest.TestCase):
             )
             self.assertEqual(r_cpu.returncode, 0, r_cpu.stdout + r_cpu.stderr)
 
+            vk_env = dict(os.environ)
+            if has_vulkan_validation_layers():
+                vk_env["ORB_LEANUI_VK_VALIDATION"] = "1"
+
             r_p1 = subprocess.run(
                 [str(self.bin), "--gpu=present", "--gpu-readback-all-prims", str(p1_dir / fname)],
-                capture_output=True, text=True, timeout=60,
+                env=vk_env, capture_output=True, text=True, timeout=60,
             )
             self.assertEqual(r_p1.returncode, 0, r_p1.stdout + r_p1.stderr)
+            assert_no_vk_validation_errors(self, r_p1.stderr)
 
             r_p2 = subprocess.run(
                 [str(self.bin), "--gpu=instanced", "--gpu-readback-all-prims", str(p2_dir / fname)],
-                capture_output=True, text=True, timeout=60,
+                env=vk_env, capture_output=True, text=True, timeout=60,
             )
             self.assertEqual(r_p2.returncode, 0, r_p2.stdout + r_p2.stderr)
+            assert_no_vk_validation_errors(self, r_p2.stderr)
 
             r_p2b = subprocess.run(
                 [str(self.bin), "--gpu=instanced", "--gpu-readback-all-prims", str(p2_rep / fname)],
-                capture_output=True, text=True, timeout=60,
+                env=vk_env, capture_output=True, text=True, timeout=60,
             )
             self.assertEqual(r_p2b.returncode, 0, r_p2b.stdout + r_p2b.stderr)
+            assert_no_vk_validation_errors(self, r_p2b.stderr)
 
             # Phase 1 (vkPresent): bit-exact 0 LSB across all 4 RGBA channels
             res_p1 = parity.compare(cpu_dir, p1_dir, tolerance=0, rgba=True, max_delta=0, max_above_tol=0.0, min_ssim=1.0)
@@ -163,7 +206,7 @@ class LeanUIVulkanTests(unittest.TestCase):
 
     @unittest.skipUnless(HAS_IMAGE_DEPS, "requires numpy and Pillow")
     def test_06_gpu_readback_canonical_screens_parity(self):
-        """Differential parity on canonical desktop screens (dark+light, 1x+2x) on Lavapipe."""
+        """Differential parity across all 36 canonical desktop screens (9 screens x dark/light x 1x/2x) on Lavapipe."""
         if not has_vulkan_icd():
             self.skipTest("no Vulkan ICD installed")
         with tempfile.TemporaryDirectory() as tmp:
@@ -172,29 +215,27 @@ class LeanUIVulkanTests(unittest.TestCase):
             gpu_dir = root / "gpu"
             cpu_dir.mkdir()
             gpu_dir.mkdir()
-            for scr in ("control_empty", "mission_transcript"):
-                for theme_flag, tname in (("--dark", "dark"), ("--light", "light")):
-                    for sc, sname in (("120", "1x"), ("240", "2x")):
-                        idx = "01" if scr == "control_empty" else "03"
-                        out_png = cpu_dir / f"{idx}_{scr}_{tname}_{sname}.png"
-                        r = subprocess.run(
-                            [str(self.bin), "--headless-golden", str(out_png),
-                             "--screen", scr, theme_flag, "--scale120", sc,
-                             "--width", "640", "--height", "400"],
-                            capture_output=True, text=True, timeout=60,
-                        )
-                        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-                rg = subprocess.run(
-                    [str(self.bin), "--gpu=instanced", "--gpu-readback", str(gpu_dir),
-                     "--screen", scr, "--width", "640", "--height", "400"],
-                    capture_output=True, text=True, timeout=120,
-                )
-                self.assertEqual(rg.returncode, 0, rg.stdout + rg.stderr)
+            vk_env = dict(os.environ)
+            if has_vulkan_validation_layers():
+                vk_env["ORB_LEANUI_VK_VALIDATION"] = "1"
+            rc = subprocess.run(
+                [str(self.bin), "--headless-golden-all", str(cpu_dir),
+                 "--width", "640", "--height", "400"],
+                capture_output=True, text=True, timeout=180,
+            )
+            self.assertEqual(rc.returncode, 0, rc.stdout + rc.stderr)
+            rg = subprocess.run(
+                [str(self.bin), "--gpu=instanced", "--gpu-readback", str(gpu_dir),
+                 "--width", "640", "--height", "400"],
+                env=vk_env, capture_output=True, text=True, timeout=240,
+            )
+            self.assertEqual(rg.returncode, 0, rg.stdout + rg.stderr)
+            assert_no_vk_validation_errors(self, rg.stderr)
             res = parity.compare(
-                cpu_dir, gpu_dir, tolerance=2, require=8, rgba=True,
+                cpu_dir, gpu_dir, tolerance=2, require=36, rgba=True,
                 max_delta=3, max_above_tol=0.05, min_ssim=0.9995,
             )
-            self.assertEqual(res["errors"], [], f"Canonical screen GPU readback parity failed: {res}")
+            self.assertEqual(res["errors"], [], f"All-36 canonical screen GPU readback parity failed: {res}")
 
     def test_07_weston_wsi_fallback_and_bench_wsi(self):
         """Under headless Weston --renderer=pixman, default auto-GPU cleanly falls back to wl_shm

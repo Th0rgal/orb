@@ -233,6 +233,56 @@ int main(void) {
   CHECK_OFF(VkPipelineRenderingCreateInfo, colorAttachmentCount, 20);
   CHECK_OFF(VkPipelineRenderingCreateInfo, pColorAttachmentFormats, 24);
 
+  CHECK_OFF(VkGraphicsPipelineCreateInfo, basePipelineIndex, 136);
+  CHECK_OFF(VkComputePipelineCreateInfo, basePipelineIndex, 88);
+
+  CHECK_SIZE(VkPhysicalDeviceProperties, 824);
+  CHECK_OFF(VkPhysicalDeviceProperties, apiVersion, 0);
+  CHECK_OFF(VkPhysicalDeviceProperties, deviceType, 16);
+  CHECK_OFF(VkPhysicalDeviceProperties, deviceName, 20);
+
+  CHECK_SIZE(VkPhysicalDeviceFeatures2, 240);
+  CHECK_OFF(VkPhysicalDeviceFeatures2, pNext, 8);
+
+  CHECK_SIZE(VkQueueFamilyProperties, 24);
+  CHECK_OFF(VkQueueFamilyProperties, queueFlags, 0);
+  CHECK_OFF(VkQueueFamilyProperties, queueCount, 4);
+
+  CHECK_SIZE(VkPhysicalDeviceMemoryProperties, 520);
+  CHECK_OFF(VkPhysicalDeviceMemoryProperties, memoryTypeCount, 0);
+  CHECK_OFF(VkPhysicalDeviceMemoryProperties, memoryTypes, 4);
+
+  CHECK_SIZE(VkFormatProperties, 12);
+  CHECK_OFF(VkFormatProperties, optimalTilingFeatures, 4);
+
+  CHECK_SIZE(VkMemoryRequirements, 24);
+  CHECK_OFF(VkMemoryRequirements, size, 0);
+  CHECK_OFF(VkMemoryRequirements, alignment, 8);
+  CHECK_OFF(VkMemoryRequirements, memoryTypeBits, 16);
+
+  CHECK_SIZE(VkSurfaceFormatKHR, 8);
+  CHECK_OFF(VkSurfaceFormatKHR, format, 0);
+  CHECK_OFF(VkSurfaceFormatKHR, colorSpace, 4);
+
+  CHECK_SIZE(VkMappedMemoryRange, 40);
+  CHECK_OFF(VkMappedMemoryRange, memory, 16);
+  CHECK_OFF(VkMappedMemoryRange, offset, 24);
+  CHECK_OFF(VkMappedMemoryRange, size, 32);
+
+  CHECK_SIZE(VkDescriptorSetLayoutBinding, 24);
+  CHECK_OFF(VkDescriptorSetLayoutBinding, binding, 0);
+  CHECK_OFF(VkDescriptorSetLayoutBinding, descriptorType, 4);
+  CHECK_OFF(VkDescriptorSetLayoutBinding, descriptorCount, 8);
+  CHECK_OFF(VkDescriptorSetLayoutBinding, stageFlags, 12);
+
+  CHECK_SIZE(VkWriteDescriptorSet, 64);
+  CHECK_OFF(VkWriteDescriptorSet, dstSet, 16);
+  CHECK_OFF(VkWriteDescriptorSet, dstBinding, 24);
+  CHECK_OFF(VkWriteDescriptorSet, descriptorCount, 32);
+  CHECK_OFF(VkWriteDescriptorSet, descriptorType, 36);
+  CHECK_OFF(VkWriteDescriptorSet, pImageInfo, 40);
+  CHECK_OFF(VkWriteDescriptorSet, pBufferInfo, 48);
+
   if (failures) {
     fprintf(stderr, "VkStructAbiCheck: %d failure(s)\n", failures);
     return 1;

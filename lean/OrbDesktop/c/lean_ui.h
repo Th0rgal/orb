@@ -78,13 +78,10 @@ lean_obj_res lean_ui_memfd(uint32_t size, lean_obj_arg w);
 /* dlopen + dlsym. Returns function address or 0. */
 lean_obj_res lean_ui_dl_sym(b_lean_obj_arg lib, b_lean_obj_arg sym, lean_obj_arg w);
 /* Call fn(a0..a5) with integer/pointer arguments (SysV / AAPCS64 integer class only).
- * `args` is 6 * u64. Returns u64 (VkResult is its low 32 bits).
- * Consequence for the Lean side: only Vulkan entry points with <= 6 integer-class
- * arguments are reachable. Use the Vulkan 1.3 `*2` forms (vkCmdPipelineBarrier2,
- * vkCmdCopyImageToBuffer2, vkCmdBlitImage2), push descriptors instead of
- * vkCmdBindDescriptorSets, and no float-argument commands (line width, depth bias).
- * Resolve instance/device functions through vkGetInstanceProcAddr / vkGetDeviceProcAddr,
- * which are themselves called through this bridge; only vkGetInstanceProcAddr uses dlsym. */
+ * `args` is 6 * u64. Returns u64 (used for 64-bit pointer returns like vkGet*ProcAddr).
+ * Entry points taking up to 8 integer-class arguments (e.g. vkCmdBindDescriptorSets,
+ * vkUpdateDescriptorSets) use lean_ui_vk_call_void8 / lean_ui_vk_call_res8 in
+ * lean_ui_vk_bridge.c; only vkGetInstanceProcAddr uses dlsym. */
 lean_obj_res lean_ui_call(size_t fn, b_lean_obj_arg args, lean_obj_arg w);
 /* Native scratch memory for structs that must outlive one call. Zero-filled. */
 lean_obj_res lean_ui_mem_alloc(size_t size, lean_obj_arg w);

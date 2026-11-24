@@ -159,7 +159,8 @@ def initVulkanSurface (width height : Nat) (wlDisplay wlSurface : USize)
   | .ok wsi =>
     let allocBytes ← wsi.dev.allocatedBytes.get
     let pMode := wsi.bundle.map (·.presentMode) |>.getD 0
-    if wantInstanced then
+    let canDirectInstanced := wsi.bundle.map (fun b => b.canTransferSrc && b.canBlitSrc && b.canBlitDst) |>.getD false
+    if wantInstanced && canDirectInstanced then
       let fmt := wsi.bundle.map (·.format) |>.getD Vk.VK_FORMAT_B8G8R8A8_UNORM
       match ← Vk.createInstancedPipeline wsi.dev fmt with
       | .ok pipe =>
@@ -791,7 +792,8 @@ def rasterizeScene (vw vh : Nat) (clearColor : Color) (atlas : Text.GlyphAtlasCa
 def renderFrame (ctx : VulkanContext) (clearColor : Color) (atlas : Text.GlyphAtlasCache)
     (scene : Scene) : IO VulkanContext := do
   let (fb, insts) := rasterizeScene ctx.width ctx.height clearColor atlas scene
-  let _ ← stageInstances ctx insts
+  if ctx.scratchPtr != 0 then
+    let _ ← stageInstances ctx insts
   return { ctx with
     framebuffer := fb
     lastUploadedDirtyRect := some { x := 0, y := 0, w := (ctx.width : Int), h := (ctx.height : Int) }
@@ -1004,7 +1006,8 @@ def renderFrameDamage (ctx : VulkanContext) (clearColor : Color) (atlas : Text.G
         | some u => some (unionRect u clipped)
     pixels := pixels + (max 0 clipped.w * max 0 clipped.h).toNat
   let t4 ← IO.monoNanosNow
-  let _ ← stageInstances ctx insts
+  if ctx.scratchPtr != 0 then
+    let _ ← stageInstances ctx insts
   if profile then IO.eprintln s!"u7-paint-ns {t1-t0} {t2-t1} {t3-t2} {t4-t3} {(← IO.monoNanosNow)-t4}"
   return {
     ctx with
@@ -1032,12 +1035,14 @@ private def fallbackToCpuShm (ctx : VulkanContext) (reason : String) : IO Vulkan
 
 /-- Render and present a live Wayland frame on the active Vulkan backend (`vkInstanced` or
 `vkPresent`). On `vkInstanced`, CPU `framebuffer` and `previousPaint` are never allocated.
-Returns `(ctx', atlas', presentedByVulkan)` — if `presentedByVulkan == false` because of
-`DEVICE_LOST` fallback, the caller transparently falls back to `Wayland.present` (`wl_shm`). -/
+Returns `(ctx', atlas', handledByVulkan, didPresent)`:
+- `(true, true)`: frame was presented to WSI (clear damage, bump `presentCount`).
+- `(true, false)`: swapchain needs recreate / zero-extent suspended (preserve damage, do not bump `presentCount`).
+- `(false, false)`: runtime `DEVICE_LOST` fell back to `cpuShm` (caller renders CPU + `wl_shm`). -/
 def renderAndPresentGpu (ctx : VulkanContext) (clearColor : Color) (atlas : Text.GlyphAtlasCache)
     (scene : Scene) (dirty : Option Rect) (prePresent onPresentAborted : IO Unit) :
-    IO (VulkanContext × Text.GlyphAtlasCache × Bool) := do
-  let some sess := ctx.gpuSession | return (ctx, atlas, false)
+    IO (VulkanContext × Text.GlyphAtlasCache × Bool × Bool) := do
+  let some sess := ctx.gpuSession | return (ctx, atlas, false, false)
   match ctx.backend, sess.pipe with
   | .vkInstanced, some pipe =>
     let (wsi', pipe', outcome, primCount, ssboBytes, atlasBytes) ←
@@ -1061,14 +1066,14 @@ def renderAndPresentGpu (ctx : VulkanContext) (clearColor : Color) (atlas : Text
         lastSsboBytes := ssboBytes
         lastDrawnPrims := primCount
         lastDamagePixels := ctx.width * ctx.height }
-      return (ctx', atlas.clearGpuDirtyRects, true)
+      return (ctx', atlas.clearGpuDirtyRects, true, true)
     | .skipped =>
-      return ({ ctx with gpuSession := some { wsi := wsi', pipe := some pipe' }, gpuAllocatedBytes := allocBytes }, atlas, true)
+      return ({ ctx with gpuSession := some { wsi := wsi', pipe := some pipe' }, gpuAllocatedBytes := allocBytes }, atlas, true, false)
     | .needsRecreate =>
-      return ({ ctx with gpuSession := some { wsi := wsi', pipe := some pipe' }, swapchainRecreates := wsi'.sm.recreateCount }, atlas, true)
+      return ({ ctx with gpuSession := some { wsi := wsi', pipe := some pipe' }, swapchainRecreates := wsi'.sm.recreateCount, gpuAllocatedBytes := allocBytes }, atlas, true, false)
     | .deviceLost reason =>
       let fbCtx ← fallbackToCpuShm { ctx with gpuSession := some { wsi := wsi', pipe := some pipe' } } reason
-      return (fbCtx, atlas, false)
+      return (fbCtx, atlas, false, false)
   | .vkPresent, _ =>
     let ctx1 ← match dirty with
       | some d => renderFrameDamage ctx clearColor atlas d scene
@@ -1087,16 +1092,19 @@ def renderAndPresentGpu (ctx : VulkanContext) (clearColor : Color) (atlas : Text
         lastSubmitNs := subNs
         lastPresentNs := presNs
         lastUploadBytes := upBytes }
-      return (ctx', atlas, true)
+      return (ctx', atlas, true, true)
     | .skipped =>
-      return ({ ctx1 with gpuSession := some { sess with wsi := wsi' }, gpuAllocatedBytes := allocBytes }, atlas, true)
+      return ({ ctx1 with gpuSession := some { sess with wsi := wsi' }, gpuAllocatedBytes := allocBytes }, atlas, true, false)
     | .needsRecreate =>
-      return ({ ctx1 with gpuSession := some { sess with wsi := wsi' }, swapchainRecreates := wsi'.sm.recreateCount }, atlas, true)
+      let wsiDirty := match wsi'.bundle with
+        | some b => { wsi' with bundle := some { b with backingNeedsFullUpload := true } }
+        | none => wsi'
+      return ({ ctx1 with gpuSession := some { sess with wsi := wsiDirty }, swapchainRecreates := wsiDirty.sm.recreateCount, gpuAllocatedBytes := allocBytes }, atlas, true, false)
     | .deviceLost reason =>
       let fbCtx ← fallbackToCpuShm { ctx1 with gpuSession := some { sess with wsi := wsi' } } reason
-      return (fbCtx, atlas, false)
+      return (fbCtx, atlas, false, false)
   | _, _ =>
-    return (ctx, atlas, false)
+    return (ctx, atlas, false, false)
 
 /-- Compute IEEE 802.3 CRC-32 for a PNG chunk (`type ++ data`). -/
 def crc32 (data : ByteArray) : UInt32 := Id.run do
