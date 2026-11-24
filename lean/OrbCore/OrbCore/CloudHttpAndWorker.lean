@@ -231,6 +231,9 @@ def matchesCloudOwner
     return true
   return false
 
+private def stripTrailingSlash (s : String) : String :=
+  if s.endsWith "/" then (s.dropEnd 1).toString else s
+
 def assistantRuntimeName (serverPort : UInt16) : IO String := do
   let sbEnv := (← getEnvTrimmed "SANDBOXED_ENV").toLower
   let oaEnv := (← getEnvTrimmed "OPEN_AGENT_ENV").toLower
@@ -238,18 +241,98 @@ def assistantRuntimeName (serverPort : UInt16) : IO String := do
     return "hermes-assistant-dev"
   return "hermes-assistant"
 
-def assistantLoopbackUrl (runtimeName : String) : String :=
-  if runtimeName == "hermes-assistant-dev" then "http://127.0.0.1:8643" else "http://127.0.0.1:8642"
+def assistantHomeDir (runtimeName : String) : IO String := do
+  let override := (← getEnvTrimmed "HERMES_HOME").trimAscii.toString
+  if !override.isEmpty then
+    return stripTrailingSlash override
+  return s!"/var/lib/{runtimeName}"
 
-def assistantEnvPaths (runtimeName : String) : Array String :=
-  #[s!"/etc/sandboxed-sh/{runtimeName}.env", s!"/var/lib/{runtimeName}/.env"]
+def assistantLoopbackUrl (runtimeName : String) : IO String := do
+  let override := (← getEnvTrimmed "HERMES_API_URL").trimAscii.toString
+  if !override.isEmpty then
+    return stripTrailingSlash override
+  if runtimeName == "hermes-assistant-dev" then return "http://127.0.0.1:8643"
+  return "http://127.0.0.1:8642"
 
-def resolveHermesServerKey? (runtimeName : String) : IO (Option String) := do
-  if let some v ← lookupEnvFileKey? (assistantEnvPaths runtimeName) "API_SERVER_KEY" then
-    if !v.isEmpty then return some v
-  if let some v ← lookupEnvFileKey? #["/etc/sandboxed-sh/hermes-assistant.env", "/var/lib/hermes-assistant/.env"] "API_SERVER_KEY" then
+def assistantEnvPaths (runtimeName : String) : IO (Array String) := do
+  let homeOverride := (← getEnvTrimmed "HERMES_HOME").trimAscii.toString
+  let mut paths : Array String := #[]
+  if !homeOverride.isEmpty then
+    paths := paths.push s!"{stripTrailingSlash homeOverride}/.env"
+  paths := paths.push s!"/etc/sandboxed-sh/{runtimeName}.env"
+  paths := paths.push s!"/var/lib/{runtimeName}/.env"
+  return paths
+
+def resolveHermesServerKeyForRuntime? (runtimeName : String) : IO (Option String) := do
+  let paths ← assistantEnvPaths runtimeName
+  if let some v ← lookupEnvFileKey? paths "API_SERVER_KEY" then
     if !v.isEmpty then return some v
   return none
+
+def resolveHermesServerKey? (runtimeName : String) : IO (Option String) := do
+  if let some v ← resolveHermesServerKeyForRuntime? runtimeName then
+    return some v
+  if runtimeName != "hermes-assistant" then
+    if let some v ← lookupEnvFileKey? #["/etc/sandboxed-sh/hermes-assistant.env", "/var/lib/hermes-assistant/.env"] "API_SERVER_KEY" then
+      if !v.isEmpty then return some v
+  return none
+
+/-- Verify a `/v1/capabilities` JSON object for Hermes run-replay readiness.
+    When `features` is present, rejects gateways that explicitly disable
+    `features.runs_idempotency.durable` or `features.run_events_replay`. -/
+def checkHermesCapabilitiesReady (capsJv : JVal) : Except String Unit :=
+  match capsJv with
+  | .obj _ =>
+    match capsJv.field? "features" with
+    | some (.obj _) =>
+      let replayOk :=
+        match (capsJv.field? "features").bind (·.fieldBool? "run_events_replay") with
+        | some false => false
+        | _ => true
+      let durableOk :=
+        match (capsJv.field? "features").bind (·.field? "runs_idempotency") with
+        | some (.obj _) =>
+          match ((capsJv.field? "features").bind (·.field? "runs_idempotency")).bind (·.fieldBool? "durable") with
+          | some false => false
+          | _ => true
+        | some (.bool false) => false
+        | _ => true
+      if replayOk && durableOk then
+        .ok ()
+      else
+        .error "Hermes gateway is missing durable run replay capabilities; upgrade hermes-gateway"
+    | _ => .ok ()
+  | _ => .error "Invalid Hermes capabilities response"
+
+private def probeHermesCapabilitiesAt (baseUrl apiKey : String) (timeoutMs : UInt32 := 1500) : IO (Except String JVal) := do
+  match ← sendJsonRequest "GET" s!"{baseUrl}/v1/capabilities" (some apiKey) none #[] timeoutMs 262144 with
+  | .ok (code, _, some jv) =>
+    if 200 ≤ code && code < 300 then
+      match checkHermesCapabilitiesReady jv with
+      | .ok () => return .ok jv
+      | .error reason => return .error reason
+    else
+      return .error "Hermes is not responding; other cloud services remain available"
+  | _ =>
+    return .error "Hermes is not responding; other cloud services remain available"
+
+private def resolveEffectiveHermesEndpoint (serverPort : UInt16) : IO (String × String × Option String × Option JVal × Option String) := do
+  let rtName ← assistantRuntimeName serverPort
+  let urlOverride := (← getEnvTrimmed "HERMES_API_URL").trimAscii.toString
+  let url0 ← assistantLoopbackUrl rtName
+  let key0? ← resolveHermesServerKey? rtName
+  let some k0 := key0?
+    | return (rtName, url0, none, none, some "Hermes API server key is not configured; enable Hermes remote access first")
+  match ← probeHermesCapabilitiesAt url0 k0 1500 with
+  | .ok capsJv => return (rtName, url0, some k0, some capsJv, none)
+  | .error primaryErr =>
+    -- Fallback probe to production port 8642 only if dev runtime isn't separate and no explicit HERMES_API_URL override is set
+    if rtName == "hermes-assistant-dev" && urlOverride.isEmpty then
+      let prodKey := (← resolveHermesServerKeyForRuntime? "hermes-assistant").getD k0
+      match ← probeHermesCapabilitiesAt "http://127.0.0.1:8642" prodKey 1500 with
+      | .ok capsJv2 => return ("hermes-assistant", "http://127.0.0.1:8642", some prodKey, some capsJv2, none)
+      | .error fallbackErr => return (rtName, url0, some k0, none, some fallbackErr)
+    return (rtName, url0, some k0, none, some primaryErr)
 
 private def checkGrokBotCredentialValid (credPath : String) (nowSec : UInt64) : IO Bool := do
   let p := credPath.trimAscii.toString
@@ -359,30 +442,14 @@ def buildCloudAccountsJson
   -- 3. Hermes / Paloma (`paloma`)
   let hermesOwner ← getEnvTrimmed "HERMES_CLOUD_OWNER"
   let hermesOwnerOk ← matchesCloudOwner store hermesOwner callerUserId callerUsername bootstrapAdminId isAdmin isLegacyUnscoped
-  let rtName ← assistantRuntimeName serverPort
   let (hermesAvail, hermesReason) ←
     if !hermesOwnerOk then
       pure (false, JVal.str "Hermes is not connected for this account")
     else
-      match ← resolveHermesServerKey? rtName with
-      | none =>
-        pure (false, JVal.str "Hermes API server key is not configured; enable Hermes remote access first")
-      | some apiKey =>
-        let baseUrl := assistantLoopbackUrl rtName
-        match ← sendJsonRequest "GET" s!"{baseUrl}/v1/capabilities" (some apiKey) none #[] 1500 262144 with
-        | .ok (code, _, some (.obj _)) =>
-          if 200 ≤ code && code < 300 then pure (true, JVal.null)
-          else pure (false, JVal.str "Hermes is not responding; other cloud services remain available")
-        | _ =>
-          -- Fallback probe to production port 8642 if dev runtime isn't separate
-          if rtName == "hermes-assistant-dev" then
-            match ← sendJsonRequest "GET" "http://127.0.0.1:8642/v1/capabilities" (some apiKey) none #[] 1500 262144 with
-            | .ok (code2, _, some (.obj _)) =>
-              if 200 ≤ code2 && code2 < 300 then pure (true, JVal.null)
-              else pure (false, JVal.str "Hermes is not responding; other cloud services remain available")
-            | _ => pure (false, JVal.str "Hermes is not responding; other cloud services remain available")
-          else
-            pure (false, JVal.str "Hermes is not responding; other cloud services remain available")
+      let (_, _, _, capsOpt, errOpt) ← resolveEffectiveHermesEndpoint serverPort
+      match capsOpt with
+      | some _ => pure (true, JVal.null)
+      | none => pure (false, JVal.str (errOpt.getD "Hermes is not responding; other cloud services remain available"))
 
   let palomaObj : JVal := .obj #[
     ("id", .str "paloma"),
@@ -485,21 +552,6 @@ private def defaultHermesEfforts : Array JVal := #[
   .obj #[("id", .str "xhigh"), ("name", .str "Extra High")]
 ]
 
-private def resolveEffectiveHermesEndpoint (serverPort : UInt16) : IO (String × String × Option String) := do
-  let rtName ← assistantRuntimeName serverPort
-  let key? ← resolveHermesServerKey? rtName
-  let url0 := assistantLoopbackUrl rtName
-  if let some k := key? then
-    if rtName == "hermes-assistant-dev" then
-      match ← sendJsonRequest "GET" s!"{url0}/v1/capabilities" (some k) none #[] 1200 262144 with
-      | .ok (c, _, _) => if 200 ≤ c && c < 300 then return (rtName, url0, some k)
-      | _ => pure ()
-      match ← sendJsonRequest "GET" "http://127.0.0.1:8642/v1/capabilities" (some k) none #[] 1200 262144 with
-      | .ok (c2, _, _) => if 200 ≤ c2 && c2 < 300 then return ("hermes-assistant", "http://127.0.0.1:8642", some k)
-      | _ => pure ()
-    return (rtName, url0, some k)
-  return (rtName, url0, none)
-
 private def collectHermesModelItems (store : CoreStore) (hermesUrl : String) (apiKey : String) : IO (Array JVal) := do
   let mut items : Array JVal := #[.obj #[("id", .str ""), ("name", .str "Profile default")]]
   let mut seen : Array String := #[""]
@@ -525,7 +577,7 @@ private def collectHermesModelItems (store : CoreStore) (hermesUrl : String) (ap
         let mid := ((entry.fieldStr? "id").getD "").trimAscii.toString
         if !mid.isEmpty && mid != "hermes-agent" && !seen.contains mid then
           seen := seen.push mid
-          let nm := (entry.fieldStr? "name").getD mid
+          let nm := (entry.fieldStr? "displayName").orElse (fun _ => entry.fieldStr? "name") |>.getD mid
           items := items.push (.obj #[("id", .str mid), ("name", .str nm)])
   return items
 
@@ -556,32 +608,93 @@ private def yamlFindScalar? (yamlText : String) (sectionPath : List String) (key
             return some (trimQuotes vRaw)
   return none
 
-private def yamlUpdateTopScalar (yamlText sectionName key newVal : String) : String := Id.run do
-  let lines := yamlText.splitOn "\n"
+private def isPrefixOfList (pfx full : List String) : Bool :=
+  match pfx, full with
+  | [], _ => true
+  | _ :: _, [] => false
+  | a :: ar, b :: br => a == b && isPrefixOfList ar br
+
+/-- Indentation-aware YAML scalar updater supporting both top-level (`["model"]`) and nested
+    (`["display", "platforms", "telegram"]`) section paths without clobbering unrelated keys. -/
+private def yamlUpdatePathScalar (yamlText : String) (sectionPath : List String) (key newVal : String) : String := Id.run do
+  let lines := if yamlText.isEmpty then ([] : List String) else yamlText.splitOn "\n"
+  let mut stack : Array (Nat × String) := #[]
   let mut out : Array String := #[]
-  let mut inSec := false
   let mut replaced := false
-  for line in lines do
-    let trimmed := line.trimAscii.toString
-    let indent := leadingSpacesCount line
-    if !trimmed.isEmpty && !trimmed.startsWith "#" && indent == 0 && trimmed.endsWith ":" then
-      if inSec && !replaced then
-        out := out.push s!"  {key}: {newVal}"
-        replaced := true
-      inSec := (trimmed == s!"{sectionName}:")
-      out := out.push line
-    else if inSec && indent == 2 && (trimmed.startsWith s!"{key}:") then
-      out := out.push s!"  {key}: {newVal}"
-      replaced := true
+  let mut bestMatchLen : Nat := 0
+  let mut bestInsertPos : Nat := 0
+  let mut bestChildIndent : Nat := 0
+  for rawLine in lines do
+    let noComment := (rawLine.splitOn " #").headD rawLine
+    let trimmed := noComment.trimAscii.toString
+    if trimmed.isEmpty || trimmed.startsWith "#" || trimmed.startsWith "-" then
+      out := out.push rawLine
     else
-      out := out.push line
-  if inSec && !replaced then
-    out := out.push s!"  {key}: {newVal}"
-    replaced := true
-  if !replaced then
-    out := out.push s!"{sectionName}:"
-    out := out.push s!"  {key}: {newVal}"
-  return String.intercalate "\n" out.toList
+      let indent := leadingSpacesCount rawLine
+      while stack.size > 0 && (stack.back!.1) >= indent do
+        stack := stack.pop
+      match trimmed.splitOn ":" with
+      | [] => out := out.push rawLine
+      | kPart :: rest =>
+        let k := kPart.trimAscii.toString
+        let vRaw := (String.intercalate ":" rest).trimAscii.toString
+        let curPath := (stack.map Prod.snd).toList
+        if vRaw.isEmpty then
+          let nextPath := curPath ++ [k]
+          stack := stack.push (indent, k)
+          out := out.push rawLine
+          if isPrefixOfList nextPath sectionPath && nextPath.length >= bestMatchLen then
+            bestMatchLen := nextPath.length
+            bestInsertPos := out.size
+            bestChildIndent := indent + 2
+        else if !replaced && curPath == sectionPath && k == key then
+          let pad := String.ofList (List.replicate indent ' ')
+          out := out.push s!"{pad}{key}: {newVal}"
+          replaced := true
+        else
+          out := out.push rawLine
+          if !curPath.isEmpty && isPrefixOfList curPath sectionPath && curPath.length >= bestMatchLen then
+            bestMatchLen := curPath.length
+            bestInsertPos := out.size
+            bestChildIndent := indent
+  if replaced then
+    return String.intercalate "\n" out.toList
+  let mut insertLines : Array String := #[]
+  let mut curIndent := if bestMatchLen == 0 then 0 else bestChildIndent
+  for sec in sectionPath.drop bestMatchLen do
+    let pad := String.ofList (List.replicate curIndent ' ')
+    insertLines := insertLines.push s!"{pad}{sec}:"
+    curIndent := curIndent + 2
+  let valPad := String.ofList (List.replicate curIndent ' ')
+  insertLines := insertLines.push s!"{valPad}{key}: {newVal}"
+  let finalLines :=
+    if bestMatchLen == 0 then
+      out ++ insertLines
+    else
+      (out.extract 0 bestInsertPos) ++ insertLines ++ (out.extract bestInsertPos out.size)
+  return String.intercalate "\n" finalLines.toList
+
+private def yamlUpdateTopScalar (yamlText sectionName key newVal : String) : String :=
+  yamlUpdatePathScalar yamlText [sectionName] key newVal
+
+/-- Parse a non-negative decimal number string (e.g. `"0.5"`, `"0.95"`) into milli-units (`500`, `950`). -/
+private def parseNonNegDecimalMilli? (raw : String) : Option Nat := do
+  let t := raw.trimAscii.toString
+  if t.isEmpty || t.startsWith "-" then none
+  match t.splitOn "." with
+  | [wholeStr] =>
+    let w ← wholeStr.toNat?
+    some (w * 1000)
+  | [wholeStr, fracStr] =>
+    let w ← if wholeStr.isEmpty then some 0 else wholeStr.toNat?
+    if fracStr.isEmpty then some (w * 1000)
+    else
+      let chars := fracStr.toList
+      if !chars.all Char.isDigit then none
+      let padded := (chars ++ ['0', '0', '0']).take 3
+      let f ← (String.ofList padded).toNat?
+      some (w * 1000 + f)
+  | _ => none
 
 private def upsertEnvLine (content key val : String) : String := Id.run do
   let lines := content.splitOn "\n"
@@ -601,14 +714,18 @@ private def upsertEnvLine (content key val : String) : String := Id.run do
 def buildHermesSettingsPayload
     (store : CoreStore)
     (serverPort : UInt16) : IO JVal := do
-  let (rtName, hermesUrl, apiKey?) ← resolveEffectiveHermesEndpoint serverPort
-  let homeDir := s!"/var/lib/{rtName}"
+  let (rtName, hermesUrl, apiKey?, capsFromProbe?, _) ← resolveEffectiveHermesEndpoint serverPort
+  let homeDir ← assistantHomeDir rtName
   let cfgPath := s!"{homeDir}/config.yaml"
   let soulPath := s!"{homeDir}/SOUL.md"
   let serviceName := s!"{rtName}.service"
-  let (rcSvc, _) ← runShortCmd "systemctl" #["is-active", "--quiet", serviceName]
-  let serviceActive := rcSvc == 0
-  let envPaths := assistantEnvPaths rtName
+  let isHermetic := (← getEnvTrimmed "ORB_HERMETIC_TEST") == "1" || !(← getEnvTrimmed "HERMES_HOME").isEmpty
+  let serviceActive ←
+    if isHermetic then pure capsFromProbe?.isSome
+    else
+      let (rcSvc, _) ← runShortCmd "systemctl" #["is-active", "--quiet", serviceName]
+      pure (rcSvc == 0)
+  let envPaths ← assistantEnvPaths rtName
   let mut envPresent := false
   for ep in envPaths do
     if (← (System.FilePath.mk ep).pathExists) then envPresent := true
@@ -630,8 +747,8 @@ def buildHermesSettingsPayload
   let usesProxy := (baseUrl.splitOn "127.0.0.1").length > 1 || (baseUrl.splitOn "localhost").length > 1
   let memEnabled := ((yamlFindScalar? yamlRaw ["memory"] "memory_enabled").getD "true").toLower != "false"
   let profEnabled := ((yamlFindScalar? yamlRaw ["memory"] "user_profile_enabled").getD "true").toLower != "false"
-  let memCharLim := ((yamlFindScalar? yamlRaw ["memory"] "memory_char_limit").bind String.toNat?).getD 4000
-  let usrCharLim := ((yamlFindScalar? yamlRaw ["memory"] "user_char_limit").bind String.toNat?).getD 2000
+  let memCharLim := ((yamlFindScalar? yamlRaw ["memory"] "memory_char_limit").bind String.toNat?).getD 8000
+  let usrCharLim := ((yamlFindScalar? yamlRaw ["memory"] "user_char_limit").bind String.toNat?).getD 4000
   let compEnabled := ((yamlFindScalar? yamlRaw ["compression"] "enabled").getD "true").toLower != "false"
   let compThreshRaw := (yamlFindScalar? yamlRaw ["compression"] "threshold").getD "0.5"
   let termBackend := (yamlFindScalar? yamlRaw ["terminal"] "backend").getD "local"
@@ -639,11 +756,16 @@ def buildHermesSettingsPayload
   let tgProgress := (yamlFindScalar? yamlRaw ["display", "platforms", "telegram"] "tool_progress").getD "off"
   let tgCleanup := ((yamlFindScalar? yamlRaw ["display", "platforms", "telegram"] "cleanup_progress").getD "true").toLower != "false"
 
-  -- 3-day session rollup from `/var/lib/{rtName}/state.db` if readable
+  -- Session rollup from `{homeDir}/state.db` if readable
   let nowSec ← nowEpoch
   let sinceSec := if nowSec > 259200 then nowSec - 259200 else 0
+  let since24h := if nowSec > 86400 then nowSec - 86400 else 0
   let sinceIso := formatEpochIso8601Utc sinceSec
+  let mut sessionsAvailable := false
   let mut sessTotal : Nat := 0
+  let mut sessAllTime : Nat := 0
+  let mut sessActive24h : Nat := 0
+  let mut sessTokens : Nat := 0
   let mut sessMsgs : Nat := 0
   let mut sessTools : Nat := 0
   let mut sessOpen : Nat := 0
@@ -654,6 +776,7 @@ def buildHermesSettingsPayload
       if let .ok r1 ← sdb.mu.atomically <| sqliteQueryRowsRaw sdb.handle
           "SELECT COALESCE(source,'api'), COUNT(*), COALESCE(SUM(message_count),0), COALESCE(SUM(tool_call_count),0), COALESCE(SUM(CASE WHEN ended_at IS NULL THEN 1 ELSE 0 END),0) FROM sessions WHERE started_at >= ?1 GROUP BY COALESCE(source,'api');"
           #[toString sinceSec] then
+        sessionsAvailable := true
         for i in [1:r1.size] do
           let src := (r1[i]![0]?).getD "api"
           let cnt := ((r1[i]![1]?).bind String.toNat?).getD 0
@@ -665,19 +788,28 @@ def buildHermesSettingsPayload
           sessTools := sessTools + tc
           sessOpen := sessOpen + op
           bySource := bySource.push (src, JVal.nat cnt)
+      if let .ok rAll ← sdb.mu.atomically <| sqliteQueryRowsRaw sdb.handle
+          "SELECT COUNT(*), COALESCE(SUM(CASE WHEN started_at >= ?1 THEN 1 ELSE 0 END),0) FROM sessions;"
+          #[toString since24h] then
+        if rAll.size > 1 then
+          sessAllTime := ((rAll[1]![0]?).bind String.toNat?).getD sessTotal
+          sessActive24h := ((rAll[1]![1]?).bind String.toNat?).getD 0
+      if let .ok rTok ← sdb.mu.atomically <| sqliteQueryRowsRaw sdb.handle
+          "SELECT COALESCE(SUM(COALESCE(input_tokens,0) + COALESCE(output_tokens,0)),0) FROM sessions;"
+          #[] then
+        if rTok.size > 1 then
+          sessTokens := ((rTok[1]![0]?).bind String.toNat?).getD 0
       sqliteCloseRaw sdb.handle
 
-  let mut capsJv : JVal := .obj #[]
+  let mut capsJv : JVal := capsFromProbe?.getD (.obj #[])
+  let apiServerHealthy := capsFromProbe?.isSome
   let mut jobsTotal : Nat := 0
   let mut jobsEnabled : Nat := 0
   let mut mcpToolsCount : Nat := 0
+  if let some toolsArr := capsJv.fieldArr? "tools" then
+    mcpToolsCount := toolsArr.size
   let mut modelsArr : Array JVal := #[.obj #[("id", .str ""), ("name", .str "Profile default")]]
   if let some k := apiKey? then
-    if let .ok (c, _, some cj) ← sendJsonRequest "GET" s!"{hermesUrl}/v1/capabilities" (some k) none #[] 1500 262144 then
-      if 200 ≤ c && c < 300 then
-        capsJv := cj
-        if let some toolsArr := cj.fieldArr? "tools" then
-          mcpToolsCount := toolsArr.size
     if let .ok (jc, _, some jj) ← sendJsonRequest "GET" s!"{hermesUrl}/api/jobs?include_disabled=true" (some k) none #[] 1500 262144 then
       if 200 ≤ jc && jc < 300 then
         let jArr := (jj.fieldArr? "jobs").orElse (fun _ => jj.asArr?) |>.getD #[]
@@ -709,6 +841,8 @@ def buildHermesSettingsPayload
     ("runtime", .obj #[
       ("service_name", .str serviceName),
       ("service_active", .bool serviceActive),
+      ("api_server_url", .str hermesUrl),
+      ("api_server_healthy", .bool apiServerHealthy),
       ("model", .str defaultModel),
       ("base_url", .str baseUrl),
       ("expected_base_url", .str expectedBase),
@@ -719,6 +853,10 @@ def buildHermesSettingsPayload
       ("notes", .arr #[])
     ]),
     ("sessions", .obj #[
+      ("available", .bool sessionsAvailable),
+      ("total_sessions", JVal.nat (if sessAllTime > 0 then sessAllTime else sessTotal)),
+      ("active_sessions_24h", JVal.nat sessActive24h),
+      ("total_tokens", JVal.nat sessTokens),
       ("since", .str sinceIso),
       ("total", JVal.nat sessTotal),
       ("by_source", .obj bySource),
@@ -766,14 +904,26 @@ def applyHermesSettingsUpdate
   if let some tgp := reqJv.fieldStr? "telegram_tool_progress" then
     if !validTgProg.contains tgp.trimAscii.toString.toLower then
       return jsonErr 400 "Invalid telegram_tool_progress"
+  if let some ctVal := reqJv.field? "compression_threshold" then
+    match ctVal with
+    | .num ctRaw =>
+      match parseNonNegDecimalMilli? ctRaw with
+      | some m =>
+        if m < 100 || m > 950 then
+          return jsonErr 400 "Invalid compression_threshold (expected 0.10..0.95)"
+      | none =>
+        return jsonErr 400 "Invalid compression_threshold"
+    | .null => pure ()
+    | _ => return jsonErr 400 "Invalid compression_threshold"
 
-  let (rtName, _, _) ← resolveEffectiveHermesEndpoint serverPort
-  let homeDir := s!"/var/lib/{rtName}"
+  let (rtName, _, _, _, _) ← resolveEffectiveHermesEndpoint serverPort
+  let homeDir ← assistantHomeDir rtName
+  let homeFp := System.FilePath.mk homeDir
   let cfgPath := System.FilePath.mk s!"{homeDir}/config.yaml"
   let soulPath := System.FilePath.mk s!"{homeDir}/SOUL.md"
 
-  if (← cfgPath.pathExists) then
-    let mut yaml ← (try IO.FS.readFile cfgPath catch _ => pure "")
+  if (← cfgPath.pathExists) || (← homeFp.pathExists) then
+    let mut yaml ← if (← cfgPath.pathExists) then (try IO.FS.readFile cfgPath catch _ => pure "") else pure ""
     if let some dm := reqJv.fieldStr? "default_model" then
       let dmt := dm.trimAscii.toString
       if !dmt.isEmpty then
@@ -791,33 +941,40 @@ def applyHermesSettingsUpdate
     if let some pe := reqJv.fieldBool? "user_profile_enabled" then
       yaml := yamlUpdateTopScalar yaml "memory" "user_profile_enabled" (if pe then "true" else "false")
     if let some mcl := reqJv.fieldNat? "memory_char_limit" then
-      let clamped := Nat.min 32000 (Nat.max 500 mcl)
+      let clamped := Nat.min 200000 (Nat.max 500 mcl)
       yaml := yamlUpdateTopScalar yaml "memory" "memory_char_limit" (toString clamped)
     if let some ucl := reqJv.fieldNat? "user_char_limit" then
-      let clamped := Nat.min 16000 (Nat.max 250 ucl)
+      let clamped := Nat.min 200000 (Nat.max 250 ucl)
       yaml := yamlUpdateTopScalar yaml "memory" "user_char_limit" (toString clamped)
     if let some ce := reqJv.fieldBool? "compression_enabled" then
       yaml := yamlUpdateTopScalar yaml "compression" "enabled" (if ce then "true" else "false")
     if let some (.num ctRaw) := reqJv.field? "compression_threshold" then
       yaml := yamlUpdateTopScalar yaml "compression" "threshold" ctRaw
+    if let some tgp := reqJv.fieldStr? "telegram_tool_progress" then
+      let tgNorm := tgp.trimAscii.toString.toLower
+      yaml := yamlUpdatePathScalar yaml ["display", "platforms", "telegram"] "tool_progress" s!"\"{tgNorm}\""
+    if let some tgc := reqJv.fieldBool? "telegram_cleanup_progress" then
+      yaml := yamlUpdatePathScalar yaml ["display", "platforms", "telegram"] "cleanup_progress" (if tgc then "true" else "false")
     if let .error e ← writeAtomicPrivate0600 cfgPath yaml.toUTF8 then
       return jsonErr 500 s!"Failed writing config.yaml: {e}"
 
   if let some soul := reqJv.fieldStr? "soul_markdown" then
-    if (← (System.FilePath.mk homeDir).pathExists) then
+    if (← homeFp.pathExists) then
       let _ ← writeAtomicPrivate0600 soulPath soul.toUTF8
 
   if let some dm := reqJv.fieldStr? "default_model" then
     let dmt := dm.trimAscii.toString
     if !dmt.isEmpty then
-      for ep in assistantEnvPaths rtName do
+      let envPaths ← assistantEnvPaths rtName
+      for ep in envPaths do
         let efp := System.FilePath.mk ep
         if (← efp.pathExists) then
           if let some cur ← (try some <$> IO.FS.readFile efp catch _ => pure none) then
             let updated := upsertEnvLine cur "HERMES_ASSISTANT_MODEL" dmt
             let _ ← writeAtomicPrivate0600 efp updated.toUTF8
 
-  if (reqJv.fieldBool? "restart_service").getD false then
+  let isHermetic := (← getEnvTrimmed "ORB_HERMETIC_TEST") == "1" || !(← getEnvTrimmed "HERMES_HOME").isEmpty
+  if (reqJv.fieldBool? "restart_service").getD false && !isHermetic then
     let _ ← runShortCmd "systemctl" #["restart", s!"{rtName}.service"]
 
   let payload ← buildHermesSettingsPayload store serverPort
@@ -978,9 +1135,48 @@ private def appendCloudEventRow
     #[missionId, runId, eventId, kind, renderCompact dataJv]
 
 private def orbFormattingInstructions : String :=
-  "Format responses cleanly in GitHub-flavored Markdown. Be concise and direct."
+  "You are answering in Orb, which renders GitHub-flavoured Markdown (headings, lists, code fences, tables). Markdown is welcome. When output is tabular, write a GFM table: a header row, a separator row such as `| --- | ---: |`, and leading and trailing pipes on every row. Never write bare `a | b | c` lines without the separator row."
 
-private def tickHermesMission
+def effortToHermesReasoning? (rawEffort : String) : Option JVal :=
+  match rawEffort.trimAscii.toString.toLower with
+  | "none" => some (.obj #[("enabled", .bool false)])
+  | "minimal" => some (.obj #[("enabled", .bool true), ("effort", .str "minimal")])
+  | "low" => some (.obj #[("enabled", .bool true), ("effort", .str "low")])
+  | "medium" => some (.obj #[("enabled", .bool true), ("effort", .str "medium")])
+  | "high" => some (.obj #[("enabled", .bool true), ("effort", .str "high")])
+  | "xhigh" => some (.obj #[("enabled", .bool true), ("effort", .str "xhigh")])
+  | "max" => some (.obj #[("enabled", .bool true), ("effort", .str "max")])
+  | "ultra" => some (.obj #[("enabled", .bool true), ("effort", .str "ultra")])
+  | _ => none
+
+private def isSafeHermesRunId (runId : String) : Bool :=
+  !runId.isEmpty && runId.toList.all fun c => c.isAlphanum || c == '_' || c == '-'
+
+private def parseSubmissionEpoch? (cursorStr : String) : Option UInt64 :=
+  if cursorStr.startsWith "submission:" then
+    ((cursorStr.drop 11).toString.toNat?).map Nat.toUInt64
+  else none
+
+private def findLastRunningToolIdx? (steps : Array JVal) (toolName : String) : Option Nat := Id.run do
+  let mut idx := steps.size
+  while idx > 0 do
+    idx := idx - 1
+    let s := steps[idx]!
+    if (s.fieldStr? "kind") == some "tool" && (s.fieldStr? "status") == some "running" &&
+       (s.fieldStr? "name") == some toolName then
+      return some idx
+  idx := steps.size
+  while idx > 0 do
+    idx := idx - 1
+    let s := steps[idx]!
+    if (s.fieldStr? "kind") == some "tool" && (s.fieldStr? "status") == some "running" then
+      return some idx
+  return none
+
+private def hasOtherPendingTurn (turns : Array JVal) (turnKey : String) : Bool :=
+  turns.any (fun t => !isPhaseTerminal ((t.fieldStr? "phase").getD "response_complete") && ((t.fieldStr? "key").getD "") != turnKey)
+
+def tickHermesMission
     (store : CoreStore)
     (broadcastHub? : Option BroadcastHub)
     (serverPort : UInt16)
@@ -1000,12 +1196,13 @@ private def tickHermesMission
   let effortVal := (paramsArr.findSome? (fun p =>
     let pid := (p.fieldStr? "id").getD ""
     if pid == "effort" || pid == "reasoning_effort" then p.fieldStr? "value" else none)).getD ""
+  let reqKey := (execJv.fieldStr? "request_key").getD missionId
 
-  let (_, hermesUrl, apiKey?) ← resolveEffectiveHermesEndpoint serverPort
+  let (_, hermesUrl, apiKey?, capsOpt, capErrOpt) ← resolveEffectiveHermesEndpoint serverPort
   let some apiKey := apiKey?
     | let failedTurn := (turn.setField "phase" (.str "failed")).setField "detail" (.str "Hermes API server key is not configured")
       let nextTurns := turns.set! turnIdx failedTurn
-      let _ ← saveCloudExecutionCas store broadcastHub? missionId ((execJv.fieldStr? "request_key").getD missionId) "hermes" (some rev) (execJv.setField "turns" (.arr nextTurns))
+      let _ ← saveCloudExecutionCas store broadcastHub? missionId reqKey "hermes" (some rev) (execJv.setField "turns" (.arr nextTurns))
       return false
 
   let simpleId := String.intercalate "" (missionId.splitOn "-")
@@ -1013,22 +1210,86 @@ private def tickHermesMission
 
   -- Cancellation requested
   if phase == "cancel_requested" then
-    if let some runId := turn.fieldStr? "external_id" then
-      if !runId.isEmpty then
-        let _ ← sendJsonRequest "POST" s!"{hermesUrl}/v1/runs/{urlEncodeComponent runId}/stop" (some apiKey) (some (.obj #[])) #[] 5000 65536
-    let cancelledTurn := turn.setField "phase" (.str "cancelled")
-    let nextTurns := turns.set! turnIdx cancelledTurn
-    let _ ← saveCloudExecutionCas store broadcastHub? missionId ((execJv.fieldStr? "request_key").getD missionId) "hermes" (some rev) (execJv.setField "turns" (.arr nextTurns))
-    return turns.any (fun t => !isPhaseTerminal ((t.fieldStr? "phase").getD "cancelled") && ((t.fieldStr? "key").getD "") != turnKey)
+    let runId := (turn.fieldStr? "external_id").getD ""
+    if runId.isEmpty then
+      let cancelledTurn := ((turn.setField "phase" (.str "cancelled")).setField "artifacts" (.arr #[]))
+        |>.setField "detail" (.str "Turn interrupted. Continue in the same conversation when ready.")
+      let nextTurns := turns.set! turnIdx cancelledTurn
+      match ← saveCloudExecutionCas store broadcastHub? missionId reqKey "hermes" (some rev) (execJv.setField "turns" (.arr nextTurns)) with
+      | .error "cas_conflict" => return true
+      | _ => return hasOtherPendingTurn turns turnKey
+    let stopRes ← sendJsonRequest "POST" s!"{hermesUrl}/v1/runs/{urlEncodeComponent runId}/stop" (some apiKey) (some (.obj #[])) #[] 5000 65536
+    let stopConfirmed :=
+      match stopRes with
+      | .ok (code, _, _) => (200 ≤ code && code < 300) || code == 404 || code == 409
+      | .error _ => false
+    let mut finalPhase := if stopConfirmed then "cancelled" else "cancel_requested"
+    let mut detailVal : JVal :=
+      if stopConfirmed then .str "Turn interrupted. Continue in the same conversation when ready."
+      else .str "Stopping — awaiting Hermes confirmation"
+    let mut finalSteps := (turn.fieldArr? "steps").getD #[]
+    let mut finalResult := (turn.field? "result").getD .null
+    if let .ok (rCode, _, some runState) ← sendJsonRequest "GET"
+        s!"{hermesUrl}/v1/runs/{urlEncodeComponent runId}" (some apiKey) none #[] 5000 524288 then
+      if 200 ≤ rCode && rCode < 300 then
+        let stStr := ((runState.fieldStr? "status").getD "").trimAscii.toString.toLower
+        if let some outStr := (runState.fieldStr? "output").orElse (fun _ => runState.fieldStr? "response") then
+          if !outStr.isEmpty then finalResult := .str outStr
+        if stStr == "stopping" || stStr == "running" || stStr == "queued" then
+          if stStr == "stopping" then
+            finalPhase := "cancel_requested"
+            detailVal := .str "Stopping — awaiting Hermes confirmation"
+        else if stStr == "cancelled" || stStr == "canceled" || stStr == "stopped" || stStr == "aborted" || stStr == "interrupted" then
+          finalPhase := "cancelled"
+          detailVal := .str "Turn interrupted. Continue in the same conversation when ready."
+        else if stStr == "completed" || stStr == "succeeded" || stStr == "done" then
+          finalPhase := "response_complete"
+          detailVal := .null
+        else if stStr == "failed" || stStr == "error" then
+          finalPhase := "failed"
+          detailVal := .str ((runState.fieldStr? "error").getD "Hermes run failed. The conversation is preserved.")
+    if finalPhase != "cancel_requested" then
+      finalSteps := finalSteps.map (fun s =>
+        if (s.fieldStr? "kind") == some "tool" && (s.fieldStr? "status") == some "running" then
+          (s.setField "status" (.str "completed")).setField "done" (.bool true)
+        else s.setField "done" (.bool true))
+    let mut updTurn := (((turn.setField "phase" (.str finalPhase)).setField "detail" detailVal)
+      |>.setField "result" finalResult)
+      |>.setField "artifacts" (.arr #[])
+    if !finalSteps.isEmpty then
+      updTurn := updTurn.setField "steps" (.arr finalSteps)
+    if updTurn != turn then
+      let nextTurns := turns.set! turnIdx updTurn
+      match ← saveCloudExecutionCas store broadcastHub? missionId reqKey "hermes" (some rev) (execJv.setField "turns" (.arr nextTurns)) with
+      | .error "cas_conflict" => return true
+      | _ => pure ()
+    return !isPhaseTerminal finalPhase || hasOtherPendingTurn turns turnKey
 
-  -- Submit queued turn to Hermes `POST /v1/runs`
+  -- Submit queued (or lost-acceptance `submitting`) turn to Hermes `POST /v1/runs`
   if phase == "queued" || (phase == "submitting" && (turn.fieldStr? "external_id").isNone) then
+    if capsOpt.isNone then
+      let why := capErrOpt.getD "Hermes is not responding; other cloud services remain available"
+      if (why.splitOn "missing durable run replay").length > 1 then
+        let incTurn := (turn.setField "phase" (.str "incompatible")).setField "detail" (.str why)
+        let _ ← saveCloudExecutionCas store broadcastHub? missionId reqKey "hermes" (some rev) (execJv.setField "turns" (.arr (turns.set! turnIdx incTurn)))
+        return false
     let nowSec ← nowEpoch
-    let claimingTurn := ((turn.setField "phase" (.str "submitting")).setField "session_id" (.str sessionId)).setField "cursor" (.str s!"submission:{nowSec}")
-    let claimExec := (execJv.setField "external_id" (.str sessionId)).setField "turns" (.arr (turns.set! turnIdx claimingTurn))
-    let .ok claimedJv ← saveCloudExecutionCas store broadcastHub? missionId ((execJv.fieldStr? "request_key").getD missionId) "hermes" (some rev) claimExec
-      | return true
-    let nextRev := (claimedJv.fieldNat? "revision").getD (rev + 1)
+    let (claimedJv, claimingTurn, nextRev) ←
+      if phase == "queued" then
+        let cTurn := ((turn.setField "phase" (.str "submitting")).setField "session_id" (.str sessionId)).setField "cursor" (.str s!"submission:{nowSec}")
+        let claimExec := (execJv.setField "external_id" (.str sessionId)).setField "turns" (.arr (turns.set! turnIdx cTurn))
+        match ← saveCloudExecutionCas store broadcastHub? missionId reqKey "hermes" (some rev) claimExec with
+        | .ok cJv => pure (cJv, cTurn, (cJv.fieldNat? "revision").getD (rev + 1))
+        | .error _ => return true
+      else
+        let subAt := (turn.fieldStr? "cursor").bind parseSubmissionEpoch? |>.getD nowSec
+        let ageSec := if nowSec ≥ subAt then nowSec - subAt else 0
+        if ageSec ≥ 20 * 3600 then
+          let uncTurn := (turn.setField "phase" (.str "submission_uncertain")).setField "detail"
+            (.str "Submission recovery window expired; inspect Hermes before retrying")
+          let _ ← saveCloudExecutionCas store broadcastHub? missionId reqKey "hermes" (some rev) (execJv.setField "turns" (.arr (turns.set! turnIdx uncTurn)))
+          return false
+        pure (execJv, turn, rev)
     let mut bodyFields : Array (String × JVal) := #[
       ("input", .str prompt),
       ("session_id", .str sessionId),
@@ -1036,138 +1297,284 @@ private def tickHermesMission
     ]
     if !modelStr.isEmpty then
       bodyFields := bodyFields.push ("model", .str modelStr)
-    if !effortVal.isEmpty then
-      bodyFields := bodyFields.push ("model_options", .obj #[("reasoning", .str effortVal)])
-    let idemHdr := #[( "Idempotency-Key", s!"orb:{missionId}:{turnKey}" )]
+    if let some reasoningObj := effortToHermesReasoning? effortVal then
+      bodyFields := bodyFields.push ("model_options", .obj #[("reasoning", reasoningObj)])
+    let idemHdr := #[("Idempotency-Key", s!"orb:{missionId}:{turnKey}")]
     match ← sendJsonRequest "POST" s!"{hermesUrl}/v1/runs" (some apiKey) (some (.obj bodyFields)) idemHdr 15000 524288 with
     | .ok (code, rawTxt, some runJv) =>
       if 200 ≤ code && code < 300 then
         let runId := ((runJv.fieldStr? "run_id").orElse (fun _ => runJv.fieldStr? "id") |>.getD "").trimAscii.toString
-        if !runId.isEmpty then
-          let runningTurn := ((claimingTurn.setField "phase" (.str "running")).setField "external_id" (.str runId)).setField "cursor" (.str "0")
+        if isSafeHermesRunId runId then
+          let resolvedSess := ((runJv.fieldStr? "session_id").getD sessionId).trimAscii.toString
+          let effSess := if resolvedSess.isEmpty then sessionId else resolvedSess
+          let runningTurn := ((((claimingTurn.setField "phase" (.str "running")).setField "external_id" (.str runId))
+            |>.setField "session_id" (.str effSess)).setField "cursor" (.str "0")).setField "detail" .null
           let runExec := claimedJv.setField "turns" (.arr ((claimedJv.fieldArr? "turns" |>.getD turns).set! turnIdx runningTurn))
-          let _ ← saveCloudExecutionCas store broadcastHub? missionId ((execJv.fieldStr? "request_key").getD missionId) "hermes" (some nextRev) runExec
+          let _ ← saveCloudExecutionCas store broadcastHub? missionId reqKey "hermes" (some nextRev) runExec
           return true
         else
-          let failTurn := (claimingTurn.setField "phase" (.str "failed")).setField "detail" (.str "Hermes returned empty run_id")
-          let _ ← saveCloudExecutionCas store broadcastHub? missionId ((execJv.fieldStr? "request_key").getD missionId) "hermes" (some nextRev)
+          let failTurn := (claimingTurn.setField "phase" (.str "failed")).setField "detail" (.str "Hermes returned invalid or empty run_id")
+          let _ ← saveCloudExecutionCas store broadcastHub? missionId reqKey "hermes" (some nextRev)
             (claimedJv.setField "turns" (.arr ((claimedJv.fieldArr? "turns" |>.getD turns).set! turnIdx failTurn)))
           return false
-      else
+      else if code == 401 || code == 403 then
+        let reTurn := (claimingTurn.setField "phase" (.str "reconnect_required")).setField "detail"
+          (.str "Hermes authorization failed; check API_SERVER_KEY")
+        let _ ← saveCloudExecutionCas store broadcastHub? missionId reqKey "hermes" (some nextRev)
+          (claimedJv.setField "turns" (.arr ((claimedJv.fieldArr? "turns" |>.getD turns).set! turnIdx reTurn)))
+        return false
+      else if code == 400 || code == 422 then
         let errDetail := (runJv.fieldStr? "error").orElse (fun _ => runJv.fieldStr? "detail") |>.getD rawTxt
-        let failTurn := (claimingTurn.setField "phase" (.str "failed")).setField "detail" (.str errDetail)
-        let _ ← saveCloudExecutionCas store broadcastHub? missionId ((execJv.fieldStr? "request_key").getD missionId) "hermes" (some nextRev)
+        let failTurn := (claimingTurn.setField "phase" (.str "failed")).setField "detail"
+          (.str (if errDetail.isEmpty then "Hermes rejected this turn; check the selected model and profile configuration" else errDetail))
+        let _ ← saveCloudExecutionCas store broadcastHub? missionId reqKey "hermes" (some nextRev)
           (claimedJv.setField "turns" (.arr ((claimedJv.fieldArr? "turns" |>.getD turns).set! turnIdx failTurn)))
         return false
-    | .ok (_, rawTxt, none) =>
-      let failTurn := (claimingTurn.setField "phase" (.str "failed")).setField "detail" (.str (if rawTxt.isEmpty then "Hermes rejected run launch" else rawTxt))
-      let _ ← saveCloudExecutionCas store broadcastHub? missionId ((execJv.fieldStr? "request_key").getD missionId) "hermes" (some nextRev)
-        (claimedJv.setField "turns" (.arr ((claimedJv.fieldArr? "turns" |>.getD turns).set! turnIdx failTurn)))
-      return false
+      else
+        -- 5xx / 429: lost acceptance stays in `submitting` so next tick replays with identical Idempotency-Key
+        let retryTurn := claimingTurn.setField "detail" (.str s!"Hermes returned HTTP {code}; retrying with same idempotency key")
+        let _ ← saveCloudExecutionCas store broadcastHub? missionId reqKey "hermes" (some nextRev)
+          (claimedJv.setField "turns" (.arr ((claimedJv.fieldArr? "turns" |>.getD turns).set! turnIdx retryTurn)))
+        return true
+    | .ok (code, rawTxt, none) =>
+      if code == 401 || code == 403 then
+        let reTurn := (claimingTurn.setField "phase" (.str "reconnect_required")).setField "detail"
+          (.str "Hermes authorization failed; check API_SERVER_KEY")
+        let _ ← saveCloudExecutionCas store broadcastHub? missionId reqKey "hermes" (some nextRev)
+          (claimedJv.setField "turns" (.arr ((claimedJv.fieldArr? "turns" |>.getD turns).set! turnIdx reTurn)))
+        return false
+      else if code >= 500 then
+        let retryTurn := claimingTurn.setField "detail" (.str s!"Hermes returned HTTP {code}; retrying with same idempotency key")
+        let _ ← saveCloudExecutionCas store broadcastHub? missionId reqKey "hermes" (some nextRev)
+          (claimedJv.setField "turns" (.arr ((claimedJv.fieldArr? "turns" |>.getD turns).set! turnIdx retryTurn)))
+        return true
+      else
+        let failTurn := (claimingTurn.setField "phase" (.str "failed")).setField "detail"
+          (.str (if rawTxt.isEmpty then "Hermes rejected run launch" else rawTxt))
+        let _ ← saveCloudExecutionCas store broadcastHub? missionId reqKey "hermes" (some nextRev)
+          (claimedJv.setField "turns" (.arr ((claimedJv.fieldArr? "turns" |>.getD turns).set! turnIdx failTurn)))
+        return false
     | .error e =>
-      let uncTurn := (claimingTurn.setField "phase" (.str "submission_uncertain")).setField "detail" (.str e)
-      let _ ← saveCloudExecutionCas store broadcastHub? missionId ((execJv.fieldStr? "request_key").getD missionId) "hermes" (some nextRev)
-        (claimedJv.setField "turns" (.arr ((claimedJv.fieldArr? "turns" |>.getD turns).set! turnIdx uncTurn)))
-      return false
+      -- Transport failure: preserve `submitting` + `submission:<epoch>` for safe idempotent replay within 20h
+      let retryTurn := claimingTurn.setField "detail" (.str s!"Hermes connection lost; execution will be reconciled ({e})")
+      let _ ← saveCloudExecutionCas store broadcastHub? missionId reqKey "hermes" (some nextRev)
+        (claimedJv.setField "turns" (.arr ((claimedJv.fieldArr? "turns" |>.getD turns).set! turnIdx retryTurn)))
+      return true
 
   -- Poll running / waiting_user Hermes run
   let runId := (turn.fieldStr? "external_id").getD ""
   if runId.isEmpty then return false
   let curCursor := (turn.fieldStr? "cursor").getD "0"
-  let cursorParam := if curCursor.startsWith "submission:" then "0" else curCursor
+  let mut nextCursor := if curCursor.startsWith "submission:" || curCursor.isEmpty then "0" else curCursor
   let mut steps := (turn.fieldArr? "steps").getD #[]
   let mut accText := (turn.fieldStr? "result").getD ""
-  let mut nextCursor := cursorParam
   let mut artifacts := (turn.fieldArr? "artifacts").getD #[]
-
-  if let .ok (evCode, _, some evResp) ← sendJsonRequest "GET"
-      s!"{hermesUrl}/v1/runs/{urlEncodeComponent runId}/events?format=json&after={urlEncodeComponent cursorParam}"
-      (some apiKey) none #[] 5000 2097152 then
-    if 200 ≤ evCode && evCode < 300 then
-      let evArr := (evResp.fieldArr? "events").orElse (fun _ => evResp.asArr?) |>.getD #[]
-      for ev in evArr do
-        let evId := ((ev.fieldStr? "id").orElse (fun _ => (ev.fieldNat? "seq").map toString) |>.getD "").trimAscii.toString
-        let kind := ((ev.fieldStr? "event").orElse (fun _ => ev.fieldStr? "type") |>.orElse (fun _ => ev.fieldStr? "kind") |>.getD "event").trimAscii.toString
-        let dataObj := (ev.field? "data").getD ev
-        if !evId.isEmpty then
-          nextCursor := evId
-          appendCloudEventRow store missionId runId evId kind dataObj
-        if kind == "message.delta" || kind == "response.output_text.delta" then
-          let delta := (dataObj.fieldStr? "delta").orElse (fun _ => dataObj.fieldStr? "text") |>.getD ""
-          accText := accText ++ delta
-        else if kind == "reasoning.delta" || kind == "thinking.delta" then
-          let delta := (dataObj.fieldStr? "delta").orElse (fun _ => dataObj.fieldStr? "text") |>.getD ""
-          if !delta.isEmpty then
-            let tid := s!"think_{runId}"
-            if steps.any (fun s => (s.fieldStr? "id") == some tid) then
-              steps := steps.map (fun s =>
-                if (s.fieldStr? "id") == some tid then
-                  let prev := (s.fieldStr? "text").getD ""
-                  s.setField "text" (.str (prev ++ delta))
-                else s)
-            else
-              steps := steps.push (.obj #[
-                ("kind", .str "think"), ("id", .str tid), ("text", .str delta),
-                ("done", .bool false), ("source", .str "event")
-              ])
-        else if kind == "tool.started" || kind == "tool_call.started" || kind == "tool.call" then
-          let callId := (dataObj.fieldStr? "call_id").orElse (fun _ => dataObj.fieldStr? "id") |>.getD s!"tool_{steps.size}"
-          let tName := (dataObj.fieldStr? "name").orElse (fun _ => dataObj.fieldStr? "tool") |>.getD "tool"
-          let inp := (dataObj.fieldStr? "arguments").orElse (fun _ => dataObj.fieldStr? "input") |>.getD ""
-          if !steps.any (fun s => (s.fieldStr? "id") == some callId) then
-            steps := steps.push (.obj #[
-              ("kind", .str "tool"), ("id", .str callId), ("call_id", .str callId),
-              ("name", .str tName), ("status", .str "running"), ("done", .bool false),
-              ("input", .str inp), ("args", .obj #[("preview", .str inp)])
-            ])
-        else if kind == "tool.completed" || kind == "tool_call.completed" || kind == "tool.result" then
-          let callId := (dataObj.fieldStr? "call_id").orElse (fun _ => dataObj.fieldStr? "id") |>.getD ""
-          let outStr := (dataObj.fieldStr? "output").orElse (fun _ => dataObj.fieldStr? "result") |>.getD ""
-          steps := steps.map (fun s =>
-            if (s.fieldStr? "id") == some callId then
-              (((s.setField "status" (.str "completed")).setField "done" (.bool true)).setField "output" (.str outStr)).setField "result" (.str outStr)
-            else s)
-
-  -- Poll run status `GET /v1/runs/{runId}`
-  let mut nextPhase := phase
   let mut detailVal := (turn.field? "detail").getD .null
-  if let .ok (rCode, _, some runState) ← sendJsonRequest "GET"
-      s!"{hermesUrl}/v1/runs/{urlEncodeComponent runId}"
-      (some apiKey) none #[] 5000 524288 then
-    if 200 ≤ rCode && rCode < 300 then
-      let stStr := ((runState.fieldStr? "status").getD "running").trimAscii.toString.toLower
-      let finalOut :=
-        (runState.fieldStr? "output").orElse (fun _ => runState.fieldStr? "response")
-        |>.orElse (fun _ => runState.fieldStr? "result") |>.getD ""
-      if !finalOut.isEmpty then
-        accText := finalOut
-      if stStr == "completed" || stStr == "succeeded" || stStr == "done" then
-        nextPhase := "response_complete"
-        steps := steps.map (fun s => s.setField "done" (.bool true))
-      else if stStr == "waiting_for_approval" || stStr == "awaiting_approval" then
-        nextPhase := "waiting_user"
-        if let some reqObj := runState.field? "pending_approval" then
-          artifacts := #[.obj #[("kind", .str "hermes_approval"), ("request", reqObj)]]
-      else if stStr == "cancelled" || stStr == "stopped" || stStr == "aborted" then
-        nextPhase := "cancelled"
-      else if stStr == "failed" || stStr == "error" then
-        nextPhase := "failed"
-        let errTxt := (runState.fieldStr? "error").getD "Hermes run failed"
-        detailVal := .str errTxt
-      else
-        nextPhase := "running"
+  let mut resolvedSessionId := sessionId
+  let mut usageVal := (turn.field? "usage").getD .null
+  let mut morePages := true
+  let mut pageCount : Nat := 0
+  let mut hasMorePending := false
 
-  let mut updatedTurn := ((turn.setField "phase" (.str nextPhase)).setField "cursor" (.str nextCursor)).setField "detail" detailVal
+  -- Paginate durable event journal (`GET /v1/runs/{runId}/events?format=json&after={cursor}`)
+  while morePages && pageCount < 8 do
+    pageCount := pageCount + 1
+    let prevPageCursor := nextCursor
+    morePages := false
+    if let .ok (evCode, _, some evResp) ← sendJsonRequest "GET"
+        s!"{hermesUrl}/v1/runs/{urlEncodeComponent runId}/events?format=json&after={urlEncodeComponent nextCursor}"
+        (some apiKey) none #[] 5000 2097152 then
+      if 200 ≤ evCode && evCode < 300 then
+        let evArr := (evResp.fieldArr? "events").orElse (fun _ => evResp.asArr?) |>.getD #[]
+        for ev in evArr do
+          let evId := ((ev.fieldStr? "id").orElse (fun _ => (ev.fieldNat? "id").map toString)
+            |>.orElse (fun _ => (ev.fieldNat? "seq").map toString) |>.getD "").trimAscii.toString
+          let dataObj := (ev.field? "data").getD ev
+          let kind := (
+            (dataObj.fieldStr? "event")
+            |>.orElse (fun _ => ev.fieldStr? "event")
+            |>.orElse (fun _ => dataObj.fieldStr? "type")
+            |>.orElse (fun _ => ev.fieldStr? "type")
+            |>.orElse (fun _ => dataObj.fieldStr? "kind")
+            |>.orElse (fun _ => ev.fieldStr? "kind")
+            |>.getD "unknown"
+          ).trimAscii.toString
+          if !evId.isEmpty then
+            nextCursor := evId
+            appendCloudEventRow store missionId runId evId kind dataObj
+          if kind == "message.delta" || kind == "response.output_text.delta" || kind == "text_delta" || kind == "text.delta" then
+            let delta := (dataObj.fieldStr? "delta").orElse (fun _ => dataObj.fieldStr? "text") |>.getD ""
+            accText := accText ++ delta
+          else if kind == "reasoning.available" then
+            let txt := ((dataObj.fieldStr? "text").getD "").trimAscii.toString
+            if !txt.isEmpty then
+              let dup := steps.any (fun s => (s.fieldStr? "kind") == some "think" && ((s.fieldStr? "text").getD "").trimAscii.toString == txt)
+              if !dup then
+                let tid := if evId.isEmpty then s!"think_{runId}_{steps.size}" else s!"think_{runId}_{evId}"
+                steps := steps.push (.obj #[
+                  ("kind", .str "think"), ("id", .str tid), ("text", .str txt),
+                  ("done", .bool true), ("source", .str "event")
+                ])
+              if accText.isEmpty then
+                detailVal := .str "Thinking…"
+          else if kind == "reasoning.delta" || kind == "thinking.delta" || kind == "reasoning_delta" || kind == "thinking_delta" then
+            let delta := (dataObj.fieldStr? "delta").orElse (fun _ => dataObj.fieldStr? "text") |>.getD ""
+            if !delta.isEmpty then
+              let tid := s!"think_{runId}"
+              if steps.any (fun s => (s.fieldStr? "id") == some tid) then
+                steps := steps.map (fun s =>
+                  if (s.fieldStr? "id") == some tid then
+                    let prev := (s.fieldStr? "text").getD ""
+                    s.setField "text" (.str (prev ++ delta))
+                  else s)
+              else
+                steps := steps.push (.obj #[
+                  ("kind", .str "think"), ("id", .str tid), ("text", .str delta),
+                  ("done", .bool false), ("source", .str "event")
+                ])
+              if accText.isEmpty then
+                detailVal := .str "Thinking…"
+          else if kind == "tool.started" || kind == "subagent.start" || kind == "tool_call.started" || kind == "tool.call" || kind == "tool_started" then
+            let tName := (dataObj.fieldStr? "tool").orElse (fun _ => dataObj.fieldStr? "name")
+              |>.orElse (fun _ => dataObj.fieldStr? "task") |>.getD "tool"
+            let callId := (dataObj.fieldStr? "call_id").orElse (fun _ => dataObj.fieldStr? "id")
+              |>.getD (if evId.isEmpty then s!"tool_{runId}_{steps.size}" else s!"tool_{runId}_{evId}")
+            let preview := (dataObj.fieldStr? "preview").orElse (fun _ => dataObj.fieldStr? "arguments")
+              |>.orElse (fun _ => dataObj.fieldStr? "input") |>.getD ""
+            let argsVal : JVal :=
+              match dataObj.field? "arguments" with
+              | some obj@(.obj _) => obj
+              | _ =>
+                match dataObj.field? "input" with
+                | some obj@(.obj _) => obj
+                | _ => if preview.isEmpty then .null else .obj #[("preview", .str preview)]
+            let inpStr := if !preview.isEmpty then preview else match argsVal with | .obj _ => renderCompact argsVal | _ => ""
+            detailVal := .str s!"Using {tName}"
+            if !steps.any (fun s => (s.fieldStr? "id") == some callId) then
+              steps := steps.push (.obj #[
+                ("kind", .str "tool"), ("id", .str callId), ("call_id", .str callId),
+                ("name", .str tName), ("status", .str "running"), ("done", .bool false),
+                ("input", .str inpStr), ("args", argsVal)
+              ])
+          else if kind == "tool.completed" || kind == "subagent.complete" || kind == "tool_call.completed" || kind == "tool.result" || kind == "tool_completed" || kind == "tool.failed" || kind == "tool_call.failed" then
+            let callId := (dataObj.fieldStr? "call_id").orElse (fun _ => dataObj.fieldStr? "id") |>.getD ""
+            let tName := (dataObj.fieldStr? "tool").orElse (fun _ => dataObj.fieldStr? "name") |>.getD "tool"
+            let outStr := (dataObj.fieldStr? "preview").orElse (fun _ => dataObj.fieldStr? "summary")
+              |>.orElse (fun _ => dataObj.fieldStr? "output") |>.orElse (fun _ => dataObj.fieldStr? "result") |>.getD ""
+            let isErr := kind == "tool.failed" || kind == "tool_call.failed" ||
+              (dataObj.fieldBool? "error").getD false || (dataObj.fieldStr? "status") == some "failed"
+            let finalSt := if isErr then "failed" else "completed"
+            let targetIdx? :=
+              if !callId.isEmpty then steps.findIdx? (fun s => (s.fieldStr? "id") == some callId)
+              else findLastRunningToolIdx? steps tName
+            match targetIdx? with
+            | some sIdx =>
+              let mut stStep := ((steps[sIdx]!.setField "status" (.str finalSt)).setField "done" (.bool true))
+              if !outStr.isEmpty then
+                stStep := (stStep.setField "output" (.str outStr)).setField "result" (.str outStr)
+              if isErr then
+                stStep := stStep.setField "error" (.str (if outStr.isEmpty then "Tool failed" else outStr))
+              if let some dur := dataObj.field? "duration" then
+                stStep := stStep.setField "duration" dur
+              steps := steps.set! sIdx stStep
+            | none =>
+              let fallbackId := if !callId.isEmpty then callId else if evId.isEmpty then s!"tool_{runId}_{steps.size}" else s!"tool_{runId}_{evId}"
+              let mut stStep : JVal := .obj #[
+                ("kind", .str "tool"), ("id", .str fallbackId), ("call_id", .str fallbackId),
+                ("name", .str tName), ("status", .str finalSt), ("done", .bool true),
+                ("output", .str outStr), ("result", if outStr.isEmpty then .null else .str outStr)
+              ]
+              if isErr then
+                stStep := stStep.setField "error" (.str (if outStr.isEmpty then "Tool failed" else outStr))
+              steps := steps.push stStep
+        if let some pageCur := (evResp.fieldStr? "cursor").orElse (fun _ => (evResp.fieldNat? "cursor").map toString) then
+          if !pageCur.trimAscii.toString.isEmpty then
+            nextCursor := pageCur.trimAscii.toString
+        if (evResp.fieldBool? "has_more").getD false then
+          if nextCursor != prevPageCursor && !evArr.isEmpty then
+            morePages := true
+          else
+            hasMorePending := true
+        else
+          hasMorePending := false
+
+  -- Poll run status `GET /v1/runs/{runId}` (unless more event pages still need draining first)
+  let mut nextPhase := phase
+  if !hasMorePending then
+    if let .ok (rCode, _, some runState) ← sendJsonRequest "GET"
+        s!"{hermesUrl}/v1/runs/{urlEncodeComponent runId}"
+        (some apiKey) none #[] 5000 524288 then
+      if 200 ≤ rCode && rCode < 300 then
+        if let some sid := runState.fieldStr? "session_id" then
+          let sidt := sid.trimAscii.toString
+          if !sidt.isEmpty then resolvedSessionId := sidt
+        if let some u := runState.field? "usage" then
+          if !u.isNull then usageVal := u
+        let stStr := ((runState.fieldStr? "status").getD "running").trimAscii.toString.toLower
+        let finalOut :=
+          (runState.fieldStr? "output").orElse (fun _ => runState.fieldStr? "response")
+          |>.orElse (fun _ => runState.fieldStr? "result") |>.getD ""
+        if !finalOut.isEmpty then
+          accText := finalOut
+        if stStr == "completed" || stStr == "succeeded" || stStr == "done" then
+          nextPhase := "response_complete"
+          detailVal := .null
+          artifacts := artifacts.filter (fun a => (a.fieldStr? "kind") != some "hermes_approval")
+          steps := steps.map (fun s =>
+            if (s.fieldStr? "kind") == some "tool" && (s.fieldStr? "status") == some "running" then
+              (s.setField "status" (.str "completed")).setField "done" (.bool true)
+            else s.setField "done" (.bool true))
+        else if stStr == "waiting_for_approval" || stStr == "awaiting_approval" then
+          nextPhase := "waiting_user"
+          detailVal := .str "Waiting for your approval"
+          if let some reqObj := (runState.field? "approval").orElse (fun _ => runState.field? "pending_approval") then
+            artifacts := #[.obj #[
+              ("kind", .str "hermes_approval"),
+              ("run_id", .str runId),
+              ("request", reqObj),
+              ("path", .str "")
+            ]]
+        else if stStr == "stopping" then
+          nextPhase := "cancel_requested"
+        else if stStr == "cancelled" || stStr == "canceled" || stStr == "stopped" || stStr == "aborted" || stStr == "interrupted" then
+          nextPhase := "cancelled"
+          detailVal := .str "Turn interrupted. Continue in the same conversation when ready."
+          artifacts := artifacts.filter (fun a => (a.fieldStr? "kind") != some "hermes_approval")
+          steps := steps.map (fun s => s.setField "done" (.bool true))
+        else if stStr == "failed" || stStr == "error" then
+          nextPhase := "failed"
+          let errTxt := (runState.fieldStr? "error").getD "Hermes run failed. The conversation is preserved."
+          detailVal := .str errTxt
+          artifacts := artifacts.filter (fun a => (a.fieldStr? "kind") != some "hermes_approval")
+        else if stStr == "running" || stStr == "queued" then
+          if nextPhase != "cancel_requested" then
+            nextPhase := "running"
+          artifacts := artifacts.filter (fun a => (a.fieldStr? "kind") != some "hermes_approval")
+
+  -- Deduplicate event-sourced `think` steps that merely echo the final response text
+  let trimmedRes := accText.trimAscii.toString
+  if !trimmedRes.isEmpty then
+    steps := steps.filter fun s =>
+      if (s.fieldStr? "kind") != some "think" || (s.fieldStr? "source") != some "event" then true
+      else
+        let st := ((s.fieldStr? "text").getD "").trimAscii.toString
+        !(!st.isEmpty && (trimmedRes.startsWith st || st.startsWith trimmedRes))
+
+  let mut updatedTurn := ((((turn.setField "phase" (.str nextPhase)).setField "cursor" (.str nextCursor))
+    |>.setField "session_id" (.str resolvedSessionId)).setField "detail" detailVal)
   updatedTurn := updatedTurn.setField "result" (if accText.isEmpty then .null else .str accText)
   updatedTurn := updatedTurn.setField "artifacts" (.arr artifacts)
+  updatedTurn := updatedTurn.setField "usage" usageVal
   if !steps.isEmpty then
     updatedTurn := updatedTurn.setField "steps" (.arr steps)
 
   if updatedTurn != turn then
     let nextTurns := turns.set! turnIdx updatedTurn
-    let _ ← saveCloudExecutionCas store broadcastHub? missionId ((execJv.fieldStr? "request_key").getD missionId) "hermes" (some rev) (execJv.setField "turns" (.arr nextTurns))
+    match ← saveCloudExecutionCas store broadcastHub? missionId reqKey "hermes" (some rev) (execJv.setField "turns" (.arr nextTurns)) with
+    | .error "cas_conflict" => return true
+    | _ => pure ()
 
-  return !isPhaseTerminal nextPhase || turns.any (fun t => !isPhaseTerminal ((t.fieldStr? "phase").getD "response_complete") && ((t.fieldStr? "key").getD "") != turnKey)
+  return hasMorePending || !isPhaseTerminal nextPhase || hasOtherPendingTurn turns turnKey
 
 private def tickCursorMission
     (store : CoreStore)
@@ -1357,6 +1764,20 @@ def handleCloudMissionCreate
     ])
   let reqSig := sha256HexStr (renderCompact normSel ++ "\n" ++ prompt)
 
+  -- Authorize cloud owner before any idempotency lookup (zero cross-tenant key oracle)
+  let ownerEnvKey := match provEnum with
+    | .hermes => "HERMES_CLOUD_OWNER"
+    | .cursorCloud => "CURSOR_CLOUD_OWNER"
+    | .grok => "GROK_BOT_OWNER"
+  let ownerVal ← getEnvTrimmed ownerEnvKey
+  let ownerOk ← matchesCloudOwner store ownerVal callerUserId callerUsername bootstrapAdminId isAdmin isLegacyUnscoped
+  if !ownerOk then
+    let denyMsg := match provEnum with
+      | .hermes => "Hermes is not connected for this account"
+      | .cursorCloud => "Cursor Cloud is not connected for this account"
+      | .grok => "Grok Bot is not connected for this account"
+    return jsonErr 403 denyMsg
+
   -- Idempotent replay check on `request_key`
   if let .ok existingRows ← execParamQuery store.missionsDb
       "SELECT mission_id, COALESCE(data,'{}') FROM cloud_executions WHERE request_key=?1 LIMIT 1;"
@@ -1364,10 +1785,12 @@ def handleCloudMissionCreate
     if existingRows.size > 1 then
       let exMid := (existingRows[1]![0]?).getD ""
       let exData := (existingRows[1]![1]?).getD "{}"
-      if let .ok exJv := OrbBin.Json.parse exData then
-        if (exJv.fieldStr? "request_signature") == some reqSig then
-          if let .ok (some detailJson) ← missionDetailJson store exMid (if isLegacyUnscoped then none else some callerUserId) bootstrapAdminId then
-            return (200, "application/json", detailJson.toUTF8)
+      let ownsEx ← canAccessMission store exMid callerUserId bootstrapAdminId isLegacyUnscoped true
+      if ownsEx then
+        if let .ok exJv := OrbBin.Json.parse exData then
+          if (exJv.fieldStr? "request_signature") == some reqSig then
+            if let .ok (some detailJson) ← missionDetailJson store exMid (if isLegacyUnscoped then none else some callerUserId) bootstrapAdminId then
+              return (200, "application/json", detailJson.toUTF8)
       return jsonErr 409 "Launch key already used"
 
   -- Verify target cloud account is available
@@ -1471,8 +1894,16 @@ def handleCloudFollowUp
   let content := ((reqJv.fieldStr? "content").getD "").trimAscii.toString
   if content.isEmpty then
     return jsonErr 400 "Follow-up message content cannot be empty"
-  let clientMsgId ← match (reqJv.fieldStr? "client_message_id").bind parseUuidCanonical? with
-    | some u => pure u
+  let clientMsgId ←
+    match reqJv.fieldStr? "client_message_id" with
+    | some rawId =>
+      let t := rawId.trimAscii.toString
+      if t.isEmpty || t.length > 200 then
+        newUuidV4
+      else
+        match parseUuidCanonical? t with
+        | some u => pure u
+        | none => pure t
     | none => newUuidV4
   if let some atts := reqJv.fieldArr? "attachments" then
     if !atts.isEmpty then
@@ -1576,8 +2007,8 @@ def dispatchCloudHttpRoute
     let hermesOwner ← getEnvTrimmed "HERMES_CLOUD_OWNER"
     let ownerOk ← matchesCloudOwner store hermesOwner callerUserId callerUsername bootstrapAdminId isAdmin isLegacyUnscoped
     if !ownerOk then
-      return some (jsonErr 502 "Hermes is not connected for this account")
-    let (_, hermesUrl, apiKey?) ← resolveEffectiveHermesEndpoint serverPort
+      return some (jsonErr 403 "Hermes is not connected for this account")
+    let (_, hermesUrl, apiKey?, _, _) ← resolveEffectiveHermesEndpoint serverPort
     let some apiKey := apiKey?
       | return some (jsonErr 502 "Hermes API server key is not configured")
     let models ← collectHermesModelItems store hermesUrl apiKey
@@ -1715,6 +2146,9 @@ def dispatchCloudHttpRoute
       return some (jsonResp 200 (.obj #[("missions", .arr childMissions)]))
 
     if method == "POST" && segs.length == 6 && segs[5]? == some "approval" then
+      let wrAllowed ← canAccessMission store mid callerUserId bootstrapAdminId isLegacyUnscoped true
+      if !wrAllowed then
+        return some (jsonErr 403 "Write access required")
       let prov := (((execJv.field? "selection").getD (.obj #[])).fieldStr? "provider").getD ""
       if prov != "hermes" then
         return some (jsonErr 404 "Hermes mission not found")
@@ -1725,12 +2159,25 @@ def dispatchCloudHttpRoute
       let choice := ((reqJv.fieldStr? "choice").getD "").trimAscii.toString
       if runId.isEmpty || reqId.isEmpty || choice.isEmpty then
         return some (jsonErr 400 "run_id, request_id, and choice are required")
+      if !isSafeHermesRunId runId then
+        return some (jsonErr 400 "Invalid Hermes run identity")
       let turns := (execJv.fieldArr? "turns").getD #[]
       let validTurn := turns.any (fun t =>
-        (t.fieldStr? "external_id") == some runId && (t.fieldStr? "phase") == some "waiting_user")
+        (t.fieldStr? "external_id") == some runId &&
+        (t.fieldStr? "phase") == some "waiting_user" &&
+        ((t.fieldArr? "artifacts").getD #[]).any (fun a =>
+          (a.fieldStr? "kind") == some "hermes_approval" &&
+          match a.field? "request" with
+          | some r =>
+            let rIdMatch := (r.fieldStr? "request_id") == some reqId ||
+              ((r.fieldNat? "request_id").map toString) == some reqId
+            let choicesArr := (r.fieldArr? "choices").getD #[]
+            let choiceOk := choicesArr.isEmpty || choicesArr.any (fun c => c.asStr? == some choice)
+            rIdMatch && choiceOk
+          | none => false))
       if !validTurn then
         return some (jsonErr 409 "Approval no longer belongs to the active turn")
-      let (_, hermesUrl, apiKey?) ← resolveEffectiveHermesEndpoint serverPort
+      let (_, hermesUrl, apiKey?, _, _) ← resolveEffectiveHermesEndpoint serverPort
       let some apiKey := apiKey?
         | return some (jsonErr 502 "Hermes API server key is not configured")
       match ← sendJsonRequest "POST"
@@ -1753,6 +2200,9 @@ def dispatchCloudHttpRoute
         | return some (jsonErr 400 "No active run")
       let t := turns[idx]!
       let ph := (t.fieldStr? "phase").getD "queued"
+      if ph == "cancel_requested" then
+        ensureCloudMissionWorker hub store broadcastHub? serverPort mid
+        return some (jsonResp 200 (.obj #[("cancel_requested", .bool true)]))
       let extId := (t.fieldStr? "external_id").getD ""
       if ph != "queued" && extId.isEmpty then
         return some (jsonErr 400 "Reconcile the submission before cancelling")

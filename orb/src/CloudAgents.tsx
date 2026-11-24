@@ -219,8 +219,10 @@ export function CloudConversation(p: { id: string; active?: boolean; launch?: Cl
       try { const [e, m] = await Promise.all([cloudExecution(p.id), getMission(p.id)]);
         if (!disposed) { setExecution(old => JSON.stringify(old) === JSON.stringify(e) ? old : e); setMissionRecord(m); p.onMission?.(m); setLoadError(''); }
         if(e.selection.provider==='hermes') {
-          const result=await api<{missions:{id:string;title:string;status:string}[]}>(`/api/control/missions/${p.id}/cloud/children`);
-          if(!disposed)setChildren(result.missions);
+          try {
+            const result=await api<{missions:{id:string;title:string;status:string}[]}>(`/api/control/missions/${p.id}/cloud/children`);
+            if(!disposed)setChildren(result.missions ?? []);
+          } catch (childErr) { swallow("cloudAgents.children")(childErr); }
         }
       } catch(e) { if (!disposed) setLoadError(`Connection lost. Last observed state is preserved. ${String(e)}`); }
       finally { refreshing = undefined; if (!disposed && queuedManual) { queuedManual = false; void refresh(true); } }
@@ -324,7 +326,7 @@ export function CloudConversation(p: { id: string; active?: boolean; launch?: Cl
       return kept.length === rows.length ? rows : kept;
     });
   });
-  const cancel = async () => { setBusy(true); setError(''); try { await api(`/api/control/missions/${p.id}/cloud/cancel`, {method:'POST'}); } catch(e) { setError(String(e)); } finally { setBusy(false); } };
+  const cancel = async () => { setBusy(true); setError(''); try { await api(`/api/control/missions/${p.id}/cloud/cancel`, {method:'POST'}); await refresh(); } catch(e) { setError(String(e)); } finally { setBusy(false); } };
   const approve = async (run_id:string, request_id:string|undefined, choice:string) => {
     setBusy(true); setError('');
     try {await api(`/api/control/missions/${p.id}/cloud/approval`, {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({run_id,request_id,choice})});await refresh();}
@@ -392,7 +394,7 @@ export function CloudConversation(p: { id: string; active?: boolean; launch?: Cl
       <For each={e().turns}>{turn => <>
         <Show when={turn.detail && !working(turn)}><p class="cloud-note">{turn.detail}</p></Show>
         <For each={turn.branches}>{branch => <p>{branch.branch} <Show when={safeCloudUrl(branch.prUrl)}>{url => <a href={url()} target="_blank" rel="noopener noreferrer">View pull request</a>}</Show></p>}</For>
-        <For each={turn.artifacts.filter(a=>a.kind==='hermes_approval' && turn.phase==='waiting_user')}>{approval => <div role="group" aria-label="Hermes approval"><p>{approval.request?.command ?? 'Hermes is waiting for your approval.'}</p><For each={approval.request?.choices ?? ['once','deny']}>{choice=><button class="na-drop-btn" disabled={busy()} onClick={()=>void approve(approval.run_id!,approval.request?.request_id,choice)}>{choice==='once'?'Approve once':choice==='deny'?'Deny':choice}</button>}</For></div>}</For>
+        <For each={turn.artifacts.filter(a=>a.kind==='hermes_approval' && turn.phase==='waiting_user')}>{approval => <div role="group" aria-label="Hermes approval"><p>{approval.request?.command ?? 'Hermes is waiting for your approval.'}</p><For each={approval.request?.choices ?? ['once','deny']}>{choice=><button class="na-drop-btn" disabled={busy()} onClick={()=>void approve(approval.run_id ?? turn.external_id ?? '',approval.request?.request_id,choice)}>{choice==='once'?'Approve once':choice==='deny'?'Deny':choice}</button>}</For></div>}</For>
         <For each={turn.artifacts.filter(a=>!a.kind)}>{artifact => <p><button class="na-drop-btn" onClick={() => void download(artifact.path)}>Download {artifact.path}</button></p>}</For>
       </>}</For>
     </>}</Show>
@@ -403,7 +405,7 @@ export function CloudConversation(p: { id: string; active?: boolean; launch?: Cl
     </>}</Show>
     <Show when={execution()}>{e => <>
       <Show when={account()?.capabilities.follow_up}><Composer active={isSlotActive()} allowConcurrentSend retainFailedMessage onPending={() => {}} onSendError={setSendError} textOnly={!account()?.capabilities.attachments} imagesOnly={Boolean(account()?.capabilities.attachments) && e().selection.provider !== 'hermes'} directFileUpload={e().selection.provider === 'hermes'} picker={false} scope={`cloud:${p.id}`} placeholder="Send follow-up" busy={active()} disabled={!cloudCanSend(e())} onSend={send}
-        onStop={account()?.capabilities.cancel && e().turns.some(t => t.external_id && ['running','submitting','waiting_user'].includes(t.phase)) ? () => void cancel() : undefined}/></Show>
+        onStop={account()?.capabilities.cancel && e().turns.some(t => t.phase === 'queued' || (t.external_id && ['running','submitting','waiting_user'].includes(t.phase))) ? () => void cancel() : undefined}/></Show>
       <ErrorToast error={sendError()} title="Couldn’t send your message" onDismiss={() => setSendError(null)} />
       <div class="cloud-conversation-meta"><ProviderLogo type={e().selection.provider}/><span title={account()?.label}>{cloudNames[e().selection.provider]}<Show when={!account() || cloudAccountLabel(account()!) !== cloudNames[e().selection.provider]}> · {account() ? cloudAccountLabel(account()!) : e().selection.account}</Show></span>
         {/* Like the agent composer: model and effort are chosen below the field, not inside it. */}
