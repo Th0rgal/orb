@@ -678,21 +678,7 @@ fun OrbConversationPage(
     var sideAgentSession by remember(initialMission?.id) { mutableStateOf<OrbSideAgentSession?>(null) }
     var commandBanner by remember { mutableStateOf<String?>(null) }
 
-    val currentBaseURL by core.baseURLFlow.collectAsState()
-    val currentToken by core.tokenFlow.collectAsState()
-    var userExplicitlyPickedAgent by remember(currentMission?.id, currentBaseURL, currentToken) { mutableStateOf(false) }
-    var cloudAccounts by remember(currentBaseURL, currentToken) { mutableStateOf<List<OrbRow>>(emptyList()) }
-    var hermesModelItems by remember(currentBaseURL, currentToken) { mutableStateOf<List<OrbDict>>(emptyList()) }
-    var hermesEffortChoices by remember(currentBaseURL, currentToken) { mutableStateOf<List<OrbAgentCatalog.ModelChoice>>(emptyList()) }
-    var selectedCloudEffort by remember(currentMission?.id, currentBaseURL, currentToken) {
-        mutableStateOf(
-            OrbJSON.dictList(currentMission?.dict("cloud")?.get("model_params"))
-                .firstOrNull { OrbJSON.str(it, "id") in setOf("effort", "reasoning_effort") }
-                ?.let { OrbJSON.str(it, "value") }
-                ?: currentMission?.str("model_effort")
-                ?: ""
-        )
-    }
+    var userExplicitlyPickedAgent by remember(currentMission?.id) { mutableStateOf(false) }
     // Agent configuration state
     var selectedBackend by remember(currentMission?.id, backends) {
         mutableStateOf(
@@ -787,55 +773,33 @@ fun OrbConversationPage(
     var selectedAccount by remember(currentMission?.id) {
         mutableStateOf(currentMission?.str("account_id", "account", "provider_account") ?: "")
     }
-    LaunchedEffect(currentBaseURL, currentToken) {
-        cloudAccounts = emptyList()
-        hermesModelItems = emptyList()
-        hermesEffortChoices = emptyList()
-        val fetched = runCatching { core.fetchRows("/api/cloud/accounts", "items") }.getOrDefault(emptyList())
-        cloudAccounts = fetched
-    }
-    LaunchedEffect(currentBaseURL, currentToken, currentMission?.id, cloudAccounts, initialFolder, selectedWorkspaceId, nodePinnedByUser, backends.size, userExplicitlyPickedAgent) {
-        if (currentMission != null) return@LaunchedEffect
-        val hermesAccount = cloudAccounts.firstOrNull {
-            it.str("provider") == "hermes" && it.bool("available") == true && !it.str("id").isNullOrEmpty()
-        }
-        val step = OrbKernel.composerDefaultStep(
-            hasExplicitChoice = userExplicitlyPickedAgent,
-            hasPinnedContext = !initialFolder.isNullOrEmpty() || nodePinnedByUser || selectedWorkspaceId.isNotEmpty(),
-            hermesAvailable = hermesAccount != null,
-            hasNativeHarness = backends.isNotEmpty()
-        )
-        if (step == OrbKernel.ComposerDefaultStepResult.DEFAULT_PALOMA_HERMES && hermesAccount != null) {
+    val cloudState = rememberOrbCloudComposerState(
+        core = core,
+        currentMissionId = currentMission?.id,
+        selectedBackend = selectedBackend,
+        hasPinnedContext = !initialFolder.isNullOrEmpty() || nodePinnedByUser || selectedWorkspaceId.isNotEmpty(),
+        hasNativeHarness = backends.isNotEmpty(),
+        userExplicitlyPickedAgent = userExplicitlyPickedAgent,
+        onConnectionReset = {
+            if (currentMission == null) {
+                userExplicitlyPickedAgent = false
+                if (selectedBackend == "hermes") {
+                    selectedBackend = backends.firstOrNull()?.str("id", "name") ?: "claudecode"
+                }
+                selectedModel = ""
+                selectedAccount = ""
+            }
+        },
+        onSelectHermesDefault = { accountId ->
             selectedBackend = "hermes"
-            selectedAccount = hermesAccount.str("id").orEmpty()
-        } else if (!userExplicitlyPickedAgent && hermesAccount == null && selectedBackend == "hermes") {
+            selectedAccount = accountId
+        },
+        onFallbackFromHermes = {
             selectedBackend = backends.firstOrNull()?.str("id", "name") ?: "claudecode"
             selectedAccount = ""
+            selectedModel = ""
         }
-    }
-    LaunchedEffect(currentBaseURL, currentToken, selectedBackend, cloudAccounts) {
-        if (selectedBackend != "hermes") return@LaunchedEffect
-        val hasAvailableHermes = cloudAccounts.any { it.str("provider") == "hermes" && it.bool("available") == true }
-        if (!hasAvailableHermes) {
-            hermesModelItems = emptyList()
-            hermesEffortChoices = emptyList()
-            return@LaunchedEffect
-        }
-        val opts = runCatching { core.fetchDict("/api/cloud/hermes/options") }.getOrNull()
-        val items = OrbJSON.dictList(OrbJSON.dict(opts?.get("models"))?.get("items"))
-            .filter { !OrbJSON.str(it, "id", "value").isNullOrEmpty() }
-        val rawEfforts = OrbJSON.dictList(opts?.get("efforts")).ifEmpty {
-            OrbJSON.dictList(OrbJSON.dict(opts?.get("efforts"))?.get("items"))
-        }
-        val effortList = rawEfforts.map { item ->
-            val id = OrbJSON.str(item, "id", "value").orEmpty()
-            val label = OrbJSON.str(item, "displayName", "name", "label")?.takeIf { it.isNotEmpty() }
-                ?: if (id.isEmpty()) "Default" else id
-            OrbAgentCatalog.ModelChoice(value = id, label = label)
-        }
-        hermesModelItems = items
-        hermesEffortChoices = effortList
-    }
+    )
     var selectedRepo by remember(currentMission?.id, project.id) {
         mutableStateOf(currentMission?.str("repo", "repository") ?: project.str("repo", "repository") ?: "")
     }
@@ -1348,6 +1312,11 @@ fun OrbConversationPage(
                                     val rowBackend = updatedRow.str("backend", "harness", "backend_id").orEmpty()
                                     if (rowBackend.isEmpty() || selectedBackend == rowBackend) {
                                         selectedModel = updatedRow.str("model_override", "model", "model_id") ?: ""
+                                    }
+                                }
+                                if (cloudExec != null && !showAgentPicker) {
+                                    cloudState.hydrateFromCloudExec(cid, cloudExec) { hydratedModel ->
+                                        selectedModel = hydratedModel
                                     }
                                 }
                             }
@@ -1929,8 +1898,8 @@ fun OrbConversationPage(
                             "content" to finalPrompt,
                             "client_message_id" to UUID.randomUUID().toString()
                         )
-                        if (rowBackend == "cloud_hermes") {
-                            cloudMsgBody.putAll(OrbAdminFormatting.buildHermesFollowUpFields(desiredModel, selectedCloudEffort))
+                        if (rowBackend == "cloud_hermes" && cloudState.shouldSendHermesSelection(existingId)) {
+                            cloudMsgBody.putAll(OrbAdminFormatting.buildHermesFollowUpFields(desiredModel, cloudState.selectedCloudEffort))
                         }
                         core.request(
                             path = "/api/control/message",
@@ -1964,11 +1933,11 @@ fun OrbConversationPage(
 
                     val isCloudService = selectedBackend in setOf("cursor_cloud", "grok_bot", "hermes")
                     val body = if (isCloudService) {
-                        val accounts = if (cloudAccounts.isNotEmpty()) {
-                            cloudAccounts
+                        val accounts = if (cloudState.cloudAccounts.isNotEmpty()) {
+                            cloudState.cloudAccounts
                         } else {
                             runCatching { core.fetchRows("/api/cloud/accounts", "items") }.getOrDefault(emptyList()).also {
-                                if (it.isNotEmpty()) cloudAccounts = it
+                                if (it.isNotEmpty()) cloudState.cloudAccounts = it
                             }
                         }
                         val resolvedAccount = selectedAccount.ifEmpty {
@@ -1983,7 +1952,7 @@ fun OrbConversationPage(
                             provider = selectedBackend,
                             account = resolvedAccount,
                             model = selectedModel,
-                            effort = selectedCloudEffort,
+                            effort = cloudState.selectedCloudEffort,
                             repository = selectedRepo,
                             gitRef = selectedGitRef
                         )
@@ -2036,7 +2005,11 @@ fun OrbConversationPage(
                     val created = core.request("/api/control/missions", method = "POST", body = body)
                     val dict = OrbJSON.dict(created) ?: OrbJSON.dict(OrbJSON.dict(created)?.get("mission"))
                     if (dict != null) {
-                        val row = OrbRow(dict)
+                        val rawRow = OrbRow(dict)
+                        val row = if (isCloudService && selectedModel.isNotBlank() && rawRow.str("model_override", "model", "model_id").isNullOrEmpty()) {
+                            OrbRow(rawRow.id, rawRow.raw + ("model_override" to selectedModel.trim()))
+                        } else rawRow
+                        if (isCloudService) cloudState.adoptCreatedMission(row.id)
                         adoptedNewMissionId = row.id
                         currentMission = row
                         core.refreshMissionsQuietly()
@@ -3588,17 +3561,9 @@ fun OrbConversationPage(
             hasHistoryTurns = latestTurns.isNotEmpty() || messages.isNotEmpty(),
             targetPlacementValid = true
         ) == OrbKernel.CloudHandoffStepResult.ALLOW_HANDOFF
-        val effectiveBackendModels = remember(backendModels, hermesModelItems) {
-            if (hermesModelItems.isEmpty()) backendModels
-            else {
-                val inner = (backendModels["backends"]?.let { OrbJSON.dict(it) } ?: backendModels).toMutableMap()
-                inner["hermes"] = hermesModelItems
-                if (backendModels.containsKey("backends")) backendModels + ("backends" to inner) else inner
-            }
-        }
         OrbAgentPickerSheet(
             backends = backends,
-            backendModels = effectiveBackendModels,
+            backendModels = cloudState.effectiveBackendModels(backendModels),
             workspaces = workspaces,
             nodes = nodes,
             managedCatalog = managedCatalog,
@@ -3609,15 +3574,21 @@ fun OrbConversationPage(
                 userExplicitlyPickedAgent = true
                 if (it != selectedBackend) {
                     selectedModel = ""
-                    selectedCloudEffort = ""
+                    cloudState.selectedCloudEffort = ""
                 }
                 selectedBackend = it
             },
             selectedModel = selectedModel,
-            onSelectModel = { selectedModel = it },
-            effortChoices = if (selectedBackend == "hermes") hermesEffortChoices else emptyList(),
-            selectedEffort = selectedCloudEffort,
-            onSelectEffort = { selectedCloudEffort = it },
+            onSelectModel = {
+                selectedModel = it
+                if (selectedBackend == "hermes" || isCloudMission) cloudState.userEditedSelection = true
+            },
+            effortChoices = if (selectedBackend == "hermes") cloudState.hermesEffortChoices else emptyList(),
+            selectedEffort = cloudState.selectedCloudEffort,
+            onSelectEffort = {
+                cloudState.selectedCloudEffort = it
+                cloudState.userEditedSelection = true
+            },
             permissionMode = selectedPermissionMode,
             showClaudePermissions = selectedBackend == "claudecode",
             onSelectPermissionMode = { mode ->
@@ -4954,6 +4925,120 @@ private fun OrbBackgroundWakeRow(turn: OrbTurn.Wake) {
             )
         }
     }
+}
+
+private class OrbCloudComposerState {
+    var cloudAccounts by mutableStateOf<List<OrbRow>>(emptyList())
+    var hermesModelItems by mutableStateOf<List<OrbDict>>(emptyList())
+    var hermesEffortChoices by mutableStateOf<List<OrbAgentCatalog.ModelChoice>>(emptyList())
+    var selectedCloudEffort by mutableStateOf("")
+    var selectionHydratedFor by mutableStateOf<String?>(null)
+    var userEditedSelection by mutableStateOf(false)
+
+    fun effectiveBackendModels(backendModels: OrbDict): OrbDict {
+        if (hermesModelItems.isEmpty()) return backendModels
+        val inner = (backendModels["backends"]?.let { OrbJSON.dict(it) } ?: backendModels).toMutableMap()
+        inner["hermes"] = hermesModelItems
+        return if (backendModels.containsKey("backends")) backendModels + ("backends" to inner) else inner
+    }
+
+    fun adoptCreatedMission(missionId: String) {
+        selectionHydratedFor = missionId
+    }
+
+    fun hydrateFromCloudExec(cid: String, cloudExec: OrbDict?, onHydratedModel: (String) -> Unit) {
+        if (selectionHydratedFor == cid || userEditedSelection) return
+        val extracted = OrbAdminFormatting.extractCloudSelection(cloudExec) ?: return
+        selectedCloudEffort = extracted.second
+        selectionHydratedFor = cid
+        onHydratedModel(extracted.first)
+    }
+
+    fun shouldSendHermesSelection(missionId: String): Boolean =
+        selectionHydratedFor == missionId || userEditedSelection
+}
+
+@Composable
+private fun rememberOrbCloudComposerState(
+    core: OrbCore,
+    currentMissionId: String?,
+    selectedBackend: String,
+    hasPinnedContext: Boolean,
+    hasNativeHarness: Boolean,
+    userExplicitlyPickedAgent: Boolean,
+    onConnectionReset: () -> Unit,
+    onSelectHermesDefault: (String) -> Unit,
+    onFallbackFromHermes: () -> Unit
+): OrbCloudComposerState {
+    val baseURL by core.baseURLFlow.collectAsState()
+    val token by core.tokenFlow.collectAsState()
+    val state = remember { OrbCloudComposerState() }
+
+    LaunchedEffect(baseURL, token) {
+        state.cloudAccounts = emptyList()
+        state.hermesModelItems = emptyList()
+        state.hermesEffortChoices = emptyList()
+        state.selectedCloudEffort = ""
+        state.selectionHydratedFor = null
+        state.userEditedSelection = false
+        onConnectionReset()
+        state.cloudAccounts = runCatching { core.fetchRows("/api/cloud/accounts", "items") }.getOrDefault(emptyList())
+    }
+
+    LaunchedEffect(currentMissionId) {
+        if (currentMissionId == null) {
+            state.selectedCloudEffort = ""
+            state.selectionHydratedFor = null
+            state.userEditedSelection = false
+        } else if (state.selectionHydratedFor != currentMissionId) {
+            state.selectedCloudEffort = ""
+            state.userEditedSelection = false
+        }
+    }
+
+    LaunchedEffect(baseURL, token, currentMissionId, state.cloudAccounts, hasPinnedContext, hasNativeHarness, userExplicitlyPickedAgent) {
+        if (currentMissionId != null) return@LaunchedEffect
+        val hermesAccount = state.cloudAccounts.firstOrNull {
+            it.str("provider") == "hermes" && it.bool("available") == true && !it.str("id").isNullOrEmpty()
+        }
+        val step = OrbKernel.composerDefaultStep(
+            hasExplicitChoice = userExplicitlyPickedAgent,
+            hasPinnedContext = hasPinnedContext,
+            hermesAvailable = hermesAccount != null,
+            hasNativeHarness = hasNativeHarness
+        )
+        if (step == OrbKernel.ComposerDefaultStepResult.DEFAULT_PALOMA_HERMES && hermesAccount != null) {
+            onSelectHermesDefault(hermesAccount.str("id").orEmpty())
+        } else if (!userExplicitlyPickedAgent && hermesAccount == null && selectedBackend == "hermes") {
+            state.selectedCloudEffort = ""
+            onFallbackFromHermes()
+        }
+    }
+
+    LaunchedEffect(baseURL, token, selectedBackend, state.cloudAccounts) {
+        if (selectedBackend != "hermes") return@LaunchedEffect
+        val hasAvailableHermes = state.cloudAccounts.any { it.str("provider") == "hermes" && it.bool("available") == true }
+        if (!hasAvailableHermes) {
+            state.hermesModelItems = emptyList()
+            state.hermesEffortChoices = emptyList()
+            return@LaunchedEffect
+        }
+        val opts = runCatching { core.fetchDict("/api/cloud/hermes/options") }.getOrNull()
+        val items = OrbJSON.dictList(OrbJSON.dict(opts?.get("models"))?.get("items"))
+            .filter { !OrbJSON.str(it, "id", "value").isNullOrEmpty() }
+        val rawEfforts = OrbJSON.dictList(opts?.get("efforts")).ifEmpty {
+            OrbJSON.dictList(OrbJSON.dict(opts?.get("efforts"))?.get("items"))
+        }
+        state.hermesModelItems = items
+        state.hermesEffortChoices = rawEfforts.map { item ->
+            val id = OrbJSON.str(item, "id", "value").orEmpty()
+            val label = OrbJSON.str(item, "displayName", "name", "label")?.takeIf { it.isNotEmpty() }
+                ?: if (id.isEmpty()) "Default" else id
+            OrbAgentCatalog.ModelChoice(value = id, label = label)
+        }
+    }
+
+    return state
 }
 
 /** Pure harness and model catalog projection for Android's agent picker; unit-tested. */

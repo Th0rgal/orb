@@ -1106,6 +1106,7 @@ struct OrbHermesSettings: View {
     @State private var draft = Draft()
     @State private var loading = true
     @State private var busy = false
+    @State private var saveTask: Task<Void, Never>? = nil
     @State private var error = ""
     @State private var unavailable = ""
     @State private var notice = ""
@@ -1167,8 +1168,12 @@ struct OrbHermesSettings: View {
         .scrollContentBackground(.hidden).background(OrbStyle.background)
         .navigationTitle("Assistant").navigationBarTitleDisplayMode(.inline)
         .task(id: OrbCore.shared.connectionGeneration) {
+            saveTask?.cancel()
+            saveTask = nil
+            busy = false
             client = OrbSettingsClient()
             state = .null
+            draft = Draft()
             notice = ""
             await load()
         }
@@ -1240,24 +1245,34 @@ struct OrbHermesSettings: View {
 
     private var actionsSection: some View {
         Section {
-            Button(busy ? "Saving…" : "Save") { Task { await save(restart: false) } }.disabled(busy || draft == Draft(state))
-            Button("Save & restart Hermes") { Task { await save(restart: true) } }.disabled(busy)
+            Button(busy ? "Saving…" : "Save") { startSave(restart: false) }.disabled(busy || draft == Draft(state))
+            Button("Save & restart Hermes") { startSave(restart: true) }.disabled(busy)
         }
     }
 
+    private func startSave(restart: Bool) {
+        saveTask?.cancel()
+        saveTask = Task { await save(restart: restart) }
+    }
+
     private func load() async {
+        let activeClient = client
         loading = true
         error = ""
         unavailable = ""
-        defer { loading = false }
+        defer { if activeClient.current { loading = false } }
         do {
-            state = try await client.call("/api/cloud/hermes/settings")
-            draft = Draft(state)
+            let loaded = try await activeClient.call("/api/cloud/hermes/settings")
+            guard activeClient.current else { return }
+            state = loaded
+            draft = Draft(loaded)
             error = ""
             unavailable = ""
         } catch is CancellationError {}
         catch {
+            guard activeClient.current else { return }
             state = .null
+            draft = Draft()
             if let reason = OrbTurnSummary.hermesUnavailableMessage(for: error) {
                 unavailable = reason
                 self.error = ""
@@ -1267,16 +1282,23 @@ struct OrbHermesSettings: View {
         }
     }
     private func save(restart: Bool) async {
-        busy = true; defer { busy = false }
+        let activeClient = client
+        let wireBody = draft.wire(restart: restart)
+        busy = true
         notice = ""
+        defer { if activeClient.current { busy = false; saveTask = nil } }
         do {
-            state = try await client.call("/api/cloud/hermes/settings", method: "PUT", body: draft.wire(restart: restart))
-            draft = Draft(state); error = ""; unavailable = ""
+            let updated = try await activeClient.call("/api/cloud/hermes/settings", method: "PUT", body: wireBody)
+            guard activeClient.current else { return }
+            state = updated
+            draft = Draft(updated); error = ""; unavailable = ""
             notice = restart ? "Saved configuration and restarted Hermes service." : "Saved Hermes configuration."
         } catch is CancellationError {}
         catch {
+            guard activeClient.current else { return }
             if let reason = OrbTurnSummary.hermesUnavailableMessage(for: error) {
                 state = .null
+                draft = Draft()
                 unavailable = reason
                 self.error = ""
             } else {

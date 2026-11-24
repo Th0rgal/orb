@@ -233,5 +233,35 @@ class OrbClientParityTest {
         val overrideFollowUp = OrbAdminFormatting.buildHermesFollowUpFields("builtin/smart", "medium")
         assertEquals("builtin/smart", overrideFollowUp["cloud_model"])
         assertEquals(listOf(mapOf("id" to "effort", "value" to "medium")), overrideFollowUp["cloud_model_params"])
+
+        val hydratedFromTurn = OrbAdminFormatting.extractCloudSelection(
+            mapOf(
+                "selection" to mapOf(
+                    "provider" to "hermes",
+                    "model" to "builtin/fast",
+                    "model_params" to listOf(mapOf("id" to "effort", "value" to "low"))
+                ),
+                "turns" to listOf(
+                    mapOf(
+                        "model" to "builtin/smart",
+                        "model_params" to listOf(mapOf("id" to "effort", "value" to "high"))
+                    )
+                )
+            )
+        )
+        assertEquals("builtin/smart" to "high", hydratedFromTurn)
+
+        val hydratedFromSelection = OrbAdminFormatting.extractCloudSelection(
+            mapOf(
+                "selection" to mapOf(
+                    "provider" to "hermes",
+                    "model" to "builtin/deep",
+                    "model_params" to listOf(mapOf("id" to "effort", "value" to "xhigh"))
+                ),
+                "turns" to listOf(mapOf("prompt" to "hello"))
+            )
+        )
+        assertEquals("builtin/deep" to "xhigh", hydratedFromSelection)
+        assertNull(OrbAdminFormatting.extractCloudSelection(null))
     }
 }

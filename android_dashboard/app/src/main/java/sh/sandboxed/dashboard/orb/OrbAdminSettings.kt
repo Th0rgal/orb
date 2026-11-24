@@ -234,6 +234,25 @@ object OrbAdminFormatting {
             "cloud_model_params" to params
         )
     }
+
+    // Hydrate Hermes model + reasoning effort from GET /api/control/missions/:id/cloud
+    // matching Desktop CloudAgents.tsx (latest turn overrides selection).
+    fun extractCloudSelection(cloudExec: OrbDict?): Pair<String, String>? {
+        if (cloudExec == null) return null
+        val turns = OrbJSON.dictList(cloudExec["turns"])
+        val lastTurn = turns.lastOrNull()
+        val sel = OrbJSON.dict(cloudExec["selection"])
+        val model = OrbJSON.str(lastTurn, "model")
+            ?: OrbJSON.str(sel, "model")
+            ?: ""
+        val turnParams = OrbJSON.dictList(lastTurn?.get("model_params"))
+        val selParams = OrbJSON.dictList(sel?.get("model_params"))
+        val params = turnParams.ifEmpty { selParams }
+        val effort = params.firstOrNull { OrbJSON.str(it, "id") in setOf("effort", "reasoning_effort") }
+            ?.let { OrbJSON.str(it, "value") }
+            ?: ""
+        return model.trim() to effort.trim()
+    }
 }
 
 @Composable
@@ -1836,6 +1855,8 @@ fun OrbHermesSettingsPage(core: OrbCore, onBack: () -> Unit) {
     val baseURL by core.baseURLFlow.collectAsState()
     val token by core.tokenFlow.collectAsState()
     var reloadNonce by remember { mutableIntStateOf(0) }
+    var saveGeneration by remember { mutableIntStateOf(0) }
+    var saveJob by remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
     var rawState by remember { mutableStateOf<OrbDict?>(null) }
     var loading by remember { mutableStateOf(true) }
     var busy by remember { mutableStateOf(false) }
@@ -1891,6 +1912,10 @@ fun OrbHermesSettingsPage(core: OrbCore, onBack: () -> Unit) {
     }
 
     LaunchedEffect(baseURL, token, reloadNonce) {
+        saveGeneration += 1
+        saveJob?.cancel()
+        saveJob = null
+        busy = false
         resetDraftState()
         loading = true
         error = null
@@ -1919,6 +1944,9 @@ fun OrbHermesSettingsPage(core: OrbCore, onBack: () -> Unit) {
 
     fun save(restart: Boolean) {
         if (busy) return
+        val subBaseURL = baseURL
+        val subToken = token
+        val subGen = saveGeneration
         val subDefaultModel = defaultModel
         val subReasoningEffort = reasoningEffort
         val subUseRouter = useRouter
@@ -1933,7 +1961,7 @@ fun OrbHermesSettingsPage(core: OrbCore, onBack: () -> Unit) {
         val subSoul = soul
         busy = true
         notice = null
-        scope.launch {
+        saveJob = scope.launch {
             try {
                 val body = mapOf(
                     "default_model" to subDefaultModel.trim(),
@@ -1951,6 +1979,7 @@ fun OrbHermesSettingsPage(core: OrbCore, onBack: () -> Unit) {
                     "restart_service" to restart
                 )
                 val updated = OrbJSON.dict(core.request("/api/cloud/hermes/settings", "PUT", body = body))
+                if (baseURL != subBaseURL || token != subToken || saveGeneration != subGen) return@launch
                 if (updated != null) {
                     rawState = updated
                     if (useRouter == subUseRouter) useRouter = updated["use_sandboxed_router"] == true
@@ -1969,7 +1998,10 @@ fun OrbHermesSettingsPage(core: OrbCore, onBack: () -> Unit) {
                 error = null
                 unavailable = null
                 notice = if (restart) "Saved configuration and restarted Hermes." else "Saved Hermes configuration."
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Throwable) {
+                if (baseURL != subBaseURL || token != subToken || saveGeneration != subGen) return@launch
                 val reason = OrbAdminFormatting.hermesUnavailableMessage(e)
                 if (reason != null) {
                     resetDraftState()
@@ -1979,7 +2011,10 @@ fun OrbHermesSettingsPage(core: OrbCore, onBack: () -> Unit) {
                     error = e.message
                 }
             } finally {
-                busy = false
+                if (baseURL == subBaseURL && token == subToken && saveGeneration == subGen) {
+                    busy = false
+                    saveJob = null
+                }
             }
         }
     }
