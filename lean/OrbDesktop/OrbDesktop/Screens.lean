@@ -55,11 +55,17 @@ def buildNewAgentBody (st : DesktopState) (mainW bodyH : SubPx) : WidgetNode :=
   let theme := st.theme
   let pal := theme.palette
   let colW : SubPx := pxToSub 608
-  let hasText := !st.composer.text.isEmpty
+  let composedText :=
+    if st.composer.imePreeditText.isEmpty then st.composer.text
+    else
+      let chars := st.composer.text.toList
+      let cur := ComposerBuffer.clampCursor st.composer.text st.composer.cursorOffset
+      String.ofList (chars.take cur) ++ st.composer.imePreeditText ++ String.ofList (chars.drop cur)
+  let hasText := !composedText.isEmpty
   let bdrCol := pal.borderStrong
   let placeholderCol : Color := if theme.isDark then 0x676767FF else 0xA3A29CFF
   let txtCol := if hasText then pal.textPrimary else placeholderCol
-  let dispText := if hasText then st.composer.text else st.composer.placeholder
+  let dispText := if hasText then composedText else st.composer.placeholder
   let sendBgCol := pal.sendBg
 
   let dropBar : WidgetNode :=
@@ -392,7 +398,7 @@ def buildMissionTranscriptBody (st : DesktopState) (mainW bodyH : SubPx)
 def buildSplitDiffRightPane (theme : Theme) (paneW paneH : SubPx)
     (delRuns : List InlineRun := []) (addRuns : List InlineRun := [])
     (diffMode : String := "split") (diffRef : String := "Working tree vs HEAD")
-    (showClose : Bool := false) : WidgetNode :=
+    (showClose : Bool := false) (refreshCount : Nat := 0) : WidgetNode :=
   let pal := theme.palette
   let bdr := theme.borderWidth
   let cardW := paneW - pxToSub 24
@@ -433,7 +439,7 @@ def buildSplitDiffRightPane (theme : Theme) (paneW paneH : SubPx)
           WidgetNode.rrect
             (BoxStyle.row 0 |>.withAlign .center |>.withJustify .center |>.withFixedSize (pxToSub 70) (pxToSub 28))
             0x00000000 (CornerRadii.uniform (pxToSub 6)) (BorderStyle.uniform bdr pal.borderSubtle)
-            [screenTextLine theme (pxToSub 50) (pxToSub 16) (pxToSub 13) (pxToSub 16) pal.textSecondary "Refresh" 500]
+            [screenTextLine theme (pxToSub 50) (pxToSub 16) (pxToSub 13) (pxToSub 16) pal.textSecondary (if refreshCount > 0 then s!"Sync {refreshCount}" else "Refresh") 500]
       ] ++ (if showClose then
           [ WidgetNode.box { BoxStyle.row 0 with grow := 1 } []
           , WidgetNode.focusable sidePanelCloseId <|
@@ -493,6 +499,31 @@ def buildSplitDiffRightPane (theme : Theme) (paneW paneH : SubPx)
              [shapedCodeLine halfW h codeR codeRunsR]
       ]
 
+  let unifiedRow (h : SubPx) (bg : Color) (ln code : String) (runs : List InlineRun := []) : WidgetNode :=
+    WidgetNode.box
+      (BoxStyle.row 0 |>.withFixedSize cardInnerW h)
+      [ WidgetNode.rrect (BoxStyle.row 0 |>.withPadding (Edges.xy (pxToSub 6) 0) |>.withFixedSize (pxToSub 44) h)
+          bg CornerRadii.zero BorderStyle.none
+          [screenTextLine theme (pxToSub 32) (pxToSub 17) (pxToSub 12) (pxToSub 17) pal.textMuted ln 400 true]
+      , WidgetNode.rrect (BoxStyle.row 0 |>.withPadding (Edges.xy (pxToSub 6) 0) |>.withFixedSize (cardInnerW - pxToSub 44) h)
+          bg CornerRadii.zero BorderStyle.none
+          [shapedCodeLine (cardInnerW - pxToSub 44) h code runs]
+      ]
+
+  let diffRows : List WidgetNode :=
+    if isUnified then
+      [ unifiedRow (pxToSub 17) 0x00000000 "120" "  let availW := viewport.w"
+      , unifiedRow (pxToSub 26) delRowBg "121" "- webkit_web_view_load_uri(wv, orb_dev_url);" delRuns
+      , unifiedRow (pxToSub 26) addRowBg "121" "+ buildDesktopScreen st availW availH shapedRuns" addRuns
+      , unifiedRow (pxToSub 18) 0x00000000 "122" "  let availH := viewport.h"
+      ]
+    else
+      [ splitRow (pxToSub 17) 0x00000000 0x00000000 "120" "let availW := viewport.w" "120" "let availW := viewport.w"
+      , splitRow (pxToSub 52) delRowBg addRowBg "121" "-  webkit_web_view_load_uri(wv, orb_dev_url);" "121" "+  buildDesktopScreen st availW availH shapedRuns"
+          delRuns addRuns
+      , splitRow (pxToSub 18) 0x00000000 0x00000000 "122" "let availH := viewport.h" "122" "let availH := viewport.h"
+      ]
+
   let diffCard : WidgetNode :=
     WidgetNode.rrect
       (BoxStyle.col 0
@@ -501,7 +532,7 @@ def buildSplitDiffRightPane (theme : Theme) (paneW paneH : SubPx)
       pal.elevatedSurface
       (CornerRadii.uniform (pxToSub 8))
       (BorderStyle.uniform bdr pal.border)
-      [ WidgetNode.rrect
+      ([ WidgetNode.rrect
           (BoxStyle.row 0
             |>.withAlign .center
             |>.withPadding (Edges.xy (pxToSub 10) 0)
@@ -520,11 +551,7 @@ def buildSplitDiffRightPane (theme : Theme) (paneW paneH : SubPx)
           BorderStyle.none
           [screenTextLine theme (cardInnerW - pxToSub 20) (pxToSub 16) (pxToSub 11) (pxToSub 16) pal.textSecondary
             "@@ -120,3 +120,3 @@ def renderDesktopFrame" 400 true]
-      , splitRow (pxToSub 17) 0x00000000 0x00000000 "120" "let availW := viewport.w" "120" "let availW := viewport.w"
-      , splitRow (pxToSub 52) delRowBg addRowBg "121" "-  webkit_web_view_load_uri(wv, orb_dev_url);" "121" "+  buildDesktopScreen st availW availH shapedRuns"
-          delRuns addRuns
-      , splitRow (pxToSub 18) 0x00000000 0x00000000 "122" "let availH := viewport.h" "122" "let availH := viewport.h"
-      ]
+      ] ++ diffRows)
 
   WidgetNode.box
     (BoxStyle.col 0
@@ -577,8 +604,8 @@ def buildMachinesFleetBody (st : DesktopState) (mainW bodyH : SubPx) : WidgetNod
       (BoxStyle.col 0 |>.withPadding (Edges.all bdr) |>.withFixedSize colW (pxToSub 62))
       pal.elevatedSurface
       (CornerRadii.uniform (pxToSub 10))
-      (BorderStyle.uniform bdr pal.borderSubtle)
-      [WidgetNode.focusable fleetLocalId <| buildMachineRow theme rowW (pxToSub 60) "This Mac" "Available in the Orb desktop app" "" false]
+      (BorderStyle.uniform bdr (if st.selectedMachineId == "local" then pal.accent else pal.borderSubtle))
+      [WidgetNode.focusable fleetLocalId <| buildMachineRow theme rowW (pxToSub 60) "This Mac" "Available in the Orb desktop app" (if st.selectedMachineId == "local" then "Selected" else "") false]
 
   let groupBg : Color := if theme.isDark then 0x242424FF else 0xEDECE9FF
   let groupBar : WidgetNode :=
@@ -601,11 +628,11 @@ def buildMachinesFleetBody (st : DesktopState) (mainW bodyH : SubPx) : WidgetNod
       pal.elevatedSurface
       (CornerRadii.uniform (pxToSub 10))
       (BorderStyle.uniform bdr pal.borderSubtle)
-      [ WidgetNode.focusable fleetCoreId <| buildMachineRow theme rowW (pxToSub 61) "Core" "Connecting · Control plane" "" true
-      , WidgetNode.focusable fleetPrimaryId <| buildMachineRow theme rowW (pxToSub 61) "orb-core-primary" "online" "3 active" true
+      [ WidgetNode.focusable fleetCoreId <| buildMachineRow theme rowW (pxToSub 61) "Core" "Connecting · Control plane" (if st.selectedMachineId == "core" then "Selected" else "") true
+      , WidgetNode.focusable fleetPrimaryId <| buildMachineRow theme rowW (pxToSub 61) "orb-core-primary" "online" (if st.selectedMachineId == "node-core-01" then "Selected" else "3 active") true
       , groupBar
-      , WidgetNode.focusable fleetLargeAId <| buildMachineRow theme rowW (pxToSub 61) "large-a   Managed" "online · 8 vCPU · 16 GB" "2 active" true
-      , WidgetNode.focusable fleetDefaultBId <| buildMachineRow theme rowW (pxToSub 60) "default-b   Managed" "online · 4 vCPU · 8 GB" "1 active" false
+      , WidgetNode.focusable fleetLargeAId <| buildMachineRow theme rowW (pxToSub 61) "large-a   Managed" "online · 8 vCPU · 16 GB" (if st.selectedMachineId == "mm-large-a" then "Selected" else "2 active") true
+      , WidgetNode.focusable fleetDefaultBId <| buildMachineRow theme rowW (pxToSub 60) "default-b   Managed" "online · 4 vCPU · 8 GB" (if st.selectedMachineId == "mm-default-b" then "Selected" else "1 active") false
       ]
 
   let swCard : WidgetNode :=
@@ -644,7 +671,7 @@ def buildMachinesFleetBody (st : DesktopState) (mainW bodyH : SubPx) : WidgetNod
             0x00000000
             (CornerRadii.uniform (pxToSub 6))
             (BorderStyle.uniform bdr pal.border)
-            [screenTextLine theme (pxToSub 36) (pxToSub 16) (pxToSub 13) (pxToSub 16) pal.textSecondary "Copy" 500]
+            [screenTextLine theme (pxToSub (if st.copiedPalomaKey then 42 else 36)) (pxToSub 16) (pxToSub 13) (pxToSub 16) pal.textSecondary (if st.copiedPalomaKey then "Copied" else "Copy") 500]
       ]
 
   let innerCol : WidgetNode :=
@@ -885,9 +912,12 @@ def buildSettingsGeneralBody (st : DesktopState) (mainW bodyH : SubPx) : WidgetN
       [screenTextLine theme (pxToSub 584) (pxToSub 17) (pxToSub 12) (pxToSub 17) pal.textSecondary txt]
 
   let apiUrlText := st.settingsApiUrl.text ++ st.settingsApiUrl.imePreeditText
+  let connectedDesc :=
+    if st.settingsActionNote.isEmpty then "Signed in to http://127.0.0.1:14470."
+    else "Status: " ++ st.settingsActionNote
   let backendCard := sCard (pxToSub 125)
     [ buildSettingsRow theme rowW (pxToSub 63) "API URL" "Base URL of the Core backend." apiUrlText false false true true false (some settingsApiUrlId)
-    , buildSettingsRow theme rowW (pxToSub 62) "Connected" "Signed in to http://127.0.0.1:14470." "Disconnect" true false false false false (some settingsDisconnectId)
+    , buildSettingsRow theme rowW (pxToSub 62) "Connected" connectedDesc "Disconnect" true false false false false (some settingsDisconnectId)
     ]
 
   let githubCard := sCard (pxToSub 62)
@@ -1044,16 +1074,20 @@ def buildSearchModalOverlay (theme : Theme) (availW availH : SubPx)
             ]
         ]
 
-  let filteredItems := filterSearchItems spec
+  let defaultFilters :=
+    filterTab == "All" && projectFilter == "All projects" &&
+    timeFilter == "Any time" && sortOrder == "Relevance"
+  let filteredItems := filterSearchItemsWithFilters spec filterTab projectFilter timeFilter sortOrder
+  let startIdx := if spec.selectedIdx >= 7 then spec.selectedIdx - 6 else 0
   let resultNodes : List WidgetNode :=
-    if useReferenceList && spec.query == "mission" && spec.items == defaultSearchDialogSpec.items then
+    if useReferenceList && defaultFilters && spec.query == "mission" && spec.items == defaultSearchDialogSpec.items then
       [ resultRow 702 (spec.selectedIdx == 0) "Mission 1 doing some work" "Project 1 · 15m ago" " 1 doing some work"
       , resultRow 703 (spec.selectedIdx == 1) "Mission 2 doing some work" "Project 1 · 15m ago" " 2 doing some work"
       , resultRow 704 (spec.selectedIdx == 2) "Mission 21 doing some work" "Project 1 · 15m ago" " 21 doing some work"
       ]
     else
-      (filteredItems.take 7).mapIdx fun i it =>
-        resultRow it.widgetId (i == spec.selectedIdx) it.title it.subtitle (" " ++ it.category)
+      ((filteredItems.drop startIdx).take 7).mapIdx fun i it =>
+        resultRow it.widgetId (startIdx + i == spec.selectedIdx) it.title it.subtitle (" " ++ it.category)
 
   let leftPane : WidgetNode :=
     WidgetNode.rrect
@@ -1085,7 +1119,7 @@ def buildSearchModalOverlay (theme : Theme) (availW availH : SubPx)
       ]
 
   let selectedTitle :=
-    if useReferenceList && spec.query == "mission" && spec.items == defaultSearchDialogSpec.items then
+    if useReferenceList && defaultFilters && spec.query == "mission" && spec.items == defaultSearchDialogSpec.items then
       match spec.selectedIdx with
       | 1 => "Mission 2 doing some work"
       | 2 => "Mission 21 doing some work"
@@ -1093,7 +1127,7 @@ def buildSearchModalOverlay (theme : Theme) (availW availH : SubPx)
     else
       (filteredItems[spec.selectedIdx]?.map (·.title)).getD "No matching mission"
   let selectedMeta :=
-    if useReferenceList && spec.query == "mission" && spec.items == defaultSearchDialogSpec.items then
+    if useReferenceList && defaultFilters && spec.query == "mission" && spec.items == defaultSearchDialogSpec.items then
       "Project 1 · 15m ago"
     else
       (filteredItems[spec.selectedIdx]?.map (·.subtitle)).getD ""
@@ -1134,7 +1168,7 @@ def buildSearchModalOverlay (theme : Theme) (availW availH : SubPx)
       ]
 
   let matchCountLabel :=
-    if useReferenceList && spec.query == "mission" && spec.items == defaultSearchDialogSpec.items then "3 matches"
+    if useReferenceList && defaultFilters && spec.query == "mission" && spec.items == defaultSearchDialogSpec.items then "3 matches"
     else s!"{filteredItems.length} matches"
 
   let footerNode : WidgetNode :=
@@ -1170,6 +1204,7 @@ def buildSearchModalOverlay (theme : Theme) (availW availH : SubPx)
       , WidgetNode.box (BoxStyle.row 0 |>.withFixedSize innerW (pxToSub 468)) [leftPane, rightPane]
       , footerNode
       ]
+      (some searchDialogCardId)
 
   WidgetNode.rrect
     (BoxStyle.col 0
@@ -1309,7 +1344,7 @@ def buildDesktopScreen (st : DesktopState) (availW availH : SubPx)
             [leftTranscript, leftComposer]
         let rightPane : WidgetNode :=
           if st.sidePanelTab == "diff" then
-            buildSplitDiffRightPane theme rightW splitH runs.diffDelRuns runs.diffAddRuns st.diffMode st.diffRef true
+            buildSplitDiffRightPane theme rightW splitH runs.diffDelRuns runs.diffAddRuns st.diffMode st.diffRef true st.diffRefreshCount
           else
             let title := if st.sidePanelTab == "files" then "Files" else "Side question"
             let bodyMsg := if st.sidePanelTab == "files" then "Workspace files for this mission" else "Ask a side question without interrupting the main turn"
@@ -1354,10 +1389,10 @@ def buildDesktopScreen (st : DesktopState) (availW availH : SubPx)
           { widths := Edges.trbl 0 theme.borderWidth 0 0, color := pal.borderSubtle }
           [leftTranscript, leftComposer]
       let rightPane :=
-        if st.diffMode == "split" && st.diffRef == "Working tree vs HEAD" then
+        if st.diffMode == "split" && st.diffRef == "Working tree vs HEAD" && st.diffRefreshCount == 0 then
           buildSplitDiffRightPane theme rightW splitH runs.diffDelRuns runs.diffAddRuns
         else
-          buildSplitDiffRightPane theme rightW splitH runs.diffDelRuns runs.diffAddRuns st.diffMode st.diffRef
+          buildSplitDiffRightPane theme rightW splitH runs.diffDelRuns runs.diffAddRuns st.diffMode st.diffRef false st.diffRefreshCount
       let splitBody : WidgetNode :=
         WidgetNode.box
           (BoxStyle.row 0 |>.withFixedSize mainW splitH |>.withBg st.theme.palette.canvas)

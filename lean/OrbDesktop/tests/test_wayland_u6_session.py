@@ -431,6 +431,9 @@ class WaylandTestCompositor:
                         mm = self._pools[pid][2]
                         frame = mm[off : off + stride * h]
                         self.last_frame_bytes = frame
+                        self.last_frame_w = w
+                        self.last_frame_h = h
+                        self.last_frame_stride = stride
                         self.last_frame_hash = hashlib.sha256(frame).hexdigest()
                     self.commit_count += 1
                     self._maybe_send_enter()
@@ -491,6 +494,32 @@ class WaylandTestCompositor:
                     raise TimeoutError(f"framebuffer hash did not change from {previous_hash[:12]}")
                 self._cond.wait(rem)
             return self.last_frame_hash
+
+    def region_hash(self, x0: int, y0: int, x1: int, y1: int) -> str:
+        with self._lock:
+            frame = self.last_frame_bytes
+            stride = getattr(self, "last_frame_stride", self.width * 4)
+            w = getattr(self, "last_frame_w", self.width)
+            h = getattr(self, "last_frame_h", self.height)
+            rx0, rx1 = max(0, min(w, x0)), max(0, min(w, x1))
+            ry0, ry1 = max(0, min(h, y0)), max(0, min(h, y1))
+            hasher = hashlib.sha256()
+            for y in range(ry0, ry1):
+                row_off = y * stride
+                hasher.update(frame[row_off + rx0 * 4 : row_off + rx1 * 4])
+            return hasher.hexdigest()
+
+    def wait_region_change(self, x0: int, y0: int, x1: int, y1: int, previous_hash: str, timeout: float = 5.0) -> str:
+        deadline = time.monotonic() + timeout
+        while True:
+            cur = self.region_hash(x0, y0, x1, y1)
+            if cur != previous_hash:
+                return cur
+            rem = deadline - time.monotonic()
+            if rem <= 0:
+                raise TimeoutError(f"region ({x0},{y0},{x1},{y1}) hash did not change from {previous_hash[:12]}")
+            with self._lock:
+                self._cond.wait(min(0.1, rem))
 
     def wait_text_input(self, enabled: bool, timeout: float = 5.0) -> None:
         deadline = time.monotonic() + timeout
@@ -646,6 +675,15 @@ class DisposableCoreState:
         self.seq_counter += 1
         self.events.setdefault(mid, []).append(ev)
         return ev
+
+    def append_assistant_delta(self, mid: str, delta: str) -> None:
+        evs = self.events.get(mid, [])
+        for ev in reversed(evs):
+            if ev["event_type"] == "assistant_message":
+                ev["content"] = ev["content"] + "\n" + delta
+                ev["payload"]["content"] = ev["content"]
+                return
+        self.add_event(mid, "assistant_message", delta)
 
 
 def make_core_handler(state: DisposableCoreState):
@@ -806,6 +844,9 @@ def make_core_handler(state: DisposableCoreState):
             body = self._read_json()
             with state.lock:
                 state.requests_log.append(("PUT", path, body))
+                if path == "/api/control/inbox-state":
+                    state.inbox_state = body if isinstance(body, dict) else state.inbox_state
+                    return self._reply(state.inbox_state)
                 if path.startswith("/api/ai/providers/") and path.endswith("/preference"):
                     aid = path.split("/")[4]
                     row = next(p for p in state.providers if p["id"] == aid)
@@ -869,12 +910,12 @@ def _resolve_binary() -> Path:
 
 
 class WaylandU6SessionTest(unittest.TestCase):
-    def _launch(self, tmp: Path, extra_args: list[str], extra_env: dict[str, str] | None = None):
+    def _launch(self, tmp: Path, extra_args: list[str], extra_env: dict[str, str] | None = None, height: int = 923):
         binary = _resolve_binary()
         rt_dir = tmp / "xdg-rt"
         rt_dir.mkdir(mode=0o700, exist_ok=True)
         display = "leanui-u6-0"
-        comp = WaylandTestCompositor(rt_dir, display, width=1470, height=923)
+        comp = WaylandTestCompositor(rt_dir, display, width=1470, height=height)
         env = dict(os.environ)
         env.update({
             "XDG_RUNTIME_DIR": str(rt_dir),
@@ -884,7 +925,7 @@ class WaylandU6SessionTest(unittest.TestCase):
         if extra_env:
             env.update(extra_env)
         proc = subprocess.Popen(
-            [str(binary), "--width", "1470", "--height", "923", *extra_args],
+            [str(binary), "--width", "1470", "--height", str(height), *extra_args],
             env=env,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -910,6 +951,11 @@ class WaylandU6SessionTest(unittest.TestCase):
     def test_live_wayland_session_end_to_end(self) -> None:
         """Full U6 Wayland input-injection session against a local disposable Core."""
         core_state = DisposableCoreState()
+
+        def count_req(method: str, prefix: str) -> int:
+            with core_state.lock:
+                return sum(1 for m, p, _ in core_state.requests_log if m == method and p.startswith(prefix))
+
         with (
             tempfile.TemporaryDirectory(prefix="orb-u6-live-") as td,
             ThreadingHTTPServer(("127.0.0.1", 0), make_core_handler(core_state)) as server,
@@ -922,10 +968,10 @@ class WaylandU6SessionTest(unittest.TestCase):
                 comp, proc = self._launch(tmp, [])
                 try:
                     comp.wait_ready(timeout=15.0)
-                    # Wait for initial roster bootstrap from disposable Core.
-                    _wait_until("initial roster fetch", lambda: any(p == "/api/projects" for _, p, _ in core_state.requests_log))
-                    # Allow roster frame to settle.
-                    time.sleep(0.4)
+                    # Wait for the FINAL request of initial roster() bootstrap (/api/auth/me) AND frame commit.
+                    h_boot = comp.last_frame_hash
+                    _wait_until("initial roster /api/auth/me", lambda: count_req("GET", "/api/auth/me") >= 1)
+                    comp.wait_frame_change(h_boot, timeout=5.0)
 
                     # 1. Create a mission via Wayland Ctrl+N + keyboard + Wayland IME preedit/delete/commit + Return.
                     comp.key_tap("n", MOD_CTRL)
@@ -942,167 +988,211 @@ class WaylandU6SessionTest(unittest.TestCase):
                     self.assertEqual(user_msgs, ["Hello U6 日本語"])
                     self.assertEqual(created["status"], "active")
 
-                    # Wait for transcript screen & initial streamed turns to render.
-                    _wait_until("mission /open history fetch", lambda: any(p == f"/api/control/missions/{mid}/open" for _, p, _ in core_state.requests_log))
-                    _wait_until("mission /current-bubble fetch", lambda: any(p.startswith(f"/api/control/missions/{mid}/current-bubble") for _, p, _ in core_state.requests_log))
-                    time.sleep(0.5)
+                    # Wait for transcript /open + /current-bubble poll #1 AND poll #2 so both HS and B have painted.
+                    tx_before = comp.region_hash(240, 45, 1450, 810)
+                    _wait_until("mission /open history fetch", lambda: count_req("GET", f"/api/control/missions/{mid}/open") >= 1)
+                    _wait_until("mission /current-bubble settled", lambda: count_req("GET", f"/api/control/missions/{mid}/current-bubble") >= 2, timeout=6.0)
+                    tx_bottom = comp.wait_region_change(240, 45, 1450, 810, tx_before, timeout=5.0)
 
                     # 2. Scroll transcript upward with `Orb.Scroll` policy, verify unpinned anchor stays
-                    #    put while new assistant text arrives, then scroll back down to re-pin.
-                    frame_bottom = comp.last_frame_hash
+                    #    put while new assistant text streams in, then scroll back down to re-pin.
                     comp.pointer_scroll(740, 400, -1200)
-                    frame_scrolled_up = comp.wait_frame_change(frame_bottom, timeout=5.0)
-                    self.assertNotEqual(frame_scrolled_up, frame_bottom, "upward wheel scroll must update transcript pixels")
+                    tx_scrolled_up = comp.wait_region_change(240, 45, 1450, 810, tx_bottom, timeout=5.0)
+                    self.assertNotEqual(tx_scrolled_up, tx_bottom, "upward wheel scroll must update transcript pixels")
 
-                    # Append more assistant output on Core while unpinned; wait a beat and ensure viewport stays stable.
+                    # Append a streamed delta to the active assistant turn and wait for the next /current-bubble poll.
+                    polls_before = count_req("GET", f"/api/control/missions/{mid}/current-bubble")
                     with core_state.lock:
-                        core_state.add_event(mid, "assistant_message", "Extra incoming line while reader is scrolled up")
-                    time.sleep(0.6)
-                    # Scroll back down to bottom to re-pin.
-                    c_up = comp.commit_count
-                    comp.pointer_scroll(740, 400, 2400)
-                    comp.wait_commit(c_up, timeout=5.0)
+                        core_state.append_assistant_delta(mid, "Streamed delta 49: appended while reader is unpinned.")
+                    _wait_until(
+                        "next /current-bubble poll after delta",
+                        lambda: count_req("GET", f"/api/control/missions/{mid}/current-bubble") >= polls_before + 2,
+                        timeout=6.0,
+                    )
+                    # Unpinned reader anchor must keep the visible transcript viewport pixels unchanged!
+                    self.assertEqual(
+                        comp.region_hash(240, 45, 1450, 810),
+                        tx_scrolled_up,
+                        "Orb.Scroll unpinned viewport must remain stable when new assistant lines arrive",
+                    )
+                    # Scroll back down to bottom to re-pin and reveal the newly appended delta.
+                    comp.pointer_scroll(740, 400, 3600)
+                    tx_repinned = comp.wait_region_change(240, 45, 1450, 810, tx_scrolled_up, timeout=5.0)
+                    self.assertNotEqual(tx_repinned, tx_scrolled_up, "scrolling back to bottom must reveal new streamed lines")
 
-                    # 3. Exercise Side Panels (header Diff, Files, Side-chat, Diff Unified/Split, Close, and Left Sidebar Ctrl+B).
-                    # Header right buttons live at x in [1370..1460], y=17 (35px header, 10px right pad, 90px box: 3x 26px + 2x 6px gaps).
-                    # Box x = 1470 - 10 - 90 = 1370 -> Diff center=1383, Files center=1415, Chat center=1447.
+                    # 3. Exercise Side Panels (header Diff, Files, Side-chat, Close, Escape-release guard, and Left Sidebar Ctrl+B).
                     frame_no_panel = comp.last_frame_hash
                     comp.pointer_click(1383, 17)  # Open Diff side panel
                     frame_diff_panel = comp.wait_frame_change(frame_no_panel, timeout=5.0)
                     self.assertNotEqual(frame_diff_panel, frame_no_panel, "clicking Diff header icon must open side panel")
 
+                    # Open Search (Ctrl+K) while side panel is open, verify IME in Search + interior click does not close,
+                    # then press Escape and verify Escape key-release does NOT bleed through to close the side panel!
+                    comp.key_tap("k", MOD_CTRL)
+                    frame_search_open = comp.wait_frame_change(frame_diff_panel, timeout=5.0)
+                    comp.wait_text_input(True, timeout=5.0)
+                    comp.ime_edit(commit="Hello", preedit="検")
+                    comp.wait_frame_change(frame_search_open, timeout=5.0)
+                    comp.ime_edit(commit="", preedit="")
+                    # Clicking inside the Search modal preview pane (900, 300) must NOT dismiss the modal.
+                    h_in_search = comp.last_frame_hash
+                    comp.pointer_click(900, 300)
+                    time.sleep(0.15)
+                    self.assertEqual(comp.last_frame_hash, h_in_search, "clicking inside Search card must not close modal")
+                    # Pressing Escape closes Search while leaving Diff side panel intact.
+                    comp.key_tap("esc")
+                    frame_after_search_esc = comp.wait_frame_change(h_in_search, timeout=5.0)
+                    self.assertNotEqual(
+                        comp.region_hash(1000, 50, 1450, 600),
+                        comp.region_hash(1000, 50, 1450, 600) if frame_after_search_esc == frame_no_panel else "",
+                    )
+
                     comp.pointer_click(1415, 17)  # Switch to Files side panel
-                    frame_files_panel = comp.wait_frame_change(frame_diff_panel, timeout=5.0)
-                    self.assertNotEqual(frame_files_panel, frame_diff_panel, "switching to Files panel must repaint")
+                    frame_files_panel = comp.wait_frame_change(frame_after_search_esc, timeout=5.0)
+                    self.assertNotEqual(frame_files_panel, frame_after_search_esc, "switching to Files panel must repaint")
 
-                    c2 = comp.commit_count
                     comp.pointer_click(1447, 17)  # Switch to Side-chat panel
-                    comp.wait_commit(c2, timeout=5.0)
+                    frame_chat_panel = comp.wait_frame_change(frame_files_panel, timeout=5.0)
 
-                    c3 = comp.commit_count
                     comp.pointer_click(1447, 17)  # Toggle Side-chat closed
-                    comp.wait_commit(c3, timeout=5.0)
+                    comp.wait_frame_change(frame_chat_panel, timeout=5.0)
 
                     # Left sidebar hide/show via Ctrl+B.
-                    c4 = comp.commit_count
                     h_open = comp.last_frame_hash
                     comp.key_tap("b", MOD_CTRL)
-                    comp.wait_commit(c4, timeout=5.0)
-                    self.assertNotEqual(comp.last_frame_hash, h_open, "Ctrl+B must hide sidebar")
-                    c5 = comp.commit_count
+                    h_hidden = comp.wait_frame_change(h_open, timeout=5.0)
+                    self.assertNotEqual(h_hidden, h_open, "Ctrl+B must hide sidebar")
                     comp.key_tap("b", MOD_CTRL)
-                    comp.wait_commit(c5, timeout=5.0)
+                    comp.wait_frame_change(h_hidden, timeout=5.0)
 
                     # 4. Stop the running mission via pointer click on Stop button (widget 2 at x=1197, y=850).
+                    polls_pre_stop = count_req("GET", f"/api/control/missions/{mid}/current-bubble")
                     comp.pointer_click(1197, 850)
                     _wait_until("mission stopped on Core", lambda: core_state.missions[0]["status"] == "interrupted")
-
-                    # Wait for desktop subscription to observe interrupted status so composer switches from Stop -> Send.
-                    time.sleep(0.8)
+                    # Wait deterministically for poll_bubble to observe the interrupted status and repaint the Send button.
+                    _wait_until(
+                        "bubble poll observes interrupted",
+                        lambda: count_req("GET", f"/api/control/missions/{mid}/current-bubble") >= polls_pre_stop + 2,
+                        timeout=6.0,
+                    )
 
                     # 5. Send a follow-up message via pointer click on composer + keyboard + IME + Send click.
                     comp.pointer_click(700, 850)
                     comp.wait_text_input(True, timeout=5.0)
                     comp.type_ascii("Followup ")
                     comp.ime_edit(commit="確認", preedit="")
+                    polls_pre_send = count_req("GET", f"/api/control/missions/{mid}/current-bubble")
                     comp.pointer_click(1197, 850)
                     _wait_until(
                         "POST /api/control/message",
-                        lambda: any(m == "POST" and p == "/api/control/message" for m, p, _ in core_state.requests_log),
+                        lambda: count_req("POST", "/api/control/message") >= 1,
                     )
                     followup_msgs = [e["content"] for e in core_state.events[mid] if e["event_type"] == "user_message"]
                     self.assertEqual(followup_msgs, ["Hello U6 日本語", "Followup 確認"])
 
-                    # Stop the follow-up turn before archiving.
-                    time.sleep(0.8)
+                    # Wait for poll_bubble to report active again, then Stop the follow-up turn before archiving.
+                    _wait_until(
+                        "bubble poll observes active follow-up",
+                        lambda: count_req("GET", f"/api/control/missions/{mid}/current-bubble") >= polls_pre_send + 2,
+                        timeout=6.0,
+                    )
+                    polls_pre_stop2 = count_req("GET", f"/api/control/missions/{mid}/current-bubble")
                     comp.pointer_click(1197, 850)
                     _wait_until("follow-up turn stopped", lambda: core_state.missions[0]["status"] == "interrupted")
-                    time.sleep(0.6)
+                    _wait_until(
+                        "bubble poll observes stopped follow-up",
+                        lambda: count_req("GET", f"/api/control/missions/{mid}/current-bubble") >= polls_pre_stop2 + 2,
+                        timeout=6.0,
+                    )
 
-                    # 6. Archive the mission: expand Source Project in sidebar, right-click the mission row, click Archive.
-                    # Sidebar geometry: header 35px, 6 nav rows (6*31 = 186 -> y=221), "Projects" section (+14+18+4 = 36 -> y=257),
-                    # first project ("Source Project") at y=257..287 (center y=272).
-                    c_exp = comp.commit_count
+                    # 6. Exercise Back / Forward (`Ctrl+[` / `Ctrl+]`) between mission transcript and New Agent without zombie state.
+                    h_tx = comp.last_frame_hash
+                    comp.key_tap("[", MOD_CTRL)
+                    h_back = comp.wait_frame_change(h_tx, timeout=5.0)
+                    comp.key_tap("]", MOD_CTRL)
+                    comp.wait_frame_change(h_back, timeout=5.0)
+
+                    # 7. Archive the mission: expand Source Project in sidebar, right-click the mission row, click Archive.
+                    h_pre_exp = comp.last_frame_hash
                     comp.pointer_click(100, 272)  # Expand Source Project
-                    comp.wait_commit(c_exp, timeout=5.0)
-                    # Mission row appears directly beneath Source Project at y=288..318 (center y=303).
-                    c_ctx = comp.commit_count
+                    h_exp = comp.wait_frame_change(h_pre_exp, timeout=5.0)
                     comp.pointer_click(100, 303, button=0x111)  # Right-click context menu
-                    comp.wait_commit(c_ctx, timeout=5.0)
-                    # Context menu opens at (100, 303): padding 6px, rows 30px each:
-                    # 0: Rename (309..339), 1: Move to (339..369), 2: Archive (369..399, center y=384).
-                    comp.pointer_click(160, 384)
+                    comp.wait_frame_change(h_exp, timeout=5.0)
+                    # Hash bottom composer dock (present on missionTranscript, blank on controlEmpty) so we wait until archive finishes.
+                    dock_pre_arch = comp.region_hash(450, 820, 1220, 915)
+                    comp.pointer_click(160, 384)  # Click Archive
                     _wait_until("mission archived on Core", lambda: core_state.missions[0]["status"] == "acknowledged")
+                    comp.wait_region_change(450, 820, 1220, 915, dock_pre_arch, timeout=5.0)
 
-                    # 7. Exercise Inference VPN & alternative-router controls (`Ctrl+4`).
+                    # 8. Exercise Inference VPN & alternative-router controls (`Ctrl+4`).
+                    # Row 0 of Inference lives at (525..1165, 35..95); blank during "Loading accounts…" and painted once providers load.
+                    row0_pre_inf = comp.region_hash(525, 35, 1165, 95)
                     comp.key_tap("4", MOD_CTRL)
-                    _wait_until("GET /api/ai/providers", lambda: any(p == "/api/ai/providers" for _, p, _ in core_state.requests_log))
-                    time.sleep(0.4)
-                    # Live Inference row 0 (`acct-ag-1`): centered colW=640 inside mainW=1250 -> x0 = 220 + (1250-640)/2 = 525.
-                    # Row 0 y = 35..95 (center y=65). Primary toggle x=525..1081, Settings › x=1081..1165 (center x=1123).
+                    _wait_until("GET /api/ai/providers", lambda: count_req("GET", "/api/ai/providers") >= 1)
+                    row0_inf = comp.wait_region_change(525, 35, 1165, 95, row0_pre_inf, timeout=5.0)
                     comp.pointer_click(700, 65)  # Toggle provider user_enabled -> false
                     _wait_until("provider skipped on Core", lambda: core_state.providers[0]["user_enabled"] is False)
+                    row0_toggled = comp.wait_region_change(525, 35, 1165, 95, row0_inf, timeout=5.0)
                     comp.pointer_click(700, 65)  # Toggle provider user_enabled -> true
                     _wait_until("provider re-enabled on Core", lambda: core_state.providers[0]["user_enabled"] is True)
+                    comp.wait_region_change(525, 35, 1165, 95, row0_toggled, timeout=5.0)
 
                     # Open AccountRoutePage (`Settings ›`) for Antigravity account.
+                    routes_pre = comp.region_hash(525, 220, 1165, 385)
                     comp.pointer_click(1123, 65)
-                    _wait_until("GET /vpn", lambda: any(p == "/api/ai/providers/acct-ag-1/vpn" for _, p, _ in core_state.requests_log))
-                    _wait_until(
-                        "GET /alternative-routers",
-                        lambda: any(p == "/api/ai/providers/acct-ag-1/alternative-routers" for _, p, _ in core_state.requests_log),
-                    )
-                    time.sleep(0.4)
-                    # AccountRoutePage layout (colW=640 centered at x=525..1165, col gap=4, y0=35):
-                    # Back (42px: 35..77), gap 4, Heading (36px: 81..117), gap 4, Card starts at y=121 (rowH=52 each):
-                    # row 0: Account connection (121..173)
-                    # row 1: Direct (selected, 173..225)
-                    # row 2: AirVPN · NL (225..277, center y=251)
-                    # row 3: AirVPN · DE (277..329)
-                    # row 4: Alternative routers (329..381, center y=355)
-                    comp.pointer_click(845, 251)  # Select AirVPN · NL
+                    _wait_until("GET /vpn", lambda: count_req("GET", "/api/ai/providers/acct-ag-1/vpn") >= 1)
+                    _wait_until("GET /alternative-routers", lambda: count_req("GET", "/api/ai/providers/acct-ag-1/alternative-routers") >= 1)
+                    comp.wait_region_change(525, 220, 1165, 385, routes_pre, timeout=5.0)
+                    h_routes = comp.last_frame_hash
+
+                    # Select AirVPN · NL (row 2, center y=251) and wait for both Core refresh AND painted non-pending frame.
+                    alt_count_1 = count_req("GET", "/api/ai/providers/acct-ag-1/alternative-routers")
+                    comp.pointer_click(845, 251)
+                    h_nl_pending = comp.wait_frame_change(h_routes, timeout=5.0)
                     _wait_until("PUT /vpn NL", lambda: core_state.vpn_state["acct-ag-1"]["country"] == "NL")
-                    time.sleep(0.4)
-                    # Now Direct is selectable (row 1, center y=199).
-                    comp.pointer_click(845, 199)  # Switch back to Direct
+                    _wait_until("refresh after PUT /vpn NL", lambda: count_req("GET", "/api/ai/providers/acct-ag-1/alternative-routers") > alt_count_1)
+                    h_nl = comp.wait_frame_change(h_nl_pending, timeout=5.0)
+
+                    # Switch back to Direct (row 1, center y=199) and wait for both Core refresh AND painted non-pending frame.
+                    alt_count_2 = count_req("GET", "/api/ai/providers/acct-ag-1/alternative-routers")
+                    comp.pointer_click(845, 199)
+                    h_direct_pending = comp.wait_frame_change(h_nl, timeout=5.0)
                     _wait_until("PUT /vpn direct", lambda: core_state.vpn_state["acct-ag-1"]["mode"] == "direct")
-                    time.sleep(0.4)
-                    # Toggle Alternative routers (row 4, center y=355).
+                    _wait_until("refresh after PUT /vpn direct", lambda: count_req("GET", "/api/ai/providers/acct-ag-1/alternative-routers") > alt_count_2)
+                    h_direct = comp.wait_frame_change(h_direct_pending, timeout=5.0)
+
+                    # Toggle Alternative routers (row 4, center y=355) and wait for refresh + repaint.
+                    alt_count_3 = count_req("GET", "/api/ai/providers/acct-ag-1/alternative-routers")
                     comp.pointer_click(845, 355)
+                    h_alt_pending = comp.wait_frame_change(h_direct, timeout=5.0)
                     _wait_until("PUT /alternative-routers false", lambda: core_state.alt_routers["acct-ag-1"]["allowed"] is False)
-                    time.sleep(0.3)
+                    _wait_until("refresh after PUT /alternative-routers", lambda: count_req("GET", "/api/ai/providers/acct-ag-1/alternative-routers") > alt_count_3)
+                    h_alt = comp.wait_frame_change(h_alt_pending, timeout=5.0)
+
                     # Escape returns to Inference list.
-                    c_esc = comp.commit_count
                     comp.key_tap("esc")
-                    comp.wait_commit(c_esc, timeout=5.0)
+                    h_back_inf = comp.wait_frame_change(h_alt, timeout=5.0)
 
-                    # 8. Exercise Search Dialog (`Ctrl+K`), Machines (`Ctrl+3`), Resources (`Ctrl+6`), Cloud (`Ctrl+2`), Inbox (`Ctrl+I`), Settings (`Ctrl+,`).
-                    c_k = comp.commit_count
-                    comp.key_tap("k", MOD_CTRL)
-                    comp.wait_commit(c_k, timeout=5.0)
-                    comp.wait_text_input(True, timeout=5.0)
-                    comp.type_ascii("Hello")
-                    comp.key_tap("down")
-                    c_kesc = comp.commit_count
-                    comp.key_tap("esc")
-                    comp.wait_commit(c_kesc, timeout=5.0)
+                    # 9. Exercise Machines (`Ctrl+3`), Resources (`Ctrl+6`), Cloud (`Ctrl+2`), Inbox (`Ctrl+I`), Settings (`Ctrl+,`).
+                    comp.key_tap("3", MOD_CTRL)
+                    h_machines = comp.wait_frame_change(h_back_inf, timeout=5.0)
+                    # Click a machine row in live Machines fleet.
+                    comp.pointer_click(845, 65)
 
-                    for key, expected_path in [
-                        ("3", "/api/machines"),
-                        ("6", "/api/resources/overview?range=6h"),
-                        ("2", "/api/cloud/accounts"),
-                    ]:
-                        c_nav = comp.commit_count
-                        comp.key_tap(key, MOD_CTRL)
-                        comp.wait_commit(c_nav, timeout=5.0)
-                        _wait_until(f"GET {expected_path}", lambda ep=expected_path: any(p == ep for _, p, _ in core_state.requests_log))
+                    comp.key_tap("6", MOD_CTRL)
+                    _wait_until("GET /api/resources/overview?range=6h", lambda: count_req("GET", "/api/resources/overview?range=6h") >= 1)
+                    h_res = comp.wait_frame_change(h_machines, timeout=5.0)
 
-                    c_set = comp.commit_count
+                    comp.key_tap("2", MOD_CTRL)
+                    _wait_until("GET /api/cloud/accounts", lambda: count_req("GET", "/api/cloud/accounts") >= 1)
+                    h_cloud = comp.wait_frame_change(h_res, timeout=5.0)
+
+                    comp.key_tap("i", MOD_CTRL)
+                    h_inbox = comp.wait_frame_change(h_cloud, timeout=5.0)
+
                     comp.key_tap(",", MOD_CTRL)
-                    comp.wait_commit(c_set, timeout=5.0)
-                    _wait_until("GET /api/auth/me", lambda: any(p == "/api/auth/me" for _, p, _ in core_state.requests_log))
+                    h_dark = comp.wait_frame_change(h_inbox, timeout=5.0)
                     # Toggle theme in live Settings (second button below Account/Connected/endpoint/@user/Manage account, y=219..259).
-                    h_dark = comp.last_frame_hash
                     comp.pointer_click(350, 239)
                     h_light = comp.wait_frame_change(h_dark, timeout=5.0)
                     self.assertNotEqual(h_light, h_dark, "clicking Theme toggle in Settings must switch theme")
@@ -1116,77 +1206,91 @@ class WaylandU6SessionTest(unittest.TestCase):
 
     def test_all_nine_screens_wayland_input_sweep(self) -> None:
         """Launch each of the 9 canonical screens under Wayland and exercise its interactive controls."""
-        # For each screen: list of (label, action) steps that must trigger real Wayland repaints.
+        # For each screen: (screen_id, height, steps). Every step asserts real framebuffer pixel change (`wait_frame_change`).
         screens = [
-            ("01_control_empty", [
-                ("click composer", lambda c: c.pointer_click(845, 435)),
-                ("type text", lambda c: c.type_ascii("hello")),
-                ("ime commit", lambda c: c.ime_edit(commit="世界")),
-                ("click project picker", lambda c: c.pointer_click(575, 390)),
-                ("click send", lambda c: c.pointer_click(1124, 488)),
+            ("01_control_empty", 923, [
+                ("click composer", lambda c: c.pointer_click(845, 435), True),
+                ("type text", lambda c: c.type_ascii("hello"), True),
+                ("ime preedit visible", lambda c: c.ime_edit(preedit="未確定"), True),
+                ("ime commit", lambda c: c.ime_edit(commit="世界", preedit=""), True),
+                ("click project picker", lambda c: c.pointer_click(575, 390), True),
+                ("click send", lambda c: c.pointer_click(1124, 488), True),
             ]),
-            ("02_control_populated", [
-                ("tab focus", lambda c: c.key_tap("tab")),
-                ("shift-tab focus", lambda c: c.key_tap("tab", MOD_SHIFT)),
-                ("ctrl+b sidebar toggle", lambda c: c.key_tap("b", MOD_CTRL)),
-                ("ctrl+b sidebar restore", lambda c: c.key_tap("b", MOD_CTRL)),
+            ("02_control_populated", 923, [
+                ("tab focus", lambda c: c.key_tap("tab"), True),
+                ("shift-tab focus", lambda c: c.key_tap("tab", MOD_SHIFT), True),
+                ("ctrl+b sidebar toggle", lambda c: c.key_tap("b", MOD_CTRL), True),
+                ("ctrl+b sidebar restore", lambda c: c.key_tap("b", MOD_CTRL), True),
             ]),
-            ("03_mission_transcript", [
-                ("scroll transcript down", lambda c: c.pointer_scroll(740, 400, 600)),
-                ("click composer", lambda c: c.pointer_click(700, 850)),
-                ("type and ime", lambda c: (c.type_ascii("hi "), c.ime_edit(commit="テスト"))),
-                ("open diff side panel", lambda c: c.pointer_click(1365, 17)),
+            ("03_mission_transcript", 600, [
+                ("scroll transcript down (overflow > 0)", lambda c: c.pointer_scroll(740, 280, 600), True),
+                ("click composer", lambda c: c.pointer_click(700, 527), True),
+                ("type and ime", lambda c: (c.type_ascii("hi "), c.ime_edit(commit="テスト")), True),
+                ("open diff side panel", lambda c: c.pointer_click(1383, 17), True),
             ]),
-            ("04_mission_split_diff", [
-                ("scroll left transcript", lambda c: c.pointer_scroll(500, 400, 600)),
-                ("switch diff to Unified", lambda c: c.pointer_click(1115, 57)),
-                ("switch diff to Split", lambda c: c.pointer_click(1165, 57)),
-                ("cycle diff ref", lambda c: c.pointer_click(995, 57)),
-                ("click diff Refresh", lambda c: c.pointer_click(1225, 57)),
+            ("04_mission_split_diff", 600, [
+                ("scroll left transcript (overflow > 0)", lambda c: c.pointer_scroll(500, 280, 600), True),
+                ("switch diff to Unified", lambda c: c.pointer_click(1115, 57), True),
+                ("switch diff to Split", lambda c: c.pointer_click(1165, 57), True),
+                ("cycle diff ref", lambda c: c.pointer_click(995, 57), True),
+                ("click diff Refresh", lambda c: c.pointer_click(1225, 57), True),
             ]),
-            ("05_machines_fleet", [
-                ("click local machine", lambda c: c.pointer_click(845, 193)),
-                ("click remote machine", lambda c: c.pointer_click(845, 304)),
-                ("click Copy key", lambda c: c.pointer_click(1123, 678)),
+            ("05_machines_fleet", 923, [
+                ("click local machine", lambda c: c.pointer_click(845, 193), True),
+                ("click remote machine", lambda c: c.pointer_click(845, 304), True),
+                ("click Copy key", lambda c: c.pointer_click(1123, 678), True),
             ]),
-            ("06_settings_general", [
-                ("click Users tab", lambda c: c.pointer_click(657, 146)),
-                ("click Account tab", lambda c: c.pointer_click(585, 146)),
-                ("toggle Theme Dark/Light", lambda c: c.pointer_click(1093, 665)),
-                ("toggle Background sync", lambda c: c.pointer_click(1093, 727)),
+            ("06_settings_general", 923, [
+                ("click Users tab", lambda c: c.pointer_click(657, 146), True),
+                ("click Account tab", lambda c: c.pointer_click(585, 146), True),
+                ("click API URL input", lambda c: c.pointer_click(1003, 246), True),
+                ("type in API URL", lambda c: c.type_ascii("/v2"), True),
+                ("toggle Theme Dark/Light", lambda c: c.pointer_click(1093, 665), True),
+                ("toggle Background sync", lambda c: c.pointer_click(1093, 727), True),
             ]),
-            ("07_search_dialog", [
-                ("type in search input", lambda c: c.type_ascii("2")),
-                ("arrow down result", lambda c: c.key_tap("down")),
-                ("click Titles filter", lambda c: c.pointer_click(470, 136)),
-                ("click Clear query", lambda c: c.pointer_click(1100, 98)),
-                ("press Escape to close", lambda c: c.key_tap("esc")),
+            ("07_search_dialog", 923, [
+                ("arrow down result", lambda c: c.key_tap("down"), True),
+                ("click Clear query", lambda c: c.pointer_click(1100, 98), True),
+                ("type in search input", lambda c: c.type_ascii("w"), True),
+                ("click Titles filter", lambda c: c.pointer_click(470, 136), True),
+                ("click inside preview pane stays open", lambda c: c.pointer_click(900, 300), False),
+                ("press Escape to close", lambda c: c.key_tap("esc"), True),
+                ("post-Escape Tab moves focus", lambda c: c.key_tap("tab"), True),
+                ("post-Escape click composer restores focus", lambda c: c.pointer_click(845, 435), True),
+                ("post-Escape type proves trap popped", lambda c: c.type_ascii("ok"), True),
             ]),
-            ("08_new_mission_dialog", [
-                ("click composer", lambda c: c.pointer_click(845, 435)),
-                ("type extra text", lambda c: c.type_ascii(" ok")),
-                ("click Send", lambda c: c.pointer_click(1124, 488)),
+            ("08_new_mission_dialog", 923, [
+                ("click composer", lambda c: c.pointer_click(845, 435), True),
+                ("type extra text", lambda c: c.type_ascii(" ok"), True),
+                ("click Send", lambda c: c.pointer_click(1124, 488), True),
             ]),
-            ("09_toast_notifications", [
-                ("dismiss third toast", lambda c: c.pointer_click(1149, 862)),
-                ("dismiss second toast", lambda c: c.pointer_click(1021, 800)),
-                ("dismiss first toast", lambda c: c.pointer_click(1130, 738)),
+            ("09_toast_notifications", 923, [
+                ("dismiss third toast", lambda c: c.pointer_click(1149, 862), True),
+                ("dismiss second toast", lambda c: c.pointer_click(1021, 800), True),
+                ("dismiss first toast", lambda c: c.pointer_click(1130, 738), True),
             ]),
         ]
 
         with tempfile.TemporaryDirectory(prefix="orb-u6-9screens-") as td:
             root = Path(td)
-            for idx, (screen_id, steps) in enumerate(screens):
+            for idx, (screen_id, height, steps) in enumerate(screens):
                 with self.subTest(screen=screen_id):
                     sub = root / f"s{idx}"
                     sub.mkdir()
-                    comp, proc = self._launch(sub, ["--screen", screen_id])
+                    comp, proc = self._launch(sub, ["--screen", screen_id], height=height)
                     try:
                         comp.wait_ready(timeout=15.0)
-                        for label, action in steps:
-                            before = comp.commit_count
+                        for label, action, expect_change in steps:
+                            prev_hash = comp.last_frame_hash
                             action(comp)
-                            comp.wait_commit(before, timeout=5.0)
+                            if expect_change:
+                                try:
+                                    comp.wait_frame_change(prev_hash, timeout=5.0)
+                                except TimeoutError as exc:
+                                    raise AssertionError(f"{screen_id} step '{label}': {exc}") from exc
+                            else:
+                                time.sleep(0.15)
+                                self.assertEqual(comp.last_frame_hash, prev_hash, f"{screen_id}: {label} must not repaint/dismiss")
                     finally:
                         self._shutdown(comp, proc)
 

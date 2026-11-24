@@ -379,13 +379,19 @@ def desktopReducer (rt : Runtime.RuntimeState DesktopState) :
             if let some composer := st.composer.editKey? key mods rows then
               return ({ st with composer }, if composer == st.composer then none else some viewport)
     if !st.liveData && st.screen == .settingsGeneral && rt.focus.owner == some settingsApiUrlId then
-      let buf := match ev with
-        | .text text => st.settingsApiUrl.insertText text
-        | .imeBatch db da text preedit _ _ => st.settingsApiUrl.applyImeBatch db da text preedit
-        | .preedit text _ _ => st.settingsApiUrl.setPreedit text
-        | _ => st.settingsApiUrl
-      if buf != st.settingsApiUrl then
-        return ({ st with settingsApiUrl := buf }, some viewport)
+      match ev with
+      | .text text =>
+        let buf := st.settingsApiUrl.insertText text
+        return ({ st with settingsApiUrl := buf }, if buf == st.settingsApiUrl then none else some viewport)
+      | .imeBatch db da text preedit _ _ =>
+        let buf := st.settingsApiUrl.applyImeBatch db da text preedit
+        return ({ st with settingsApiUrl := buf }, if buf == st.settingsApiUrl then none else some viewport)
+      | .preedit text _ _ =>
+        let buf := st.settingsApiUrl.setPreedit text
+        return ({ st with settingsApiUrl := buf }, if buf == st.settingsApiUrl then none else some viewport)
+      | .composerReturn _ =>
+        return (st, none)
+      | _ => pure ()
     if let .pointerMove x y := ev then
       return (st, st.sidebarHoverDamage rt.hitRegions scale rt.hoveredEntity (hitTest rt.hitRegions x y))
     if let .pointerLeave := ev then
@@ -709,7 +715,7 @@ def main (args : List String) : IO UInt32 := do
               return (voiced, if updated.isSome || voiced.voiceAvailable != next.voiceAvailable ||
                 voiced.voicePhase != next.voicePhase then some vp else damage))
             (·.liveData) desktopFocusChange (some wakeFd) (·.writeRequest.isSome)
-            (fun rt => animations && (runningBadgeDamage rt).isSome)
+            (fun rt => animations && (runningBadgeDamage rt).isSome) desktopFocusTraps
         finally
           discard (IO.wait probe)
           closeVoice voiceSlot
