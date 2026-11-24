@@ -446,15 +446,6 @@ def verifyLoginCredentials (cfg : CoreConfig) (username? : Option String) (suppl
       (match username? with | none => true | some reqU => reqU.isEmpty || reqU == u) &&
       ctEqSlice (ByteSlice.ofString suppliedPassword) (ByteSlice.ofString p)
 
-/-- Authenticate protected HTTP API routes (`Authorization: Bearer <token>`). -/
-def authenticateHttpBearer (cfg : CoreConfig) (hdrs : Array (String × String)) (nowEpochSec : UInt64) : Bool :=
-  if cfg.devMode then true
-  else
-    match extractBearerToken? hdrs nowEpochSec with
-    | none => false
-    | some tok =>
-      (verifyAnySessionTokenExp? (effectiveJwtSecret cfg) tok nowEpochSec).isSome
-
 /-- Resolve `CallerPrincipal` against `users` (`orb-jwt-v2` live session epoch + `!disabled` check
     via `Orb.Kernel.multiuserRbacStep`, or verified single-tenant legacy token; never falls back
     to bootstrap admin on a failed lookup or raw password bearer). -/
@@ -4283,7 +4274,8 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
     if caller.role == "admin" then
       items := items.push "{\"id\":\"core\",\"name\":\"orb-core\",\"status\":\"online\",\"admin_only\":true,\"core_colocated\":true}"
     for vm in visibleVms do
-      if vm.status != "destroyed" then
+      if (vm.status == "ready" || vm.status == "provisioning") &&
+         (vm.expiresAtSec == (0 : UInt64) || vm.expiresAtSec > nowEpochSec) then
         items := items.push s!"\{\"id\":{jsonEscape s!"managed-{vm.id}"},\"name\":{jsonEscape vm.sandboxName},\"provider\":{jsonEscape vm.provider},\"status\":{jsonEscape vm.status},\"admin_only\":false}"
     return .ok (mkJson 200 ("[" ++ String.intercalate "," items.toList ++ "]"))
 
@@ -6682,14 +6674,14 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
     let nowIsoRn := formatEpochIso8601Utc nowEpochSec
     match st.managedStore? with
     | none =>
-      let fv ← buildComputeFleetJVal st.relayHub? none mf callerUidOpt (infS + cmpS) caller.dailySpendCapCents? st.store.rootDir nowIsoRn (some st.store) 2500 isRnAdmin
+      let fv ← buildComputeFleetJVal st.relayHub? none mf callerUidOpt (infS + cmpS) caller.dailySpendCapCents? st.store.rootDir nowIsoRn (some st.store) 2500 isRnAdmin (some nowEpochSec)
       return .ok (mkJson 200 (renderCompact fv))
     | some mst =>
       match ← loadManagedFleet mst mf.enabled mf.boatEnabled mf.dailyCapCents mf.spentTodayCents mf.maxConcurrent with
       | .error e => return .ok (mkJson 500 s!"\{\"error\":{jsonEscape e}}")
       | .ok live =>
         st.managedRef.set live
-        let fv ← buildComputeFleetJVal st.relayHub? (some mst) live callerUidOpt (infS + cmpS) caller.dailySpendCapCents? st.store.rootDir nowIsoRn (some st.store) 2500 isRnAdmin
+        let fv ← buildComputeFleetJVal st.relayHub? (some mst) live callerUidOpt (infS + cmpS) caller.dailySpendCapCents? st.store.rootDir nowIsoRn (some st.store) 2500 isRnAdmin (some nowEpochSec)
         return .ok (mkJson 200 (renderCompact fv))
 
   -- Durable follow-up queue (`GET|POST /api/control/queue`, `PATCH /api/control/queue/:id`, `POST /api/control/queue/:id/step`, `POST /api/control/queue/:id/requeue`)

@@ -426,45 +426,6 @@ def callRemoteNodeHttp
       let jv? := (OrbBin.Json.parseBytes resp.body).toOption
       return .ok (resp.status, txt, jv?, effNodeId, nodeTok)
 
-/-- Execute a command synchronously (`POST /execute`) on a remote node or managed VM. -/
-def execOnRemoteNode
-    (hub? : Option RelayHub)
-    (mc : ManagedComputeStore)
-    (targetNodeId missionId command : String)
-    (sideLane : Bool := false)
-    (timeoutMs : Nat := 60000) : IO (Except String JVal) := do
-  let (_, staticNodes) ← loadStaticRemoteNodes
-  let (effNodeId, nodeSecret) ← do
-    if let some sn := staticNodes.find? (fun n => n.id == targetNodeId) then
-      match ← resolveStaticNodeToken? sn with
-      | some tok => pure (sn.id, tok)
-      | none => return .error s!"remote node `{sn.id}` has no token in `{sn.tokenEnv}`"
-    else
-      match ← resolveManagedMachineId? mc targetNodeId with
-      | none => return .error s!"unknown remote node `{targetNodeId}`"
-      | some mid =>
-        match ← getManagedNodeAuth? mc mid with
-        | some pair => pure pair
-        | none => return .error s!"managed machine `{mid}` has no enrolled token"
-  let nowSec ← nowEpoch
-  let effMissionId :=
-    if missionId.trimAscii.toString.isEmpty then "00000000-0000-0000-0000-000000000000"
-    else missionId.trimAscii.toString
-  let leaseTok := signRemoteNodeLeaseToken nodeSecret effMissionId effNodeId "mission:execute" (nowSec + 900)
-  let payload := JVal.obj #[
-    ("mission_id", .str effMissionId),
-    ("lease_token", .str leaseTok),
-    ("command", .str command),
-    ("side_lane", .bool sideLane)
-  ]
-  match ← callRemoteNodeHttp hub? mc targetNodeId "POST" "/execute" (some payload) #[] timeoutMs with
-  | .error e => return .error e
-  | .ok (st, txt, jv?, _, _) =>
-    if 200 ≤ st && st < 300 then
-      return .ok (jv?.getD (.obj #[("stdout", .str txt), ("exit_code", JVal.nat 0)]))
-    else
-      return .error s!"node HTTP {st}: {txt}"
-
 /-! ## `GET /api/compute/fleet`, Enriched `GET /api/remote-nodes`, & Persisted Static Node Cordons -/
 
 /-- Read persisted static-node cordons from `<dataRoot>/node_state.json` (matching Rust `node_state.json`). -/
@@ -512,9 +473,9 @@ def buildRemoteLaunchCapabilitiesJVal : IO JVal := do
   let proxyConfigured := !p1.isEmpty || !p2.isEmpty
   return .obj #[
     ("typed", .bool true),
-    ("harnesses", .arr #[.str "claudecode", .str "opencode", .str "grok", .str "codex", .str "antigravity", .str "vibe"]),
+    ("harnesses", .arr #[.str "claudecode", .str "opencode", .str "grok", .str "codex", .str "antigravity"]),
     ("goal_harnesses", .arr (RemoteGoal.harnesses.map JVal.str)),
-    ("requires_proxy_harnesses", .arr #[.str "claudecode", .str "opencode", .str "codex", .str "vibe"]),
+    ("requires_proxy_harnesses", .arr #[.str "claudecode", .str "opencode", .str "codex"]),
     ("raw_command", .bool true),
     ("proxy_url_configured", .bool proxyConfigured),
     ("error_prefixes", .arr #[
@@ -815,9 +776,12 @@ def buildComputeFleetJVal
     (nowIso : String := "")
     (store? : Option CoreStore := none)
     (probeDeadlineMs : Nat := 2500)
-    (isAdmin : Bool := false) : IO JVal := do
+    (isAdmin : Bool := false)
+    (nowSec? : Option UInt64 := none) : IO JVal := do
   let (rnEnabled, staticNodes) ← loadStaticRemoteNodes
-  let nowSec ← nowEpoch
+  let nowSec ← match nowSec? with
+    | some s => pure s
+    | none => nowEpoch
   let effIso := if nowIso.isEmpty then formatEpochIso8601Utc nowSec else nowIso
   let mut persistedCordons ← loadPersistedNodeCordons dataRoot
   if let some st := store? then
@@ -846,7 +810,10 @@ def buildComputeFleetJVal
     | some uid => fleet.machines.filter (fun m => m.ownerUserId == uid)
   let mut managedItems : Array JVal := #[]
   for m in visibleMachines do
-    if m.status != "destroyed" then
+    let isActiveVm :=
+      (m.status == "ready" || m.status == "provisioning") &&
+      (m.expiresAtSec == (0 : UInt64) || m.expiresAtSec > nowSec)
+    if isActiveVm then
       let hubSeen? ← match hub? with
         | some h => getMachineLastSeen? h m.id
         | none => pure none

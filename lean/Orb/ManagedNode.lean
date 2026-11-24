@@ -157,6 +157,21 @@ def observeVmRetainedArchive (s : VmSliceState) (confirmedArchive : Bool)
     { s with phaseCode := 2, activeComputeEligible := 0 }
   else s
 
+/-- Pure fleet-visibility gate for managed VMs (`get_compute_fleet`, `/api/remote-nodes`, `/api/nodes`):
+    only active (`phaseCode ∈ {0, 1}` or stopped with active `resumePending = 1`) and unexpired
+    (`expiresAtSec = 0 ∨ nowSec < expiresAtSec`) VMs are visible in the live compute fleet.
+    Destroyed (`3`), stopped (`2` without resume), pending-expiry (`expiryPending = 1`), and
+    expired VMs are excluded regardless of stale metadata. -/
+def verifyManagedFleetVisible (phaseCode expiryPending resumePending : UInt8)
+    (expiresAtSec nowSec : UInt64) : UInt8 :=
+  if phaseCode == 3 then 0
+  else if expiresAtSec != 0 && expiresAtSec ≤ nowSec then 0
+  else if phaseCode == 2 then
+    if resumePending == 1 then 1 else 0
+  else if phaseCode == 0 || phaseCode == 1 then
+    if expiryPending == 1 && resumePending != 1 then 0 else 1
+  else 0
+
 def foldVmSlice (s : VmSliceState) : List VmSliceEvent → VmSliceState
   | [] => s
   | ev :: rest => foldVmSlice (stepVmSlice s ev).1 rest
