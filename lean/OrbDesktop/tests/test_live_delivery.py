@@ -574,7 +574,7 @@ class Delivery(unittest.TestCase):
                     (5, 'assistant_message_canonical', MERMAID_TURN)):
                 db.execute("INSERT INTO mission_events VALUES(NULL,'a',?,?,?,?,'{}','')",
                            (seq, seq, kind, json.dumps({'content': content, 'queued': False})))
-        if mode in ('long-paging', 'older-403'):
+        if mode in ('long-paging', 'older-403', 'paging-degraded-recover', 'stale-older-race'):
             # >1,000-row persisted mission: initial /open serves only the newest
             # 200 tail rows + 80 spine rows (280 total), and earlier rows page in
             # on demand via /events?before_seq=...&view=transcript&limit=200.
@@ -585,6 +585,9 @@ class Delivery(unittest.TestCase):
                 content = f'Turn {seq:04d}'
                 db.execute("INSERT INTO mission_events VALUES(NULL,'a',?,?,?,?,'{}','')",
                            (seq, seq, kind, json.dumps({'content': content, 'queued': False})))
+        degraded_sent = threading.Event()
+        older_started = threading.Event()
+        unavailable_sent = threading.Event()
         project_started = threading.Event()
         release_project = threading.Event()
         events = '/current-bubble'
@@ -681,6 +684,11 @@ class Delivery(unittest.TestCase):
                     if mode == 'older-403':
                         self.send_error(403)
                         return
+                    if mode == 'stale-older-race':
+                        older_started.set()
+                        deadline = time.monotonic() + 8
+                        while time.monotonic() < deadline and not (Path(root) / 'stale-race-cleared').exists():
+                            time.sleep(0.02)
                     qs = live.urllib.parse.parse_qs(live.urllib.parse.urlsplit(path).query)
                     before_seq = int(qs.get('before_seq', ['0'])[0])
                     limit = int(qs.get('limit', ['200'])[0])
@@ -728,6 +736,30 @@ class Delivery(unittest.TestCase):
                             self.wfile.write(b'{not json')
                         except (BrokenPipeError, ConnectionResetError):
                             pass
+                        return
+                    if mid == 'a' and mode == 'paging-degraded-recover' and \
+                            (Path(root) / 'paging-paged-one').exists() and not degraded_sent.is_set():
+                        degraded_sent.set()
+                        for seq, kind in ((1051, 'user_message'), (1052, 'assistant_message')):
+                            db.execute("INSERT INTO mission_events VALUES(NULL,'a',?,?,?,?,'{}','')",
+                                       (seq, seq, kind, json.dumps({'content': f'Turn {seq:04d}', 'queued': False})))
+                        self.send_error(503)
+                        return
+                    if mid == 'a' and mode == 'stale-older-race' and older_started.is_set() and not unavailable_sent.is_set():
+                        unavailable_sent.set()
+                        for seq, kind in ((1051, 'user_message'), (1052, 'assistant_message')):
+                            db.execute("INSERT INTO mission_events VALUES(NULL,'a',?,?,?,?,'{}','')",
+                                       (seq, seq, kind, json.dumps({'content': f'Turn {seq:04d}', 'queued': False})))
+                        self.send_response(200)
+                        self.end_headers()
+                        try:
+                            self.wfile.write(b'{not json')
+                        except (BrokenPipeError, ConnectionResetError):
+                            pass
+                        return
+                    if mid == 'a' and mode == 'stale-older-race' and unavailable_sent.is_set() and \
+                            not (Path(root) / 'stale-race-cleared').exists():
+                        self.send_error(503)
                         return
                     if mid == 'a' and mode == 'markdown-turn' and paths.count(path) == 2:
                         # Stream the single markdown line first.
@@ -813,7 +845,7 @@ class Delivery(unittest.TestCase):
                                              'ORB_TEST_MERMAID': MERMAID_TURN,
                                              'ORB_TEST_BACKEDGE': MERMAID_BACKEDGE,
                                              'ORB_TEST_CYCLE': MERMAID_CYCLE,
-                                             'ORB_TEST_MARKDOWN': MD_TURN}, check=True, timeout=20)
+                                             'ORB_TEST_MARKDOWN': MD_TURN}, check=True, timeout=45)
                 if mode in ('reconnect', 'settings-switch'):
                     first = tokens.index('Bearer changed')
                     self.assertGreater(first, 0)
@@ -860,6 +892,17 @@ class Delivery(unittest.TestCase):
                     # On-demand older page 403 revokes the mission and stops polling it.
                     self.assertEqual(paths.count(a + '/open'), 1)
                     self.assertEqual(len([p for p in paths if p.startswith(a + '/events?')]), 1)
+                    self.assertNotIn(b + events, paths)
+                elif mode == 'paging-degraded-recover':
+                    # Initial /open + degraded-recovery /open; one on-demand older page kept intact.
+                    self.assertEqual(paths.count(a + '/open'), 2)
+                    page_paths = [p for p in paths if p.startswith(a + '/events?')]
+                    self.assertEqual(page_paths, [a + '/events?before_seq=771&view=transcript&limit=200'])
+                    self.assertNotIn(b + events, paths)
+                elif mode == 'stale-older-race':
+                    # Initial /open + post-unavailable recovery /open; stale before_seq=771 cancelled/rejected.
+                    self.assertEqual(paths.count(a + '/open'), 2)
+                    self.assertGreaterEqual(len([p for p in paths if p.startswith(a + '/events?')]), 1)
                     self.assertNotIn(b + events, paths)
                 elif mode == 'mermaid-backedge':
                     # The driver renders and asserts from the first bubble; mission
@@ -1157,6 +1200,12 @@ class Delivery(unittest.TestCase):
 
     def test_older_page_403_revokes_and_clears_transcript(self):
         self.run_wire('older-403')
+
+    def test_degraded_recovery_preserves_paged_older_turns_and_scroll_anchor(self):
+        self.run_wire('paging-degraded-recover')
+
+    def test_stale_older_fetch_cancelled_and_rejected_across_unavailable_recovery(self):
+        self.run_wire('stale-older-race')
 
     def test_two_turn_live_keeps_history_and_renders_mermaid(self):
         self.run_wire('mermaid-turn')

@@ -261,8 +261,8 @@ inductive BubbleUpdate where
   | revoked
 
 inductive OlderHistoryUpdate where
-  | page (batch : HistoryBatch)
-  | failed
+  | page (requestedCursor : Int) (batch : HistoryBatch)
+  | failed (requestedCursor : Int)
 
 inductive LiveUpdate where
   | sample (roster : Option (List String)) (bubble : Option BubbleUpdate)
@@ -307,13 +307,17 @@ private def readSample (line : String) : Option LiveUpdate := do
     return .sample none none (some (parseHistoryBatch hasMoreStr cursorStr packed)) none
   | ["HS", packed] =>
     return .sample none none (some { turns := parseHistoryEntries packed }) none
-  -- One on-demand older history page, oldest first.
+  -- One on-demand older history page, oldest first (originating cursor stamped by `startOlderFetch`).
   | ["HO", hasMoreStr, cursorStr, packed] =>
-    return .sample none none none (some (.page (parseHistoryBatch hasMoreStr cursorStr packed)))
-  | ["HE"] => return .sample none none none (some .failed)
+    return .sample none none none (some (.page 0 (parseHistoryBatch hasMoreStr cursorStr packed)))
+  | ["HE"] => return .sample none none none (some (.failed 0))
   | ["X"] => return .sample none (some .unavailable) none none
   | ["D"] => return .sample none (some .revoked) none none
   | _ => none
+
+private def stampOlderCursor (cursor : Int) : OlderHistoryUpdate → OlderHistoryUpdate
+  | .page _ batch => .page cursor batch
+  | .failed _ => .failed cursor
 
 private def mergeLiveUpdate (previous : Option LiveUpdate) (rows : Option (List String))
     (bubble : Option BubbleUpdate) (history : Option HistoryBatch) (older : Option OlderHistoryUpdate) :
@@ -362,19 +366,24 @@ private def startOlderFetch (mission binding : String) (cursor : Int)
   let args := #["-I", "-c", transport ++ "\nfetch_older_turns(*sys.argv[1:])",
     mission, binding, toString cursor]
   let child ← IO.Process.spawn { cmd := "python3", args, stdin := .null, stdout := .piped, stderr := .null }
+  let cancelled ← IO.mkRef false
   let reader ← IO.asTask (prio := .dedicated) do
     try
       let line ← child.stdout.getLine
+      if (← cancelled.get) then return
       if line.endsWith "\n" then
         if let some (.sample rows bubble history older) := readSample (line.dropEnd 1).toString then
           if bubble.isSome || older.isSome then
-            latest.atomically (modify fun previous => mergeLiveUpdate previous rows bubble history older)
+            let stamped := older.map (stampOlderCursor cursor)
+            latest.atomically (modify fun previous => mergeLiveUpdate previous rows bubble history stamped)
             notify
             return
     catch _ => pure ()
-    latest.atomically (set (some LiveUpdate.invalid))
-    notify
+    unless (← cancelled.get) do
+      latest.atomically (set (some LiveUpdate.invalid))
+      notify
   return do
+    cancelled.set true
     try child.kill catch _ => pure ()
     discard child.wait
     discard (IO.wait reader)
@@ -523,9 +532,11 @@ def readLiveFrame (slot : IO.Ref (Option LiveSubscription)) (scale : Nat) (viewp
       if (action == "cloud-send" || action == "cloud-create") && r.exitCode != 0 then
         return ({ st with cloudAttempt := r.stdout.trimAscii.toString, writeError := "Core did not confirm the request. Submit again to retry." }, some viewport)
       if r.exitCode != 0 then throw (IO.userError "write failed")
-      match request with
-      | .providerPreference .. => pure ()
-      | _ => closeLiveSubscription slot
+      let st ← match request with
+        | .providerPreference .. => pure st
+        | _ => do
+          closeLiveSubscription slot
+          pure { st with historyLoading := false }
       match request with
       | .inboxRead item openItem =>
         let next := { st with inboxItems := st.inboxItems.filter (· != item) }
@@ -633,7 +644,10 @@ def readLiveFrame (slot : IO.Ref (Option LiveSubscription)) (scale : Nat) (viewp
   match update with
   | .invalid => closeLiveSubscription slot; return invalidate
   | .sample roster bubble history older =>
-    if older.isSome then
+    let isUnavailable := match bubble with | some .unavailable => true | _ => false
+    -- Retire any in-flight older-page fetch when its result arrives, or when a
+    -- fresh `/open` (`HS`) or access-loss (`X`) invalidates the active fetch window.
+    if older.isSome || history.isSome || isUnavailable then
       if let some (_, stopOlder) ← sub.olderFetch.swap none then stopOlder
     -- The roster can finish after a newer transcript read. Keep the selected
     -- conversation's title, status and text together across that arrival.
@@ -656,20 +670,6 @@ def readLiveFrame (slot : IO.Ref (Option LiveSubscription)) (scale : Nat) (viewp
       closeLiveSubscription slot
       let (st, _) := stepDesktopEvent scale viewport st (.activate 101)
       return (st, some viewport)
-    -- Cold open: the persisted timeline populates completed turns before the
-    -- bubble frame is applied to the same state.
-    let (st, histDamage) := match history with
-      | some batch => applyHistoryBatch scale viewport st sub.mission batch
-      | none => (st, none)
-    let (st, olderDamage) := match older with
-      | some (.page batch) => applyOlderHistoryBatch scale viewport st sub.mission batch
-      | some .failed =>
-        if st.openMission == some sub.mission then
-          ({ st with historyLoading := false, historyLoadError := true },
-           some (transcriptDamageRect scale viewport st.sidebarWidth))
-        else (st, none)
-      | none => (st, none)
-    let pageDamage := startDamage.orElse fun _ => histDamage.orElse fun _ => olderDamage
     if let some .revoked := bubble then
       closeLiveSubscription slot
       let next := { st with
@@ -677,13 +677,34 @@ def readLiveFrame (slot : IO.Ref (Option LiveSubscription)) (scale : Nat) (viewp
         sidebarRows := rows.filter (·.rowId != "mission:" ++ sub.mission) }
       return ((stepDesktopEvent scale viewport next (.activate 101)).1, some viewport)
     if let some .unavailable := bubble then
-      -- Drop the retained reply so later roster frames cannot resurrect cleared
-      -- output, and clear instead of archiving: access loss is not a boundary.
+      -- Drop the retained reply and discard any stale coalesced older page;
+      -- access loss clears the transcript rather than archiving or prepending.
       sub.lastBubble.set none
       let (next, damage) :=
         if st.liveTurns.isEmpty && (streamedText st).isEmpty && !st.showsHistoryBanner then (st, none)
         else (clearLiveTranscript st, some (transcriptDamageRect scale viewport st.sidebarWidth))
-      return (next, pageDamage.orElse (fun _ => if changed then some viewport else damage))
+      return (next, startDamage.orElse (fun _ => if changed then some viewport else damage))
+    -- Cold open / recovery: the persisted timeline populates or merges completed
+    -- turns before the bubble frame is applied to the same state.
+    let (st, histDamage) := match history with
+      | some batch =>
+        let (st', dmg) := applyHistoryBatch scale viewport st sub.mission batch
+        if st'.historyLoading then
+          ({ st' with historyLoading := false }, dmg.orElse fun _ => some (transcriptDamageRect scale viewport st'.sidebarWidth))
+        else (st', dmg)
+      | none => (st, none)
+    let (st, olderDamage) := match older with
+      | some (.page reqCursor batch) =>
+        if history.isSome then (st, none)
+        else applyOlderHistoryBatch scale viewport st sub.mission batch (some reqCursor)
+      | some (.failed reqCursor) =>
+        if history.isSome then (st, none)
+        else if st.openMission == some sub.mission && st.historyHasMore && st.historyNextCursor == some reqCursor then
+          ({ st with historyLoading := false, historyLoadError := true },
+           some (transcriptDamageRect scale viewport st.sidebarWidth))
+        else (st, none)
+      | none => (st, none)
+    let pageDamage := startDamage.orElse fun _ => histDamage.orElse fun _ => olderDamage
     let some (.text title status text) := bubble | return (st, pageDamage.orElse (fun _ => if changed then some viewport else none))
     let (next, damage) := applyLiveText scale viewport st sub.mission text
     let some card := next.selectedCard | return invalidate

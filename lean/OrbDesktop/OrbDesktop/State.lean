@@ -465,6 +465,9 @@ structure DesktopState where
   liveTurns : List String := []
   /-- Seen event/row IDs of persisted turns in `liveTurns`, for cross-page deduplication. -/
   liveTurnIds : List String := []
+  /-- Number of leading turns in `liveTurns` backed by persisted Core history (excluding
+      in-flight turns appended locally by `applyLiveText`). -/
+  livePersistedCount : Nat := 0
   /-- Whether Core advertised older transcript history before the current `liveTurns` window. -/
   historyHasMore : Bool := false
   /-- Exclusive `before_seq` cursor for the next on-demand older transcript page. -/
@@ -588,7 +591,7 @@ def resetSelection (st : DesktopState) (card : Option MissionSummaryCard) : Desk
   let mid := if cloud.isSome then none else card.map (·.missionId)
   { st with
     unconfirmedSend := none, writeError := ""
-    voicePhase := .idle, voiceGeneration := st.voiceGeneration + 1, openMission := mid, missionMenu := none, stream := { shown := [], pending := [], renders := 1 }, liveTurns := [], liveTurnIds := [], historyHasMore := false, historyNextCursor := none, historyLoading := false, historyLoadError := false, scroll := {}
+    voicePhase := .idle, voiceGeneration := st.voiceGeneration + 1, openMission := mid, missionMenu := none, stream := { shown := [], pending := [], renders := 1 }, liveTurns := [], liveTurnIds := [], livePersistedCount := 0, historyHasMore := false, historyNextCursor := none, historyLoading := false, historyLoadError := false, scroll := {}
     composer := { isRunning := card.any (·.isRunning) }
     messageSent := false, missionStopped := false, missionArchived := false, sidePanelOpen := false
     sidebarRows := st.sidebarRows.map fun row => { row with selected := row.widgetId == (card.map (·.widgetId)).getD 101 } }
@@ -1879,20 +1882,26 @@ def clearLiveTranscript (st : DesktopState) : DesktopState :=
   { st with
     liveTurns := []
     liveTurnIds := []
+    livePersistedCount := 0
     historyHasMore := false
     historyNextCursor := none
     historyLoading := false
     historyLoadError := false
     stream := { st.stream with shown := [], pending := [] } }
 
-/-- Cold open of a persisted mission: the Core `/open` window owns the initial completed
-turns and continuation cursor; the live bubble keeps owning the current turn. Empty,
-foreign or identical batches are no-ops that never erase or redraw. -/
+/-- Cold open or recovery of a persisted mission: the Core `/open` window owns the
+initial completed turns and continuation cursor; the live bubble keeps owning the
+current turn. When persisted history is already loaded and overlaps the incoming
+`/open` tail (e.g. recovery after a transient 5xx/network outage without an `'X'`
+clear), merge only newer tail turns onto the existing paged prefix so previously
+paged older turns, `historyNextCursor`, `historyHasMore`, and scroll offset survive
+without jumps. Empty, foreign or identical batches are no-ops. -/
 def applyHistoryBatch (scale : Nat) (viewport : Rect) (st : DesktopState) (mission : String)
     (batch : HistoryBatch) : DesktopState × Damage := Id.run do
   if !st.liveData || st.screen != .missionTranscript || st.openMission != some mission then
     return (st, none)
   let mut seen : Std.HashSet String := {}
+  let mut entries : Array (String × String) := #[]
   let mut texts : Array String := #[]
   let mut ids : Array String := #[]
   for (tid, txt) in batch.turns do
@@ -1901,20 +1910,54 @@ def applyHistoryBatch (scale : Nat) (viewport : Rect) (st : DesktopState) (missi
       if seen.contains tid then continue
       seen := seen.insert tid
       ids := ids.push tid
+    entries := entries.push (tid, txt)
     texts := texts.push txt
   let hasMore := batch.hasMore && batch.nextCursor.isSome
   let nextCursor := if hasMore then batch.nextCursor else none
   if texts.isEmpty && !hasMore then
     return (st, none)
+  -- Recovery merge path: if persisted turns are already loaded and overlap the
+  -- incoming `/open` tail, keep all already-paged older turns and cursor state.
+  if !st.liveTurnIds.isEmpty then
+    let existingIds : Std.HashSet String := Std.HashSet.ofList st.liveTurnIds
+    let mut lastOverlap : Option Nat := none
+    for i in [:entries.size] do
+      let (tid, _) := entries[i]!
+      if !tid.isEmpty && existingIds.contains tid then
+        lastOverlap := some i
+    if let some idx := lastOverlap then
+      let mut addedTexts : Array String := #[]
+      let mut addedIds : Array String := #[]
+      for i in [idx + 1 : entries.size] do
+        let (tid, txt) := entries[i]!
+        if !tid.isEmpty && existingIds.contains tid then continue
+        if !tid.isEmpty then addedIds := addedIds.push tid
+        addedTexts := addedTexts.push txt
+      let prefixLen := min st.livePersistedCount st.liveTurns.length
+      let mergedTurns := st.liveTurns.take prefixLen ++ addedTexts.toList
+      let mergedIds := st.liveTurnIds ++ addedIds.toList
+      let mergedCount := mergedTurns.length
+      if mergedTurns == st.liveTurns && mergedIds == st.liveTurnIds &&
+          mergedCount == st.livePersistedCount && !st.historyLoading && !st.historyLoadError then
+        return (st, none)
+      return ({ st with
+        liveTurns := mergedTurns
+        liveTurnIds := mergedIds
+        livePersistedCount := mergedCount
+        historyLoading := false
+        historyLoadError := false },
+        some (transcriptDamageRect scale viewport st.sidebarWidth))
   let textList := texts.toList
   let idList := ids.toList
   if st.liveTurns == textList && st.liveTurnIds == idList &&
+      (st.liveTurnIds.isEmpty || st.livePersistedCount == textList.length) &&
       st.historyHasMore == hasMore && st.historyNextCursor == nextCursor &&
       !st.historyLoading && !st.historyLoadError then
     return (st, none)
   return ({ st with
     liveTurns := textList
     liveTurnIds := idList
+    livePersistedCount := textList.length
     historyHasMore := hasMore
     historyNextCursor := nextCursor
     historyLoading := false
@@ -1927,12 +1970,16 @@ def applyHistoryTurns (scale : Nat) (viewport : Rect) (st : DesktopState) (missi
     (turns : List String) : DesktopState × Damage :=
   applyHistoryBatch scale viewport st mission { turns := turns.map (fun t => ("", t)) }
 
-/-- Prepend an on-demand older history page while deduplicating by event/row ID and
-preserving the reader's scroll anchor so the currently visible turn does not jump. -/
+/-- Prepend an on-demand older history page while deduplicating by event/row ID,
+verifying the originating cursor still matches `st.historyNextCursor` (when supplied),
+and preserving the reader's scroll anchor so the currently visible turn does not jump. -/
 def applyOlderHistoryBatch (scale : Nat) (viewport : Rect) (st : DesktopState) (mission : String)
-    (batch : HistoryBatch) : DesktopState × Damage := Id.run do
+    (batch : HistoryBatch) (requestedCursor : Option Int := none) : DesktopState × Damage := Id.run do
   if !st.liveData || st.screen != .missionTranscript || st.openMission != some mission then
     return (st, none)
+  if let some req := requestedCursor then
+    if !st.historyHasMore || st.historyNextCursor != some req then
+      return (st, none)
   let mut seen : Std.HashSet String := Std.HashSet.ofList st.liveTurnIds
   let mut addedTexts : Array String := #[]
   let mut addedIds : Array String := #[]
@@ -1957,6 +2004,7 @@ def applyOlderHistoryBatch (scale : Nat) (viewport : Rect) (st : DesktopState) (
   return ({ st with
     liveTurns := addedList ++ st.liveTurns
     liveTurnIds := addedIds.toList ++ st.liveTurnIds
+    livePersistedCount := st.livePersistedCount + addedList.length
     historyHasMore := hasMore
     historyNextCursor := nextCursor
     historyLoading := false
