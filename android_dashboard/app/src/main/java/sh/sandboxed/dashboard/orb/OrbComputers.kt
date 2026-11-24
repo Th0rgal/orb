@@ -32,6 +32,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
@@ -51,7 +52,10 @@ suspend fun loadClientComputers(core: OrbCore): List<OrbRow> {
  */
 @Composable
 fun OrbComputersBlock(core: OrbCore, computers: List<OrbRow>, ready: Boolean) {
+    val context = LocalContext.current
+    val sideSystemInstalled = remember(context) { OrbSideSystem.isInstalled(context) }
     var starting by remember { mutableStateOf<OrbRow?>(null) }
+    var startingSideSystem by remember { mutableStateOf(false) }
     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
         Text(
             text = "COMPUTERS",
@@ -60,7 +64,7 @@ fun OrbComputersBlock(core: OrbCore, computers: List<OrbRow>, ready: Boolean) {
             fontWeight = FontWeight.Bold,
             letterSpacing = 0.7.sp
         )
-        if (ready && computers.isEmpty()) {
+        if (ready && computers.isEmpty() && !sideSystemInstalled) {
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -75,7 +79,7 @@ fun OrbComputersBlock(core: OrbCore, computers: List<OrbRow>, ready: Boolean) {
                 Text(text = "Open Orb on Mac", color = OrbStyle.textMuted, fontSize = 12.sp)
             }
         }
-        if (computers.isNotEmpty()) {
+        if (sideSystemInstalled || computers.isNotEmpty()) {
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -83,6 +87,34 @@ fun OrbComputersBlock(core: OrbCore, computers: List<OrbRow>, ready: Boolean) {
                     .background(OrbStyle.surface)
                     .border(1.dp, OrbStyle.border, RoundedCornerShape(16.dp))
             ) {
+                if (sideSystemInstalled) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp, vertical = 13.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(8.dp)
+                                .clip(CircleShape)
+                                .background(OrbStyle.success)
+                        )
+                        Spacer(Modifier.width(10.dp))
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(text = OrbSideSystem.LOCAL_LABEL, color = OrbStyle.textPrimary, fontSize = 15.sp)
+                            Text(
+                                text = "NixOS SideSystem · headless (no desktop needed)",
+                                color = OrbStyle.textSecondary,
+                                fontSize = 12.sp
+                            )
+                        }
+                        TextButton(
+                            onClick = { startingSideSystem = true },
+                            modifier = Modifier.semantics { contentDescription = "Start a local mission in NixOS SideSystem" }
+                        ) { Text("Start") }
+                    }
+                }
                 computers.forEach { computer ->
                     val online = computer.bool("online") == true
                     val name = computer.str("name")?.takeIf { it.isNotBlank() } ?: "Computer"
@@ -129,6 +161,95 @@ fun OrbComputersBlock(core: OrbCore, computers: List<OrbRow>, ready: Boolean) {
             core.requestMissionFocus(missionId)
         }
     }
+    if (startingSideSystem) {
+        OrbSideSystemStartDialog(core = core, onDismiss = { startingSideSystem = false }) { missionId ->
+            startingSideSystem = false
+            core.requestMissionFocus(missionId)
+        }
+    }
+}
+
+@Composable
+private fun OrbSideSystemStartDialog(
+    core: OrbCore,
+    onDismiss: () -> Unit,
+    onStarted: (String) -> Unit
+) {
+    val scope = rememberCoroutineScope()
+    val backends = remember { listOf("claudecode" to "Claude Code", "opencode" to "OpenCode", "codex" to "Codex") }
+    var prompt by remember { mutableStateOf("") }
+    var backend by remember { mutableStateOf("claudecode") }
+    var busy by remember { mutableStateOf(false) }
+    var error by remember { mutableStateOf<String?>(null) }
+
+    AlertDialog(
+        onDismissRequest = { if (!busy) onDismiss() },
+        title = { Text("Start in NixOS SideSystem") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                error?.let { Text(it, color = OrbStyle.warning, fontSize = 13.sp) }
+                OutlinedTextField(
+                    value = prompt,
+                    onValueChange = { prompt = it },
+                    label = { Text("Prompt") },
+                    modifier = Modifier.fillMaxWidth().heightIn(min = 120.dp)
+                )
+                Text("Harness", color = OrbStyle.textSecondary, fontSize = 12.sp)
+                Row(
+                    modifier = Modifier.horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    backends.forEach { (id, label) ->
+                        FilterChip(
+                            selected = id == backend,
+                            onClick = { backend = id },
+                            label = { Text(label) }
+                        )
+                    }
+                }
+                Text(
+                    "Starts headless orb-locald in NixOS SideSystem without launching the desktop.",
+                    color = OrbStyle.textMuted,
+                    fontSize = 12.sp
+                )
+            }
+        },
+        confirmButton = {
+            if (busy) {
+                CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
+            } else {
+                TextButton(
+                    enabled = prompt.isNotBlank(),
+                    onClick = {
+                        busy = true
+                        error = null
+                        scope.launch {
+                            try {
+                                val row = OrbSideSystem.launchLocalMission(
+                                    core = core,
+                                    projectSlug = "default",
+                                    prompt = prompt.trim(),
+                                    backend = backend,
+                                    model = "",
+                                    title = ""
+                                )
+                                if (row.id.isBlank()) error = "SideSystem did not return a mission."
+                                else {
+                                    core.refreshMissionsQuietly()
+                                    onStarted(row.id)
+                                }
+                            } catch (e: Throwable) {
+                                error = e.message ?: "Could not start in NixOS SideSystem."
+                            } finally {
+                                busy = false
+                            }
+                        }
+                    }
+                ) { Text("Start") }
+            }
+        },
+        dismissButton = { TextButton(enabled = !busy, onClick = onDismiss) { Text("Cancel") } }
+    )
 }
 
 @Composable
