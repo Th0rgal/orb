@@ -288,7 +288,7 @@ def handleBlindRelayRendezvous
           return ((0 : UInt32), (0 : UInt16), (0 : UInt16), (0 : UInt32))
       | none =>
         return ((0 : UInt32), (0 : UInt16), (0 : UInt16), (0 : UInt32))
-  let mut out := ByteArray.mkEmpty 16
+  let mut out := ByteArray.emptyWithCapacity 16
   out := out.push 0x52  -- 'R'
   out := out.push 0x4E  -- 'N'
   out := out.push 0x44  -- 'D'
