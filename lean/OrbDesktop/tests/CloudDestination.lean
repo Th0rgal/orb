@@ -16,7 +16,7 @@ private def settled (readState : DesktopState → IO (Option DesktopState)) (st 
 
 private partial def labels (n : WidgetNode) : List String :=
   let own := match n.payloadOf with
-    | .text _ runs => [String.ofList ((runs.flatMap (·.glyphs)).map fun g => Char.ofNat g.glyphId)]
+    | .text _ runs _ => [String.ofList ((runs.flatMap (·.glyphs)).map fun g => Char.ofNat g.glyphId)]
     | _ => []
   own ++ n.childrenOf.flatMap labels
 
