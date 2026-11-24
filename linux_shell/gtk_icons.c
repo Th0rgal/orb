@@ -66,11 +66,13 @@ void orb_gtk_bind_keyboard_focus(GtkWidget *window) {
 void orb_gtk_apply_theme(GtkCssProvider *css, gboolean light) {
     static const char *m[][2] = { {"#141414", "#fafaf9"}, {"#d8d8d7", "#242423"}, {"#e6e6e5", "#101010"}, {"#b1b1b1", "#535250"}, {"#8a8a8a", "#7b7a76"}, {"#6c6c6b", "#939290"}, {"#5c5c5c", "#a9a8a2"}, {"#5b5b5a", "#535250"}, {"#2c2c2c", "#e8e7e2"}, {"rgba(18,19,19,0.78)", "rgba(246,246,244,0.72)"}, {"216,216,215", "36,36,35"} };
     static const char menu_css[] =
-        ".orb-ctx{background-color:#141414;color:#d8d8d7;border:1px solid #2c2c2c;border-radius:6px;}"
-        ".orb-ctx modelbutton{color:inherit;min-height:26px;padding:0 8px;margin:0;border:0;border-radius:4px;"
-        "outline:none;box-shadow:none;}"
-        ".orb-ctx modelbutton:hover{background-color:rgba(216,216,215,0.10);}"
-        ".orb-keyboard-focus .orb-ctx modelbutton:focus{outline:1px solid #8a8a8a;outline-offset:-1px;}";
+        "popover.orb-ctx,popover.orb-ctx.background{background-color:#141414;background-image:none;color:#d8d8d7;border:1px solid #2c2c2c;border-radius:8px;padding:4px;font-size:12.5px;box-shadow:0 8px 24px rgba(0,0,0,0.38);}"
+        "popover.orb-ctx>box,popover.orb-ctx stack{background:transparent;padding:0;margin:0;}"
+        "popover.orb-ctx modelbutton,popover.orb-ctx modelbutton.flat,popover.orb-ctx modelbutton:focus{color:#d8d8d7;min-height:26px;padding:0 8px;margin:0;border:none;border-radius:5px;background:transparent;background-image:none;outline:none;box-shadow:none;font-size:12.5px;}"
+        "popover.orb-ctx modelbutton:hover,popover.orb-ctx modelbutton.flat:hover{background-color:rgba(216,216,215,0.09);color:#e6e6e5;}"
+        "popover.orb-ctx modelbutton image{opacity:0.62;}popover.orb-ctx modelbutton:hover image{opacity:0.95;}"
+        "popover.orb-ctx separator{background-color:#2c2c2c;min-height:1px;margin:4px 6px;}"
+        ".orb-keyboard-focus popover.orb-ctx modelbutton:focus{background-color:rgba(216,216,215,0.09);outline:none;}";
     char *s = g_strconcat(ORB_CHROME_CSS, menu_css, NULL); for (size_t i = 0; light && i < G_N_ELEMENTS(m); i++) { char **parts = g_strsplit(s, m[i][0], -1); g_free(s); s = g_strjoinv(m[i][1], parts); g_strfreev(parts); }
     gtk_css_provider_load_from_data(css, s, -1, NULL); g_free(s); orb_icons_light = light;
 }
@@ -142,7 +144,7 @@ void orb_menu_separator(GtkWidget *page) {
 void orb_add_menu_icon(GtkWidget *button, const char *icon) {
     GtkBox *content = GTK_BOX(gtk_bin_get_child(GTK_BIN(button)));
     GtkWidget *image = gtk_image_new_from_icon_name(icon, GTK_ICON_SIZE_MENU);
-    gtk_widget_set_margin_end(image, 7);
+    gtk_image_set_pixel_size(GTK_IMAGE(image), 13); gtk_widget_set_margin_end(image, 7);
     gtk_box_pack_start(content, image, FALSE, FALSE, 0);
     gtk_box_reorder_child(content, image, 0);
 }
