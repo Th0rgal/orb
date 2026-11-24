@@ -1165,15 +1165,15 @@ def stepSearchModal (viewport : Rect) (st : DesktopState) (spec : SearchDialogSp
     return (openItem spec.selectedIdx, some viewport)
   | .text utf8 =>
     let buf := st.searchBuffer.insertText utf8
-    let spec' := { spec with query := buf.text ++ buf.imePreeditText, selectedIdx := 0 }
+    let spec' := { spec with query := buf.displayText, selectedIdx := 0 }
     return ({ st with searchBuffer := buf, modal := .searchPalette spec' }, some viewport)
   | .preedit utf8 _ _ =>
     let buf := st.searchBuffer.setPreedit utf8
-    let spec' := { spec with query := buf.text ++ buf.imePreeditText, selectedIdx := 0 }
+    let spec' := { spec with query := buf.displayText, selectedIdx := 0 }
     return ({ st with searchBuffer := buf, modal := .searchPalette spec' }, some viewport)
   | .imeBatch db da commit preedit _ _ =>
     let buf := st.searchBuffer.applyImeBatch db da commit preedit
-    let spec' := { spec with query := buf.text ++ buf.imePreeditText, selectedIdx := 0 }
+    let spec' := { spec with query := buf.displayText, selectedIdx := 0 }
     return ({ st with searchBuffer := buf, modal := .searchPalette spec' }, some viewport)
   | .activate id =>
     if id == searchEscId || id == searchBackdropId then
@@ -1719,6 +1719,7 @@ private def stepMissionMenu (st : DesktopState) (menu : MissionMenu) (ev : Event
   let items := missionMenuRows st menu
   match ev with
   | .scroll _ _ _ dy =>
+    if dy == 0 then return (st, none)
     let index := if dy > 0 then min (items.length - 1) (menu.first + 1) else menu.first - 1
     return update { menu with first := index, highlighted := index }
   | .key key _ state =>

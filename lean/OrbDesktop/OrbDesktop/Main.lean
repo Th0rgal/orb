@@ -94,10 +94,11 @@ def shapeDesktopRuns (ac : Text.GlyphAtlasCache) (font : Text.FontHandle)
   if font.facePtr != 0 then
     -- Cache short labels, not the growing stream. UVs remain valid through
     -- append-only shelf allocation; resetAll discards all resolved runs.
-    let cacheable := text.utf8ByteSize ≤ 512
+    let cacheable := text.utf8ByteSize ≤ Text.maxShapeCacheBytes
+    let cacheKey : Text.ResolvedRunKey := ⟨font.facePtr, scale120, style.sizeSub, text⟩
     if cacheable then
-      if let some hit := ac.resolved.find? (fun e => e.face == font.facePtr && e.scale == scale120 && e.text == text && e.style == style) then
-        return (ac, [hit.run])
+      if let some hit := ac.resolvedMap.get? cacheKey then
+        return (ac, [{ hit with style := style }])
     let (ac', shaped) ← Text.shapeWithFallback ac font devSize64 text
     let mut curAc := ac'
     let mut glyphs : Array ShapedGlyph := #[]
@@ -137,7 +138,16 @@ def shapeDesktopRuns (ac : Text.GlyphAtlasCache) (font : Text.FontHandle)
     }
     if cacheable then
       let entries := curAc.resolved.push ⟨font.facePtr, scale120, text, style, run⟩
-      curAc := { curAc with resolved := if entries.size > 2048 then entries.extract 1 entries.size else entries }
+      let map' := curAc.resolvedMap.insert cacheKey run
+      if entries.size > Text.maxResolvedRuns then
+        let map'' := match entries[0]? with
+          | some evicted =>
+            let evKey : Text.ResolvedRunKey := ⟨evicted.face, evicted.scale, evicted.style.sizeSub, evicted.text⟩
+            if evKey == cacheKey then map' else map'.erase evKey
+          | none => map'
+        curAc := { curAc with resolved := entries.extract 1 entries.size, resolvedMap := map'' }
+      else
+        curAc := { curAc with resolved := entries, resolvedMap := map' }
     return (curAc, [run])
   else
     return (ac, [overlaySynthRun style text])
@@ -319,7 +329,7 @@ def renderDesktopView (rt : Runtime.RuntimeState DesktopState) :
       (719, outside) :: overlay.hitRegionsSub, overlay.focusableOrder), [])
   if let .searchPalette spec := st.modal then
     let overRaw := buildSearchModalOverlay theme availW availH spec st.searchFilterTab
-      st.searchProjectFilter st.searchTimeFilter st.searchSortOrder (!st.liveData)
+      st.searchProjectFilter st.searchTimeFilter st.searchSortOrder (!st.liveData) st.searchBuffer
     let (ac7, overWidget) ← shapeWidgetTree ac6 rt.primaryFont rt.monoFont rt.boldFont rt.mediumFont rt.semiboldFont sc overRaw
     let overBox := layoutNode sc none pal.focusRing 0 0 availW availH overWidget.toLayoutNode
     let overScene := buildSceneFromLayout sc rt.focus theme overWidget overBox (recordNodes := false)
@@ -357,7 +367,7 @@ def desktopReducer (rt : Runtime.RuntimeState DesktopState) :
         if let .searchPalette spec := st.modal then
           if rt.focus.owner == some spec.inputWidgetId then
             if let some buf := st.searchBuffer.editKey? key mods then
-              let spec' := { spec with query := buf.text ++ buf.imePreeditText, selectedIdx := 0 }
+              let spec' := { spec with query := buf.displayText, selectedIdx := 0 }
               return ({ st with searchBuffer := buf, modal := .searchPalette spec' }, if buf == st.searchBuffer then none else some viewport)
         else if !st.liveData && st.screen == .settingsGeneral && rt.focus.owner == some settingsApiUrlId then
           if let some buf := st.settingsApiUrl.editKey? key mods then

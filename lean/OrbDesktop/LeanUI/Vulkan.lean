@@ -671,10 +671,21 @@ private def scrollBand (old new : Scene) (dirty vp : Rect) : Option (Rect × Nat
   let band := { dirty with h := dirty.h - max 96 (2 * (shift : Int)) }
   let src := { band with y := band.y + shift }
   if intersectRect vp src != src then return none
-  let some a := bandPaint old src | return none
-  let some b := bandPaint new band | return none
-  if a != b then return none
-  return some (band,shift)
+  let matchesBand (b : Rect) : Bool :=
+    let s := { b with y := b.y + shift }
+    match bandPaint old s, bandPaint new b with
+    | some a, some c => a == c
+    | _, _ => false
+  if matchesBand band then
+    return some (band, shift)
+  -- Overlay scrollbars paint inside the right-edge gutter and move opposite to content.
+  -- Inset by a narrow right-edge strip so `FFI.scrollRows` still reuses the content body.
+  let gutter : Int := min (band.w / 8) 32
+  if gutter > 0 && band.w > gutter + 96 then
+    let inner := { band with w := band.w - gutter }
+    if matchesBand inner then
+      return some (inner, shift)
+  return none
 
 -- New glyph allocations may change unused texels. Prove that every old
 -- sampling command still sees the same bytes, or discard the framebuffer.
@@ -732,12 +743,20 @@ def renderFrameDamage (ctx : VulkanContext) (clearColor : Color) (atlas : Text.G
   let t3 ← IO.monoNanosNow
   let mut initial := initial
   let mut paint := dirty
+  let mut extraStrip : Option Rect := none
   if let some (band, shift) := scrollBand prev.scene scene dirty vp then
     initial := FFI.scrollRows initial ((band.y.toNat*ctx.width+band.x.toNat)*4).toUSize
       (ctx.width*4).toUSize (band.w.toNat*4).toUSize band.h.toNat.toUSize shift.toUSize
     paint := { dirty with y := band.bottom, h := dirty.bottom - band.bottom }
+    if band.right < dirty.right then
+      extraStrip := some { x := band.right, y := dirty.y, w := dirty.right - band.right, h := band.bottom - dirty.y }
     if profile then IO.eprintln s!"u7-scroll-reuse dy={shift} pixels={band.w*band.h}"
-  let (fb, insts) := rasterizeSceneInto ctx.width ctx.height clearColor atlas (some initial) (some paint) scene
+  let (fb0, insts0) := rasterizeSceneInto ctx.width ctx.height clearColor atlas (some initial) (some paint) scene
+  let (fb, insts) := match extraStrip with
+    | some strip =>
+      let (fb1, insts1) := rasterizeSceneInto ctx.width ctx.height clearColor atlas (some fb0) (some strip) scene
+      (fb1, insts0 ++ insts1)
+    | none => (fb0, insts0)
   let t4 ← IO.monoNanosNow
   let _ ← stageInstances ctx insts
   if profile then IO.eprintln s!"u7-paint-ns {t1-t0} {t2-t1} {t3-t2} {t4-t3} {(← IO.monoNanosNow)-t4}"

@@ -89,11 +89,11 @@ structure RuntimeState (σ : Type) where
   wayland : Wayland.WaylandClient := {}
   vulkan : Vulkan.VulkanContext := {}
   atlas : Text.GlyphAtlasCache := {}
-  primaryFont : Text.FontHandle := { fontId := 1, facePtr := 0, pattern := "sans-serif" }
-  monoFont : Text.FontHandle := { fontId := 2, facePtr := 0, pattern := "DejaVu Sans Mono" }
-  boldFont : Text.FontHandle := { fontId := 3, facePtr := 0, pattern := "Inter:weight=bold" }
-  mediumFont : Text.FontHandle := { fontId := 4, facePtr := 0, pattern := "Inter:weight=medium" }
-  semiboldFont : Text.FontHandle := { fontId := 5, facePtr := 0, pattern := "Inter:weight=demibold" }
+  primaryFont : Text.FontHandle := { fontId := 1, facePtr := 0, pattern := "IBM Plex Sans,Inter,sans-serif" }
+  monoFont : Text.FontHandle := { fontId := 2, facePtr := 0, pattern := "Lilex Nerd Font,Lilex,IBM Plex Mono,DejaVu Sans Mono,monospace" }
+  boldFont : Text.FontHandle := { fontId := 3, facePtr := 0, pattern := "IBM Plex Sans,Inter,sans-serif:weight=bold" }
+  mediumFont : Text.FontHandle := { fontId := 4, facePtr := 0, pattern := "IBM Plex Sans,Inter,sans-serif:weight=medium" }
+  semiboldFont : Text.FontHandle := { fontId := 5, facePtr := 0, pattern := "IBM Plex Sans,Inter,sans-serif:weight=demibold" }
   focus : FocusState := {}
   windowFocused : Bool := true
   lastImeOwner : Option EntityId := none
@@ -285,14 +285,34 @@ def stepEventWithFocus (rt : RuntimeState σ) (onEvent : σ → Event → σ × 
 
 end RuntimeState
 
-/-- Coalesce adjacent `.scroll` events in the same Wayland frame so high-rate touchpad bursts
-update layout and repaint once per frame instead of once per axis tick. -/
-private def coalesceScrollEvents (evs : Array Event) : Array Event :=
+/-- Coalesce adjacent `.scroll` events in the same Wayland frame (absorbing interleaved `.time`
+stamps emitted by `wl_pointer.axis`) so high-rate touchpad bursts update layout and repaint
+once per frame. Only merges matching pointer coordinates and same-sign axis deltas to preserve
+cross-container routing, clamping, and `Orb.Scroll` unpinning transitions. -/
+def coalesceScrollEvents (evs : Array Event) : Array Event :=
   evs.foldl (init := #[]) fun acc ev =>
-    match ev, acc.back? with
-    | .scroll x2 y2 dx2 dy2, some (.scroll _ _ dx1 dy1) =>
-      acc.pop.push (.scroll x2 y2 (dx1 + dx2) (dy1 + dy2))
-    | _, _ => acc.push ev
+    match ev with
+    | .scroll x2 y2 dx2 dy2 =>
+      if dx2 == 0 && dy2 == 0 then acc
+      else
+        let canMerge (x1 y1 dx1 dy1 : Int) : Bool :=
+          x1 == x2 && y1 == y2 && dx1 * dx2 ≥ 0 && dy1 * dy2 ≥ 0
+        match acc.back? with
+        | some (.scroll x1 y1 dx1 dy1) =>
+          if canMerge x1 y1 dx1 dy1 then
+            acc.pop.push (.scroll x1 y1 (dx1 + dx2) (dy1 + dy2))
+          else acc.push ev
+        | some (.time t) =>
+          match acc[acc.size - 2]? with
+          | some (.scroll x1 y1 dx1 dy1) =>
+            if canMerge x1 y1 dx1 dy1 then
+              let base := acc.pop.pop
+              let base := match base.back? with | some (.time _) => base.pop | _ => base
+              base.push (.time t) |>.push (.scroll x1 y1 (dx1 + dx2) (dy1 + dy2))
+            else acc.push ev
+          | _ => acc.push ev
+        | _ => acc.push ev
+    | _ => acc.push ev
 
 /-- Execute one frame tick:
 1. Pump Wayland events (`Wayland.pumpEvents`) and reduce them through `stepEvent`.
@@ -440,11 +460,14 @@ def initRuntimeOn {σ : Type} (cfg : RuntimeConfig) (wl : Wayland.WaylandClient)
     IO (RuntimeState σ) := do
   let (bw, bh) := wl.deviceBufferSize
   let vk ← Vulkan.initVulkan bw bh
-  let font ← Text.openFont 1 cfg.fontPattern
-  let mono ← Text.openFont 2 "Lilex,IBM Plex Mono,monospace"
-  let bold ← Text.openFont 3 s!"{cfg.fontPattern}:weight=bold"
-  let medium ← Text.openFont 4 s!"{cfg.fontPattern}:weight=medium"
-  let semibold ← Text.openFont 5 s!"{cfg.fontPattern}:weight=demibold"
+  let primaryPat := if cfg.headlessGolden.isSome then "Inter" else cfg.fontPattern
+  let monoPat := if cfg.headlessGolden.isSome then "DejaVu Sans Mono"
+    else "Lilex Nerd Font,Lilex,IBM Plex Mono,DejaVu Sans Mono,monospace"
+  let font ← Text.openFont 1 primaryPat
+  let mono ← Text.openFont 2 monoPat
+  let bold ← Text.openFont 3 s!"{primaryPat}:weight=bold"
+  let medium ← Text.openFont 4 s!"{primaryPat}:weight=medium"
+  let semibold ← Text.openFont 5 s!"{primaryPat}:weight=demibold"
   let focus0 : FocusState := { owner := some 1, traps := [] }
   let initDmg : Damage := some { x := 0, y := 0, w := (bw : Int), h := (bh : Int) }
   return {

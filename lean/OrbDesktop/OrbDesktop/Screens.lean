@@ -973,7 +973,8 @@ def buildSearchModalOverlay (theme : Theme) (availW availH : SubPx)
     (projectFilter : String := "All projects")
     (timeFilter : String := "Any time")
     (sortOrder : String := "Relevance")
-    (useReferenceList : Bool := true) : WidgetNode :=
+    (useReferenceList : Bool := true)
+    (searchBuf : ComposerBuffer := {}) : WidgetNode :=
   let pal := theme.palette
   let bdr := theme.borderWidth
   let scrimCol : Color := if theme.isDark then 0x0000006B else 0x1E1E1C40
@@ -985,6 +986,11 @@ def buildSearchModalOverlay (theme : Theme) (availW availH : SubPx)
   let innerW : SubPx := pxToSub 878
   let queryDisplay := if spec.query.isEmpty then spec.placeholder else spec.query
   let queryColor := if spec.query.isEmpty then pal.textMuted else pal.textStrong
+  let searchCaretPos :=
+    if spec.query.isEmpty then 0
+    else if searchBuf.displayText == spec.query then
+      ComposerBuffer.clampCursor searchBuf.text searchBuf.cursorOffset + searchBuf.imePreeditText.length
+    else spec.query.length
 
   let searchBar : WidgetNode :=
     WidgetNode.box
@@ -998,8 +1004,10 @@ def buildSearchModalOverlay (theme : Theme) (availW availH : SubPx)
             sizeSub := pxToSub 15, lineHeightSub := pxToSub 22, color := queryColor, weight := 400 }
           let baseRun := overlaySynthRun stRun queryDisplay
           let run := if spec.query.isEmpty then baseRun else { baseRun with editorStart := some 0 }
-          WidgetNode.text (BoxStyle.row 0 |>.withFixedSize (pxToSub 748) (pxToSub 22)) (pxToSub 22) [run] none
-            (some { owner := spec.inputWidgetId, pos := spec.query.length, length := spec.query.length, color := pal.textPrimary })
+          WidgetNode.text
+            ({ BoxStyle.row 0 |>.withFixedSize (pxToSub 748) (pxToSub 22) with clip := true })
+            (pxToSub 22) [run] none
+            (some { owner := spec.inputWidgetId, pos := searchCaretPos, length := spec.query.length, color := pal.textPrimary })
       , WidgetNode.focusable searchClearId <|
           WidgetNode.box
             (BoxStyle.row 0 |>.withAlign .center |>.withJustify .center |>.withFixedSize (pxToSub 22) (pxToSub 22))
@@ -1445,15 +1453,18 @@ def buildDesktopScreen (st : DesktopState) (availW availH : SubPx)
              |>.withPadding (Edges.xy (pxToSub 7) (pxToSub 2))
              |>.withRadius (pxToSub 6)
            let pillTextStyle : TextStyle := { Theme.mutedText theme with weight := 500 }
+           let pillLabel (txt : String) : WidgetNode :=
+             WidgetNode.text ({ BoxStyle.row 0 with maxWidth := pxToSub 170, maxHeight := pxToSub 18, clip := true })
+               (pxToSub 18) [overlaySynthRun pillTextStyle txt]
            let projectPicker := WidgetNode.focusable draftProjectPickerId <| WidgetNode.box pillStyle
-             [chromeLabel (pxToSub 18) [overlaySynthRun pillTextStyle project],
+             [pillLabel project,
               chromeIcon "chevron-down" pal.textMuted 10] (some draftProjectPickerId)
            let destination := WidgetNode.focusable 720 <| WidgetNode.box pillStyle
-             [chromeIcon "server" pal.textMuted 14, chromeLabel (pxToSub 18) [overlaySynthRun pillTextStyle machine],
+             [chromeIcon "server" pal.textMuted 14, pillLabel machine,
               chromeIcon "chevron-down" pal.textMuted 10] (some 720)
            let folderLabel := ((st.draftDirectory.splitOn "/").filter (!·.isEmpty)).getLast?.getD (if st.draftDirectory.isEmpty then "Folder" else "/")
            let folderPicker := WidgetNode.focusable draftDirectoryPickerId <| WidgetNode.box pillStyle
-             [chromeIcon "folder" pal.textMuted 14, chromeLabel (pxToSub 18) [overlaySynthRun pillTextStyle folderLabel]] (some draftDirectoryPickerId)
+             [chromeIcon "folder" pal.textMuted 14, pillLabel folderLabel] (some draftDirectoryPickerId)
            let header := WidgetNode.box (BoxStyle.row (pxToSub 10) |>.withAlign .center |>.withFixedSize width (pxToSub 26))
              ([projectPicker, destination] ++ if v.machine.startsWith "auto-managed" then [] else [folderPicker])
            let voiceButton (id : Nat) (icon : String) :=

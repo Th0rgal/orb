@@ -1,3 +1,4 @@
+import Std.Data.HashMap
 import LeanUI.Defs
 import LeanUI.Layout
 import LeanUI.Kernel
@@ -273,6 +274,21 @@ def rasterizeIcon (paths : List (List (Int × Int))) (size : Nat)
              format := 1, isColor := false, pixels := FFI.iconMask segments size.toUSize }
   else rasterizeIconReference paths size strokeTenths
 
+/-- Maximum UTF-8 byte length eligible for short-label shaping/resolved-run caching.
+Longer strings (such as growing streaming replies) bypass caching to prevent thrashing. -/
+def maxShapeCacheBytes : Nat := 128
+
+/-- Maximum retained atlas-resolved short-label runs per `GlyphAtlasCache`. -/
+def maxResolvedRuns : Nat := 512
+
+/-- O(1) lookup key for `GlyphAtlasCache.resolvedMap` (color/underline applied on hit). -/
+structure ResolvedRunKey where
+  face : USize
+  scale : Nat
+  sizeSub : SubPx
+  text : String
+  deriving BEq, Hashable, Inhabited
+
 /-- Short label with atlas-resolved glyph positions, scoped to the owning atlas. -/
 structure ResolvedRun where
   face : USize
@@ -303,6 +319,7 @@ structure GlyphAtlasCache where
   fallbackFonts : Array FontHandle := #[]
   missingCharsets : Array String := #[]
   resolved : Array ResolvedRun := #[]
+  resolvedMap : Std.HashMap ResolvedRunKey InlineRun := {}
   hits : Nat := 0
   misses : Nat := 0
   deriving Inhabited
@@ -328,7 +345,7 @@ def resetAll (ac : GlyphAtlasCache) : GlyphAtlasCache :=
   let pages' := ac.pages.map fun p =>
     { atlas := p.atlas.reset
       rgba := ByteArray.empty }
-  { ac with pages := pages', cache := {}, resolved := #[], pendingUploads := none }
+  { ac with pages := pages', cache := {}, resolved := #[], resolvedMap := {}, pendingUploads := none }
 
 /-- Allocate a padded slot `(w, h)` across pages using `Atlas.allocPadded` / `Atlas.allocPages`
 and blit the rasterized bitmap into the chosen page. -/
@@ -407,7 +424,7 @@ def shapeTextCached (ac : GlyphAtlasCache) (f : FontHandle) (size64 : UInt32) (t
     (features : String := "") : IO (GlyphAtlasCache × Array ShapedGlyph) := do
   -- Bound retained bytes as well as entry count. Growing replies are shaped
   -- once per new prefix; keeping those prefixes evicts reusable labels.
-  if text.utf8ByteSize > 128 then return (ac, ← shapeText f size64 text features)
+  if text.utf8ByteSize > maxShapeCacheBytes then return (ac, ← shapeText f size64 text features)
   match ac.shapeCache.find? (fun cached =>
       cached.fontId == f.fontId && cached.size64 == size64 && cached.text == text && cached.features == features) with
   | some cached =>
