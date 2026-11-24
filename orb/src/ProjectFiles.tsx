@@ -2873,7 +2873,7 @@ export function FileDocument(p: { text: string | null; name: string; error?: str
           <div class="scroll">
             <div class="col">
               <Show when={p.text !== null} fallback={<FileSkeleton />}>
-                <MdView text={p.text ?? ""} />
+                <MdView text={p.text ?? ""} editorial />
               </Show>
             </div>
           </div>

@@ -412,7 +412,7 @@ export function warmTranscriptMarkdown(items: ReadonlyArray<{ kind: string; text
   else setTimeout(run, 16);
 }
 
-export function MdView(p: { text: string; compact?: boolean; searchable?: boolean }) {
+export function MdView(p: { text: string; compact?: boolean; searchable?: boolean; editorial?: boolean }) {
   const parse = incrementalMarkdown();
   let mountText: string | undefined;
   let sawMultipleTexts = false;
@@ -468,7 +468,10 @@ export function MdView(p: { text: string; compact?: boolean; searchable?: boolea
   const pendingInline = () => resolvedState().pendingInline;
 
   return (
-    <div class={`md ${p.compact ? "md-compact" : ""}`} data-find-message={p.searchable ? "" : undefined}>
+    <div
+      class={`md${p.compact ? " md-compact" : ""}${p.editorial ? " md-editorial" : ""}`}
+      data-find-message={p.searchable ? "" : undefined}
+    >
       <Index each={blocks()}>{(b) => renderBlockSlot(b, p.compact, pendingInline)}</Index>
     </div>
   );

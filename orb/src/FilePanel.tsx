@@ -1153,7 +1153,7 @@ export function FilePanelProvider(p: {
                   )}
                 </For>
               </div>
-              <Show when={selected()?.name.match(/\.mdx?$/i)}>
+              <Show when={selected()?.name.match(/\.(mdx?|markdown)$/i)}>
                 <button
                   class="file-mode"
                   title="Toggle Markdown/source (⌘/)"
@@ -1442,7 +1442,7 @@ export function FilePanelProvider(p: {
                         >
                           <Show
                             when={
-                              selected()?.name.match(/\.mdx?$/i) &&
+                              selected()?.name.match(/\.(mdx?|markdown)$/i) &&
                               !sourceMode()
                             }
                             fallback={
@@ -1453,7 +1453,7 @@ export function FilePanelProvider(p: {
                               />
                             }
                           >
-                            <MdView text={data().content ?? ""} />
+                            <MdView text={data().content ?? ""} editorial />
                           </Show>
                         </FileReferenceContext.Provider>
                       </Show>

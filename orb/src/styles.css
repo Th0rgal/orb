@@ -69,8 +69,9 @@
   --md-p: #6a6a6a;
   --md-h: #c9c9c8;
   --md-fence: #8a8a8a;
-  --sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Inter", "Segoe UI", sans-serif;
-  --mono: "SF Mono", ui-monospace, Menlo, Monaco, monospace;
+  --sans: "IBM Plex Sans", "Inter", system-ui, -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", sans-serif;
+  --mono: "Lilex Nerd Font", "Lilex", "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, Monaco, monospace;
+  --serif-editorial: "IBM Plex Serif", "EB Garamond", "Michelangelus", Georgia, serif;
   --tb-h: 35px;
   --tb-traffic-left: 8px;
   --tb-traffic-margin: 0px;
@@ -1341,10 +1342,36 @@ button.under-model { color: inherit; }
 .md li { margin: 3px 0; }
 .md hr { border: 0; border-top: 1px solid var(--stroke-soft); margin: 18px 0; }
 .md code { font: 13px var(--mono); background: var(--bg-code); padding: 1px 5px; border-radius: var(--radius-xs); }
-.md pre { background: var(--bg-inset); padding: 12px 14px; border-radius: var(--radius-md); overflow-x: auto; margin: 0 0 14px; }
+.md pre { font-family: var(--mono); background: var(--bg-inset); padding: 12px 14px; border-radius: var(--radius-md); overflow-x: auto; margin: 0 0 14px; }
 .md pre code { background: none; padding: 0; }
 .md blockquote { margin: 0 0 12px; padding-left: 12px; border-left: 3px solid var(--stroke-strong); color: var(--fg-2); }
 .md a { color: var(--blue); text-decoration: none; }
+/* Editorial serif typography strictly for Markdown Files Editor preview mode. */
+.md.md-editorial {
+  font-family: var(--serif-editorial);
+  font-size: 15.5px;
+  line-height: 1.7;
+  max-width: 68ch;
+  margin: 0 auto;
+  padding: 20px 24px 72px;
+}
+.md.md-editorial h1,
+.md.md-editorial h2,
+.md.md-editorial h3 {
+  font-family: var(--serif-editorial);
+  line-height: 1.3;
+  letter-spacing: -0.01em;
+}
+.md.md-editorial pre,
+.md.md-editorial code {
+  font-family: var(--mono);
+}
+.md.md-editorial blockquote > .md {
+  padding: 0;
+  font-family: inherit;
+  font-size: inherit;
+  line-height: inherit;
+}
 .md-src { position: relative; flex: 1; min-height: 0; font: 13px/1.55 var(--mono); }
 /* Two stacked layers that must occupy exactly the same box and wrap text at
    exactly the same points: a highlighted <pre> underneath, and a transparent
@@ -1860,12 +1887,12 @@ button.fork-trigger:hover { color: var(--fg); }
 .file-tree-row span { width:12px;flex:none;color:var(--fg-3); }
 .file-tree-resize { position:absolute;right:0;top:0;height:100%;width:5px;cursor:col-resize; }
 .file-preview { flex:1;min-width:0;overflow:auto;padding:18px 22px;user-select:text;-webkit-user-select:text;cursor:text; }
-.file-preview .md-view { font-size:14px;line-height:1.6; }
+.file-preview > .md.md-editorial { padding: 8px 0 48px; }
 .file-provenance { color:var(--fg-3);font-size:11px;margin-bottom:16px; }
 .file-empty { min-height:260px;height:100%;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:12px;color:var(--fg-3); }
 .file-empty button { border:1px solid var(--stroke);border-radius: var(--radius-sm);padding:5px 10px;color:var(--fg-2); }
 .file-muted { color:var(--fg-3);font-size:12px;padding:10px; }
-.file-source-code { user-select:text;-webkit-user-select:text;cursor:text;font:12px/20px ui-monospace,SFMono-Regular,Menlo,monospace; }
+.file-source-code { user-select:text;-webkit-user-select:text;cursor:text;font:12px/20px var(--mono); }
 .file-source-code>div { display:flex;min-width:max-content;white-space:pre; }
 .file-line-number { flex:none;width:40px;text-align:right;padding-right:12px;color:var(--fg-3);user-select:none;-webkit-user-select:none; }
 .file-source-code .highlight { background:var(--bg-active); }
@@ -2575,7 +2602,7 @@ select.orb-select-native:disabled { cursor: default; }
 .agent-task-chevron { color: var(--fg-3); transition: transform 120ms; }
 .agent-task[data-open="true"] > .agent-task-toggle .agent-task-chevron { transform: rotate(-90deg); }
 .agent-task-detail { padding: 4px 2px 12px 32px; }
-.agent-task-detail pre { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font: 11px/1.6 ui-monospace, monospace; max-height: 240px; overflow: auto; }
+.agent-task-detail pre { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font: 11px/1.6 var(--mono); max-height: 240px; overflow: auto; }
 .agent-task-empty { color: var(--fg-3); font-size: 11px; }
 .agent-activity-history { margin: 8px 0; }
 .agent-activity-history > summary { cursor: pointer; color: var(--fg-3); padding: 4px 0; }
