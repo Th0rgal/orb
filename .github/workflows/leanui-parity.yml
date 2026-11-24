@@ -71,7 +71,8 @@ jobs:
             libjavascriptcoregtk-4.1-dev libssl-dev libsqlite3-dev zstd \
             libwayland-dev libxkbcommon-dev libfreetype-dev libharfbuzz-dev \
             libfontconfig-dev weston fonts-inter fonts-dejavu-core unzip \
-            xvfb imagemagick python3-numpy python3-pil ripgrep
+            xvfb imagemagick python3-numpy python3-pil ripgrep \
+            mesa-vulkan-drivers vulkan-validationlayers libvulkan-dev glslang-tools
 
       - name: Install pinned Chrome for Testing and private fonts
         run: |
@@ -198,10 +199,12 @@ jobs:
 
       - name: Run parity tests
         run: |
+          python3 scripts/gen_leanui_shaders.py --check
           python3 -m unittest -v scripts/test_leanui_tokens.py scripts/test_leanui_parity.py
           python3 -I scripts/test_leanui_window_effects.py
           scripts/leanui_window_smoke.sh target/native/orb-desktop-native
           target/native/orb-desktop-native --verify-repaint --bench 20 --width 1470 --height 923
+          ORB_LEANUI_TEST_BINARY="$PWD/target/native/orb-desktop-native" python3 -IB lean/OrbDesktop/tests/test_vulkan_fallback_and_parity.py -v
 
       - name: Run U7 native frame budget and stream damage benchmark
         run: |

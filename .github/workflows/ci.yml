@@ -165,11 +165,12 @@ jobs:
           set -euo pipefail
           rs_count=$(git ls-files '*.rs' | wc -l)
           test "$rs_count" -eq 0
-          for cfile in lean/OrbNetLeaf/c/orb_net_leaf.c lean/OrbBin/c/orb_bin_posix.c lean/OrbBin/c/orb_bin_sqlite.c lean/OrbBin/c/orb_bin_udp.c lean/OrbNode/c/orb_node_posix.c lean/OrbCore/c/orb_core_sqlite.c linux_shell/main.c linux_shell/gtk_chrome.c linux_shell/gtk_icons.c linux_shell/gtk_menu.c; do
+          for cfile in lean/OrbNetLeaf/c/orb_net_leaf.c lean/OrbBin/c/orb_bin_posix.c lean/OrbBin/c/orb_bin_sqlite.c lean/OrbBin/c/orb_bin_udp.c lean/OrbNode/c/orb_node_posix.c lean/OrbCore/c/orb_core_sqlite.c lean/OrbDesktop/c/lean_ui_wayland.c lean/OrbDesktop/c/lean_ui_text.c lean/OrbDesktop/c/lean_ui_vulkan.c lean/OrbDesktop/c/lean_ui_vk_bridge.c lean/OrbDesktop/c/lean_ui_sidebar.c linux_shell/main.c linux_shell/gtk_chrome.c linux_shell/gtk_icons.c linux_shell/gtk_menu.c; do
             lines=$(wc -l < "$cfile")
             echo "$cfile: $lines LOC"
             test "$lines" -le 220
           done
+          python3 scripts/gen_leanui_shaders.py --check
           python3 scripts/lint_kernel_calls.py
           python3 scripts/check_state_inventory.py --require-all-completed
 
@@ -488,7 +489,8 @@ jobs:
           mkdir -p "$HOME/orb-desktop-debs"
           sudo apt-get -o Dir::Cache::archives="$HOME/orb-desktop-debs" install -y --no-install-recommends libwebkit2gtk-4.1-dev \
             libgtk-3-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-dev libssl-dev libsqlite3-dev zstd \
-            libwayland-dev libxkbcommon-dev libfreetype-dev libharfbuzz-dev libfontconfig-dev
+            libwayland-dev libxkbcommon-dev libfreetype-dev libharfbuzz-dev libfontconfig-dev \
+            mesa-vulkan-drivers vulkan-validationlayers libvulkan-dev glslang-tools python3-numpy python3-pil
           sudo rm -rf "$HOME/orb-desktop-debs/partial" "$HOME/orb-desktop-debs/lock"
       - name: Build orb-locald + sandboxed-mcp
         if: steps.desktop-bins.outputs.cache-hit != 'true' && steps.promoted-desktop.outcome != 'success'
@@ -505,7 +507,11 @@ jobs:
 
       - name: Native LeanUI build and warm-cache invalidation
         if: needs.plan.outputs.run_orb_desktop_shell == 'true'
-        run: python3 scripts/test_native_desktop_cache.py
+        run: |
+          set -euo pipefail
+          python3 scripts/gen_leanui_shaders.py --check
+          python3 scripts/test_native_desktop_cache.py
+          ORB_LEANUI_TEST_BINARY="$PWD/target/native/orb-desktop-native" python3 -IB lean/OrbDesktop/tests/test_vulkan_fallback_and_parity.py -v
 
       # Tar preserves executable modes when promoted across run artifacts.
       - run: |

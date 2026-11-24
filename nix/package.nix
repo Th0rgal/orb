@@ -349,10 +349,12 @@ in
       # Downstream overrides add `autoPatchelfHook` (omarchnix's orb-desktop does), which
       # rewrites DT_RUNPATH after `postFixup` and drops the dlopen()ed libraries again.
       # `runtimeDependencies` is what autoPatchelf keeps in every binary's RUNPATH.
-      runtimeDependencies = lib.optionals stdenv.hostPlatform.isLinux [
+      runtimeDependencies = lib.optionals stdenv.hostPlatform.isLinux ([
         (lib.getLib openssl)
         (lib.getLib sqlite)
-      ];
+      ] ++ lib.optionals (buildDesktop && vulkan-loader != null) [
+        (lib.getLib vulkan-loader)
+      ]);
 
       installPhase = ''
         runHook preInstall
@@ -376,7 +378,7 @@ in
       postFixup = lib.optionalString stdenv.hostPlatform.isLinux ''
         for f in "$out/bin"/*; do
           if [ ! -L "$f" ] && [ -f "$f" ]; then
-            patchelf --add-rpath "${lib.makeLibraryPath [openssl sqlite]}" "$f"
+            patchelf --add-rpath "${lib.makeLibraryPath ([openssl sqlite] ++ lib.optionals (buildDesktop && vulkan-loader != null) [vulkan-loader])}" "$f"
           fi
         done
       '';
@@ -390,6 +392,12 @@ in
               || { echo "$b: sqlite missing from DT_RUNPATH" >&2; exit 1; }
           fi
         done
+        ${lib.optionalString (buildDesktop && vulkan-loader != null) ''
+        if [ -f "$out/bin/orb-desktop-native" ]; then
+          patchelf --print-rpath "$out/bin/orb-desktop-native" | grep -q "${lib.getLib vulkan-loader}/lib" \
+            || { echo "orb-desktop-native: vulkan-loader missing from DT_RUNPATH" >&2; exit 1; }
+        fi
+        ''}
       '';
 
       passthru = {inherit leanBase leanNode leanCore leanLocald leanDesktop;};

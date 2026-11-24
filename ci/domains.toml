@@ -77,7 +77,7 @@ paths = [
   "lean/LeanUI.lean",
   "lean/LeanUI/*",
   "c/lean_ui*",
-  "shaders/scene_sdf.glsl",
+  "shaders/*",
   "scripts/test_account_vpn_transport.py",
   "scripts/test_airvpn_sidecar.py",
   "scripts/build_orb_bins.sh",
@@ -94,6 +94,11 @@ jobs = ["test", "harness-contract", "policy-lint", "capability-matrix", "orb-des
 name = "wakeup_mcp"
 paths = ["scripts/wakeup_mcp.py", "orb/tests/wakeup_mcp_test.py"]
 jobs = ["orb-desktop-shell", "harness-contract", "policy-lint", "capability-matrix", "docker"]
+
+[[domain]]
+name = "desktop_native_spec_and_c"
+paths = ["lean/OrbDesktop/LeanUI/Spec/*", "lean/OrbDesktop/LeanUI/Swapchain.lean", "lean/OrbDesktop/c/*"]
+jobs = ["orb-desktop-shell", "wf:kernel-abi"]
 
 [[domain]]
 name = "desktop_native"

@@ -38,6 +38,10 @@ structure RuntimeConfig where
   headlessGolden : Option System.FilePath := none
   /-- Render offscreen without connecting to a compositor. -/
   headless : Bool := false
+  /-- Requested GPU backend mode (`auto`, `disabled`, `present`, `instanced`, `lavapipe`). -/
+  gpuMode : Vulkan.GpuModeRequest := .auto
+  /-- Offscreen Vulkan readback directory (CI differential parity harness only). -/
+  gpuReadbackDir : Option System.FilePath := none
   width : Nat := 1280
   height : Nat := 800
   scale120 : Nat := 120
@@ -47,14 +51,29 @@ structure RuntimeConfig where
   title : String := "Orb Desktop"
   deriving Repr, Inhabited
 
-/-- Parse CLI arguments (`--headless-golden <path>`, `--width <px>`, `--height <px>`,
-`--scale120 <n>`, `--light`, `--dark`, `--frames <n>`). -/
+/-- Parse CLI arguments (`--headless-golden <path>`, `--headless`, `--no-gpu`, `--gpu`,
+`--gpu=present`, `--gpu=instanced`, `--gpu=lavapipe`, `--gpu-readback <dir>`, `--width <px>`,
+`--height <px>`, `--scale120 <n>`, `--light`, `--dark`, `--frames <n>`). -/
 def parseRuntimeArgs (args : List String) : RuntimeConfig :=
   let rec loop (rem : List String) (cfg : RuntimeConfig) : RuntimeConfig :=
     match rem with
     | [] => cfg
     | "--headless-golden" :: path :: rest =>
       loop rest { cfg with headlessGolden := some path }
+    | "--headless" :: rest =>
+      loop rest { cfg with headless := true }
+    | "--no-gpu" :: rest =>
+      loop rest { cfg with gpuMode := .disabled }
+    | "--gpu" :: rest =>
+      loop rest { cfg with gpuMode := .instanced }
+    | "--gpu=present" :: rest =>
+      loop rest { cfg with gpuMode := .present }
+    | "--gpu=instanced" :: rest =>
+      loop rest { cfg with gpuMode := .instanced }
+    | "--gpu=lavapipe" :: rest =>
+      loop rest { cfg with gpuMode := .lavapipe }
+    | "--gpu-readback" :: dir :: rest =>
+      loop rest { cfg with gpuReadbackDir := some dir }
     | "--width" :: w :: rest =>
       loop rest { cfg with width := w.toNat?.getD cfg.width }
     | "--height" :: h :: rest =>
@@ -133,6 +152,9 @@ structure RuntimeState (σ : Type) where
   damage : Damage := none
   framesRendered : Nat := 0
   quiescentSkips : Nat := 0
+  presentCount : Nat := 0
+  frameCallbackSkips : Nat := 0
+  lastFrameTotalNs : UInt64 := 0
   running : Bool := true
 
 namespace RuntimeState
@@ -461,6 +483,9 @@ def stepFrameWithRegions {σ : Type} (rt : RuntimeState σ)
         st := { st with app := app', damage := dmg'.elim st.damage (Damage.add st.damage) }
   if !needsRedraw st.damage then
     return { st with quiescentSkips := st.quiescentSkips + 1 }
+  if !st.wayland.headless && st.wayland.frameCallbackPending && !st.wayland.configurePendingCommit then
+    return { st with frameCallbackSkips := st.frameCallbackSkips + 1 }
+  let frameT0 ← IO.monoNanosNow
   let (bw, bh) := st.wayland.deviceBufferSize
   let vk0 :=
     if st.vulkan.width != bw || st.vulkan.height != bh then
@@ -474,9 +499,54 @@ def stepFrameWithRegions {σ : Type} (rt : RuntimeState σ)
   -- Transfer the old surface into the painter; retaining it in `st` forces
   -- a framebuffer-sized copy even for a small in-place repaint.
   st := { st with vulkan := default }
+  if !st.wayland.headless && vk0.backend != .cpuShm then
+    let wlRef ← IO.mkRef st.wayland
+    let prePresent : IO Unit := do
+      let wlA ← Wayland.syncViewportDestination (← wlRef.get)
+      let wlB ← Wayland.requestFrameCallback wlA
+      wlRef.set wlB
+    let onAborted : IO Unit := do
+      let wlC ← Wayland.cancelFrameCallback (← wlRef.get)
+      wlRef.set wlC
+    let (vkGpu, atlasGpu, presentedByVk) ←
+      Vulkan.renderAndPresentGpu vk0 clearColor atlas' scene st.damage prePresent onAborted
+    let wlAfter ← wlRef.get
+    if presentedByVk then
+      let frameT1 ← IO.monoNanosNow
+      return {
+        st with
+        wayland := wlAfter
+        vulkan := vkGpu
+        atlas := atlasGpu
+        hitRegions := regions
+        scrollRegions
+        activeScrollbarDrag
+        focusableOrder := focusOrder
+        damage := none
+        framesRendered := st.framesRendered + 1
+        presentCount := st.presentCount + 1
+        lastFrameTotalNs := (frameT1 - frameT0).toUInt64
+      }
+    -- Runtime DEVICE_LOST fallback: render CPU frame so `runWindow` presents via `wl_shm`.
+    let vkCpu ← Vulkan.renderFrame vkGpu clearColor atlasGpu scene
+    let frameT1 ← IO.monoNanosNow
+    return {
+      st with
+      wayland := wlAfter
+      vulkan := vkCpu
+      atlas := atlasGpu
+      hitRegions := regions
+      scrollRegions
+      activeScrollbarDrag
+      focusableOrder := focusOrder
+      damage := none
+      framesRendered := st.framesRendered + 1
+      lastFrameTotalNs := (frameT1 - frameT0).toUInt64
+    }
   let vk' ← match st.damage with
     | some dirty => Vulkan.renderFrameDamage vk0 clearColor atlas' dirty scene
     | none => Vulkan.renderFrame vk0 clearColor atlas' scene
+  let frameT1 ← IO.monoNanosNow
   return {
     st with
     vulkan := vk'
@@ -487,6 +557,7 @@ def stepFrameWithRegions {σ : Type} (rt : RuntimeState σ)
     focusableOrder := focusOrder
     damage := none
     framesRendered := st.framesRendered + 1
+    lastFrameTotalNs := (frameT1 - frameT0).toUInt64
   }
 
 /-- Frame tick for views without independently scrollable input regions. -/
@@ -579,7 +650,10 @@ def buildCanaryScene (rt : RuntimeState Unit) :
 def initRuntimeOn {σ : Type} (cfg : RuntimeConfig) (wl : Wayland.WaylandClient) (initialApp : σ) :
     IO (RuntimeState σ) := do
   let (bw, bh) := wl.deviceBufferSize
-  let vk ← Vulkan.initVulkan bw bh
+  let useCpuOnly := wl.headless || cfg.headless || cfg.headlessGolden.isSome
+  let vk ←
+    if useCpuOnly then Vulkan.initVulkan bw bh
+    else Vulkan.initVulkanSurface bw bh wl.display wl.window.surface cfg.gpuMode wl.hasLinuxDmabuf
   let primaryPat := if cfg.headlessGolden.isSome then "Inter" else cfg.fontPattern
   let monoPat := if cfg.headlessGolden.isSome then "DejaVu Sans Mono"
     else "Lilex Nerd Font,Lilex,IBM Plex Mono,DejaVu Sans Mono,monospace"
@@ -710,12 +784,19 @@ def runWindow {σ : Type} (rt0 : RuntimeState σ)
         else pure wl
       let wl ← Wayland.syncTextFocus wl textOwner.isSome
       rt := { rt with wayland := wl, lastImeOwner := textOwner }
-      if rt.framesRendered != rendered then
+      if rt.framesRendered != rendered && rt.vulkan.backend == .cpuShm then
         let wl ← Wayland.present rt.wayland rt.vulkan.framebuffer
-        rt := { rt with wayland := wl }
-      else if rt.running && !workPending rt.app then
-        if animationVisible rt then timedWait (100 - (← IO.monoMsNow) % 100).toUInt64
-        else if hasProducer rt.app then timedWait 0xffffffff else Wayland.waitEvents rt.wayland
+        rt := { rt with wayland := wl, presentCount := rt.presentCount + 1 }
+      else if rt.running then
+        -- Anti-busy-spin rule: when redraw is deferred awaiting `wl_callback.done`, block on
+        -- Wayland fd + `wakeFd` even when `workPending rt.app == true`!
+        let deferredByFrameCb := rt.wayland.frameCallbackPending && !rt.wayland.configurePendingCommit
+        if deferredByFrameCb then
+          if animationVisible rt then timedWait (100 - (← IO.monoMsNow) % 100).toUInt64
+          else timedWait 0xffffffff
+        else if !workPending rt.app then
+          if animationVisible rt then timedWait (100 - (← IO.monoMsNow) % 100).toUInt64
+          else if hasProducer rt.app then timedWait 0xffffffff else Wayland.waitEvents rt.wayland
   return rt
 
 /-- Cleanly release font and Vulkan scratch resources owned by `RuntimeState`. -/

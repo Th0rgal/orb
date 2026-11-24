@@ -63,8 +63,8 @@ inductive Prim where
   | quad (rect : Rect) (fill : Color) (radius : Nat) (borderWidth : Nat) (border : Color)
   /-- SDF drop shadow under `rect`. -/
   | shadow (rect : Rect) (color : Color) (radius : Nat) (blur : Nat)
-  /-- Atlas-textured glyph: `src` in atlas texels, `dst` in device pixels. -/
-  | glyph (src : Rect) (dst : Rect) (color : Color) (isColor : Bool)
+  /-- Atlas-textured glyph: `src` in atlas texels, `dst` in device pixels, on `page`. -/
+  | glyph (src : Rect) (dst : Rect) (color : Color) (isColor : Bool) (page : Nat := 0)
   /-- Push a scissor rect (intersected with the current one). -/
   | clipPush (rect : Rect)
   | clipPop
@@ -95,7 +95,7 @@ def bounds : Prim → Option Rect
   | .shadow r _ _ blur =>
     let pad : Int := (blur * 2 : Int)
     some { x := r.x - pad, y := r.y - pad, w := r.w + 2 * pad, h := r.h + 2 * pad }
-  | .glyph _ dst _ _ => some dst
+  | .glyph _ dst _ _ _ => some dst
   | .clipPush _ => none
   | .clipPop => none
   | .rrect r _ _ _ _ => some r

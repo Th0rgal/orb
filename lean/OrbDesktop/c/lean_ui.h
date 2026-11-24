@@ -98,6 +98,15 @@ lean_obj_res lean_ui_box_axis(b_lean_obj_arg src, size_t w, size_t h, size_t r, 
 uint8_t lean_ui_same_rows(b_lean_obj_arg a, b_lean_obj_arg b, size_t off,
                           size_t stride, size_t bytes, size_t rows);
 
+/* ---- lean_ui_vk_bridge.c : Vulkan 1.3 8-arg trampolines & strided staging/readback - */
+lean_obj_res lean_ui_vk_call_void8(size_t fn, b_lean_obj_arg args, lean_obj_arg w);
+lean_obj_res lean_ui_vk_call_res8(size_t fn, b_lean_obj_arg args, lean_obj_arg w);
+lean_obj_res lean_ui_vk_copy_rect(size_t dst_ptr, size_t dst_cap, b_lean_obj_arg src,
+                                  size_t src_off, size_t src_stride, size_t row_bytes,
+                                  size_t rows, lean_obj_arg w);
+lean_obj_res lean_ui_vk_read_rect(size_t src_ptr, size_t src_stride, size_t row_bytes,
+                                  size_t rows, lean_obj_arg w);
+
 /* ---- lean_ui_text.c : Fontconfig + FreeType 2 + HarfBuzz -------------------------- */
 /* Single-threaded: FT_Face is not thread-safe. */
 

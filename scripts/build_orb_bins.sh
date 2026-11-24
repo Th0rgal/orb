@@ -225,7 +225,7 @@ for bin in "${BINS_TO_STAGE[@]}"; do
   elif [[ "$bin" == "orb-locald" || "$bin" == "orb-locald-test" ]]; then
     ORB_LOCALD_TARGETS+=("$bin")
   elif [[ "$bin" == "orb-desktop-native" ]]; then
-    ORB_DESKTOP_TARGETS+=("$bin")
+    ORB_DESKTOP_TARGETS+=("orb-desktop-native" "LeanUI.Spec.SwapchainSpec" "LeanUI.Spec.MutantSuite")
   elif [[ "$bin" == "lean-mesh" ]]; then
     ORB_BIN_TARGETS+=("lean-mesh-cli")
   else
