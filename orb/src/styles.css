@@ -785,20 +785,21 @@ textarea::placeholder { color: var(--placeholder); }
    height is a floor and the padding is symmetric. */
 .menu-item {
   display: flex; align-items: center; gap: 8px;
-  width: 100%; min-height: 28px; text-align: left; padding: 4px 8px; border-radius: var(--radius-sm);
-  color: var(--fg); font-size: 13px; line-height: 16px;
+  width: 100%; min-height: 26px; text-align: left; padding: 3px 8px; border-radius: 5px;
+  color: var(--fg); font-size: 12.5px; line-height: 16px;
 }
-.menu-item:hover, .menu-item.on[role="option"] { background: var(--bg-hover); }
+.menu-item:hover, .menu-item.on[role="option"] { background: var(--bg-hover); color: var(--fg-strong); }
 .menu-item[aria-pressed]::after, .menu-attachment-mark { content: ""; width: 14px; flex: 0 0 14px; margin-left: auto; color: var(--fg-2); }
 .menu-item[aria-pressed="true"]::after { content: "✓"; }
 .menu-item:focus:not(:focus-visible) { outline: 0; }
-.menu-item:focus-visible { outline: 1px solid var(--focus-border); outline-offset: -1px; background: var(--bg-hover); }
+.menu-item:focus-visible { outline: 0; background: var(--bg-hover); color: var(--fg-strong); }
+.menu-item:is(:hover, :focus-visible) .menu-ico { color: var(--fg-strong); }
 .menu-item.danger { color: var(--red); }
 .menu-item.danger .menu-ico { color: inherit; }
-.menu-ico { width: 16px; height: 16px; display: grid; place-items: center; color: var(--fg-3); flex: none; }
-.menu-ico svg { width: 14px; height: 14px; display: block; }
-.menu-sep { height: 1px; background: var(--stroke-soft); margin: 3px 6px; }
-.popup-menu { min-width: 168px; padding: 3px; }
+.menu-ico { width: 14px; height: 14px; display: grid; place-items: center; color: var(--fg-3); flex: none; }
+.menu-ico svg { width: 13px; height: 13px; display: block; }
+.menu-sep { height: 1px; background: var(--stroke-soft); margin: 4px 6px; }
+.popup-menu { min-width: 168px; padding: 4px; }
 .dock-sync-note {
   display: flex; align-items: center; justify-content: center; gap: 6px;
   padding: 7px 14px 0; color: var(--fg-3);
@@ -2388,12 +2389,11 @@ button.fork-trigger:hover { color: var(--fg); }
 select.orb-select-native { position: absolute; inset: 0; width: 100%; height: 100%; opacity: 0; margin: 0; padding: 0; cursor: pointer; }
 select.orb-select-native:disabled { cursor: default; }
 .orb-options { overflow-y: auto; padding: 4px; }
-.orb-option { min-height: 28px; padding: 4px 8px; border-radius: 3px; cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.orb-option[data-active="true"], .orb-option:hover { background: var(--bg-hover); color: var(--fg); }
+.orb-option { min-height: 26px; padding: 3px 8px; border-radius: 5px; cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.orb-option[data-active="true"], .orb-option:hover { background: var(--bg-hover); color: var(--fg-strong); }
 .orb-option[aria-disabled="true"] { opacity: .4; cursor: default; }
 .routing-filters .orb-select { width: 100%; }
 .menu { padding: 4px; }
-.menu-item { border-radius: 3px; }
 .routing-picker { position: relative; }
 .routing-picker > .s-input { padding-right: 26px; }
 .routing-picker > .orb-select-arrows { position: absolute; right: 8px; top: 50%; transform: translateY(-50%); color: var(--fg-2); }

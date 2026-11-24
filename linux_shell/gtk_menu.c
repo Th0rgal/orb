@@ -10,7 +10,7 @@
 #endif
 const char *orb_menu_project_slug(const char *target) { return (!target || strncmp(target, "project:", 8) != 0 || !target[8]) ? NULL : target + 8; }
 #if defined(ORB_HAS_WEBKITGTK)
-typedef struct { GtkWidget *wv; const char *action; char *id, *arg; } MenuAct;
+typedef struct { GtkWidget *wv, *row; const char *action; char *id, *arg; } MenuAct;
 static void free_act(gpointer p, GClosure *cl) { (void)cl; MenuAct *a = p; g_free(a->id); g_free(a->arg); g_free(a); }
 static void run_action(GtkWidget *wv, const char *action, const char *id, const char *arg) {
     char *a = orb_json_escape_string(action), *i = orb_json_escape_string(id), *g = orb_json_escape_string(arg ? arg : "");
@@ -21,38 +21,49 @@ static void run_action(GtkWidget *wv, const char *action, const char *id, const 
     }
     free(a); free(i); free(g);
 }
-static gboolean rename_key(GtkWidget *dialog, GdkEventKey *event, gpointer data) {
-    if (event->keyval == GDK_KEY_Escape) gtk_dialog_response(GTK_DIALOG(dialog), GTK_RESPONSE_CANCEL);
-    else if ((event->keyval == GDK_KEY_Return || event->keyval == GDK_KEY_KP_Enter) && gtk_widget_has_focus(GTK_WIDGET(data)))
-        gtk_dialog_response(GTK_DIALOG(dialog), GTK_RESPONSE_ACCEPT);
-    else return FALSE;
-    return TRUE;
+typedef struct { GtkWidget *wv, *pop; char *id, *title; } RenameCtx;
+static void free_rename(gpointer p, GClosure *cl) { (void)cl; RenameCtx *r = p; g_free(r->id); g_free(r->title); g_free(r); }
+static gboolean destroy_later(gpointer w) {
+    if (GTK_IS_MENU(w) && gtk_menu_get_attach_widget(GTK_MENU(w))) gtk_menu_detach(GTK_MENU(w));
+    gtk_widget_destroy(GTK_WIDGET(w)); g_object_unref(w); return G_SOURCE_REMOVE;
 }
-static void prompt_rename(GtkWidget *wv, const char *id, const char *title) {
-    GtkWidget *top = gtk_widget_get_toplevel(wv);
-    GtkWidget *dlg = gtk_dialog_new_with_buttons("Rename conversation", GTK_IS_WINDOW(top) ? GTK_WINDOW(top) : NULL,
-                                                 GTK_DIALOG_MODAL | GTK_DIALOG_DESTROY_WITH_PARENT,
-                                                 "_Cancel", GTK_RESPONSE_CANCEL, "_Rename", GTK_RESPONSE_ACCEPT, NULL);
-    GtkWidget *entry = gtk_entry_new(), *area = gtk_dialog_get_content_area(GTK_DIALOG(dlg));
-    g_signal_connect(dlg, "key-press-event", G_CALLBACK(rename_key), entry);
-    gtk_entry_set_text(GTK_ENTRY(entry), title ? title : ""); gtk_entry_set_max_length(GTK_ENTRY(entry), 200); gtk_entry_set_activates_default(GTK_ENTRY(entry), TRUE);
-    gtk_dialog_set_default_response(GTK_DIALOG(dlg), GTK_RESPONSE_ACCEPT); gtk_container_set_border_width(GTK_CONTAINER(area), 12);
-    gtk_box_pack_start(GTK_BOX(area), entry, TRUE, TRUE, 0); gtk_widget_set_size_request(dlg, 380, -1); gtk_widget_show_all(dlg);
-    if (gtk_dialog_run(GTK_DIALOG(dlg)) == GTK_RESPONSE_ACCEPT) {
-        g_autofree char *next = g_strdup(gtk_entry_get_text(GTK_ENTRY(entry)));
-        if (*g_strstrip(next) && g_strcmp0(next, title) != 0) run_action(wv, "rename", id, next);
-    }
-    gtk_widget_destroy(dlg);
+static void rename_commit(GtkEntry *entry, gpointer ud) {
+    RenameCtx *r = ud;
+    g_autofree char *next = g_strdup(gtk_entry_get_text(entry));
+    if (*g_strstrip(next) && g_strcmp0(next, r->title) != 0) run_action(r->wv, "rename", r->id, next);
+    gtk_popover_popdown(GTK_POPOVER(r->pop));
+}
+static gboolean rename_key(GtkWidget *w, GdkEventKey *ev, gpointer ud) {
+    (void)w;
+    if (ev->keyval == GDK_KEY_Escape) { gtk_popover_popdown(GTK_POPOVER(ud)); return TRUE; }
+    return FALSE;
+}
+static void rename_closed(GtkPopover *pop, gpointer ud) { (void)ud; g_idle_add(destroy_later, g_object_ref(pop)); }
+static void prompt_rename(GtkWidget *wv, GtkWidget *row, const char *id, const char *title) {
+    GtkWidget *anchor = (row && gtk_widget_get_mapped(row)) ? row : wv;
+    GtkWidget *pop = gtk_popover_new(anchor), *entry = gtk_entry_new();
+    gtk_style_context_add_class(gtk_widget_get_style_context(pop), "orb-rename");
+    gtk_popover_set_constrain_to(GTK_POPOVER(pop), GTK_POPOVER_CONSTRAINT_WINDOW);
+    gtk_popover_set_position(GTK_POPOVER(pop), GTK_POS_BOTTOM);
+    gtk_entry_set_text(GTK_ENTRY(entry), title ? title : "");
+    gtk_entry_set_max_length(GTK_ENTRY(entry), 200);
+    gtk_widget_set_size_request(entry, 240, -1);
+    RenameCtx *r = g_new0(RenameCtx, 1); r->wv = wv; r->pop = pop; r->id = g_strdup(id); r->title = g_strdup(title ? title : "");
+    g_signal_connect_data(entry, "activate", G_CALLBACK(rename_commit), r, free_rename, 0);
+    g_signal_connect(entry, "key-press-event", G_CALLBACK(rename_key), pop);
+    g_signal_connect(pop, "closed", G_CALLBACK(rename_closed), NULL);
+    gtk_container_add(GTK_CONTAINER(pop), entry);
+    gtk_widget_show_all(pop);
+    gtk_popover_popup(GTK_POPOVER(pop));
+    gtk_widget_grab_focus(entry);
+    gtk_editable_select_region(GTK_EDITABLE(entry), 0, -1);
 }
 static GtkWidget *sel_list;
-static void on_item(GtkButton *mi, gpointer ud) {
+static void on_item(GtkMenuItem *mi, gpointer ud) {
     (void)mi;
     MenuAct *a = ud;
     if (strcmp(a->action, "rename") == 0) {
-        /* The dialog spins a nested loop; the menu (and `a`) may be freed meanwhile. */
-        g_autofree char *id = g_strdup(a->id);
-        g_autofree char *title = g_strdup(a->arg);
-        prompt_rename(a->wv, id, title);
+        prompt_rename(a->wv, a->row, a->id, a->arg);
     } else if (strcmp(a->action, "clear") == 0) {
         if (sel_list) { orb_sel_clear(sel_list); }
     } else if (strcmp(a->action, "delete") == 0 || strcmp(a->action, "move") == 0) {
@@ -64,29 +75,24 @@ static void on_item(GtkButton *mi, gpointer ud) {
         g_strfreev(ids);
     }
 }
-static void move_page(GtkWidget *page, GtkWidget *moves, const char *label) {
-    GtkWidget *popup = gtk_widget_get_ancestor(page, GTK_TYPE_POPOVER_MENU);
-    gtk_container_add(GTK_CONTAINER(popup), moves);
-    gtk_container_child_set(GTK_CONTAINER(popup), moves, "submenu", "destinations", NULL);
-    g_object_set(orb_menu_row(page, label, "folder-symbolic"), "menu-name", "destinations", NULL);
+static void move_page(GtkWidget *menu, GtkWidget *moves, const char *label) {
+    gtk_menu_item_set_submenu(GTK_MENU_ITEM(orb_menu_row(menu, label, "folder-symbolic")), moves);
 }
-static void add_item(GtkWidget *menu, const char *label, GtkWidget *wv, const char *action, const char *id, const char *arg) {
+static void add_item(GtkWidget *menu, const char *label, GtkWidget *wv, GtkWidget *row, const char *action, const char *id, const char *arg) {
     GtkWidget *it = orb_menu_row(menu, label, orb_menu_icon_name(action));
-    MenuAct *a = g_new0(MenuAct, 1); a->wv = wv; a->action = action; a->id = g_strdup(id); a->arg = g_strdup(arg ? arg : "");
-    g_signal_connect_data(it, "clicked", G_CALLBACK(on_item), a, free_act, 0);
+    MenuAct *a = g_new0(MenuAct, 1); a->wv = wv; a->row = row; a->action = action; a->id = g_strdup(id); a->arg = g_strdup(arg ? arg : "");
+    g_signal_connect_data(it, "activate", G_CALLBACK(on_item), a, free_act, 0);
 }
-static gboolean destroy_later(gpointer w) { gtk_widget_destroy(GTK_WIDGET(w)); g_object_unref(w); return G_SOURCE_REMOVE; }
-static void closed(GtkPopover *popup, gpointer data) { (void)data; g_idle_add(destroy_later, g_object_ref(popup)); }
+static void closed(GtkMenuShell *menu, gpointer data) { (void)data; g_idle_add(destroy_later, g_object_ref(menu)); }
 static GtkWidget *move_submenu(GtkWidget *wv, GtkWidget *list, const char *id, const char *current) {
     GtkWidget *sub = orb_menu_page();
-    g_object_set(orb_menu_row(sub, "_Move to", NULL), "menu-name", "main", "inverted", TRUE, NULL);
     int n = 0;
     GList *rows = gtk_container_get_children(GTK_CONTAINER(list));
     for (GList *l = rows; l; l = l->next) {
         const char *kind = g_object_get_data(G_OBJECT(l->data), "orb-kind");
         const char *slug = orb_menu_project_slug(g_object_get_data(G_OBJECT(l->data), "orb-target"));
         const char *name = g_object_get_data(G_OBJECT(l->data), "orb-title");
-        if (kind && !strcmp(kind, "project") && slug && g_strcmp0(slug, current) != 0) { add_item(sub, name && *name ? name : slug, wv, "move", id, slug); ++n; }
+        if (kind && !strcmp(kind, "project") && slug && g_strcmp0(slug, current) != 0) { add_item(sub, name && *name ? name : slug, wv, NULL, "move", id, slug); ++n; }
     }
     g_list_free(rows);
     return n ? sub : (gtk_widget_destroy(sub), NULL);
@@ -160,12 +166,12 @@ static void bulk_menu(GtkWidget *wv, GtkWidget *list, GtkWidget *menu) {
     } else {
         GtkWidget *moves = move_submenu(wv, list, ids, NULL);
         if (moves) { snprintf(label, sizeof(label), "_Move %d agents to", n); move_page(menu, moves, label); }
-        if (archived < n) { snprintf(label, sizeof(label), "_Archive %d conversations", n - archived); add_item(menu, label, wv, "archive", ids, NULL); }
-        if (archived > 0) { snprintf(label, sizeof(label), "R_estore %d conversations", archived); add_item(menu, label, wv, "restore", ids, NULL); }
+        if (archived < n) { snprintf(label, sizeof(label), "_Archive %d conversations", n - archived); add_item(menu, label, wv, NULL, "archive", ids, NULL); }
+        if (archived > 0) { snprintf(label, sizeof(label), "R_estore %d conversations", archived); add_item(menu, label, wv, NULL, "restore", ids, NULL); }
         orb_menu_separator(menu);
-        snprintf(label, sizeof(label), "_Delete %d agents\xE2\x80\xA6", n); add_item(menu, label, wv, "delete", ids, ids);
+        snprintf(label, sizeof(label), "_Delete %d agents\xE2\x80\xA6", n); add_item(menu, label, wv, NULL, "delete", ids, ids);
     }
-    orb_menu_separator(menu); add_item(menu, "_Clear selection", wv, "clear", "", NULL);
+    orb_menu_separator(menu); add_item(menu, "_Clear selection", wv, NULL, "clear", "", NULL);
     g_free(ids);
 }
 gboolean orb_gtk_row_context_menu(GtkWidget *wv, GtkWidget *list, GtkWidget *row, const GdkEvent *ev) {
@@ -176,11 +182,7 @@ gboolean orb_gtk_row_context_menu(GtkWidget *wv, GtkWidget *list, GtkWidget *row
     gboolean is_project = !bulk && wv && slug && g_strcmp0(kind, "project") == 0;
     gboolean is_mission = !bulk && wv && !g_strcmp0(kind, "mission") && target && !strncmp(target, "m:", 2) && target[2];
     if (!bulk && !is_project && !is_mission) return FALSE;
-    GtkWidget *pop = gtk_popover_menu_new(), *menu = orb_menu_page();
-    orb_menu_anchor(GTK_POPOVER(pop), row, ev);
-    gtk_container_add(GTK_CONTAINER(pop), menu);
-    gtk_container_child_set(GTK_CONTAINER(pop), menu, "submenu", "main", NULL);
-    gtk_style_context_add_class(gtk_widget_get_style_context(pop), "orb-ctx");
+    GtkWidget *menu = orb_menu_page();
     if (bulk) { bulk_menu(wv, list, menu); }
     else if (is_project) { orb_project_menu_populate(wv, menu, slug); }
     else {
@@ -188,16 +190,16 @@ gboolean orb_gtk_row_context_menu(GtkWidget *wv, GtkWidget *list, GtkWidget *row
         const char *status = g_object_get_data(G_OBJECT(row), "orb-status"), *project = g_object_get_data(G_OBJECT(row), "orb-project");
         gboolean archived = g_strcmp0(status, "acknowledged") == 0 || g_strcmp0(status, "archived") == 0;
         GtkWidget *moves = move_submenu(wv, list, id, project);
-        add_item(menu, "_Rename\xE2\x80\xA6", wv, "rename", id, title);
+        add_item(menu, "_Rename\xE2\x80\xA6", wv, row, "rename", id, title);
         if (moves) { move_page(menu, moves, "_Move to"); }
-        add_item(menu, archived ? "R_estore" : "_Archive", wv, archived ? "restore" : "archive", id, NULL);
         orb_menu_separator(menu);
-        add_item(menu, "_Copy mission ID", wv, "copy-id", id, NULL);
-        add_item(menu, "Mission _settings", wv, "settings", id, NULL);
+        add_item(menu, "_Copy mission ID", wv, row, "copy-id", id, NULL);
+        add_item(menu, "Mission _settings", wv, row, "settings", id, NULL);
+        orb_menu_separator(menu);
+        add_item(menu, archived ? "R_estore" : "_Archive", wv, row, archived ? "restore" : "archive", id, NULL);
     }
-    g_signal_connect(pop, "closed", G_CALLBACK(closed), NULL);
-    gtk_widget_show_all(pop);
-    gtk_popover_popup(GTK_POPOVER(pop));
+    g_signal_connect(menu, "selection-done", G_CALLBACK(closed), NULL);
+    orb_menu_popup(menu, row, ev);
     return TRUE;
 }
 #endif

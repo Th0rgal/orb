@@ -13,10 +13,9 @@ void orb_gtk_bind_keyboard_focus(GtkWidget *window);
 void orb_gtk_apply_theme(GtkCssProvider *css, gboolean light);
 typedef struct { GPtrArray *spinning; guint src; int step; } OrbIconSpinner;
 void orb_spinner_stop(OrbIconSpinner *sp);
-GtkWidget *orb_menu_row(GtkWidget *page, const char *label, const char *icon);
+GtkWidget *orb_menu_row(GtkWidget *menu, const char *label, const char *icon);
 gboolean orb_button_enter(GtkWidget *button, GdkEventKey *event, gpointer data);
-void orb_menu_separator(GtkWidget *page);
-void orb_add_menu_icon(GtkWidget *button, const char *icon);
+void orb_menu_separator(GtkWidget *menu);
 GtkWidget *orb_make_icon_widget(OrbIconSpinner *sp, const char *icon, const char *color, const char *status);
 void orb_gtk_bind_pointer_cursor(GtkWidget *w);
 /* Starts a compositor-driven move of `w`'s toplevel with the primary button held. */
