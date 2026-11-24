@@ -12,16 +12,16 @@ from PIL import Image
 NAME = re.compile(r'(.+)_(dark|light)_([12])x$')
 
 
-def read(path):
+def read(path, rgba=False):
     with Image.open(path) as im:
-        return np.asarray(im.convert('RGB')).copy()
+        return np.asarray(im.convert('RGBA' if rgba else 'RGB')).copy()
 
 
 def ssim(a, b):
-    """Mean local RGB SSIM, uniform 7x7 window, population covariance.
+    """Mean local RGB/RGBA SSIM, uniform 7x7 window, population covariance.
 
     Tiny fixtures use the largest available square window. Constants assume
-    8-bit RGB; no image-dependent normalization or optional scipy dependency.
+    8-bit channels; no image-dependent normalization or optional scipy dependency.
     """
     a, b = a.astype(float), b.astype(float)
     n = min(7, a.shape[0], a.shape[1])
@@ -36,12 +36,14 @@ def ssim(a, b):
 
 def metrics(a, b, tolerance=8):
     if a.ndim != 3 or not all(a.shape):
-        raise ValueError('expected a nonempty RGB image')
+        raise ValueError('expected a nonempty RGB/RGBA image')
     if a.shape != b.shape:
         raise ValueError(f'dimension mismatch: {a.shape} != {b.shape}')
     d = np.max(np.abs(a.astype(np.int16)-b.astype(np.int16)), axis=2)
     return {'mismatch': float(np.mean(d > 0)*100),
-            'above_tolerance': float(np.mean(d > tolerance)*100), 'ssim': ssim(a, b)}
+            'above_tolerance': float(np.mean(d > tolerance)*100),
+            'max_delta': int(np.max(d)),
+            'ssim': ssim(a, b)}
 
 
 def regions(a, b, tolerance):
@@ -59,7 +61,8 @@ def regions(a, b, tolerance):
 
 
 def compare(reference, native, tolerance=8, require=None, out=None,
-            reference_repeat=None, native_repeat=None):
+            reference_repeat=None, native_repeat=None, rgba=False,
+            max_delta=None, max_above_tol=None, min_ssim=None):
     refs = {p.name: p for p in Path(reference).glob('*.png')}
     candidates = {p.name: p for p in Path(native).glob('*.png')}
     errors, rows = [], []
@@ -71,7 +74,7 @@ def compare(reference, native, tolerance=8, require=None, out=None,
             equal = 0
             for name, path in sorted(files.items()):
                 try:
-                    a, b = read(path), read(Path(repeat)/name)
+                    a, b = read(path, rgba=rgba), read(Path(repeat)/name, rgba=rgba)
                     if a.shape == b.shape and np.array_equal(a, b):
                         equal += 1
                     else:
@@ -84,14 +87,27 @@ def compare(reference, native, tolerance=8, require=None, out=None,
             errors.append(f'missing pair: {name}')
             continue
         match = NAME.fullmatch(Path(name).stem)
-        if not match:
+        if not match and not rgba:
             errors.append(f'invalid canonical filename: {name}')
             continue
         try:
-            a, b = read(refs[name]), read(candidates[name])
-            row = dict(name=name, screen=match[1], theme=match[2], scale=int(match[3]), **metrics(a, b, tolerance))
+            a, b = read(refs[name], rgba=rgba), read(candidates[name], rgba=rgba)
+            m = metrics(a, b, tolerance)
+            row = dict(
+                name=name,
+                screen=match[1] if match else Path(name).stem,
+                theme=match[2] if match else 'rgba',
+                scale=int(match[3]) if match else 1,
+                **m,
+            )
             row['regions'] = regions(a, b, tolerance)
             rows.append(row)
+            if max_delta is not None and m['max_delta'] > max_delta:
+                errors.append(f"{name}: max_delta {m['max_delta']} > {max_delta}")
+            if max_above_tol is not None and m['above_tolerance'] > max_above_tol:
+                errors.append(f"{name}: above_tolerance {m['above_tolerance']:.4f}% > {max_above_tol}%")
+            if min_ssim is not None and m['ssim'] < min_ssim:
+                errors.append(f"{name}: ssim {m['ssim']:.6f} < {min_ssim}")
             if out:
                 Path(out).mkdir(parents=True, exist_ok=True)
                 Image.fromarray(np.abs(a.astype(np.int16)-b.astype(np.int16)).clip(0, 255).astype('uint8')).save(Path(out)/name)
@@ -156,6 +172,10 @@ def main(argv=None):
         p.add_argument('--'+name)
     p.add_argument('--tolerance', type=int, default=8)
     p.add_argument('--require', type=int)
+    p.add_argument('--rgba', action='store_true')
+    p.add_argument('--max-delta', type=int)
+    p.add_argument('--max-above-tol', type=float)
+    p.add_argument('--min-ssim', type=float)
     args = p.parse_args(argv)
     if not 0 <= args.tolerance <= 255:
         p.error('tolerance must be between 0 and 255')
@@ -163,7 +183,12 @@ def main(argv=None):
         p.error('require must be positive')
     if args.crops_dir and not args.table:
         p.error('--crops-dir requires --table containing crop declarations')
-    result = compare(args.reference, args.native, args.tolerance, args.require, args.out, args.reference_repeat, args.native_repeat)
+    result = compare(
+        args.reference, args.native, args.tolerance, args.require, args.out,
+        args.reference_repeat, args.native_repeat,
+        rgba=args.rgba, max_delta=args.max_delta,
+        max_above_tol=args.max_above_tol, min_ssim=args.min_ssim,
+    )
     if not result['pairs']:
         result['errors'].append('no image pairs measured')
     body = table(result)

@@ -15,6 +15,7 @@ structure ShapedGlyph where
   xOffset : Int := 0
   yOffset : Int := 0
   atlasSrc : Rect := { x := 0, y := 0, w := 0, h := 0 }
+  atlasPage : Nat := 0
   sizePx : Nat × Nat := (0, 0)
   bearingPx : Int × Int := (0, 0)
   isColor : Bool := false

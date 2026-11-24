@@ -209,7 +209,7 @@ where
             { x := gxSub, y := originYSub + Int.ofNat pg.relY + pg.glyph.yOffset,
               w := Int.ofNat (max 1 pg.glyph.xAdvance),
               h := Int.ofNat (max 1 subPerPx) }
-      (if gw > 0 && gh > 0 then [Prim.glyph pg.glyph.atlasSrc dst pg.color pg.glyph.isColor] else []) ++
+      (if gw > 0 && gh > 0 then [Prim.glyph pg.glyph.atlasSrc dst pg.color pg.glyph.isColor pg.glyph.atlasPage] else []) ++
         emitLineGlyphs scale120 originXSub originYSub lineHSub pgs
 
 /-- Emit a crisp vertical caret bar at the logical scalar insertion point when `owner` is focused. -/

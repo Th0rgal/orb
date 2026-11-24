@@ -7,10 +7,7 @@ static lean_obj_res io_err(const char *msg) {
   return lean_io_result_mk_error(lean_mk_io_user_error(lean_mk_string(msg)));
 }
 
-/* Compare a strided rectangle in two RGBA buffers. Out-of-range
- * rectangles cannot establish reuse; the caller then repaints in full. */
-/* Offsets, widths and pitches in pixels. Validate without overflowing, then
- * use the same straight-alpha integer rounding as the reference rasterizer. */
+/* Offsets, widths and pitches in pixels. Validate without overflowing. */
 static int fits_rows(size_t len, size_t off, size_t pitch, size_t w, size_t h) {
   return h && w && pitch >= w && off <= len && w <= len-off && h-1 <= (len-off-w)/pitch;
 }
@@ -26,10 +23,11 @@ lean_obj_res lean_ui_blit_glyph(lean_obj_arg fb, b_lean_obj_arg atlas, size_t ds
       unsigned a = (s[3]*(color & 255)+127)/255;
       if (!a) continue;
       for (unsigned i=0; i<3; ++i) {
-        unsigned c = colored ? s[i] : ((color >> (24-8*i)) & 255);
-        d[i] = (c*a + d[i]*(255-a)+127)/255;
+        unsigned v = colored ? ((s[i]*(color & 255)+127)/255 + (d[i]*(255-a)+127)/255)
+                             : ((((color >> (24-8*i)) & 255)*a + d[i]*(255-a)+127)/255);
+        d[i] = v > 255 ? 255 : v;
       }
-      d[3] = a + (d[3]*(255-a)+127)/255;
+      unsigned oa = a + (d[3]*(255-a)+127)/255; d[3] = oa > 255 ? 255 : oa;
     }
   }
   return fb;
@@ -81,7 +79,9 @@ static double icon_coord(const uint8_t *p) { return (int)p[0]+256*(int)p[1]-128;
 /* Match rasterizeIconReference: 16 pixel-center samples, round segment
  * endpoints, and the same floating-point operations (no fused multiply-add). */
 lean_obj_res lean_ui_icon_mask(b_lean_obj_arg segments, size_t size) {
+#ifdef __clang__
 #pragma STDC FP_CONTRACT OFF
+#endif
   if (size > 1024) return lean_alloc_sarray(1,0,0);
   lean_obj_res out = lean_alloc_sarray(1,size*size,size*size);
   const uint8_t *p = lean_sarray_cptr(segments);

@@ -237,6 +237,7 @@ class WaylandTestCompositor:
         self._pools: dict[int, tuple[int, int, mmap.mmap]] = {}
         self._buffers: dict[int, tuple[int, int, int, int, int]] = {}  # buf -> (pool, off, w, h, stride)
         self._attached_buf: int | None = None
+        self._pending_frame_cbs: list[int] = []
         self.surface_id: int | None = None
         self.xdg_surface_id: int | None = None
         self.xdg_toplevel_id: int | None = None
@@ -265,11 +266,14 @@ class WaylandTestCompositor:
     def _send(self, payload: bytes, fds: list[int] | None = None) -> None:
         if self._client is None:
             return
-        if fds:
-            anc = [(socket.SOL_SOCKET, socket.SCM_RIGHTS, array.array("i", fds).tobytes())]
-            self._client.sendmsg([payload], anc)
-        else:
-            self._client.sendall(payload)
+        try:
+            if fds:
+                anc = [(socket.SOL_SOCKET, socket.SCM_RIGHTS, array.array("i", fds).tobytes())]
+                self._client.sendmsg([payload], anc)
+            else:
+                self._client.sendall(payload)
+        except OSError:
+            pass
 
     def _serve(self) -> None:
         buf = bytearray()
@@ -418,6 +422,9 @@ class WaylandTestCompositor:
             if opcode == 1:  # attach(buffer, x, y)
                 bid = struct.unpack_from("=I", body, 0)[0]
                 self._attached_buf = bid
+            elif opcode == 3:  # frame(callback)
+                cb = struct.unpack_from("=I", body, 0)[0]
+                self._pending_frame_cbs.append(cb)
             elif opcode == 6:  # commit
                 if self.xdg_toplevel_id and self.xdg_surface_id and not self.configured_acked and self._attached_buf is None:
                     # Initial commit -> send xdg_toplevel.configure + xdg_surface.configure
@@ -426,7 +433,8 @@ class WaylandTestCompositor:
                     self._send(_wl_msg(self.xdg_surface_id, 0, struct.pack("=I", self._next_serial())))
                     self._maybe_send_enter()
                 elif self._attached_buf and self._attached_buf in self._buffers:
-                    pid, off, w, h, stride = self._buffers[self._attached_buf]
+                    bid = self._attached_buf
+                    pid, off, w, h, stride = self._buffers[bid]
                     if pid in self._pools:
                         mm = self._pools[pid][2]
                         frame = mm[off : off + stride * h]
@@ -436,6 +444,14 @@ class WaylandTestCompositor:
                         self.last_frame_stride = stride
                         self.last_frame_hash = hashlib.sha256(frame).hexdigest()
                     self.commit_count += 1
+                    # Release buffer and fire any pending wl_surface.frame callbacks per Wayland spec
+                    self._send(_wl_msg(bid, 0, b""))  # wl_buffer.release
+                    if self._pending_frame_cbs:
+                        ts = int(time.monotonic() * 1000) & 0xFFFFFFFF
+                        for cb in self._pending_frame_cbs:
+                            self._send(_wl_msg(cb, 0, struct.pack("=I", ts)))  # wl_callback.done
+                            self._send(_wl_msg(1, 1, struct.pack("=I", cb)))   # wl_display.delete_id
+                        self._pending_frame_cbs.clear()
                     self._maybe_send_enter()
                     self._cond.notify_all()
 
