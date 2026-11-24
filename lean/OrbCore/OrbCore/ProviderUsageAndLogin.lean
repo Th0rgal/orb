@@ -493,6 +493,21 @@ def loadHydratedProviders (store : CoreStore) (workingDir : String)
   let defJv ← readDataJsonFile workingDir store.rootDir "default_provider.json"
   let defaultId := (defJv.fieldStr? "default_provider_id").getD ""
   let backendsJv ← readDataJsonFile workingDir store.rootDir "provider_backends.json"
+  let orderJv ← readDataJsonFile workingDir store.rootDir "provider_order.json"
+  let dbSortOrders : Array (String × String × Nat) ←
+    match ← execParamQuery store.missionsDb "SELECT id, provider_type, COALESCE(sort_order, 0) FROM ai_providers;" #[] with
+    | .ok rows => pure ((rows.extract 1 rows.size).filterMap fun r =>
+        match r[0]?, r[1]? with
+        | some id, some pt => some (id, pt, (r[2]?.bind String.toNat?).getD 0)
+        | _, _ => none)
+    | .error _ => pure #[]
+  let savedOrderFor (id pType : String) (fallback : Nat) : Nat :=
+    match orderJv.fieldNat? id with
+    | some p => p
+    | none =>
+      if dbSortOrders.any (fun (_, pt, so) => pt == pType && so > 0) then
+        (dbSortOrders.find? (fun (rid, _, _) => rid == id)).map (·.2.2) |>.getD fallback
+      else fallback
   let authFiles ← scanCliProxyAuthFiles
   let uniquePrefix := fun (file : CliAuthFileInfo) =>
     if !file.prefixId.isEmpty && !file.prefixId.contains '/' &&
@@ -551,7 +566,7 @@ def loadHydratedProviders (store : CoreStore) (workingDir : String)
         if !legAccessTok.isEmpty && legAccessTok != "cli-proxy-managed" then legAccessTok
         else if p.providerType.toLower == "muse-code" && !legRefreshFile.isEmpty && !legRefreshFile.endsWith ".json" then legRefreshFile
         else ""
-    let effOauthFile := (matchedAuth?.map (·.fileName)).getD legRefreshFile
+    let effOauthFile := (matchedAuth?.map (·.fileName)).getD (if !legAuthFile.isEmpty then legAuthFile else legRefreshFile)
     let effDeviceTok := museDeviceToken p.providerType matchedAuth? legRefreshFile
 
     let bksFromFile : Array String :=
@@ -571,7 +586,7 @@ def loadHydratedProviders (store : CoreStore) (workingDir : String)
         ("context_limit", match cm.contextLimit? with | some c => JVal.uint64 c.toUInt64 | none => JVal.nat 128000),
         ("output_limit", match cm.outputLimit? with | some o => JVal.uint64 o.toUInt64 | none => JVal.nat 8192)
       ]
-    let prio := (leg?.bind (fun j => j.fieldNat? "priority")).getD idx
+    let prio := savedOrderFor p.id p.providerType ((leg?.bind (fun j => j.fieldNat? "priority")).getD idx)
     let createdStr := (leg?.bind (fun j => j.fieldStr? "created_at")).getD (if p.updatedAt.isEmpty then nowIso else p.updatedAt)
     let updatedStr := if p.updatedAt.isEmpty then createdStr else p.updatedAt
 
@@ -641,14 +656,14 @@ def loadHydratedProviders (store : CoreStore) (workingDir : String)
         hasApiKey := hasApi
         hasOAuth := hasOa
         oauthToken := (matchedAuth?.map (·.accessToken)).getD effLegTok
-        oauthFile := (matchedAuth?.map (·.fileName)).getD refFile
+        oauthFile := (matchedAuth?.map (·.fileName)).getD (if !authFile.isEmpty then authFile else refFile)
         nativeOnly := matchedAuth?.any (·.nativeOnly)
         boundOauthFile := (matchedAuth?.map (·.fileName)).getD ""
         modelPrefix := (matchedAuth?.map uniquePrefix).getD ""
         accountEmail := if !email.isEmpty then email else (matchedAuth?.map (·.email)).getD ""
         enabled := en
         isDefault := (lid == defaultId)
-        priority := (leg.fieldNat? "priority").getD out.size
+        priority := savedOrderFor lid pType ((leg.fieldNat? "priority").getD out.size)
         useForBackends := ((leg.fieldArr? "use_for_backends").getD #[]).filterMap JVal.asStr?
         customModels := ((leg.fieldArr? "custom_models").getD #[]).filter (fun cm =>
           let mid := (cm.fieldStr? "id").getD ""
@@ -667,9 +682,10 @@ def loadHydratedProviders (store : CoreStore) (workingDir : String)
   for af in orderedAuthFiles do
     let pType := authTypeToProviderType af.authType
     if !sidecarAuthFileDuplicated out pType af then
+      let synthId := if af.prefixId.isEmpty || af.prefixId == vpnModelPrefix af.fileName || out.any (fun hp => hp.id == af.prefixId) ||
+          (authFiles.filter (fun f => f.prefixId == af.prefixId)).size != 1 then fileAccountId pType af.fileName else af.prefixId
       out := out.push { (default : HydratedProvider) with
-        id := if af.prefixId.isEmpty || af.prefixId == vpnModelPrefix af.fileName || out.any (fun hp => hp.id == af.prefixId) ||
-            (authFiles.filter (fun f => f.prefixId == af.prefixId)).size != 1 then fileAccountId pType af.fileName else af.prefixId
+        id := synthId
         name := (lookupProviderMeta pType).name
         providerType := pType
         hasOAuth := true
@@ -680,10 +696,11 @@ def loadHydratedProviders (store : CoreStore) (workingDir : String)
         modelPrefix := uniquePrefix af
         accountEmail := af.email
         enabled := !af.disabled
-        priority := out.size
+        priority := savedOrderFor synthId pType out.size
         deviceToken := af.deviceToken
       }
-  return out.qsort (fun a b => a.priority < b.priority)
+  let indexed := out.mapIdx (fun i hp => (hp, i))
+  return (indexed.qsort (fun a b => a.1.priority < b.1.priority || (a.1.priority == b.1.priority && a.2 < b.2))).map Prod.fst
 
 /-- Legacy rows can claim the same file. Only an unambiguous binding authorizes routing. -/
 def accountRoutingFile (accounts : Array HydratedProvider) (hp : HydratedProvider) : String :=
@@ -2952,9 +2969,18 @@ def dispatchProviderAndAiRoute
   let segs := (cleanPath.splitOn "/").filter (!·.isEmpty)
   let qMap := parseQueryMap rawTarget
   let effAdmin := isLegacyUnscoped || isAdmin
-  -- The proxy records a login held by CLIProxyAPI under `cliproxyapi:<type>`, not the row id.
+  -- The proxy records a login held by CLIProxyAPI under `cliproxyapi:<type>` (and
+  -- Antigravity pools models under `cliproxyapi:antigravity:<model>`), not only the row id.
+  let isFileAccountHash (s : String) : Bool :=
+    s.length == 64 && s.toList.all (fun c => ('0' ≤ c && c ≤ '9') || ('a' ≤ c && c ≤ 'f'))
   let healthKeys (hp : HydratedProvider) : Array String :=
     if hp.hasOAuth && !hp.hasApiKey then #[hp.id, s!"cliproxyapi:{hp.providerType}"] else #[hp.id]
+  let matchesHealthKey (hps : Array HydratedProvider) (hp : HydratedProvider) (k : String) : Bool :=
+    (healthKeys hp).contains k ||
+    (hp.hasOAuth && !hp.hasApiKey && hp.providerType == "antigravity" &&
+      k.startsWith "cliproxyapi:antigravity:" &&
+      !isFileAccountHash (k.drop "cliproxyapi:antigravity:".length).toString &&
+      !hps.any (fun other => other.id == k && other.id != hp.id))
 
   -- 1. `GET /api/providers/antigravity-models` & `GET /api/antigravity-models` (300s cached!)
   if method == "GET" && (segs == ["api", "providers", "antigravity-models"] || segs == ["api", "antigravity-models"]) then
@@ -3243,6 +3269,9 @@ def dispatchProviderAndAiRoute
     let tracked ← match healthTracker? with
       | some t => snapshotActiveHealthCooldowns t nowSec
       | none => pure #[]
+    let disabledIds ← match healthTracker? with
+      | some t => snapshotDisabledHealthAccountIds t
+      | none => pure #[]
     let cooldowns := (← proxyCooldownsRef.get) ++ tracked
     let sidecarFiles ← fetchSidecarAuthFiles
     let usageCached ← hub.mu.atomically (do return (← get).usageEntries)
@@ -3250,7 +3279,7 @@ def dispatchProviderAndAiRoute
     let mut snaps : Array JVal := #[]
     for hp in visibleHps do
       let keys := healthKeys hp
-      let coreCooldowns := cooldowns.filter (fun c => keys.contains c.accountId)
+      let coreCooldowns := cooldowns.filter (fun c => matchesHealthKey hps hp c.accountId)
       let coreRem : UInt64 :=
         coreCooldowns.foldl (fun acc c => max acc (c.remainingSecs nowSec)) 0
       let coreReason? : Option String :=
@@ -3261,8 +3290,15 @@ def dispatchProviderAndAiRoute
       let sidecarDisabled := (matchedSidecar?.map (·.disabled)).getD false
       let loginUnavailable := matchedSidecar?.any (·.needsReauth)
       let sidecarRem : UInt64 := if sidecarDisabled then 0 else (matchedSidecar?.map (·.remainingSecs)).getD 0
+      let mut lookupKeys := keys
+      for c in tracked do
+        if matchesHealthKey hps hp c.accountId && !lookupKeys.contains c.accountId then
+          lookupKeys := lookupKeys.push c.accountId
+      for d in disabledIds do
+        if matchesHealthKey hps hp d && !lookupKeys.contains d then
+          lookupKeys := lookupKeys.push d
       let trackerRecs ← match healthTracker? with
-        | some t => keys.mapM (lookupAccountHealthRecord t)
+        | some t => lookupKeys.mapM (lookupAccountHealthRecord t)
         | none => pure #[]
       let disabledRec? := trackerRecs.find? (fun r => r.disabledByProvider)
       let disabledByProvider := disabledRec?.isSome
@@ -3330,6 +3366,7 @@ def dispatchProviderAndAiRoute
         ("parked_until", parkedUntilJv),
         ("parked_reason", parkedReasonJv),
         ("parked_source", parkedSourceJv),
+        ("last_failure_reason", parkedReasonJv),
         ("login_status", if loginUnavailable then .str "needs_reauth" else .null),
         ("login_reason_code", JVal.nat ((matchedSidecar?.map (fun (f : SidecarAuthFileEntry) => f.loginReason)).getD 0).toNat),
         ("login_message", if loginUnavailable then .str "Sign in again" else .null),
@@ -3338,17 +3375,19 @@ def dispatchProviderAndAiRoute
       ])
     return some (jsonResp 200 (.arr snaps))
 
-  if method == "POST" && segs.length == 5 && segs[0]? == some "api" && segs[1]? == some "model-routing" && segs[2]? == some "health" && segs[4]? == some "clear" then
+  if method == "POST" && segs.length >= 5 && segs[0]? == some "api" && segs[1]? == some "model-routing" && segs[2]? == some "health" && segs.getLast? == some "clear" then
     if !effAdmin then return some (jsonErr 403 "admin_required")
-    let acctId := segs[3]!
+    let rawAcct := String.intercalate "/" ((segs.drop 3).take (segs.length - 4))
+    let acctId := (percentDecodeStrict rawAcct).getD rawAcct
     let hps ← loadHydratedProviders store workingDir
     let matchedProv? := hps.find? (fun hp => hp.id == acctId)
-    let keys := match matchedProv? with
-      | some hp => healthKeys hp
-      | none => #[acctId]
+    let matchClear (k : String) : Bool :=
+      match matchedProv? with
+      | some hp => matchesHealthKey hps hp k
+      | none => k == acctId
     let cur ← proxyCooldownsRef.get
-    proxyCooldownsRef.set (cur.filter (fun c => !keys.contains c.accountId))
-    if let some t := healthTracker? then clearAccountHealthWhere t keys.contains
+    proxyCooldownsRef.set (cur.filter (fun c => !matchClear c.accountId))
+    if let some t := healthTracker? then clearAccountHealthWhere t matchClear
     if let some hp := matchedProv? then
       let sidecarFiles ← fetchSidecarAuthFiles
       -- Recovery retains enabled-only matching even when reporting also sees old disabled files.
@@ -3364,7 +3403,7 @@ def dispatchProviderAndAiRoute
     let rawId := String.intercalate "/" ((segs.drop 3).take (segs.length - 4))
     let cid := (percentDecodeStrict rawId).getD rawId
     let testAll := ((qParam? qMap "all").getD "false") == "true"
-    let probeModel := if cid.startsWith "builtin/" then cid else s!"builtin/{cid}"
+    let probeModel := cid
     let probeBody : JVal := .obj #[
       ("model", .str probeModel),
       ("max_tokens", JVal.nat 4),
@@ -3408,6 +3447,12 @@ def dispatchProviderAndAiRoute
       for idx in [0:ids.size] do
         let _ ← execParamStmt store.missionsDb
           "UPDATE ai_providers SET sort_order=?2 WHERE id=?1;" #[ids[idx]!, toString idx]
+      legacyAiProvidersJsonMu.atomically do
+        let curOrder ← readDataJsonFile workingDir store.rootDir "provider_order.json"
+        let mut nextOrder := match curOrder with | .obj _ => curOrder | _ => .obj #[]
+        for idx in [0:ids.size] do
+          nextOrder := nextOrder.setField ids[idx]! (JVal.nat idx)
+        writeDataJsonFile workingDir store.rootDir "provider_order.json" nextOrder
       appendProviderAuditLog store callerUserId (if effAdmin then "admin" else "member") "reorder" "" #["sort_order"]
         (formatEpochIso8601Utc (← nowEpoch))
 

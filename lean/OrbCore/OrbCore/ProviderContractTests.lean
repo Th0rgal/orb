@@ -1865,6 +1865,251 @@ def checkNativeCanary : IO Unit := do
   unless !permits (NativeCanary.parse (some "member/account") "") "worker" "member" "account" do
     throw (IO.userError "native canary accepted a missing worker")
 
+/-- V2 end-to-end routing contract:
+    1) Multi-account priority reorder (`POST /api/ai/providers/reorder`) persists across
+       `GET /api/ai/providers`, refreshes `chainsRef`, updates `GET /api/model-routing/chains/:id/resolve`,
+       and governs live `/v1/chat/completions` attempt order & failover.
+    2) Per-user `user_provider_prefs` skips a disabled primary account and falls through to
+       the remaining enabled secondary account instead of falsely returning `403`.
+    3) `GET /api/model-routing/health` and `POST /api/model-routing/health/:id/clear` match
+       Antigravity per-model pool keys (`cliproxyapi:antigravity:<model>`), decode percent-encoded
+       account IDs (`cliproxyapi%3A...`), and clear BOTH `proxyCooldownsRef` and `healthTracker?`.
+    4) `POST /api/model-routing/chains/:id/test` probes custom (non-`builtin/`) chains by exact ID.
+    5) Disabled-account deduplication prevents a duplicate synthetic row when an enabled DB row
+       points at a disabled on-disk sidecar auth file via `cli_proxy_auth_file`. -/
+private def v2RoutingEndToEndContract
+    (app : CoreAppState) (store : CoreStore) (root jwt memberJwt : String)
+    (cooldownsRef : IO.Ref (Array AccountCooldown)) (now : UInt64) : IO (Array String) := do
+  let mut failures : Array String := #[]
+  let acctA := "v2-xai-a"
+  let acctB := "v2-xai-b"
+  let customChainId := "v2-custom-chain"
+  let agId := "v2-ag-oauth"
+  let agEnabledDisabledFile := "antigravity-v2-disabled.json"
+  let agEnabledDisabledPath := s!"{root}/auth-empty/{agEnabledDisabledFile}"
+  let origProvidersRaw ← IO.FS.readFile s!"{root}/.sandboxed-sh/ai_providers.json"
+  let tracker ← newProviderHealthTracker 1 2
+  let tried ← IO.mkRef (#[] : Array String)
+  let failPrimary ← IO.mkRef true
+  let failAll ← IO.mkRef false
+  let v2App : CoreAppState := {
+    app with
+    healthTracker? := some tracker
+    proxyMockTransport? := some (fun target => do
+      tried.modify (·.push target.accountId)
+      if (← failAll.get) || ((← failPrimary.get) && target.accountId == acctB) then
+        return .ok {
+          status := 429
+          headers := #[("Content-Type", "application/json"), ("Retry-After", "30")]
+          body := "{\"error\":{\"type\":\"rate_limit_exceeded\",\"message\":\"try next account\"}}".toUTF8
+        }
+      return .ok {
+        status := 200
+        headers := #[("Content-Type", "application/json")]
+        body := s!"\{\"model\":{jsonEscape target.modelId},\"choices\":[\{\"message\":\{\"role\":\"assistant\",\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}".toUTF8
+      })
+  }
+  try
+    -- Seed two enabled xAI API-key accounts (`v2-xai-a`, `v2-xai-b`) + custom chain.
+    for (pid, nm, key) in #[(acctA, "xAI Primary", "sk-v2-a"), (acctB, "xAI Backup", "sk-v2-b")] do
+      match ← upsertAIProvider store {
+        id := pid, providerType := "xai", name := nm, enabled := true,
+        apiKey := key, updatedAt := "1700001000"
+      } with
+      | .error e => throw (IO.userError s!"v2 seed provider {pid} failed: {e}")
+      | .ok () => pure ()
+    let (createSt, _) ← postJson v2App jwt "/api/model-routing/chains"
+      (renderCompact (.obj #[
+        ("id", .str customChainId),
+        ("name", .str "V2 Custom Chain"),
+        ("entries", .arr #[.obj #[("provider_id", .str "xai"), ("model_id", .str "grok-4")]])
+      ])) now
+    if createSt != 201 then
+      failures := failures.push s!"v2: create custom chain expected 201, got {createSt}"
+
+    -- Initial resolve must include both accounts with `v2-openai-a` before `v2-openai-b`.
+    let resBefore := (← getJson v2App jwt s!"/api/model-routing/chains/{customChainId}/resolve" now).asArr?.getD #[]
+    let idsBefore := resBefore.filterMap (·.fieldStr? "account_id")
+    if idsBefore != #[acctA, acctB] then
+      failures := failures.push s!"v2: initial resolve expected [{acctA}, {acctB}], got {idsBefore}"
+    if resBefore[0]?.bind (·.fieldStr? "auth_kind") != some "api_key" then
+      failures := failures.push s!"v2: API-key resolve auth_kind expected api_key, got {resBefore[0]?.map renderCompact}"
+
+    -- Reorder `v2-openai-b` ahead of `v2-openai-a`: must persist on GET and refresh routing chains.
+    let (reordSt, reordBody) ← postJson v2App jwt "/api/ai/providers/reorder"
+      (renderCompact (.obj #[("ids", .arr #[.str acctB, .str acctA])])) now
+    if reordSt != 200 then
+      failures := failures.push s!"v2: reorder expected 200, got {reordSt}"
+    let prioOf (rows : Array JVal) (id : String) : Option Nat :=
+      (rows.find? (·.fieldStr? "id" == some id)).bind (·.fieldNat? "priority")
+    let listedAfter := (← getJson v2App jwt "/api/ai/providers" now).asArr?.getD #[]
+    if prioOf (reordBody.asArr?.getD #[]) acctB != some 0 ||
+       prioOf (reordBody.asArr?.getD #[]) acctA != some 1 ||
+       prioOf listedAfter acctB != some 0 ||
+       prioOf listedAfter acctA != some 1 then
+      failures := failures.push s!"v2: reorder priority did not persist across reload: b={prioOf listedAfter acctB} a={prioOf listedAfter acctA}"
+    let resAfter := (← getJson v2App jwt s!"/api/model-routing/chains/{customChainId}/resolve" now).asArr?.getD #[]
+    let idsAfter := resAfter.filterMap (·.fieldStr? "account_id")
+    if idsAfter != #[acctB, acctA] then
+      failures := failures.push s!"v2: resolve after reorder expected [{acctB}, {acctA}], got {idsAfter}"
+
+    -- Live proxy request on `v2-custom-chain`: tries rank-1 (`acctB`) first, fails over to rank-2 (`acctA`).
+    let postProxy := fun (bearer model : String) => do
+      let body := renderCompact (.obj #[("model", .str model), ("messages", .arr #[])])
+      let raw := s!"POST /v1/chat/completions HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {bearer}\r\nContent-Length: {body.utf8ByteSize}\r\n\r\n{body}"
+      let .ok req := parseRequest raw.toUTF8 none | throw (IO.userError "v2 proxy request parse failed")
+      let .ok resp ← dispatchCoreRequest v2App req now | throw (IO.userError "v2 proxy unexpected upgrade")
+      return resp
+    tried.set #[]
+    let foResp ← postProxy jwt customChainId
+    let selHdr := ((foResp.extraHdrs.find? (fun h => h.1.toLower == "x-orb-selected-account")).map (·.2)).getD ""
+    if foResp.status != 200 || selHdr != acctA || (← tried.get) != #[acctB, acctA] then
+      failures := failures.push s!"v2: multi-account failover expected [b,a]->200(a), got status={foResp.status} sel={selHdr} tried={← tried.get}"
+
+    -- While `acctB` is parked, the next request skips `acctB` and tries `acctA`; if `acctA` also
+    -- rate-limits, the third request short-circuits with all-cooled 429 without hitting upstream.
+    failAll.set true
+    tried.set #[]
+    let parkAResp ← postProxy jwt customChainId
+    if parkAResp.status != 429 || (← tried.get) != #[acctA] then
+      failures := failures.push s!"v2: second request must skip cooled {acctB} and try only {acctA}, got status={parkAResp.status} tried={← tried.get}"
+    tried.set #[]
+    let cdResp ← postProxy jwt customChainId
+    let cdBody := String.fromUTF8! cdResp.body
+    if cdResp.status != 429 || !(← tried.get).isEmpty || !((cdBody.splitOn "currently in cooldown").length > 1) then
+      failures := failures.push s!"v2: all-cooled chain must short-circuit with 429 cooldown without upstream call, got status={cdResp.status} tried={← tried.get} body={cdBody}"
+    failAll.set false
+
+    -- Clear cooldowns on both accounts, then verify per-user preference skips `acctB` and routes to `acctA`.
+    let (clrB, _) ← postJson v2App jwt s!"/api/model-routing/health/{acctB}/clear" "" now
+    let (clrA, _) ← postJson v2App jwt s!"/api/model-routing/health/{acctA}/clear" "" now
+    if clrB != 204 || clrA != 204 then
+      failures := failures.push s!"v2: clear {acctB}/{acctA} expected 204/204, got {clrB}/{clrA}"
+    failPrimary.set false
+    let (prefSt1, _) ← putJson v2App memberJwt s!"/api/ai/providers/{acctB}/preference" "{\"enabled\":false}" now
+    if prefSt1 != 200 then
+      failures := failures.push s!"v2: member preference disable {acctB} expected 200, got {prefSt1}"
+    tried.set #[]
+    let prefResp ← postProxy memberJwt customChainId
+    if prefResp.status != 200 || (← tried.get) != #[acctA] then
+      failures := failures.push s!"v2: member skipping primary must route to secondary {acctA}, got status={prefResp.status} tried={← tried.get}"
+    -- Skipping BOTH accounts must return 403 `no_user_enabled_providers`.
+    let (prefSt2, _) ← putJson v2App memberJwt s!"/api/ai/providers/{acctA}/preference" "{\"enabled\":false}" now
+    if prefSt2 != 200 then
+      failures := failures.push s!"v2: member preference disable {acctA} expected 200, got {prefSt2}"
+    let allSkippedResp ← postProxy memberJwt customChainId
+    if allSkippedResp.status != 403 then
+      failures := failures.push s!"v2: member skipping all accounts expected 403, got {allSkippedResp.status}"
+    discard <| putJson v2App memberJwt s!"/api/ai/providers/{acctB}/preference" "{\"enabled\":true}" now
+    discard <| putJson v2App memberJwt s!"/api/ai/providers/{acctA}/preference" "{\"enabled\":true}" now
+
+    -- Custom chain probe (`POST /api/model-routing/chains/v2-custom-chain/test`) must probe exact ID.
+    let (probeFd, probePort) ← IO.ofExcept (← LeanSys.Posix.tcpListen "127.0.0.1" 0 4)
+    let probeStop ← IO.mkRef false
+    let probedModel ← IO.mkRef ""
+    let probeSrv ← IO.asTask (prio := .dedicated) do
+      while !(← probeStop.get) do
+        match ← LeanSys.Posix.tcpAcceptPoll probeFd 50 with
+        | .error _ => pure ()
+        | .ok client =>
+          let raw ← LeanSys.Posix.readStreamChunk client 16384
+          let response ← match parseRequest raw none with
+            | .error _ => pure (400, "{}")
+            | .ok req => do
+              let jv := (OrbBin.Json.parseBytes req.bodySlice.toByteArray).toOption.getD .null
+              probedModel.set ((jv.fieldStr? "model").getD "")
+              match ← dispatchCoreRequest v2App req now with
+              | .error _ => pure (500, "{}")
+              | .ok resp => pure (resp.status, String.fromUTF8! resp.body)
+          let (code, body) := response
+          discard <| LeanSys.Posix.writeAll client
+            s!"HTTP/1.1 {code} OK\r\nContent-Type: application/json\r\nContent-Length: {body.utf8ByteSize}\r\nConnection: close\r\n\r\n{body}".toUTF8
+          discard <| LeanSys.Posix.closeFd client
+    try
+      let probeApp := { v2App with cfg := { v2App.cfg with port := probePort } }
+      let (testCode, testDoc) ← postJson probeApp jwt s!"/api/model-routing/chains/{customChainId}/test" "{}" now
+      if testCode != 200 || testDoc.fieldBool? "ok" != some true || (← probedModel.get) != customChainId then
+        failures := failures.push s!"v2: custom chain /test expected exact model={customChainId} ok=true, got code={testCode} model={← probedModel.get} doc={renderCompact testDoc}"
+    finally
+      probeStop.set true
+      discard <| IO.wait probeSrv
+      discard <| LeanSys.Posix.closeFd probeFd
+
+    -- Antigravity per-model pool cooldowns + URL-encoded `cliproxyapi%3A...` clear across BOTH cooldown stores.
+    let .ok origArr := (OrbBin.Json.parse origProvidersRaw).map (fun j => j.asArr?.getD #[])
+      | throw (IO.userError "v2 orig providers parse failed")
+    let agLegacy := JVal.obj #[
+      ("id", .str agId), ("provider_type", .str "antigravity"), ("name", .str "V2 Antigravity"),
+      ("enabled", .bool true), ("cli_proxy_auth_file", .str agEnabledDisabledFile)
+    ]
+    IO.FS.writeFile s!"{root}/.sandboxed-sh/ai_providers.json" (renderCompact (.arr (origArr.push agLegacy)))
+    match ← upsertAIProvider store {
+      id := agId, providerType := "antigravity", name := "V2 Antigravity", enabled := true,
+      apiKey := "cli-proxy-managed", updatedAt := "1700001000"
+    } with
+    | .error e => throw (IO.userError s!"v2 seed ag provider failed: {e}")
+    | .ok () => pure ()
+    IO.FS.writeFile agEnabledDisabledPath
+      "{\"type\":\"antigravity\",\"email\":\"v2-ag-disabled@fixture.invalid\",\"disabled\":true}"
+    -- Deduplication: enabled DB row referencing disabled on-disk sidecar file via `cli_proxy_auth_file` must not duplicate.
+    let listedDedup := (← getJson v2App jwt "/api/ai/providers" now).asArr?.getD #[]
+    let agDupMatches := listedDedup.filter (fun v =>
+      v.fieldStr? "id" == some agId ||
+      v.fieldStr? "account_email" == some "v2-ag-disabled@fixture.invalid")
+    if agDupMatches.size != 1 || agDupMatches[0]!.fieldStr? "id" != some agId then
+      failures := failures.push s!"v2: enabled DB row referencing disabled sidecar file must not duplicate, got {renderCompact (.arr agDupMatches)}"
+
+    let wallNow ← nowEpoch
+    let agPoolKey := OrbCore.ProxyModelRouting.antigravityPoolAccount "gemini-4-neon"
+    let encodedKey := "cliproxyapi:openai:abcd1234"
+    let keepKey := "v2-unrelated-keep"
+    cooldownsRef.set #[
+      { accountId := agPoolKey, untilEpoch := wallNow + 1800, reason := .usageLimit },
+      { accountId := encodedKey, untilEpoch := wallNow + 1200, reason := .rateLimit },
+      { accountId := keepKey, untilEpoch := wallNow + 900, reason := .serverError }
+    ]
+    tracker.health.atomically do
+      modify fun s => { s with accounts := #[
+        { accountId := agPoolKey, slotId := accountSlotId agPoolKey, parkedQuota := true,
+          cooldown? := some { accountId := agPoolKey, untilEpoch := wallNow + 1500, reason := .usageLimit } },
+        { accountId := encodedKey, slotId := accountSlotId encodedKey, parkedQuota := true,
+          cooldown? := some { accountId := encodedKey, untilEpoch := wallNow + 1000, reason := .rateLimit } },
+        { accountId := keepKey, slotId := accountSlotId keepKey,
+          cooldown? := some { accountId := keepKey, untilEpoch := wallNow + 900, reason := .serverError } }
+      ] }
+    let healthRows := (← getJson v2App jwt "/api/model-routing/health" now).asArr?.getD #[]
+    let agHealth := (healthRows.find? (·.fieldStr? "account_id" == some agId)).getD .null
+    if (agHealth.fieldUInt64? "cooldown_secs_remaining").getD 0 < 1700 ||
+       agHealth.fieldStr? "parked_reason" != some "usage_limit" ||
+       agHealth.fieldStr? "last_failure_reason" != some "usage_limit" then
+      failures := failures.push s!"v2: antigravity health must surface per-model pool cooldown and last_failure_reason, got {renderCompact agHealth}"
+    let (clrAg, _) ← postJson v2App jwt s!"/api/model-routing/health/{agId}/clear" "" now
+    if clrAg != 204 then
+      failures := failures.push s!"v2: antigravity clear expected 204, got {clrAg}"
+    if (← cooldownsRef.get).any (·.accountId == agPoolKey) ||
+       (← lookupAccountHealthRecord tracker agPoolKey).cooldown?.isSome then
+      failures := failures.push "v2: antigravity clear must remove per-model pool cooldown from both stores"
+    let (clrEnc, _) ← postJson v2App jwt "/api/model-routing/health/cliproxyapi%3Aopenai%3Aabcd1234/clear" "" now
+    if clrEnc != 204 then
+      failures := failures.push s!"v2: percent-encoded clear expected 204, got {clrEnc}"
+    if (← cooldownsRef.get).any (·.accountId == encodedKey) ||
+       (← lookupAccountHealthRecord tracker encodedKey).cooldown?.isSome then
+      failures := failures.push "v2: percent-encoded clear must remove cooldown from both stores"
+    if !(← cooldownsRef.get).any (·.accountId == keepKey) ||
+       (← lookupAccountHealthRecord tracker keepKey).cooldown?.isNone then
+      failures := failures.push "v2: clearing targeted accounts must preserve unrelated cooldowns in both stores"
+  finally
+    cooldownsRef.set #[]
+    discard <| execParamQuery store.missionsDb "DELETE FROM model_routing_chains WHERE id=?1;" #[customChainId]
+    discard <| deleteAIProvider store acctA
+    discard <| deleteAIProvider store acctB
+    discard <| deleteAIProvider store agId
+    IO.FS.writeFile s!"{root}/.sandboxed-sh/ai_providers.json" origProvidersRaw
+    discard <| (IO.FS.removeFile agEnabledDisabledPath).toBaseIO
+    discard <| (IO.FS.removeFile s!"{root}/.sandboxed-sh/provider_order.json").toBaseIO
+    discard <| (IO.FS.removeFile s!"{root}/provider_order.json").toBaseIO
+  return failures
+
 def run : IO Unit := do
   checkNativeCanary
   let fixtureRaw ← IO.FS.readFile "shared/orb-spec/fixtures/provider-response-contract.json"
@@ -2163,6 +2408,7 @@ def run : IO Unit := do
       failures := failures ++ (← routingCatalogContract app root jwt now)
       failures := failures ++ (← routingChainProbeContract app jwt now)
       failures := failures ++ (← customDiscoveryContract app jwt now)
+      failures := failures ++ (← v2RoutingEndToEndContract app store root jwt memberJwt cooldownsRef now)
       if !failures.isEmpty then
         throw (IO.userError ("provider response contract failures:\n" ++ String.intercalate "\n" failures.toList))
     finally

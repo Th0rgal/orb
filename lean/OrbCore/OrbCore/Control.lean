@@ -868,18 +868,160 @@ def parseChainTargetsJson
       if provRaw == "antigravity" || provRaw.startsWith "antigravity:" then
         let pool := eligibleHydrated.filter (fun hp => hp.providerType == "antigravity")
         if !pool.isEmpty && !pool.any (fun hp => hp.enabled && !hp.nativeOnly && (hp.hasApiKey || hp.hasOAuth)) then continue
-      let matchedHydrated? := eligibleHydrated.find? fun hp =>
+      let isMatchedHydrated (hp : HydratedProvider) : Bool :=
         hp.enabled && !hp.nativeOnly && (hp.hasApiKey || hp.hasOAuth) && (
           hp.id == acctRaw ||
           hp.id == strippedProv ||
           (!provRaw.startsWith "custom:" && hp.providerType == provRaw) ||
           (!provSlug.isEmpty && providerSlugOf hp.name == provSlug)
         )
+      let matchedHydratedList := eligibleHydrated.filter isMatchedHydrated
+      let isMatchedRow (p : AIProviderRecord) : Bool :=
+        p.enabled && (
+          p.id == acctRaw ||
+          p.id == strippedProv ||
+          (!provRaw.startsWith "custom:" && p.providerType == provRaw) ||
+          (!provSlug.isEmpty && providerSlugOf p.name == provSlug)
+        )
+      let matchedRows := eligibleRows.filter isMatchedRow
+      let matchedHydrated? := matchedHydratedList[0]?
       let matchedProv? := matchProviderForChainTarget? eligibleRows acctRaw provRaw
       let anyCfgProv? := eligibleRows.find? fun p =>
         p.id == acctRaw || p.id == strippedProv ||
         (!provRaw.startsWith "custom:" && p.providerType == provRaw) ||
         (!provSlug.isEmpty && providerSlugOf p.name == provSlug)
+      let inlineAcctRpm? := (parseOptionalBoundedU32 it "rpm_limit" 1 100000).toOption.join
+      let inlineAcctConc? := (parseOptionalBoundedU32 it "max_concurrency" 1 1024).toOption.join
+      let inlineMdlRpm? := (parseOptionalBoundedU32 it "model_rpm_limit" 1 100000).toOption.join
+      let inlineMdlTpm? := (parseOptionalBoundedU64 it "model_tpm_limit" 1 1000000000).toOption.join
+      let inlineMdlConc? := (parseOptionalBoundedU32 it "model_max_concurrency" 1 1024).toOption.join
+      let inlineCtxLimit? := (parseOptionalBoundedU32 it "context_limit" 1 1000000000).toOption.join
+      if inlineKey?.isNone && inlineUrl?.isNone && !matchedHydratedList.isEmpty then
+        let mut entryTargets : Array ProviderTarget := #[]
+        for hp in matchedHydratedList do
+          let row? := eligibleRows.find? (fun p => p.id == hp.id)
+          let effProvType := hp.providerType
+          let isAg := effProvType == "antigravity" || provRaw == "antigravity" || provRaw.startsWith "antigravity:"
+          let mdl := if isAg then canonicalAntigravityProxyModelId mdlRaw else mdlRaw
+          let matchedModel? := row?.bind (fun p => p.customModels.find? (fun cm => cm.id == mdl || cm.id == mdlRaw))
+          let inlineContextLimit := inlineCtxLimit?.orElse (fun _ => matchedModel?.bind (·.contextLimit?)) |>.getD 128000
+          let effAcctRpm? := inlineAcctRpm?.orElse (fun _ => hp.rpmLimit?.orElse (fun _ => row?.bind (·.rpmLimit?)))
+          let effAcctConc? := (inlineAcctConc?.orElse (fun _ => hp.maxConcurrency?.orElse (fun _ => row?.bind (·.maxConcurrency?)))).orElse
+            (fun _ => if effProvType == "google" || effProvType == "antigravity" then googleMaxConcurrency? else none)
+          let useCliProxy := !cliProxyKey.isEmpty && !cliProxyUrl.isEmpty && (isAg || (!hp.hasApiKey && hp.hasOAuth))
+          let target : ProviderTarget :=
+            if useCliProxy then
+              let credential? : Option SidecarCredential := if pinned then
+                some ⟨hp.providerType, accountRoutingFile hydratedProvs hp, hp.modelPrefix⟩ else none
+              let rawModel := if isAg then mdl else OrbCore.ProxyModelRouting.cliProxyModelId effProvType mdl
+              let routedModel := match credential? with
+                | some c => if c.modelPrefix.isEmpty || rawModel.isEmpty || rawModel.startsWith (c.modelPrefix ++ "/")
+                            then rawModel else c.modelPrefix ++ "/" ++ rawModel
+                | none => rawModel
+              let acct :=
+                if hasExplicitAcct then acctRaw
+                else if isAg then OrbCore.ProxyModelRouting.antigravityPoolAccount mdl
+                else s!"cliproxyapi:{hp.providerType}"
+              {
+                accountId              := acct
+                provider               := provRaw
+                baseUrl                := cliProxyUrl
+                apiKey                 := cliProxyKey
+                modelId                := routedModel
+                sidecarCredential?     := credential?
+                accountRpmLimit?       := effAcctRpm?
+                accountMaxConcurrency? := effAcctConc?
+                modelRpmLimit?         := inlineMdlRpm?.orElse (fun _ => matchedModel?.bind (·.rpmLimit?))
+                modelTpmLimit?         := inlineMdlTpm?.orElse (fun _ => matchedModel?.bind (·.tpmLimit?))
+                modelMaxConcurrency?   := inlineMdlConc?.orElse (fun _ => matchedModel?.bind (·.maxConcurrency?))
+                contextLimit           := inlineContextLimit
+              }
+            else
+              let url :=
+                (if hp.baseUrl.isEmpty then none else some hp.baseUrl)
+                |>.orElse (fun _ => row?.bind (fun p => if p.baseUrl.isEmpty then none else some p.baseUrl))
+                |>.getD (defaultProviderBaseUrl effProvType)
+              let key :=
+                (if hp.apiKey.isEmpty then none else some hp.apiKey)
+                |>.orElse (fun _ => row?.map (·.apiKey))
+                |>.getD ""
+              if key.isEmpty && !cliProxyKey.isEmpty && !cliProxyUrl.isEmpty then
+                {
+                  accountId              := s!"cliproxyapi:{provRaw}"
+                  provider               := provRaw
+                  baseUrl                := cliProxyUrl
+                  apiKey                 := cliProxyKey
+                  modelId                := if isAg then mdl else OrbCore.ProxyModelRouting.cliProxyModelId effProvType mdl
+                  accountRpmLimit?       := effAcctRpm?
+                  accountMaxConcurrency? := effAcctConc?
+                  modelRpmLimit?         := inlineMdlRpm?.orElse (fun _ => matchedModel?.bind (·.rpmLimit?))
+                  modelTpmLimit?         := inlineMdlTpm?.orElse (fun _ => matchedModel?.bind (·.tpmLimit?))
+                  modelMaxConcurrency?   := inlineMdlConc?.orElse (fun _ => matchedModel?.bind (·.maxConcurrency?))
+                  contextLimit           := inlineContextLimit
+                }
+              else
+                {
+                  accountId              := hp.id
+                  provider               := provRaw
+                  baseUrl                := url
+                  apiKey                 := key
+                  modelId                := mdl
+                  accountRpmLimit?       := effAcctRpm?
+                  accountMaxConcurrency? := effAcctConc?
+                  modelRpmLimit?         := inlineMdlRpm?.orElse (fun _ => matchedModel?.bind (·.rpmLimit?))
+                  modelTpmLimit?         := inlineMdlTpm?.orElse (fun _ => matchedModel?.bind (·.tpmLimit?))
+                  modelMaxConcurrency?   := inlineMdlConc?.orElse (fun _ => matchedModel?.bind (·.maxConcurrency?))
+                  contextLimit           := inlineContextLimit
+                }
+          if !entryTargets.any (fun t => t.accountId == target.accountId && t.baseUrl == target.baseUrl && t.modelId == target.modelId) then
+            entryTargets := entryTargets.push target
+        out := out ++ entryTargets
+      else if inlineKey?.isNone && inlineUrl?.isNone && matchedHydratedList.isEmpty && !matchedRows.isEmpty then
+        let mut entryTargets : Array ProviderTarget := #[]
+        for p in matchedRows do
+          let effProvType := p.providerType
+          let isAg := effProvType == "antigravity" || provRaw == "antigravity" || provRaw.startsWith "antigravity:"
+          let mdl := if isAg then canonicalAntigravityProxyModelId mdlRaw else mdlRaw
+          let matchedModel? := p.customModels.find? (fun cm => cm.id == mdl || cm.id == mdlRaw)
+          let inlineContextLimit := inlineCtxLimit?.orElse (fun _ => matchedModel?.bind (·.contextLimit?)) |>.getD 128000
+          let effAcctRpm? := inlineAcctRpm?.orElse (fun _ => p.rpmLimit?)
+          let effAcctConc? := (inlineAcctConc?.orElse (fun _ => p.maxConcurrency?)).orElse
+            (fun _ => if effProvType == "google" || effProvType == "antigravity" then googleMaxConcurrency? else none)
+          let url := if p.baseUrl.isEmpty then defaultProviderBaseUrl effProvType else p.baseUrl
+          let key := p.apiKey
+          let target : ProviderTarget :=
+            if (isAg || key.isEmpty) && !cliProxyKey.isEmpty && !cliProxyUrl.isEmpty then
+              {
+                accountId              := if isAg then OrbCore.ProxyModelRouting.antigravityPoolAccount mdl else s!"cliproxyapi:{provRaw}"
+                provider               := provRaw
+                baseUrl                := cliProxyUrl
+                apiKey                 := cliProxyKey
+                modelId                := if isAg then mdl else OrbCore.ProxyModelRouting.cliProxyModelId effProvType mdl
+                accountRpmLimit?       := effAcctRpm?
+                accountMaxConcurrency? := effAcctConc?
+                modelRpmLimit?         := inlineMdlRpm?.orElse (fun _ => matchedModel?.bind (·.rpmLimit?))
+                modelTpmLimit?         := inlineMdlTpm?.orElse (fun _ => matchedModel?.bind (·.tpmLimit?))
+                modelMaxConcurrency?   := inlineMdlConc?.orElse (fun _ => matchedModel?.bind (·.maxConcurrency?))
+                contextLimit           := inlineContextLimit
+              }
+            else
+              {
+                accountId              := p.id
+                provider               := provRaw
+                baseUrl                := url
+                apiKey                 := key
+                modelId                := mdl
+                accountRpmLimit?       := effAcctRpm?
+                accountMaxConcurrency? := effAcctConc?
+                modelRpmLimit?         := inlineMdlRpm?.orElse (fun _ => matchedModel?.bind (·.rpmLimit?))
+                modelTpmLimit?         := inlineMdlTpm?.orElse (fun _ => matchedModel?.bind (·.tpmLimit?))
+                modelMaxConcurrency?   := inlineMdlConc?.orElse (fun _ => matchedModel?.bind (·.maxConcurrency?))
+                contextLimit           := inlineContextLimit
+              }
+          if !entryTargets.any (fun t => t.accountId == target.accountId && t.baseUrl == target.baseUrl && t.modelId == target.modelId) then
+            entryTargets := entryTargets.push target
+        out := out ++ entryTargets
+      else
       let effProvType :=
         match matchedHydrated? with
         | some hp => hp.providerType
@@ -887,14 +1029,8 @@ def parseChainTargetsJson
       let isAg := effProvType == "antigravity" || provRaw == "antigravity" || provRaw.startsWith "antigravity:"
       let mdl := if isAg then canonicalAntigravityProxyModelId mdlRaw else mdlRaw
       let matchedModel? := matchedProv?.bind (fun p => p.customModels.find? (fun cm => cm.id == mdl || cm.id == mdlRaw))
-      let inlineAcctRpm? := (parseOptionalBoundedU32 it "rpm_limit" 1 100000).toOption.join
-      let inlineAcctConc? := (parseOptionalBoundedU32 it "max_concurrency" 1 1024).toOption.join
-      let inlineMdlRpm? := (parseOptionalBoundedU32 it "model_rpm_limit" 1 100000).toOption.join
-      let inlineMdlTpm? := (parseOptionalBoundedU64 it "model_tpm_limit" 1 1000000000).toOption.join
-      let inlineMdlConc? := (parseOptionalBoundedU32 it "model_max_concurrency" 1 1024).toOption.join
       let inlineContextLimit :=
-        (parseOptionalBoundedU32 it "context_limit" 1 1000000000).toOption.join
-          |>.orElse (fun _ => matchedModel?.bind (·.contextLimit?)) |>.getD 128000
+        inlineCtxLimit?.orElse (fun _ => matchedModel?.bind (·.contextLimit?)) |>.getD 128000
 
       -- When `providers`/`hydratedProvs` are populated (live store hydration) and every matching account is disabled
       -- with no inline credentials, skip this unconfigured/disabled entry instead of emitting an unauthenticated dead target!
@@ -1045,7 +1181,10 @@ def renderResolvedChainJson (chain : RoutingChain) (pacingTracker? : Option Prox
       | none => pure none
     let effAcctRpm? := tgt.accountRpmLimit?.orElse (fun _ => obsRpm?)
     let hasCreds := if tgt.apiKey.isEmpty then "false" else "true"
-    let authKind := if tgt.apiKey.isEmpty then "\"none\"" else "\"api_key\""
+    let authKind :=
+      if tgt.apiKey.isEmpty then "\"none\""
+      else if tgt.sidecarCredential?.isSome || tgt.accountId.startsWith "cliproxyapi" then "\"oauth\""
+      else "\"api_key\""
     let hasBaseUrl := if tgt.baseUrl.isEmpty then "false" else "true"
     let entryJson :=
       s!"\{\"provider_id\":{jsonEscape tgt.provider},\"model_id\":{jsonEscape tgt.modelId}," ++
@@ -5937,6 +6076,9 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
         pHub st.store st.cfg.workingDir st.cfg.port st.pacingTracker? st.proxyCooldownsRef
         req.method cleanPath rawTarget req.bodySlice.toByteArray
         caller.userId (caller.role == "admin") caller.isLegacyUnscoped (healthTracker? := st.healthTracker?) then
+      if req.method == "POST" && cleanPath == "/api/ai/providers/reorder" && pCode == 200 then
+        let refreshed ← loadRoutingChainsFromStore st.store st.cfg.workingDir
+        discard <| publishRoutingChainsUpdate st refreshed
       return .ok { status := pCode, contentType := pCtype, corsOrigin? := reqOrigin?, body := pBody }
     if caller.isLegacyUnscoped && req.method == "GET" && cleanPath == "/api/ai/providers" then
       let providers ← listAIProviders st.store
@@ -6315,7 +6457,7 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
       let .ok jv := OrbBin.Json.parseBytes req.bodySlice.toByteArray
         | return .ok (mkJson 400 "{\"error\":\"invalid_json\"}")
       let defCid ← nextUniqueId st "chain" nowEpochSec
-      let cid := chainId?.orElse (fun _ => jv.fieldStr? "id") |>.getD defCid
+      let cid := chainId?.orElse (fun _ => (jv.fieldStr? "id").map (·.trimAscii.toString) |>.filter (!·.isEmpty)) |>.getD defCid
       let existing? := (← loadChainRows).find? (fun c => c.fieldStr? "id" == some cid)
       let .ok storedRows ← execParamQuery st.store.missionsDb "SELECT models_json FROM model_routing_chains WHERE id=?1;" #[cid]
         | return .ok (mkJson 500 "{\"error\":\"routing_chain_store_unavailable\"}")

@@ -394,7 +394,15 @@ function LiveProviders(p: { list: AIProvider[]; health?: Record<string, AccountH
   const rankIn = (group: () => AIProvider[], a: AIProvider): AccountRank | undefined => {
     const peers = group().filter(x => x.provider_type === a.provider_type);
     if (peers.length < 2) return undefined;
-    return { index: peers.findIndex(x => x.id === a.id), count: peers.length, move: to => reorder(group(), a, to) };
+    return {
+      index: peers.findIndex(x => x.id === a.id),
+      count: peers.length,
+      move: to => reorder(group(), a, to),
+      moveFrom: (fromId, to) => {
+        const source = peers.find(x => x.id === fromId);
+        if (source) reorder(group(), source, to);
+      },
+    };
   };
   const toggle = (a: AIProvider, enabled: boolean) => {
     setToggleError(null);
@@ -1234,7 +1242,7 @@ function EmailLabel(p: { email: string }) {
   );
 }
 
-type AccountRank = { index: number; count: number; move: (to: number) => void };
+type AccountRank = { index: number; count: number; move: (to: number) => void; moveFrom: (fromId: string, to: number) => void };
 
 const ORDINALS = ["1st", "2nd", "3rd"];
 const ordinal = (n: number) => ORDINALS[n - 1] ?? `${n}th`;
@@ -1242,14 +1250,14 @@ const ordinal = (n: number) => ORDINALS[n - 1] ?? `${n}th`;
 /** The account's place among its provider's accounts, with up/down buttons
  * and a drag handle (drop on another account row). Lives in the row body so
  * the header keeps its columns. */
-function RankControls(p: { rank: AccountRank; name: string; title: string }) {
+function RankControls(p: { rank: AccountRank; id: string; name: string; title: string }) {
   const r = () => p.rank;
   return (
     <div class="p-rank-row">
       <span class="s-row-desc" title={`Tried ${ordinal(r().index + 1)} of ${r().count} ${p.title} accounts`}>Tried {ordinal(r().index + 1)} of {r().count}</span>
       <div class="p-rank-actions">
       <span class="p-rank-grip" draggable="true" title="Drag onto another account to change the order" aria-hidden="true"
-        onDragStart={e => { e.dataTransfer?.setData(RANK_DRAG_TYPE, String(r().index)); if (e.dataTransfer) e.dataTransfer.effectAllowed = "move"; }}>⠿</span>
+        onDragStart={e => { e.dataTransfer?.setData(RANK_DRAG_TYPE, p.id); if (e.dataTransfer) e.dataTransfer.effectAllowed = "move"; }}>⠿</span>
       <button type="button" class="icon-btn" aria-label={`Try ${p.name} earlier`} disabled={r().index === 0} onClick={() => r().move(r().index - 1)}>
         <Ic.FindPrevIcon size={13} />
       </button>
@@ -1369,7 +1377,7 @@ function LiveRow(p: { a: AIProvider; open?: boolean; onOpenChange?: (open: boole
     <div class="p-acc-wrap" data-provider-id={a.id} classList={{ "p-drop": dropping(), "is-disabled": rowDisabled() }}
       onDragOver={e => { if (p.rank && e.dataTransfer?.types.includes(RANK_DRAG_TYPE)) { e.preventDefault(); setDropping(true); } }}
       onDragLeave={() => setDropping(false)}
-      onDrop={e => { setDropping(false); const from = e.dataTransfer?.getData(RANK_DRAG_TYPE); if (p.rank && from) { e.preventDefault(); if (Number(from) !== p.rank.index) p.rank.move(p.rank.index); } }}>
+      onDrop={e => { setDropping(false); const fromId = e.dataTransfer?.getData(RANK_DRAG_TYPE); if (p.rank && fromId && fromId !== a.id) { e.preventDefault(); p.rank.moveFrom(fromId, p.rank.index); } }}>
       <div class="p-account-header">
       <button class="s-row p-acc p-acc-btn" aria-expanded={open()} onClick={() => setOpen(!open())}>
         <ProviderLogo type={a.provider_type} name={a.name} />
@@ -1415,7 +1423,7 @@ function LiveRow(p: { a: AIProvider; open?: boolean; onOpenChange?: (open: boole
           </Show>
 
             <Show when={manages() && a.provider_type === "antigravity"}><AlternativeRouterSettings account={a.id} /></Show>
-          <Show when={p.rank}>{r => <RankControls rank={r()} name={email() ?? a.name} title={title()} />}</Show>
+          <Show when={p.rank}>{r => <RankControls rank={r()} id={a.id} name={email() ?? a.name} title={title()} />}</Show>
           <Show when={mistralSubscription()}>
             <MistralUsageConnect a={a} usage={p.usage} onUsage={p.onUsage} />
           </Show>
