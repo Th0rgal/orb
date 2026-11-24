@@ -402,8 +402,8 @@ export default function App() {
   createEffect(() => {
     connectionVersion();
     const gen = ++palomaCheckGen;
+    setPalomaAvailable(false);
     if (!isConnected()) {
-      setPalomaAvailable(false);
       return;
     }
     import("./cloudAgentApi")

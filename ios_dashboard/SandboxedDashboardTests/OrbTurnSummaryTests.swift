@@ -145,10 +145,22 @@ final class OrbTurnSummaryTests: XCTestCase {
         hermesSel.provider = "hermes"
         hermesSel.account = "paloma"
         hermesSel.model = ""
+        hermesSel.repository = "https://github.com/Th0rgal/orb"
+        hermesSel.gitRef = "master"
         hermesSel.params = .array([.object(["id": .string("effort"), "value": .string("high")])])
         XCTAssertEqual(hermesSel.wire["provider"].text, "hermes")
         XCTAssertEqual(hermesSel.wire["account"].text, "paloma")
         XCTAssertEqual(hermesSel.wire["model_params"].items.first?["value"].text, "high")
+        XCTAssertEqual(hermesSel.wire["repository"], .null)
+        XCTAssertEqual(hermesSel.wire["git_ref"], .null)
+
+        var cursorSel = OrbSelection()
+        cursorSel.provider = "cursor_cloud"
+        cursorSel.account = "cursor-default"
+        cursorSel.repository = "https://github.com/Th0rgal/orb"
+        cursorSel.gitRef = "master"
+        XCTAssertEqual(cursorSel.wire["repository"].text, "https://github.com/Th0rgal/orb")
+        XCTAssertEqual(cursorSel.wire["git_ref"].text, "master")
     }
 
     @MainActor func testBannersAreSkippedForItemsAlreadyOnScreen() {

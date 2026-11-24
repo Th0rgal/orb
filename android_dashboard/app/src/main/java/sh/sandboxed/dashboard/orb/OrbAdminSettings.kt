@@ -178,7 +178,7 @@ object OrbAdminFormatting {
         return "$total · $open open"
     }
 
-    /** Core returns 403 on `/api/cloud/hermes/*` when Hermes is not connected for this account. */
+    // Core returns 403 on Hermes cloud endpoints when Hermes is not connected for this account.
     fun hermesUnavailableMessage(error: Throwable): String? {
         val orbErr = error as? OrbError ?: return null
         if (orbErr.status != 403) return null
@@ -193,6 +193,46 @@ object OrbAdminFormatting {
         "hermes" -> "paloma"
         "cursor_cloud" -> "cursor-default"
         else -> "grok-default"
+    }
+
+    fun buildCloudCreateSpec(
+        provider: String,
+        account: String,
+        model: String = "",
+        effort: String = "",
+        repository: String = "",
+        gitRef: String = ""
+    ): MutableMap<String, Any?> {
+        val spec = mutableMapOf<String, Any?>(
+            "provider" to provider,
+            "account" to account
+        )
+        val cleanModel = model.trim()
+        if (cleanModel.isNotEmpty()) spec["model"] = cleanModel
+        val cleanEffort = effort.trim()
+        if (provider == "hermes" && cleanEffort.isNotEmpty()) {
+            spec["model_params"] = listOf(mapOf("id" to "effort", "value" to cleanEffort))
+        }
+        if (provider == "cursor_cloud") {
+            val cleanRepo = repository.trim()
+            val cleanRef = gitRef.trim()
+            if (cleanRepo.isNotEmpty()) spec["repository"] = cleanRepo
+            if (cleanRef.isNotEmpty()) spec["git_ref"] = cleanRef
+        }
+        return spec
+    }
+
+    fun buildHermesFollowUpFields(model: String, effort: String): Map<String, Any?> {
+        val cleanEffort = effort.trim()
+        val params = if (cleanEffort.isNotEmpty()) {
+            listOf(mapOf("id" to "effort", "value" to cleanEffort))
+        } else {
+            emptyList<Map<String, String>>()
+        }
+        return mapOf(
+            "cloud_model" to model.trim(),
+            "cloud_model_params" to params
+        )
     }
 }
 
@@ -1817,6 +1857,23 @@ fun OrbHermesSettingsPage(core: OrbCore, onBack: () -> Unit) {
     var telegramCleanup by remember { mutableStateOf(false) }
     var soul by remember { mutableStateOf("") }
 
+    fun resetDraftState() {
+        rawState = null
+        showSoulDialog = false
+        useRouter = true
+        defaultModel = ""
+        reasoningEffort = ""
+        memory = true
+        memoryLimit = 8000
+        userProfile = true
+        userLimit = 4000
+        compression = true
+        compressionThreshold = 0.5
+        telegramProgress = "new"
+        telegramCleanup = false
+        soul = ""
+    }
+
     fun applyState(s: OrbDict) {
         rawState = s
         useRouter = s["use_sandboxed_router"] == true
@@ -1834,7 +1891,7 @@ fun OrbHermesSettingsPage(core: OrbCore, onBack: () -> Unit) {
     }
 
     LaunchedEffect(baseURL, token, reloadNonce) {
-        rawState = null
+        resetDraftState()
         loading = true
         error = null
         unavailable = null
@@ -1847,7 +1904,7 @@ fun OrbHermesSettingsPage(core: OrbCore, onBack: () -> Unit) {
         } catch (e: CancellationException) {
             throw e
         } catch (e: Throwable) {
-            rawState = null
+            resetDraftState()
             val reason = OrbAdminFormatting.hermesUnavailableMessage(e)
             if (reason != null) {
                 unavailable = reason
@@ -1915,7 +1972,7 @@ fun OrbHermesSettingsPage(core: OrbCore, onBack: () -> Unit) {
             } catch (e: Throwable) {
                 val reason = OrbAdminFormatting.hermesUnavailableMessage(e)
                 if (reason != null) {
-                    rawState = null
+                    resetDraftState()
                     unavailable = reason
                     error = null
                 } else {
@@ -2105,7 +2162,7 @@ fun OrbHermesSettingsPage(core: OrbCore, onBack: () -> Unit) {
         }
     }
 
-    if (showSoulDialog) {
+    if (showSoulDialog && rawState != null) {
         AlertDialog(
             onDismissRequest = { showSoulDialog = false },
             containerColor = OrbStyle.elevated,

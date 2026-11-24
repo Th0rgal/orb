@@ -198,5 +198,40 @@ class OrbClientParityTest {
             "12 · 2 open",
             OrbAdminFormatting.hermesSessions(mapOf("total" to 12, "open" to 2))
         )
+
+        val hermesSpec = OrbAdminFormatting.buildCloudCreateSpec(
+            provider = "hermes",
+            account = "paloma",
+            model = "",
+            effort = "high",
+            repository = "https://github.com/Th0rgal/orb",
+            gitRef = "master"
+        )
+        assertEquals("hermes", hermesSpec["provider"])
+        assertEquals("paloma", hermesSpec["account"])
+        assertFalse(hermesSpec.containsKey("model"))
+        assertFalse(hermesSpec.containsKey("repository"))
+        assertFalse(hermesSpec.containsKey("git_ref"))
+        assertEquals(listOf(mapOf("id" to "effort", "value" to "high")), hermesSpec["model_params"])
+
+        val cursorSpec = OrbAdminFormatting.buildCloudCreateSpec(
+            provider = "cursor_cloud",
+            account = "cursor-default",
+            model = "default",
+            effort = "high",
+            repository = "https://github.com/Th0rgal/orb",
+            gitRef = "master"
+        )
+        assertEquals("https://github.com/Th0rgal/orb", cursorSpec["repository"])
+        assertEquals("master", cursorSpec["git_ref"])
+        assertFalse(cursorSpec.containsKey("model_params"))
+
+        val resetFollowUp = OrbAdminFormatting.buildHermesFollowUpFields("", "")
+        assertEquals("", resetFollowUp["cloud_model"])
+        assertEquals(emptyList<Map<String, String>>(), resetFollowUp["cloud_model_params"])
+
+        val overrideFollowUp = OrbAdminFormatting.buildHermesFollowUpFields("builtin/smart", "medium")
+        assertEquals("builtin/smart", overrideFollowUp["cloud_model"])
+        assertEquals(listOf(mapOf("id" to "effort", "value" to "medium")), overrideFollowUp["cloud_model_params"])
     }
 }

@@ -678,9 +678,21 @@ fun OrbConversationPage(
     var sideAgentSession by remember(initialMission?.id) { mutableStateOf<OrbSideAgentSession?>(null) }
     var commandBanner by remember { mutableStateOf<String?>(null) }
 
-    var userExplicitlyPickedAgent by remember(currentMission?.id) { mutableStateOf(false) }
-    var cloudAccounts by remember { mutableStateOf<List<OrbRow>>(emptyList()) }
-    var hermesModelItems by remember { mutableStateOf<List<OrbDict>>(emptyList()) }
+    val currentBaseURL by core.baseURLFlow.collectAsState()
+    val currentToken by core.tokenFlow.collectAsState()
+    var userExplicitlyPickedAgent by remember(currentMission?.id, currentBaseURL, currentToken) { mutableStateOf(false) }
+    var cloudAccounts by remember(currentBaseURL, currentToken) { mutableStateOf<List<OrbRow>>(emptyList()) }
+    var hermesModelItems by remember(currentBaseURL, currentToken) { mutableStateOf<List<OrbDict>>(emptyList()) }
+    var hermesEffortChoices by remember(currentBaseURL, currentToken) { mutableStateOf<List<OrbAgentCatalog.ModelChoice>>(emptyList()) }
+    var selectedCloudEffort by remember(currentMission?.id, currentBaseURL, currentToken) {
+        mutableStateOf(
+            OrbJSON.dictList(currentMission?.dict("cloud")?.get("model_params"))
+                .firstOrNull { OrbJSON.str(it, "id") in setOf("effort", "reasoning_effort") }
+                ?.let { OrbJSON.str(it, "value") }
+                ?: currentMission?.str("model_effort")
+                ?: ""
+        )
+    }
     // Agent configuration state
     var selectedBackend by remember(currentMission?.id, backends) {
         mutableStateOf(
@@ -775,16 +787,16 @@ fun OrbConversationPage(
     var selectedAccount by remember(currentMission?.id) {
         mutableStateOf(currentMission?.str("account_id", "account", "provider_account") ?: "")
     }
-    LaunchedEffect(currentMission?.id, initialFolder, selectedWorkspaceId, nodePinnedByUser, backends.size, userExplicitlyPickedAgent) {
+    LaunchedEffect(currentBaseURL, currentToken) {
+        cloudAccounts = emptyList()
+        hermesModelItems = emptyList()
+        hermesEffortChoices = emptyList()
+        val fetched = runCatching { core.fetchRows("/api/cloud/accounts", "items") }.getOrDefault(emptyList())
+        cloudAccounts = fetched
+    }
+    LaunchedEffect(currentBaseURL, currentToken, currentMission?.id, cloudAccounts, initialFolder, selectedWorkspaceId, nodePinnedByUser, backends.size, userExplicitlyPickedAgent) {
         if (currentMission != null) return@LaunchedEffect
-        val loaded = if (cloudAccounts.isNotEmpty()) {
-            cloudAccounts
-        } else {
-            runCatching { core.fetchRows("/api/cloud/accounts", "items") }.getOrDefault(emptyList()).also {
-                if (it.isNotEmpty()) cloudAccounts = it
-            }
-        }
-        val hermesAccount = loaded.firstOrNull {
+        val hermesAccount = cloudAccounts.firstOrNull {
             it.str("provider") == "hermes" && it.bool("available") == true && !it.str("id").isNullOrEmpty()
         }
         val step = OrbKernel.composerDefaultStep(
@@ -796,19 +808,33 @@ fun OrbConversationPage(
         if (step == OrbKernel.ComposerDefaultStepResult.DEFAULT_PALOMA_HERMES && hermesAccount != null) {
             selectedBackend = "hermes"
             selectedAccount = hermesAccount.str("id").orEmpty()
+        } else if (!userExplicitlyPickedAgent && hermesAccount == null && selectedBackend == "hermes") {
+            selectedBackend = backends.firstOrNull()?.str("id", "name") ?: "claudecode"
+            selectedAccount = ""
         }
     }
-    LaunchedEffect(selectedBackend, cloudAccounts) {
+    LaunchedEffect(currentBaseURL, currentToken, selectedBackend, cloudAccounts) {
         if (selectedBackend != "hermes") return@LaunchedEffect
         val hasAvailableHermes = cloudAccounts.any { it.str("provider") == "hermes" && it.bool("available") == true }
         if (!hasAvailableHermes) {
             hermesModelItems = emptyList()
+            hermesEffortChoices = emptyList()
             return@LaunchedEffect
         }
         val opts = runCatching { core.fetchDict("/api/cloud/hermes/options") }.getOrNull()
         val items = OrbJSON.dictList(OrbJSON.dict(opts?.get("models"))?.get("items"))
             .filter { !OrbJSON.str(it, "id", "value").isNullOrEmpty() }
+        val rawEfforts = OrbJSON.dictList(opts?.get("efforts")).ifEmpty {
+            OrbJSON.dictList(OrbJSON.dict(opts?.get("efforts"))?.get("items"))
+        }
+        val effortList = rawEfforts.map { item ->
+            val id = OrbJSON.str(item, "id", "value").orEmpty()
+            val label = OrbJSON.str(item, "displayName", "name", "label")?.takeIf { it.isNotEmpty() }
+                ?: if (id.isEmpty()) "Default" else id
+            OrbAgentCatalog.ModelChoice(value = id, label = label)
+        }
         hermesModelItems = items
+        hermesEffortChoices = effortList
     }
     var selectedRepo by remember(currentMission?.id, project.id) {
         mutableStateOf(currentMission?.str("repo", "repository") ?: project.str("repo", "repository") ?: "")
@@ -1903,8 +1929,8 @@ fun OrbConversationPage(
                             "content" to finalPrompt,
                             "client_message_id" to UUID.randomUUID().toString()
                         )
-                        if (rowBackend == "cloud_hermes" && desiredModel.isNotEmpty()) {
-                            cloudMsgBody["cloud_model"] = desiredModel
+                        if (rowBackend == "cloud_hermes") {
+                            cloudMsgBody.putAll(OrbAdminFormatting.buildHermesFollowUpFields(desiredModel, selectedCloudEffort))
                         }
                         core.request(
                             path = "/api/control/message",
@@ -1953,13 +1979,14 @@ fun OrbConversationPage(
                         if (selectedBackend == "cursor_cloud" && (selectedRepo.isBlank() || selectedGitRef.isBlank())) {
                             throw OrbError("Choose a repository and Git reference for Cursor Cloud.")
                         }
-                        val cloudSpec = mutableMapOf<String, Any?>(
-                            "provider" to selectedBackend,
-                            "account" to resolvedAccount
+                        val cloudSpec = OrbAdminFormatting.buildCloudCreateSpec(
+                            provider = selectedBackend,
+                            account = resolvedAccount,
+                            model = selectedModel,
+                            effort = selectedCloudEffort,
+                            repository = selectedRepo,
+                            gitRef = selectedGitRef
                         )
-                        if (selectedModel.isNotEmpty()) cloudSpec["model"] = selectedModel
-                        if (selectedRepo.isNotEmpty()) cloudSpec["repository"] = selectedRepo
-                        if (selectedGitRef.isNotEmpty()) cloudSpec["git_ref"] = selectedGitRef
                         val cloudBody = mutableMapOf<String, Any?>(
                             "prompt" to finalPrompt,
                             "title" to OrbJSON.cleanTitle(baseText).take(72),
@@ -3580,11 +3607,17 @@ fun OrbConversationPage(
             selectedBackend = selectedBackend,
             onSelectBackend = {
                 userExplicitlyPickedAgent = true
-                if (it != selectedBackend) selectedModel = ""
+                if (it != selectedBackend) {
+                    selectedModel = ""
+                    selectedCloudEffort = ""
+                }
                 selectedBackend = it
             },
             selectedModel = selectedModel,
             onSelectModel = { selectedModel = it },
+            effortChoices = if (selectedBackend == "hermes") hermesEffortChoices else emptyList(),
+            selectedEffort = selectedCloudEffort,
+            onSelectEffort = { selectedCloudEffort = it },
             permissionMode = selectedPermissionMode,
             showClaudePermissions = selectedBackend == "claudecode",
             onSelectPermissionMode = { mode ->
@@ -4975,6 +5008,9 @@ fun OrbAgentPickerSheet(
     onSelectBackend: (String) -> Unit,
     selectedModel: String,
     onSelectModel: (String) -> Unit,
+    effortChoices: List<OrbAgentCatalog.ModelChoice> = emptyList(),
+    selectedEffort: String = "",
+    onSelectEffort: (String) -> Unit = {},
     permissionMode: OrbClaudePermissionMode = OrbClaudePermissionMode.Supervised,
     showClaudePermissions: Boolean = false,
     onSelectPermissionMode: (OrbClaudePermissionMode) -> Unit = {},
@@ -5853,8 +5889,46 @@ fun OrbAgentPickerSheet(
                 }
             }
 
+            if (selectedBackend == "hermes" && effortChoices.isNotEmpty()) {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        text = "REASONING EFFORT",
+                        color = OrbStyle.textMuted,
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold,
+                        letterSpacing = 0.7.sp
+                    )
+                    Row(
+                        modifier = Modifier.horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        effortChoices.forEach { choice ->
+                            val active = selectedEffort == choice.value
+                            Box(
+                                modifier = Modifier
+                                    .clip(CircleShape)
+                                    .background(if (active) Color.White else OrbStyle.surface)
+                                    .border(1.dp, if (active) Color.Transparent else OrbStyle.border, CircleShape)
+                                    .orbPressClickable { if (!locked) onSelectEffort(choice.value) }
+                                    .padding(horizontal = 12.dp, vertical = 7.dp)
+                            ) {
+                                Text(
+                                    text = choice.label,
+                                    color = if (active) Color.Black else Color.White,
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Medium,
+                                    maxLines = 1,
+                                    softWrap = false
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+
             // Repository & Git Ref
-            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            if (selectedBackend != "hermes") {
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 Text(
                     text = "REPOSITORY & GIT REF",
                     color = OrbStyle.textMuted,
@@ -5905,6 +5979,7 @@ fun OrbAgentPickerSheet(
                             modifier = Modifier.fillMaxWidth()
                         )
                     }
+                }
                 }
             }
 
