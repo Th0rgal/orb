@@ -1,6 +1,7 @@
 import conversationHistoryFixtures from "../../shared/orb-spec/fixtures/conversation-history.json";
 import { describe,it,expect } from "vitest";
 import { buildTranscript,applyStreamEvent } from "../src/Transcript";
+import { stripGoalCompletionMarkers } from "../src/transcriptModel";
 import { storedToStream,heldAfterHistory,type StreamEvent } from "../src/stream";
 const ev=(type:string,data:Record<string,unknown>):StreamEvent=>({type,data});
 const snap=(content:string)=>ev("text_delta",{content});
@@ -211,4 +212,20 @@ it("matches mobile canonical conversation fixtures", () => {
   const displayed = buildTranscript(events).flatMap(item => item.kind === "text" || (item.kind === "user" && !item.queued) ? [item.text] : []);
   expect(displayed, fixture.name).toEqual(fixture.expected);
  }
+});
+
+it("strips standalone GOAL_COMPLETE markers from finalized goal answers after follow-ups", () => {
+ const events: StreamEvent[] = [
+  ev("user_message", { content: "/goal Test preflight only" }),
+  final("Preflight check passed.\n\n<!-- GOAL_COMPLETE -->\n", "a1"),
+  ev("user_message", { content: "What is the status?" }),
+  final("Already complete.\n```html\n<!-- GOAL_COMPLETE -->\n```", "a2"),
+  snap("Streaming...\n<!-- GOAL_COMPLETE -->"),
+ ];
+ const projected = stripGoalCompletionMarkers(buildTranscript(events));
+ const assistantTexts = texts(projected);
+ expect(assistantTexts).toHaveLength(3);
+ expect(assistantTexts[0].text).toBe("Preflight check passed.\n");
+ expect(assistantTexts[1].text).toContain("```html\n<!-- GOAL_COMPLETE -->\n```");
+ expect(assistantTexts[2].text).toContain("<!-- GOAL_COMPLETE -->");
 });

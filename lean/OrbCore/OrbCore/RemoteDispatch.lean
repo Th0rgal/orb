@@ -2053,6 +2053,7 @@ partial def spawnRemoteJobPoller
                   else if let some (_, tReason) := transientVerdict? then tReason
                   else if nextMissionStatus == "awaiting_user" then "awaiting_wakeup"
                   else if jState == "cancelled" && isProvErr then "provider_error"
+                  else if jState == "cancelled" && termReason.isEmpty then "remote_job_cancelled"
                   else termReason
                 if transientVerdict?.isSome then
                   discard <| execParamQuery store.missionsDb
@@ -2060,10 +2061,10 @@ partial def spawnRemoteJobPoller
                     #[missionId, nextTermReason, nowIso, jobId, s!"{capturedGen}"]
                 -- Only the observer that owns the current generation may settle
                 -- the mission. A stale poller still closes its own job ledger,
-                -- but cannot overwrite a newer turn's status or queues.
+                -- but cannot overwrite a newer turn's status or an already-settled turn.
                 if let .ok updated ← execParamQuery store.missionsDb
                   ("UPDATE missions SET status=?2, terminal_reason=?3, state_revision=state_revision+1, updated_at=?4 " ++
-                   "WHERE id=?1 AND run_generation=CAST(?5 AS INTEGER) AND status NOT IN ('cancelled','interrupted') RETURNING id;")
+                   "WHERE id=?1 AND run_generation=CAST(?5 AS INTEGER) AND status NOT IN ('completed','awaiting_user','acknowledged','archived','cancelled','interrupted') RETURNING id;")
                   #[missionId, nextMissionStatus, nextTermReason, nowIso, s!"{capturedGen}"] then
                   if updated.size > 1 then
                     emitMissionEventAndBroadcast store broadcastHub? missionId "mission_status_changed"
