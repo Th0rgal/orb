@@ -222,6 +222,9 @@ def bulk_write(c, kind, key):
             print('failed\t' + mid)
 
 
+ACCOUNT_VPN_POLL_SECONDS = 5
+
+
 def account_path(account):
     if not isinstance(account, str) or not account or account in ('.', '..') or len(account) > 256:
         raise ValueError('invalid provider account')
@@ -232,60 +235,148 @@ def valid_country(value):
     return isinstance(value, str) and re.fullmatch('[A-Z]{2}', value) is not None
 
 
-def vpn_options(route):
-    mode = route['mode']
-    if mode not in ('direct', 'vpn') or not isinstance(route.get('can_configure'), bool):
-        raise ValueError('invalid account route')
-    selected = '' if mode == 'direct' else route['country']
-    if mode == 'vpn' and not valid_country(selected):
-        raise ValueError('invalid route country')
-    status = route['status']
-    if status == 'verified':
-        detail = ' · '.join(['Verified exit', selected, route['server'], ', '.join(route['exits'])])
-    elif status == 'blocked':
-        detail = selected + ' · ' + (route.get('message') or 'The VPN route is unavailable.')
-    elif status == 'direct' and not selected:
-        detail = 'Direct'
+def account_vpn_route(payload):
+    """Mirror orb/src/accountVpn.ts `accountVpnRoute`."""
+    if not isinstance(payload, dict) or not isinstance(payload.get('countries'), list):
+        return None
+    mode = payload.get('mode')
+    if mode == 'vpn':
+        country = payload.get('country')
+        return payload if isinstance(country, str) and country else None
+    return payload if mode == 'direct' else None
+
+
+def account_vpn_view(route, native_account=False):
+    """Mirror orb/src/accountVpn.ts `accountVpnView`."""
+    vpn = route['mode'] == 'vpn'
+    selected = route.get('country') if vpn and isinstance(route.get('country'), str) else ''
+    offered = [country for country in route['countries'] if isinstance(country, str) and country]
+    editable = route.get('can_configure') is True
+    blocked = vpn and route.get('status') == 'blocked'
+    pending = blocked and route.get('reason') == 'vpn_awaiting_verification'
+    countries = list(dict.fromkeys(([selected] if selected else []) + offered))
+    if not editable:
+        cfg_msg = route.get('configuration_message')
+        notice = cfg_msg if isinstance(cfg_msg, str) else 'VPN routing is unavailable for this credential.'
+    elif offered:
+        notice = ''
     else:
-        raise ValueError('invalid account route status')
-    yield ('', '', 'Account connection', detail)
-    if route['can_configure']:
-        countries = route['countries']
-        if not isinstance(countries, list) or not all(valid_country(country) for country in countries):
-            raise ValueError('invalid country choices')
-        for country in dict.fromkeys(['', *([selected] if selected else []), *countries]):
-            picked = country == selected
-            caption = 'Retry verification' if picked and status == 'blocked' else 'Selected' if picked else ''
-            action = 'vpn' if not picked or status == 'blocked' else ''
+        notice = 'Import a named server profile in AirVPN Settings to enable VPN routing.'
+    if vpn and route.get('status') == 'verified':
+        server = route.get('server') if isinstance(route.get('server'), str) else ''
+        raw_exits = route.get('exits')
+        exits = [e for e in raw_exits if isinstance(e, str)] if isinstance(raw_exits, list) else []
+        status = f"Verified exit · {server} · {', '.join(exits)}"
+    elif blocked:
+        msg = route.get('message')
+        status = msg if isinstance(msg, str) else 'The VPN route is unavailable.'
+    else:
+        status = ''
+    return {
+        'selected': selected,
+        'countries': countries,
+        'editable': editable,
+        'confirm_direct': bool(native_account) and editable and route['mode'] == 'direct' and route.get('saved') is not True,
+        'notice': notice,
+        'status': status,
+        'retry': blocked and not pending,
+        'poll': pending,
+    }
+
+
+def account_vpn_write(country):
+    return {'mode': 'vpn', 'country': country} if country else {'mode': 'direct'}
+
+
+def missing_account_setting(status, body, path):
+    if status != 404 or not isinstance(body, str):
+        return False
+    try:
+        parsed = json.loads(body)
+    except ValueError:
+        return False
+    return isinstance(parsed, dict) and parsed.get('error') == 'not_found' and parsed.get('path') == path
+
+
+def alternative_router_access(payload):
+    if not isinstance(payload, dict):
+        return None
+    allowed = payload.get('allowed')
+    return allowed if isinstance(allowed, bool) else None
+
+
+def vpn_options_for_view(view):
+    parts = [part for part in (view['status'], view['notice']) if part]
+    if not view['editable'] and view['selected']:
+        parts.insert(0, 'AirVPN · ' + view['selected'])
+    if not parts:
+        parts = ['AirVPN · ' + view['selected'] if view['selected'] else 'Direct']
+    yield ('refresh' if not view['editable'] else '', '', 'Account connection', ' · '.join(parts))
+    if view['editable']:
+        for country in ('', *view['countries']):
+            picked = country == view['selected']
+            if picked:
+                if view['retry']:
+                    action, caption = 'vpn', 'Retry verification'
+                elif not country and view['confirm_direct']:
+                    action, caption = 'vpn', 'Confirm Direct route'
+                else:
+                    action, caption = '', 'Selected'
+            else:
+                action, caption = 'vpn', ''
             yield (action, country, 'AirVPN · ' + country if country else 'Direct', caption)
 
 
+def vpn_options(route, native_account=False):
+    validated = account_vpn_route(route)
+    if validated is None:
+        raise ValueError('invalid account route')
+    yield from vpn_options_for_view(account_vpn_view(validated, native_account))
+
+
 def router_options(settings):
-    allowed = settings['allowed']
-    if not isinstance(allowed, bool):
+    allowed = alternative_router_access(settings)
+    if allowed is None:
         raise ValueError('invalid alternative-router setting')
     yield ('routers', 'off' if allowed else 'on', 'Alternative routers',
            'Allowed · OpenCode and other routed clients' if allowed else 'Off · Native Antigravity only')
 
 
-def account_route_rows(c, account, antigravity):
+def account_route_state(c, account, antigravity):
     base = account_path(account)
-    sections = [('vpn', 'Account connection', vpn_options)]
+    sections = [('vpn', 'Account connection', 'vpn')]
     if antigravity:
-        sections.append(('alternative-routers', 'Alternative routers', router_options))
-    for suffix, title, options in sections:
+        sections.append(('alternative-routers', 'Alternative routers', 'routers'))
+    rows = []
+    should_poll = False
+    for suffix, title, kind in sections:
         try:
-            rows = list(options(c.get(base + '/' + suffix)))
+            payload = c.get(base + '/' + suffix)
+            if kind == 'vpn':
+                route = account_vpn_route(payload)
+                if route is None:
+                    raise ValueError('invalid account route')
+                view = account_vpn_view(route, antigravity)
+                should_poll = view['poll']
+                section_rows = list(vpn_options_for_view(view))
+            else:
+                section_rows = list(router_options(payload))
         except urllib.error.HTTPError as error:
             with error:
                 if error.code == 401:
                     raise
                 if error.code in (403, 404):
                     continue
-            rows = [('refresh', '', title, 'Could not load. Retry')]
+            section_rows = [('refresh', '', title, 'Could not load. Retry')]
         except (OSError, ValueError, KeyError, TypeError):
-            rows = [('refresh', '', title, 'Could not load. Retry')]
-        yield from rows
+            section_rows = [('refresh', '', title, 'Could not load. Retry')]
+        rows.extend(section_rows)
+    return rows, should_poll
+
+
+def account_route_rows(c, account, antigravity):
+    rows, _ = account_route_state(c, account, antigravity)
+    yield from rows
 
 
 def save_account_route(c, account, action, value):
@@ -293,23 +384,26 @@ def save_account_route(c, account, action, value):
     if action == 'vpn':
         if value and not valid_country(value):
             raise ValueError('invalid country choice')
-        body = {'mode': 'vpn', 'country': value} if value else {'mode': 'direct'}
+        body = account_vpn_write(value)
         # Core verifies both exit addresses and waits for the new AirVPN session.
         result = c.request(base + '/vpn', body=body, method='PUT', deadline=120)
-        if not isinstance(result, dict) or result.get('mode') != body['mode'] or (value and result.get('country') != value):
+        confirmed = account_vpn_route(result)
+        if confirmed is None or confirmed['mode'] != body['mode'] or (value and confirmed.get('country') != value):
             raise ValueError('unconfirmed account connection')
     elif action == 'routers':
         if value not in ('off', 'on'):
             raise ValueError('invalid router choice')
         body = {'allowed': value == 'on'}
         result = c.request(base + '/alternative-routers', body=body, method='PUT')
-        if not isinstance(result, dict) or result.get('allowed') is not body['allowed']:
+        if alternative_router_access(result) is not body['allowed']:
             raise ValueError('unconfirmed router setting')
     else:
         raise ValueError('unknown route setting')
 
 
-def account_routes(binding, account, provider, action, value):
+def account_routes(binding, account, provider, action, value, poll=''):
+    if poll == 'poll' and not action:
+        time.sleep(ACCOUNT_VPN_POLL_SECONDS)
     c = Connection()
     if c.binding != binding:
         return
@@ -319,9 +413,10 @@ def account_routes(binding, account, provider, action, value):
             save_account_route(c, account, action, value)
         except (ValueError, OSError):
             confirmed = False
-    rows = list(account_route_rows(c, account, provider == 'antigravity'))
+    rows, should_poll = account_route_state(c, account, provider == 'antigravity')
     c.check()
-    print('routes' if confirmed else 'unconfirmed')
+    header = 'routes' if confirmed else 'unconfirmed'
+    print(header + ('\tpoll' if should_poll else ''))
     if not rows:
         rows = [('', '', 'Account connection', 'Routing controls are unavailable for this account on this Core.')]
     for row in rows:

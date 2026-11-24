@@ -237,6 +237,18 @@ private def providerEsc := (stepDesktopEvent 120 vp providerDetail (.key 0xff1b 
 #guard providerEsc.fleetTopSub == providerList.fleetTopSub && providerEsc.accountRoutePage.isNone
 #guard desktopFocusChange providerDetail providerEsc (.key 0xff1b 0 .pressed) == some (providerSettingsId 1)
 
+private def pollingRouteState : DesktopState :=
+  { providerDetail with accountRoutePage := providerDetail.accountRoutePage.map fun p =>
+      { p with polling := true, options := some [
+          ⟨"", "", "Account connection", "Waiting for exit verification."⟩,
+          ⟨"vpn", "", "Direct", ""⟩,
+          ⟨"", "NL", "AirVPN · NL", "Selected"⟩] } }
+-- While awaiting verification, the selected country is not retryable, while switching routes remains enabled and cancels polling.
+#guard (stepDesktopEvent 120 vp pollingRouteState (.activate (providerRouteId 2))).1.accountRoutePage.any
+  (fun p => p.pending.isNone && p.polling)
+#guard (stepDesktopEvent 120 vp pollingRouteState (.activate (providerRouteId 1))).1.accountRoutePage.any
+  (fun p => p.pending == some ⟨"vpn", "", "Direct", ""⟩ && !p.polling)
+
 private def blankDraft : DesktopState := { hierarchyFixture with screen := .controlEmpty }
 #guard desktopFocusChange blankDraft blankDraft (.key 0x6e 2 .pressed) == some 1
 #guard desktopFocusChange blankDraft blankDraft (.key 0x6e 0 .pressed) == none
@@ -759,6 +771,66 @@ def main (args : List String) : IO Unit := do
         IO.sleep 20
       throw (IO.userError "new account did not recover")
     return
+  if args == ["account-vpn-poll"] then
+    withLiveSources true (pure ()) fun readSources => do
+      let waitUntil (st0 : DesktopState) (limit : Nat) (pred : DesktopState → Bool) (msg : String) : IO DesktopState := do
+        let mut cur := st0
+        for _ in [:limit] do
+          if let some next ← readSources cur then cur := next
+          if pred cur then return cur
+          IO.sleep 20
+        throw (IO.userError msg)
+      let inf := (stepDesktopEvent 120 vp st (.activate 113)).1
+      let inf ← waitUntil inf 300 (·.providers.isSome) "providers did not load"
+      let opened := (stepDesktopEvent 120 vp inf (.activate (providerSettingsId 0))).1
+      -- 1st read: exit awaiting verification -> polling armed, NO Retry verification offered.
+      let pending ← waitUntil opened 300 (fun s => s.accountRoutePage.any (·.options.isSome)) "account route did not load"
+      let some p1 := pending.accountRoutePage | throw (IO.userError "missing account route page")
+      let opts1 := p1.options.getD []
+      unless p1.polling &&
+          opts1.any (fun r => r.title == "Account connection" && r.detail == "Waiting for exit verification.") &&
+          opts1.any (fun r => r.title == "AirVPN · NL" && r.action.isEmpty && r.detail == "Selected") &&
+          !opts1.any (fun r => r.detail == "Retry verification") do
+        throw (IO.userError s!"pending route offered retry or failed to arm polling: {repr p1}")
+      let (box1, _) := renderWidgetTree 120 (pxToSub 900) (pxToSub 600) pending.initialFocusState pending.theme
+        (buildDesktopScreen pending (pxToSub 900) (pxToSub 600))
+      if (renderedBoxRoot box1).contains "Retry" then
+        throw (IO.userError "rendered pending account route unexpectedly showed Retry")
+      -- Automatic 5-second reread settles to a Core-reported failure -> polling stops, Retry verification appears.
+      let failed ← waitUntil pending 500
+        (fun s => s.accountRoutePage.any (fun p => !p.polling && (p.options.getD []).any (·.detail == "Retry verification")))
+        "pending route did not reread to failure"
+      let some p2 := failed.accountRoutePage | throw (IO.userError "missing failed route page")
+      let opts2 := p2.options.getD []
+      let some retryIdx := opts2.findIdx? (fun r => r.action == "vpn" && r.value == "NL" && r.detail == "Retry verification") |
+        throw (IO.userError "Retry verification option missing after Core reported failure")
+      let (box2, _) := renderWidgetTree 120 (pxToSub 900) (pxToSub 600) failed.initialFocusState failed.theme
+        (buildDesktopScreen failed (pxToSub 900) (pxToSub 600))
+      unless (renderedBoxRoot box2).contains "Retry" do
+        throw (IO.userError "rendered failed account route missing Retry button")
+      -- Activate Retry verification -> PUT enters awaiting verification -> 5-second reread settles to verified exit.
+      let retrying := (stepDesktopEvent 120 vp failed (.activate (providerRouteId retryIdx))).1
+      unless retrying.accountRoutePage.any (fun p => p.pending.isSome && !p.polling) do
+        throw (IO.userError "activating Retry verification did not start write")
+      let rePending ← waitUntil retrying 300 (fun s => s.accountRoutePage.any (fun p => p.pending.isNone && p.polling))
+        "retry write did not enter pending reread state"
+      let settled ← waitUntil rePending 500
+        (fun s => s.accountRoutePage.any (fun p => !p.polling && (p.options.getD []).any (·.detail == "Verified exit · Alkaid · 192.0.2.20")))
+        "retried pending route did not reread until verified"
+      let some p3 := settled.accountRoutePage | throw (IO.userError "missing settled route page")
+      let opts3 := p3.options.getD []
+      unless !p3.polling && opts3.any (fun r => r.title == "AirVPN · NL" && r.action.isEmpty && r.detail == "Selected") &&
+          !opts3.any (fun r => r.detail == "Retry verification") do
+        throw (IO.userError s!"settled verified route invalid: {repr p3}")
+      -- Settled page remains quiescent and stops issuing account-route reads.
+      let mut quiet := settled
+      for _ in [:25] do
+        if let some next ← readSources quiet then
+          unless next.accountRoutePage == quiet.accountRoutePage do
+            throw (IO.userError "settled account route unexpectedly changed")
+          quiet := next
+        IO.sleep 20
+    return
   if let ["inbox", action] := args then
     unless !st.inboxAvailable && st.missionCards.isEmpty do throw (IO.userError "bootstrap waited for Inbox history")
     let slot ← IO.mkRef none
@@ -1243,3 +1315,27 @@ private def sidebarRootRightBorder (embedded : Bool) : SubPx :=
 #guard sidebarRootRightBorder false == hierarchyFixture.theme.borderWidth
 #guard (buildSidebarChrome hierarchyFixture (pxToSub 600) (embedded := true)).styleOf.padding.right == 0
 #guard (buildSidebarChrome hierarchyFixture (pxToSub 600) (embedded := false)).styleOf.padding.right == hierarchyFixture.theme.borderWidth
+
+private def routeButtonsText (opts : List AccountRouteOption) : String :=
+  let st : DesktopState := { providerDetail with accountRoutePage := providerDetail.accountRoutePage.map fun p =>
+    { p with options := some opts } }
+  let (box, _) := renderWidgetTree 120 (pxToSub 900) (pxToSub 600) st.initialFocusState st.theme
+    (buildDesktopScreen st (pxToSub 900) (pxToSub 600))
+  renderedBoxRoot box
+
+#guard
+  let rendered := routeButtonsText [
+    ⟨"", "", "Account connection", "Direct"⟩,
+    ⟨"vpn", "", "Direct", "Confirm Direct route"⟩,
+    ⟨"vpn", "NL", "AirVPN · NL", ""⟩]
+  rendered.contains "Confirm" && rendered.contains "Select" && !rendered.contains "Retry"
+
+#guard
+  let rendered := routeButtonsText [
+    ⟨"refresh", "", "Account connection", "VPN routing is unavailable for this credential."⟩]
+  rendered.contains "Refresh" && !rendered.contains "Retry"
+
+#guard
+  let rendered := routeButtonsText [
+    ⟨"refresh", "", "Account connection", "Could not load. Retry"⟩]
+  rendered.contains "Retry"
