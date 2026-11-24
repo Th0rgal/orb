@@ -702,6 +702,23 @@ export function projectCompletedGoal(items: StreamItem[]): StreamItem[] {
   return copy;
 }
 
+/** Strip standalone trailing `<!-- GOAL_COMPLETE -->` protocol markers from finalized
+ * assistant answers in missions that used `/goal`, even after follow-up turns move
+ * the mission out of `completed` / `remote_goal_complete`. */
+export function stripGoalCompletionMarkers(items: StreamItem[]): StreamItem[] {
+  let copy: StreamItem[] | undefined;
+  for (let i = 0; i < items.length; i++) {
+    const item = items[i];
+    if (item.kind !== "text" || item.live) continue;
+    const projected = projectGoalAnswer(item);
+    if (projected !== item) {
+      if (!copy) copy = items.slice();
+      copy[i] = projected;
+    }
+  }
+  return copy ?? items;
+}
+
 /** A delivered follow-up supersedes the previous attempt's terminal notice.
  * Keep the raw history intact, and do not dismiss failures for queued input. */
 export function visibleTranscript(items: StreamItem[]): StreamItem[] {
