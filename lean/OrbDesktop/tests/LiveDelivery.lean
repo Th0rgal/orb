@@ -253,6 +253,39 @@ private def blankDraft : DesktopState := { hierarchyFixture with screen := .cont
 #guard desktopFocusChange blankDraft blankDraft (.key 0x6e 2 .pressed) == some 1
 #guard desktopFocusChange blankDraft blankDraft (.key 0x6e 0 .pressed) == none
 
+-- Live Runtime activation regression (U6a): clicking or keyboard-activating New Agent (101)
+-- while already on `.controlEmpty`/`.controlPopulated` passes `.activate 101` to
+-- `desktopFocusChange` so focus & IME move to composer `1`; dragging off or key repeat does not.
+private def newAgentRuntimeCheck : Bool := Id.run do
+  let navRect : Rect := { x := 100, y := 100, w := 400, h := 200 }
+  let reduce := stepDesktopEvent 120 vp
+  let rt0 : Runtime.RuntimeState DesktopState := {
+    app := blankDraft
+    focus := { owner := some 101 }
+    hitRegions := [(101, navRect)]
+  }
+  -- Pointer press + release on 101 while already on `.controlEmpty` focuses composer 1.
+  let down := rt0.stepEventWithFocus reduce desktopFocusChange (.pointerButton 200 150 0x110 true)
+  let up := down.stepEventWithFocus reduce desktopFocusChange (.pointerButton 200 150 0x110 false)
+  -- Dragging off 101 before release keeps focus on 101 (no activation).
+  let dragOff := down.stepEventWithFocus reduce desktopFocusChange (.pointerButton 900 900 0x110 false)
+  -- Keyboard Return and Space on focused 101 focus composer 1; repeated Return does not.
+  let byReturn := rt0.stepEventWithFocus reduce desktopFocusChange (.key 0xff0d 0 .pressed)
+  let bySpace := rt0.stepEventWithFocus reduce desktopFocusChange (.key 0x20 0 .pressed)
+  let byRepeat := rt0.stepEventWithFocus reduce desktopFocusChange (.key 0xff0d 0 .repeated)
+  -- Also works from `.controlPopulated`.
+  let popRt : Runtime.RuntimeState DesktopState := { rt0 with app := { blankDraft with screen := .controlPopulated } }
+  let popReturn := popRt.stepEventWithFocus reduce desktopFocusChange (.key 0xff0d 0 .pressed)
+  return down.focus.owner == some 101 &&
+    up.focus.owner == some 1 &&
+    dragOff.focus.owner == some 101 &&
+    byReturn.focus.owner == some 1 &&
+    bySpace.focus.owner == some 1 &&
+    byRepeat.focus.owner == some 101 &&
+    popReturn.focus.owner == some 1
+
+#guard newAgentRuntimeCheck
+
 private def collapsed := (stepDesktopEvent 120 vp unsentDraft (.activate sidebarToggleId)).1
 #guard collapsed.sidebarWidth == 0 && collapsed.composer.text == unsentDraft.composer.text
 #guard (stepDesktopEvent 120 vp collapsed (.key 0x62 2 .pressed)).1.sidebarWidth == chromeSidebarWidthSub
@@ -689,6 +722,147 @@ private def runOlder403 (slot : IO.Ref (Option LiveSubscription)) (st : DesktopS
   unless next.liveTurns.isEmpty && (streamedText next).isEmpty && !next.historyHasMore do
     throw (IO.userError "older-page 403 did not revoke and clear transcript")
 
+private def runU6aLiveWrites (st0 : DesktopState) : IO Unit := do
+  unless st0.hasLiveConnection && st0.screen == .controlEmpty && st0.missionCards.isEmpty do
+    throw (IO.userError s!"expected empty connected New Agent screen, got screen={repr st0.screen} cards={st0.missionCards.length}")
+  let pending := { DesktopState.liveUnavailable with initialRosterPending := true }
+  unless desktopFocusChange pending st0 (.time 0) == some 1 do
+    throw (IO.userError "initial live connect did not focus New Agent composer")
+  let reduce := stepDesktopEvent 120 vp
+  let slot ← IO.mkRef (none : Option LiveSubscription)
+  try
+    -- 1. Type ASCII + IME preedit/commit + UTF-8 surrounding deletion in New Agent composer.
+    let mut rt : Runtime.RuntimeState DesktopState := { app := st0, focus := { owner := some 1 } }
+    rt := rt.stepEvent reduce (.text "Launch U6a ")
+    rt := rt.stepEvent reduce (.preedit "にほん" 0 3)
+    let blockedCreate := rt.stepEvent reduce (.key 0xff0d 0 .pressed)
+    unless blockedCreate.app.writeRequest.isNone do
+      throw (IO.userError "Return submitted New Agent draft while IME preedit was active")
+    rt := rt.stepEvent reduce (.imeBatch 0 0 "日本猫" "" 0 0)
+    rt := rt.stepEvent reduce (.imeBatch 3 0 "語 🚀" "" 0 0)
+    let expectedInitial := "Launch U6a 日本語 🚀"
+    unless rt.app.composer.text == expectedInitial && rt.app.composer.imePreeditText.isEmpty do
+      throw (IO.userError s!"unexpected New Agent draft after IME commit: {repr rt.app.composer.text}")
+    -- 2. Press Return to queue Create and dispatch POST /api/control/missions through Core.lean.
+    rt := rt.stepEvent reduce (.key 0xff0d 0 .pressed)
+    unless rt.app.writeRequest == some .create do
+      throw (IO.userError s!"expected .create writeRequest, got {repr rt.app.writeRequest}")
+    let (st, createDmg) ← readLiveFrame slot 120 vp rt.app
+    unless createDmg.isSome && st.writeRequest.isNone && st.writeError.isEmpty && st.screen == .missionTranscript do
+      throw (IO.userError s!"create write failed: err={repr st.writeError} screen={repr st.screen}")
+    let some mid := st.openMission | throw (IO.userError "create did not open the new mission")
+    unless st.composer.text.isEmpty && st.composer.isRunning do
+      throw (IO.userError s!"post-create composer state wrong: text={repr st.composer.text} running={st.composer.isRunning}")
+    let root := System.FilePath.mk ((← IO.getEnv "ORB_STATE_DIR").getD "")
+    IO.FS.writeFile (root / "u6a-created-id") mid
+    -- 3. Wait for Turn 1 persisted prompt + completed reply to arrive via poll_bubble.
+    let st ← awaitState slot st fun s =>
+      s.liveTurns == ["You: " ++ expectedInitial] &&
+      streamedText s == "Turn 1 reply" &&
+      !s.composer.isRunning &&
+      s.selectedCard.any (·.status == "awaiting_user")
+    -- 4. Type + IME commit follow-up in Mission Transcript composer and send via Return.
+    let mut rt2 : Runtime.RuntimeState DesktopState := { app := st, focus := { owner := some 1 } }
+    rt2 := rt2.stepEvent reduce (.text "Follow-up café ")
+    rt2 := rt2.stepEvent reduce (.preedit "かんじ" 0 3)
+    let blockedSend := rt2.stepEvent reduce (.key 0xff0d 0 .pressed)
+    unless blockedSend.app.writeRequest.isNone do
+      throw (IO.userError "Return submitted follow-up while IME preedit was active")
+    rt2 := rt2.stepEvent reduce (.imeBatch 0 0 "漢字仮" "" 0 0)
+    rt2 := rt2.stepEvent reduce (.imeBatch 3 0 "テスト ✓" "" 0 0)
+    let expectedFollowup := "Follow-up café 漢字テスト ✓"
+    unless rt2.app.composer.text == expectedFollowup && rt2.app.composer.imePreeditText.isEmpty do
+      throw (IO.userError s!"unexpected follow-up draft after IME commit: {repr rt2.app.composer.text}")
+    rt2 := rt2.stepEvent reduce (.key 0xff0d 0 .pressed)
+    unless rt2.app.writeRequest == some (.send mid expectedFollowup) do
+      throw (IO.userError s!"expected .send writeRequest, got {repr rt2.app.writeRequest}")
+    let (st, sendDmg) ← readLiveFrame slot 120 vp rt2.app
+    unless sendDmg.isSome && st.writeError.isEmpty && st.unconfirmedSend.isNone && st.composer.text.isEmpty do
+      throw (IO.userError s!"send write failed: err={repr st.writeError} text={repr st.composer.text}")
+    -- 5. Wait for Turn 2 to stream while active and verify zero duplicate/dropped turns.
+    let expectedTurns := ["You: " ++ expectedInitial, "Turn 1 reply", "You: " ++ expectedFollowup]
+    let st ← awaitState slot st fun s =>
+      s.liveTurns == expectedTurns &&
+      streamedText s == "Turn 2 streaming..." &&
+      s.composer.isRunning &&
+      s.selectedCard.any (·.status == "active")
+    -- 6. Archive while running must be refused without clobbering the open mission.
+    let menuRunning : DesktopState := { st with missionMenu := some { mission := mid, x := 20, y := 40 } }
+    let (reqBusyArchive, _) := reduce menuRunning (.activate 712)
+    unless reqBusyArchive.writeRequest == some (.archive mid) do
+      throw (IO.userError "context menu did not request archive")
+    let (stRefused, _) ← readLiveFrame slot 120 vp reqBusyArchive
+    unless stRefused.writeError == "Stop or finish this agent before archiving it." &&
+        stRefused.openMission == some mid && stRefused.liveTurns == expectedTurns do
+      throw (IO.userError s!"busy archive was not cleanly refused: err={repr stRefused.writeError}")
+    -- 7. Stop the running turn via composer Stop button (widget 2) and wait for Core confirmation.
+    let (reqStop, _) := reduce { stRefused with writeError := "" } (.activate 2)
+    unless reqStop.writeRequest == some (.stop mid) do
+      throw (IO.userError s!"activate 2 while running did not request stop: {repr reqStop.writeRequest}")
+    let (stAfterStop, stopDmg) ← readLiveFrame slot 120 vp reqStop
+    unless stopDmg.isSome && stAfterStop.writeError.isEmpty do
+      throw (IO.userError s!"stop write failed: err={repr stAfterStop.writeError}")
+    let stStopped ← awaitState slot stAfterStop fun s =>
+      !s.composer.isRunning &&
+      s.selectedCard.any (·.status == "interrupted") &&
+      s.liveTurns == expectedTurns
+    -- 8. Archive the stopped mission via context menu (712) and verify clean state transition.
+    let menuStopped : DesktopState := { stStopped with missionMenu := some { mission := mid, x := 20, y := 40 } }
+    let (reqArchive, _) := reduce menuStopped (.activate 712)
+    unless reqArchive.writeRequest == some (.archive mid) do
+      throw (IO.userError "context menu did not request archive after stop")
+    let (stArchived, archDmg) ← readLiveFrame slot 120 vp reqArchive
+    unless archDmg.isSome && stArchived.writeError.isEmpty && stArchived.openMission.isNone &&
+        stArchived.screen == .controlEmpty &&
+        stArchived.missionCards.any (fun c => c.missionId == mid && c.status == "acknowledged") do
+      throw (IO.userError s!"archive write failed: err={repr stArchived.writeError} open={repr stArchived.openMission}")
+    unless desktopFocusChange stStopped stArchived (.time 0) == some 1 do
+      throw (IO.userError "returning to New Agent after archive did not refocus composer")
+  finally
+    closeLiveSubscription slot
+  -- Split HS-then-B degraded recovery regression: draining `HS` before the incoming `B`
+  -- frame must drop any stale retained `sub.lastBubble` so `st.stream` is not resurrected
+  -- and duplicated when the empty turn-boundary `B` arrives next.
+  let latest ← Std.Mutex.new (none : Option LiveUpdate)
+  let lastBubble ← IO.mkRef (some (BubbleUpdate.text "Mission" "awaiting_user" "Answer 1"))
+  let olderFetch ← IO.mkRef (none : Option (Int × IO Unit))
+  let sub : LiveSubscription := {
+    projects := []
+    mission := "m"
+    binding := "fixture"
+    latest
+    lastBubble
+    olderFetch
+    stop := pure ()
+  }
+  let splitSlot ← IO.mkRef (some sub)
+  let splitInit : DesktopState := {
+    coldFixture with
+    liveTurns := ["You: Turn 1"]
+    liveTurnIds := ["id:1"]
+    livePersistedCount := 1
+    stream := { shown := ["Answer 1"], pending := [], renders := 2 }
+  }
+  latest.atomically (set (some (LiveUpdate.sample none none
+    (some { turns := [("id:1", "You: Turn 1"), ("id:2", "Answer 1"), ("id:3", "You: Follow-up")] }) none)))
+  let (afterHs, hsDmg) ← readLiveFrame splitSlot 120 vp splitInit
+  unless hsDmg.isSome &&
+      afterHs.liveTurns == ["You: Turn 1", "Answer 1", "You: Follow-up"] &&
+      (streamedText afterHs).isEmpty &&
+      (← lastBubble.get).isNone do
+    throw (IO.userError s!"split HS recovery resurrected stale bubble: turns={repr afterHs.liveTurns} stream={repr (streamedText afterHs)}")
+  latest.atomically (set (some (LiveUpdate.sample none (some (BubbleUpdate.text "Mission" "active" "")) none none)))
+  let (afterEmptyB, _) ← readLiveFrame splitSlot 120 vp afterHs
+  unless afterEmptyB.liveTurns == ["You: Turn 1", "Answer 1", "You: Follow-up"] &&
+      (streamedText afterEmptyB).isEmpty &&
+      afterEmptyB.composer.isRunning do
+    throw (IO.userError s!"split HS-then-B duplicated turn: turns={repr afterEmptyB.liveTurns} stream={repr (streamedText afterEmptyB)}")
+  latest.atomically (set (some (LiveUpdate.sample none (some (BubbleUpdate.text "Mission" "active" "Answer 2")) none none)))
+  let (afterReplyB, _) ← readLiveFrame splitSlot 120 vp afterEmptyB
+  unless afterReplyB.liveTurns == ["You: Turn 1", "Answer 1", "You: Follow-up"] &&
+      streamedText afterReplyB == "Answer 2" do
+    throw (IO.userError s!"split HS-then-B follow-up reply broken: turns={repr afterReplyB.liveTurns} stream={repr (streamedText afterReplyB)}")
+
 def main (args : List String) : IO Unit := do
   for dark in [true, false] do
     for width in [480, 1000] do
@@ -861,6 +1035,9 @@ def main (args : List String) : IO Unit := do
       return
     finally
       closeLiveSubscription slot
+  if args == ["u6a-live-writes"] then
+    runU6aLiveWrites st
+    return
   let [a,b] := st.missionCards | throw (IO.userError "bad roster")
   unless st.sidebarRows.any (fun r => r.title == "Project title" && r.subtitle == "Objective" && r.iconColor == some 0x8aaed4ff) do
     throw (IO.userError "wrong project fields")

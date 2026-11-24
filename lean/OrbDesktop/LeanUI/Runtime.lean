@@ -233,6 +233,38 @@ def stepEvent (rt : RuntimeState σ) (onEvent : σ → Event → σ × Damage) (
     | some r => Damage.add rt1.damage r
   { rt1 with app := app', damage := finalDmg }
 
+/-- Return the synthesized activation event (`.activate id` or `.composerReturn`) that
+`stepEvent` dispatches for `ev`, or `ev` itself when no activation occurs. -/
+def effectiveEvent (rt : RuntimeState σ) (ev : Event) : Event :=
+  match ev with
+  | .pointerButton px py 0x110 false =>
+    match hitTest rt.hitRegions px py, rt.pressedEntity with
+    | some id, some pressed => if id == pressed then .activate id else ev
+    | _, _ => ev
+  | .key keysym mods state =>
+    if (state == .pressed || state == .repeated) &&
+        (keysym == 0xff0d || keysym == 0xff8d || keysym == 0x20) then
+      match rt.focus.owner with
+      | some id =>
+        let editorReturn := id == 1 && keysym != 0x20
+        if (editorReturn || id != 1) && state == .repeated then ev
+        else if editorReturn then .composerReturn (mods &&& 1 != 0)
+        else .activate id
+      | none => ev
+    else ev
+  | _ => ev
+
+/-- Apply one `Event` and reconcile focus via `focusChange`, passing the synthesized
+`.activate` / `.composerReturn` event whenever `stepEvent` dispatched one. -/
+def stepEventWithFocus (rt : RuntimeState σ) (onEvent : σ → Event → σ × Damage)
+    (focusChange : σ → σ → Event → Option Nat) (ev : Event) : RuntimeState σ :=
+  let before := rt.app
+  let dispatched := rt.effectiveEvent ev
+  let rt' := rt.stepEvent onEvent ev
+  match focusChange before rt'.app dispatched with
+  | some target => rt'.requestFocus target rt'.viewportDeviceRect
+  | none => rt'
+
 end RuntimeState
 
 /-- Execute one frame tick:
@@ -248,9 +280,7 @@ def stepFrameWithRegions {σ : Type} (rt : RuntimeState σ)
   let (wl1, evs) ← Wayland.pumpEvents rt.wayland
   let mut st := { rt with wayland := wl1 }
   for ev in evs do
-    let before := st.app
-    st := st.stepEvent (onEvent st) ev
-    if let some target := focusChange before st.app ev then st := st.requestFocus target st.viewportDeviceRect
+    st := st.stepEventWithFocus (onEvent st) focusChange ev
   if !needsRedraw st.damage then
     return { st with quiescentSkips := st.quiescentSkips + 1 }
   let (bw, bh) := st.wayland.deviceBufferSize
@@ -471,9 +501,12 @@ def runWindow {σ : Type} (rt0 : RuntimeState σ)
       for ev in evs do
         rt := rt.stepEvent (onEvent rt) ev
     else
+      let before := rt.app
       let (app, damage) ← pollFrame rt
       rt := { rt with app }
       if let some rect := damage then rt := rt.markDirty rect
+      if let some target := focusChange before app (.time 0) then
+        rt := rt.requestFocus target rt.viewportDeviceRect
       let rendered := rt.framesRendered
       rt ← stepFrameWithRegions rt onEvent view focusChange
       let shape : UInt32 := match rt.hoveredEntity with
