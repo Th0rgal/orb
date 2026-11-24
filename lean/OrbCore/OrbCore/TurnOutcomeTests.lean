@@ -945,7 +945,7 @@ private def checkSidecarAuthFileDuplicated : IO Unit := do
     "sidecarAuthFileDuplicated suppresses duplicate enabled/kimi cliproxyapi rows while keeping distinct and multi-account email-less antigravity files"
 
 private def verifyNativeHarnessResourcesAccounting (root : String) : IO Unit := do
-  let store ← openCoreStore root
+  let .ok store ← openCoreStore root | throw (IO.userError "openCoreStore failed")
   try
     let nowSec ← nowEpoch
     OrbCore.Proxy.recordNativeHarnessUsage store nowSec "antigravity" "gemini-4-neon" "m-agy-res" "" "gemini-4-neon" 12000 3500 8000
