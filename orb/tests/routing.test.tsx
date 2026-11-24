@@ -422,6 +422,65 @@ describe("Routing settings", () => {
     );
     expect(cards[0].textContent).toContain("1 consecutive failures · 100 input tokens · 20 output tokens");
   });
+  it("surfaces Core parked_reason/parked_until, encodes colon account IDs on clear, and separates disabled_by_provider from sidecar disabled", async () => {
+    const coreRows = [
+      {
+        account_id: "cliproxyapi:openai:abcd1234",
+        provider_id: "openai",
+        account_state: "degraded",
+        consecutive_failures: 2,
+        cooldown_secs_remaining: 90,
+        cooldown_remaining_secs: 90,
+        parked_until: "2026-11-24T12:00:00Z",
+        parked_reason: "usage_limit",
+        parked_source: "core",
+      },
+      {
+        account_id: "account-banned",
+        provider_id: "antigravity",
+        account_state: "disabled_by_provider",
+        disabled: true,
+        disabled_by_provider: true,
+        disabled_by_provider_message: "TOS_VIOLATION",
+        consecutive_failures: 1,
+        cooldown_secs_remaining: 0,
+      },
+      {
+        account_id: "account-sidecar-disabled",
+        provider_id: "xai",
+        account_state: "disabled",
+        disabled: true,
+        disabled_by_provider: false,
+        consecutive_failures: 0,
+        cooldown_secs_remaining: 0,
+      },
+    ];
+    cacheReset();
+    const orig = vi.mocked(fetch).getMockImplementation()!;
+    vi.mocked(fetch).mockImplementation(async (input, init) => {
+      const path = new URL(String(input)).pathname;
+      if (path.endsWith("/health")) return new Response(JSON.stringify(coreRows), { status: 200 });
+      return orig(input, init);
+    });
+    const view = render(() => <RoutingSettings onOpenClient={() => {}} tab="health" />);
+    await waitFor(() => expect(view.container.querySelectorAll(".routing-health")).toHaveLength(3));
+    const cards = Array.from(view.container.querySelectorAll(".routing-health"));
+    expect(cards[0].textContent).toContain("Last failure: usage_limit");
+    expect(cards[0].textContent).toContain("Cooldown until:");
+    expect(cards[0].textContent).toContain("core");
+    expect(cards[1].querySelector(".routing-status")?.textContent).toBe("Disabled by provider");
+    expect(cards[1].textContent).toContain("TOS_VIOLATION");
+    expect(cards[1].querySelector("button")?.textContent).toBe("Clear disabled state");
+    expect(cards[2].querySelector(".routing-status")?.textContent).toBe("Disabled");
+    expect(cards[2].textContent).toContain("Re-enable or reconnect it in Inference settings.");
+    expect(cards[2].querySelector("button")).toBeNull();
+    fireEvent.click(cards[0].querySelector("button")!);
+    await waitFor(() =>
+      expect(
+        writes.some((w) => w.path === "/api/model-routing/health/cliproxyapi%3Aopenai%3Aabcd1234/clear"),
+      ).toBe(true),
+    );
+  });
 });
 
 

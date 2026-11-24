@@ -760,9 +760,18 @@ export function RoutingSettings(p: { onOpenClient: () => void; tab?: RoutingTab 
             >
               <For each={health()}>
                 {(h) => {
+                  const core = h as R.AccountHealthSnapshot & {
+                    parked_until?: string | null;
+                    parked_reason?: string | null;
+                    parked_source?: string | null;
+                    login_status?: string | null;
+                    login_message?: string | null;
+                  };
                   const cooldown = () => h.cooldown_remaining_secs ?? h.cooldown_secs_remaining;
-                  const disabledByProvider = () => h.disabled_by_provider === true;
+                  const disabledByProvider = () =>
+                    h.disabled_by_provider === true || h.account_state === "disabled_by_provider";
                   const disabled = () => disabledByProvider() || h.account_state === "disabled";
+                  const failureReason = () => h.last_failure_reason || core.parked_reason || "None";
                   return (
                   <details
                     class="s-card routing-health"
@@ -813,11 +822,25 @@ export function RoutingSettings(p: { onOpenClient: () => void; tab?: RoutingTab 
                       <Show when={disabledByProvider()}>
                         <p class="inline-error">{h.disabled_by_provider_message || "The provider disabled this account."}</p>
                       </Show>
+                      <Show when={!disabledByProvider() && h.account_state === "disabled"}>
+                        <p class="routing-muted">This login is disabled. Re-enable or reconnect it in Inference settings.</p>
+                      </Show>
+                      <Show when={!disabled() && core.login_status === "needs_reauth"}>
+                        <p class="inline-error">{core.login_message || "Sign in again to restore this login."}</p>
+                      </Show>
                       <p>Account: {h.account_id}</p>
                       <p>
-                        Last failure: {h.last_failure_reason || "None"} ·{" "}
+                        Last failure: {failureReason()} ·{" "}
                         {time(h.last_failure_at ?? null)}
                       </p>
+                      <Show when={core.parked_until}>
+                        {(until) => (
+                          <p>
+                            Cooldown until: {time(until())}
+                            {core.parked_source ? ` · ${core.parked_source}` : ""}
+                          </p>
+                        )}
+                      </Show>
                       <p>
                         {h.consecutive_failures != null ? h.consecutive_failures : "—"} consecutive failures ·{" "}
                         {h.total_input_tokens != null ? h.total_input_tokens.toLocaleString() : "—"} input tokens ·{" "}
@@ -851,9 +874,10 @@ export function RoutingSettings(p: { onOpenClient: () => void; tab?: RoutingTab 
                       </Show>
                       <Show
                         when={
-                          disabled() ||
-                          (cooldown() != null &&
-                          cooldown()! > 0)
+                          disabledByProvider() ||
+                          (!disabled() &&
+                            cooldown() != null &&
+                            cooldown()! > 0)
                         }
                       >
                         <button
@@ -863,7 +887,7 @@ export function RoutingSettings(p: { onOpenClient: () => void; tab?: RoutingTab 
                             void action(() => R.clearCooldown(h.account_id))
                           }
                         >
-                          {disabled() ? "Clear disabled state" : "Clear cooldown"}
+                          {disabledByProvider() ? "Clear disabled state" : "Clear cooldown"}
                         </button>
                       </Show>
                     </div>

@@ -557,4 +557,23 @@ describe("resourcesModel shared spec", () => {
     expect(long.text.endsWith("…")).toBe(true);
     expect(long.width).toBeLessThanOrEqual(80);
   });
+
+  it("keeps compact 2-column Sankey bars full-width and inward pill budgets non-overlapping down to 200px", () => {
+    for (const width of [200, 320, 540, 759]) {
+      const layout = computeSankeyLayout(
+        fixture.sankey_2col.nodes,
+        fixture.sankey_2col.links,
+        { width, height: 340, metric: "raw", marginX: 10, marginY: 16 },
+      );
+      const col0 = layout.nodes.filter((n) => n.column === 0);
+      const col1 = layout.nodes.filter((n) => n.column === 1);
+      const leftEdge = Math.max(...col0.map((n) => n.x1));
+      const rightEdge = Math.min(...col1.map((n) => n.x0));
+      const span = Math.max(80, rightEdge - leftEdge);
+      const maxPillW = Math.max(48, Math.min(span * 0.46, (span - 20) / 2));
+      expect(Math.min(...col0.map((n) => n.x0))).toBe(10);
+      expect(Math.max(...col1.map((n) => n.x1))).toBeCloseTo(width - 10, 1);
+      expect(leftEdge + 6 + maxPillW).toBeLessThan(rightEdge - 6 - maxPillW);
+    }
+  });
 });

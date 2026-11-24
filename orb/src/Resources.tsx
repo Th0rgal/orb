@@ -156,6 +156,8 @@ export default function Resources(props: {
       observedEls.add(el);
       ro.observe(el);
     }
+    const cw = Math.floor(el.clientWidth || el.getBoundingClientRect().width);
+    if (cw > 40) setWideFlows(cw > 1600);
     const ch = Math.floor(el.clientHeight || el.getBoundingClientRect().height);
     if (ch > CARD_HEAD_HEIGHT + 80) {
       const bodyH = Math.max(MIN_SANKEY_CANVAS_HEIGHT, ch - CARD_HEAD_HEIGHT);
@@ -1125,7 +1127,7 @@ export default function Resources(props: {
                   };
                   const maxPillW = () =>
                     cols() <= 2
-                      ? Math.max(80, span() * 0.46)
+                      ? Math.max(48, Math.min(span() * 0.46, (span() - 20) / 2))
                       : Math.max(64, span() / (cols() - 1) - 86);
                   return <div class="res-card res-card-main" data-testid={`res-flow-${flowLens}`}>
                 <div class="res-card-head">
