@@ -4,6 +4,7 @@
   not created `active`. Remote dispatch uses a loopback node fixture.
 -/
 import OrbCore.Control
+import OrbCore.CloudHttpAndWorkerTests
 
 namespace OrbCore.TurnOutcomeTests
 open OrbBin.Json OrbBin.Sqlite OrbBin.PosixExt
@@ -944,6 +945,7 @@ private def checkSidecarAuthFileDuplicated : IO Unit := do
     "sidecarAuthFileDuplicated suppresses duplicate enabled/kimi cliproxyapi rows while keeping distinct and multi-account email-less antigravity files"
 
 def run : IO Unit := do
+  OrbCore.CloudHttpAndWorkerTests.run
   checkSidecarAuthFileDuplicated
   r24_lost_reply_is_uncertain_not_rejected
   r24_failed_enqueue_is_not_success

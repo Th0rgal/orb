@@ -1,7 +1,7 @@
-import { For, Show, createSignal, onMount } from "solid-js";
+import { For, Show, createEffect, createSignal, onCleanup } from "solid-js";
 import { ErrorToast } from "./toast";
 import { getHermesSettings, updateHermesSettings, type HermesSettingsState } from "./cloudAgentApi";
-import { ApiError, isConnected } from "./api";
+import { ApiError, connectionVersion, isConnected } from "./api";
 import { Select } from "./Select";
 import { ProviderLogo } from "./ProviderLogo";
 import { MdView } from "./Markdown";
@@ -17,6 +17,9 @@ export function HermesSettings() {
   // Core answers 403 when Hermes is not configured for this account
   // (HERMES_CLOUD_OWNER unset or another user). That is setup, not a failure.
   const [unavailable, setUnavailable] = createSignal("");
+  let loadGeneration = 0;
+  let disposed = false;
+  onCleanup(() => { disposed = true; });
 
   const [defaultModel, setDefaultModel] = createSignal("");
   const [reasoningEffort, setReasoningEffort] = createSignal("");
@@ -48,7 +51,11 @@ export function HermesSettings() {
   };
 
   const load = async () => {
+    const gen = ++loadGeneration;
     if (!isConnected()) {
+      setState(null);
+      setError("");
+      setUnavailable("");
       setLoading(false);
       return;
     }
@@ -56,16 +63,23 @@ export function HermesSettings() {
     setError("");
     setUnavailable("");
     try {
-      applyState(await getHermesSettings());
+      const next = await getHermesSettings();
+      if (disposed || gen !== loadGeneration) return;
+      applyState(next);
     } catch (e) {
+      if (disposed || gen !== loadGeneration) return;
+      setState(null);
       if (e instanceof ApiError && e.status === 403) setUnavailable(e.detail || "Hermes is not connected for this account");
       else setError(e instanceof Error ? e.message : String(e));
     } finally {
-      setLoading(false);
+      if (!disposed && gen === loadGeneration) setLoading(false);
     }
   };
 
-  onMount(() => {
+  createEffect(() => {
+    void connectionVersion();
+    setState(null);
+    setNotice("");
     void load();
   });
 
