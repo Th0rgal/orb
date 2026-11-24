@@ -944,6 +944,30 @@ private def checkSidecarAuthFileDuplicated : IO Unit := do
          !OrbCore.ProviderUsageAndLogin.sidecarAuthFileDuplicated #[agyFirst] "antigravity" agySecond)
     "sidecarAuthFileDuplicated suppresses duplicate enabled/kimi cliproxyapi rows while keeping distinct and multi-account email-less antigravity files"
 
+private def verifyNativeHarnessResourcesAccounting (root : String) : IO Unit := do
+  let store ← openCoreStore root
+  try
+    let nowSec ← nowEpoch
+    OrbCore.Proxy.recordNativeHarnessUsage store nowSec "antigravity" "gemini-4-neon" "m-agy-res" "" "gemini-4-neon" 12000 3500 8000
+    OrbCore.Proxy.recordNativeHarnessUsage store nowSec "antigravity" "gemini-4-neon" "m-agy-zero" "" "gemini-4-neon" 0 0 0
+    let .ok rows ← execParamQuery store.missionsDb
+      "SELECT provider, model, input_tokens, output_tokens, cache_read_tokens, account_id FROM proxy_usage WHERE mission_id='m-agy-res';" #[]
+      | throw (IO.userError "proxy_usage query failed")
+    check (rows.size == 2) s!"expected 1 native antigravity proxy_usage row, got {rows.size - 1}"
+    check ((rows[1]![0]?).getD "" == "antigravity" &&
+           (rows[1]![1]?).getD "" == "gemini-4-neon" &&
+           (rows[1]![2]?).getD "" == "12000" &&
+           (rows[1]![3]?).getD "" == "3500" &&
+           (rows[1]![4]?).getD "" == "8000" &&
+           (rows[1]![5]?).getD "" == "native:antigravity")
+      s!"unexpected native antigravity proxy_usage row: {reprStr rows[1]!}"
+    let .ok zRows ← execParamQuery store.missionsDb
+      "SELECT COUNT(*) FROM proxy_usage WHERE mission_id='m-agy-zero';" #[]
+      | throw (IO.userError "proxy_usage zero query failed")
+    check ((zRows[1]?.bind (·[0]?)).getD "" == "0") "zero-token native turn must not insert proxy_usage row"
+  finally
+    closeCoreStore store
+
 def run : IO Unit := do
   OrbCore.CloudHttpAndWorkerTests.run
   checkSidecarAuthFileDuplicated
@@ -954,6 +978,7 @@ def run : IO Unit := do
   let root := s!"/tmp/orb-turn-outcome-{← newUuidV4}"
   IO.FS.createDirAll s!"{root}/.sandboxed-sh"
   try
+    verifyNativeHarnessResourcesAccounting root
     verifyNativeApprovalBudget root
     verifyNativeOAuthRotation root
     verifyAdminDirectAntigravityStaticTarget root

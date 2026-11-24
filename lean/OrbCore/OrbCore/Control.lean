@@ -2421,6 +2421,16 @@ def buildCoreHarnessCallbacks (st : CoreAppState) (missionId : String) (generati
         interrupted      := isErr || emptyVerdict?.isSome
       }
       observeControlTurnFinished tSink missionId turnUsage ownerUid? ownerUname? nowSec
+    let bLow := finalSnap.harness.trimAscii.toString.toLower
+    let normHarness := if bLow == "claude" then "claudecode" else bLow
+    if normHarness == "antigravity" || normHarness == "grok" then
+      let mRec? ← getMission? st.store missionId
+      let effModel :=
+        (finalSnap.model?.orElse fun _ =>
+          (mRec?.map (·.modelOverride.trimAscii.toString)).filter (!·.isEmpty)).getD ""
+      recordNativeHarnessUsage st.store nowSec normHarness effModel missionId
+        ((mRec?.map (·.parentMissionId)).getD "") ((mRec?.map (·.modelOverride)).getD "")
+        (finalSnap.inputTokens?.getD 0).toNat (finalSnap.outputTokens?.getD 0).toNat (finalSnap.cacheReadTokens?.getD 0).toNat
     let stPl := renderCompact (.obj #[("status", .str nextStatus), ("content", .str finalSnap.text)])
     discard <| appendMissionEvent st.store missionId "mission_status_changed" stPl ts
     publishControlEvent st.broadcastHub? "mission_status_changed" stPl (some missionId)
