@@ -398,8 +398,10 @@ export default function App() {
       if (connected) void refreshCurrentUser(true);
     }),
   );
+  let palomaCheckGen = 0;
   createEffect(() => {
     connectionVersion();
+    const gen = ++palomaCheckGen;
     if (!isConnected()) {
       setPalomaAvailable(false);
       return;
@@ -407,6 +409,7 @@ export default function App() {
     import("./cloudAgentApi")
       .then((m) => m.cloudAccounts())
       .then((rows) => {
+        if (gen !== palomaCheckGen) return;
         if (!Array.isArray(rows)) {
           setPalomaAvailable(false);
           return;
@@ -414,7 +417,9 @@ export default function App() {
         cachePut("settings:cloud-accounts", rows);
         setPalomaAvailable(rows.some((row) => row.provider === "hermes" && row.available));
       })
-      .catch(() => setPalomaAvailable(false));
+      .catch(() => {
+        if (gen === palomaCheckGen) setPalomaAvailable(false);
+      });
   });
   const showAskPaloma = createMemo(
     () =>

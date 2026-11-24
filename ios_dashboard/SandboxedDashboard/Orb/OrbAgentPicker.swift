@@ -88,7 +88,8 @@ struct OrbSelection {
     }
     var wire: OrbJSON {
         var value: [String: OrbJSON] = ["provider": .string(provider), "account": .string(account)]
-        if !model.isEmpty { value["model"] = .string(model); if !params.items.isEmpty { value["model_params"] = params } }
+        if !model.isEmpty { value["model"] = .string(model) }
+        if !params.items.isEmpty { value["model_params"] = params }
         if !repository.isEmpty { value["repository"] = .string(repository) }
         if !gitRef.isEmpty { value["git_ref"] = .string(gitRef) }
         return .object(value)
@@ -155,6 +156,7 @@ struct OrbAgentPicker: View {
     @Environment(\.dismiss) private var dismiss
     @State private var accounts: [OrbJSON] = []
     @State private var models: [OrbJSON] = []
+    @State private var efforts: [OrbJSON] = []
     @State private var backends: [OrbJSON] = []
     @State private var nodes: [OrbJSON] = []
     @State private var repos: [OrbJSON] = []
@@ -350,6 +352,26 @@ struct OrbAgentPicker: View {
                         }
                     }
                 }
+                if selection.provider == "hermes" && !efforts.isEmpty {
+                    let currentEffort = selection.params.items.first(where: { $0["id"].text == "effort" || $0["id"].text == "reasoning_effort" })?["value"].text ?? ""
+                    Picker("Reasoning effort", selection: Binding(
+                        get: { currentEffort },
+                        set: { newValue in
+                            var rest = selection.params.items.filter { $0["id"].text != "effort" && $0["id"].text != "reasoning_effort" }
+                            if !newValue.isEmpty {
+                                rest.append(.object(["id": .string("effort"), "value": .string(newValue)]))
+                            }
+                            selection.params = .array(rest)
+                        }
+                    )) {
+                        ForEach(efforts.indices, id: \.self) { index in
+                            let eff = efforts[index]
+                            let eid = eff["id"].text
+                            let label = eff["displayName"].text.isEmpty ? (eff["name"].text.isEmpty ? (eid.isEmpty ? "Default" : eid) : eff["name"].text) : eff["displayName"].text
+                            Text(label).tag(eid)
+                        }
+                    }.accessibilityIdentifier("picker.effort")
+                }
                 if !selection.cloud && selection.backend == "claudecode" {
                     Picker("Permissions", selection: $selection.permissionMode) {
                         ForEach(OrbClaudePermissionMode.allCases, id: \.rawValue) { mode in
@@ -389,7 +411,11 @@ struct OrbAgentPicker: View {
                 Task { await loadModels() }
             }
             .onChange(of: selection.model) { _, _ in
-                selection.params = models.first(where: { $0["id"].text == selection.model })?["variants"].items.first?["params"] ?? .array([])
+                let preservedEffort = selection.provider == "hermes"
+                    ? selection.params.items.filter { $0["id"].text == "effort" || $0["id"].text == "reasoning_effort" }
+                    : []
+                let variantParams = models.first(where: { $0["id"].text == selection.model })?["variants"].items.first?["params"].items ?? []
+                selection.params = .array(variantParams + preservedEffort)
                 recomputeAutoNodeIfNeeded()
             }
         }
@@ -425,6 +451,13 @@ struct OrbAgentPicker: View {
         backendModelsMap = catalog["models"]["backends"]
         models = backendModelsMap[selection.backend].items
     }
+    private func applyCloudOptions(_ value: OrbJSON, for provider: String) {
+        guard selection.provider == provider else { return }
+        models = value["models"]["items"].items
+        repos = value["repositories"]["items"].items
+        let rawEfforts = value["efforts"]
+        efforts = rawEfforts.items.isEmpty ? rawEfforts["items"].items : rawEfforts.items
+    }
     private func load() async {
         loadingOptions = true
         defer { loadingOptions = false }
@@ -434,25 +467,32 @@ struct OrbAgentPicker: View {
                     accounts = cachedAccounts.items
                 }
                 let provider = selection.provider
-                if provider != "grok_bot" {
+                let accValue = try await OrbReadCache.cloudAccounts()
+                accounts = accValue.items
+                let matchingAvailable = accounts.first(where: { $0["provider"].text == provider && $0["available"].flag })
+                if !existing && selection.account.isEmpty, let first = matchingAvailable {
+                    selection.account = first["id"].text
+                }
+                if provider != "grok_bot" && matchingAvailable != nil {
                     let endpoint = provider == "hermes" ? "hermes" : "cursor"
                     if let cachedOpts = OrbReadCache.read("catalog:cloud:\(endpoint)") {
-                        models = cachedOpts["models"]["items"].items
-                        repos = cachedOpts["repositories"]["items"].items
+                        applyCloudOptions(cachedOpts, for: provider)
                     }
-                    async let accountsTask = OrbReadCache.cloudAccounts()
-                    async let optionsTask = OrbReadCache.cloudOptions(endpoint)
-                    let (accValue, optValue) = try await (accountsTask, optionsTask)
-                    accounts = accValue.items
-                    if selection.provider == provider {
-                        models = optValue["models"]["items"].items
-                        repos = optValue["repositories"]["items"].items
+                    do {
+                        let optValue = try await OrbReadCache.cloudOptions(endpoint)
+                        applyCloudOptions(optValue, for: provider)
+                    } catch {
+                        if OrbTurnSummary.hermesUnavailableMessage(for: error) != nil {
+                            models = []; efforts = []; repos = []
+                        } else {
+                            throw error
+                        }
                     }
                 } else {
-                    accounts = try await OrbReadCache.cloudAccounts().items
-                    models = []
+                    models = []; efforts = []; repos = []
                 }
             } else {
+                efforts = []
                 if let cached = OrbReadCache.read("catalog:agent") {
                     applyAgentCatalog(cached)
                 }
@@ -470,16 +510,26 @@ struct OrbAgentPicker: View {
         }
         do {
             if selection.cloud {
-                guard provider != "grok_bot" else { models = []; return }
+                guard provider != "grok_bot" else { models = []; efforts = []; return }
+                guard accounts.isEmpty || accounts.contains(where: { $0["provider"].text == provider && $0["available"].flag }) else {
+                    models = []; efforts = []; repos = []; return
+                }
                 let endpoint = provider == "hermes" ? "hermes" : "cursor"
                 if let cachedOpts = OrbReadCache.read("catalog:cloud:\(endpoint)") {
-                    models = cachedOpts["models"]["items"].items
-                    repos = cachedOpts["repositories"]["items"].items
+                    applyCloudOptions(cachedOpts, for: provider)
                 }
-                let value = try await OrbReadCache.cloudOptions(endpoint)
-                guard selection.provider == provider else { return }
-                models = value["models"]["items"].items; repos = value["repositories"]["items"].items
+                do {
+                    let value = try await OrbReadCache.cloudOptions(endpoint)
+                    applyCloudOptions(value, for: provider)
+                } catch {
+                    if OrbTurnSummary.hermesUnavailableMessage(for: error) != nil {
+                        models = []; efforts = []; repos = []
+                    } else {
+                        throw error
+                    }
+                }
             } else {
+                efforts = []
                 let catalog = try await OrbReadCache.agentCatalog()
                 guard selection.backend == backend && selection.provider == provider else { return }
                 backendModelsMap = catalog["models"]["backends"]

@@ -163,4 +163,40 @@ class OrbClientParityTest {
         assertTrue(isValidHttpUrl("https://inference.ethereum.foundation/v1"))
         assertFalse(isValidHttpUrl("ftp://inference.ethereum.foundation/v1"))
     }
+
+    @Test
+    fun hermesSettingsAndCloudAccountParity() {
+        assertEquals("paloma", OrbAdminFormatting.defaultCloudAccountId("hermes"))
+        assertEquals("cursor-default", OrbAdminFormatting.defaultCloudAccountId("cursor_cloud"))
+        assertEquals("grok-default", OrbAdminFormatting.defaultCloudAccountId("grok_bot"))
+
+        assertEquals(
+            "Hermes is not connected for this account",
+            OrbAdminFormatting.hermesUnavailableMessage(
+                OrbError("Forbidden", status = 403, body = """{"error":"Hermes is not connected for this account"}""")
+            )
+        )
+        assertEquals(
+            "Hermes is not connected for this account",
+            OrbAdminFormatting.hermesUnavailableMessage(OrbError("", status = 403))
+        )
+        assertNull(OrbAdminFormatting.hermesUnavailableMessage(OrbError("Server error", status = 500)))
+
+        val runtimeRows = OrbAdminFormatting.hermesRuntime(
+            mapOf(
+                "service_active" to true,
+                "api_server_healthy" to true,
+                "uses_sandboxed_proxy" to true,
+                "token_present" to true
+            )
+        )
+        assertEquals(
+            listOf("Service" to "Active", "API" to "Healthy", "Route" to "Via Core proxy"),
+            runtimeRows
+        )
+        assertEquals(
+            "12 · 2 open",
+            OrbAdminFormatting.hermesSessions(mapOf("total" to 12, "open" to 2))
+        )
+    }
 }

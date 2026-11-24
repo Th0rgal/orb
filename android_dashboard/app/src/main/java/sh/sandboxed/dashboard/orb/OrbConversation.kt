@@ -680,6 +680,7 @@ fun OrbConversationPage(
 
     var userExplicitlyPickedAgent by remember(currentMission?.id) { mutableStateOf(false) }
     var cloudAccounts by remember { mutableStateOf<List<OrbRow>>(emptyList()) }
+    var hermesModelItems by remember { mutableStateOf<List<OrbDict>>(emptyList()) }
     // Agent configuration state
     var selectedBackend by remember(currentMission?.id, backends) {
         mutableStateOf(
@@ -796,6 +797,18 @@ fun OrbConversationPage(
             selectedBackend = "hermes"
             selectedAccount = hermesAccount.str("id").orEmpty()
         }
+    }
+    LaunchedEffect(selectedBackend, cloudAccounts) {
+        if (selectedBackend != "hermes") return@LaunchedEffect
+        val hasAvailableHermes = cloudAccounts.any { it.str("provider") == "hermes" && it.bool("available") == true }
+        if (!hasAvailableHermes) {
+            hermesModelItems = emptyList()
+            return@LaunchedEffect
+        }
+        val opts = runCatching { core.fetchDict("/api/cloud/hermes/options") }.getOrNull()
+        val items = OrbJSON.dictList(OrbJSON.dict(opts?.get("models"))?.get("items"))
+            .filter { !OrbJSON.str(it, "id", "value").isNullOrEmpty() }
+        hermesModelItems = items
     }
     var selectedRepo by remember(currentMission?.id, project.id) {
         mutableStateOf(currentMission?.str("repo", "repository") ?: project.str("repo", "repository") ?: "")
@@ -1885,14 +1898,18 @@ fun OrbConversationPage(
                         }
                     }
                     if (rowBackend.startsWith("cloud_")) {
+                        val cloudMsgBody = mutableMapOf<String, Any?>(
+                            "mission_id" to existingId,
+                            "content" to finalPrompt,
+                            "client_message_id" to UUID.randomUUID().toString()
+                        )
+                        if (rowBackend == "cloud_hermes" && desiredModel.isNotEmpty()) {
+                            cloudMsgBody["cloud_model"] = desiredModel
+                        }
                         core.request(
                             path = "/api/control/message",
                             method = "POST",
-                            body = mapOf(
-                                "mission_id" to existingId,
-                                "content" to finalPrompt,
-                                "client_message_id" to UUID.randomUUID().toString()
-                            )
+                            body = cloudMsgBody
                         )
                     } else {
                         val msgBody = mutableMapOf<String, Any?>(
@@ -1931,11 +1948,7 @@ fun OrbConversationPage(
                         val resolvedAccount = selectedAccount.ifEmpty {
                             accounts.firstOrNull { it.str("provider") == selectedBackend && it.bool("available") == true }?.str("id")
                                 ?: accounts.firstOrNull { it.str("provider") == selectedBackend }?.str("id")
-                                ?: when (selectedBackend) {
-                                    "hermes" -> "hermes-default"
-                                    "cursor_cloud" -> "cursor-default"
-                                    else -> "grok-default"
-                                }
+                                ?: OrbAdminFormatting.defaultCloudAccountId(selectedBackend)
                         }
                         if (selectedBackend == "cursor_cloud" && (selectedRepo.isBlank() || selectedGitRef.isBlank())) {
                             throw OrbError("Choose a repository and Git reference for Cursor Cloud.")
@@ -3548,9 +3561,17 @@ fun OrbConversationPage(
             hasHistoryTurns = latestTurns.isNotEmpty() || messages.isNotEmpty(),
             targetPlacementValid = true
         ) == OrbKernel.CloudHandoffStepResult.ALLOW_HANDOFF
+        val effectiveBackendModels = remember(backendModels, hermesModelItems) {
+            if (hermesModelItems.isEmpty()) backendModels
+            else {
+                val inner = (backendModels["backends"]?.let { OrbJSON.dict(it) } ?: backendModels).toMutableMap()
+                inner["hermes"] = hermesModelItems
+                if (backendModels.containsKey("backends")) backendModels + ("backends" to inner) else inner
+            }
+        }
         OrbAgentPickerSheet(
             backends = backends,
-            backendModels = backendModels,
+            backendModels = effectiveBackendModels,
             workspaces = workspaces,
             nodes = nodes,
             managedCatalog = managedCatalog,

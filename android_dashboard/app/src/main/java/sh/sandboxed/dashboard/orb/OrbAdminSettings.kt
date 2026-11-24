@@ -51,6 +51,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableDoubleStateOf
@@ -175,6 +176,23 @@ object OrbAdminFormatting {
         val total = (sessions?.get("total") as? Number)?.toInt() ?: return null
         val open = (sessions["open"] as? Number)?.toInt() ?: 0
         return "$total · $open open"
+    }
+
+    /** Core returns 403 on `/api/cloud/hermes/*` when Hermes is not connected for this account. */
+    fun hermesUnavailableMessage(error: Throwable): String? {
+        val orbErr = error as? OrbError ?: return null
+        if (orbErr.status != 403) return null
+        val bodyMsg = orbErr.body?.let { raw ->
+            OrbJSON.dict(OrbJSON.parse(raw))?.let { d -> OrbJSON.str(d, "error", "message") }
+        }?.trim().orEmpty()
+        val detail = bodyMsg.ifEmpty { orbErr.message.trim() }
+        return detail.ifEmpty { "Hermes is not connected for this account" }
+    }
+
+    fun defaultCloudAccountId(provider: String): String = when (provider) {
+        "hermes" -> "paloma"
+        "cursor_cloud" -> "cursor-default"
+        else -> "grok-default"
     }
 }
 
@@ -1775,9 +1793,14 @@ private fun OrbSkillDetailView(core: OrbCore, name: String, onBack: () -> Unit) 
 @Composable
 fun OrbHermesSettingsPage(core: OrbCore, onBack: () -> Unit) {
     val scope = rememberCoroutineScope()
+    val baseURL by core.baseURLFlow.collectAsState()
+    val token by core.tokenFlow.collectAsState()
+    var reloadNonce by remember { mutableIntStateOf(0) }
     var rawState by remember { mutableStateOf<OrbDict?>(null) }
+    var loading by remember { mutableStateOf(true) }
     var busy by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
+    var unavailable by remember { mutableStateOf<String?>(null) }
     var notice by remember { mutableStateOf<String?>(null) }
     var showSoulDialog by remember { mutableStateOf(false) }
 
@@ -1810,15 +1833,30 @@ fun OrbHermesSettingsPage(core: OrbCore, onBack: () -> Unit) {
         soul = OrbJSON.str(s, "soul_markdown").orEmpty()
     }
 
-    LaunchedEffect(Unit) {
+    LaunchedEffect(baseURL, token, reloadNonce) {
+        rawState = null
+        loading = true
+        error = null
+        unavailable = null
+        notice = null
         try {
             val s = core.fetchDict("/api/cloud/hermes/settings")
             applyState(s)
             error = null
+            unavailable = null
         } catch (e: CancellationException) {
             throw e
         } catch (e: Throwable) {
-            error = e.message
+            rawState = null
+            val reason = OrbAdminFormatting.hermesUnavailableMessage(e)
+            if (reason != null) {
+                unavailable = reason
+                error = null
+            } else {
+                error = e.message
+            }
+        } finally {
+            loading = false
         }
     }
 
@@ -1872,9 +1910,17 @@ fun OrbHermesSettingsPage(core: OrbCore, onBack: () -> Unit) {
                     if (soul == subSoul) soul = OrbJSON.str(updated, "soul_markdown").orEmpty()
                 }
                 error = null
+                unavailable = null
                 notice = if (restart) "Saved configuration and restarted Hermes." else "Saved Hermes configuration."
             } catch (e: Throwable) {
-                error = e.message
+                val reason = OrbAdminFormatting.hermesUnavailableMessage(e)
+                if (reason != null) {
+                    rawState = null
+                    unavailable = reason
+                    error = null
+                } else {
+                    error = e.message
+                }
             } finally {
                 busy = false
             }
@@ -1895,7 +1941,28 @@ fun OrbHermesSettingsPage(core: OrbCore, onBack: () -> Unit) {
             notice?.let { Text(it, color = OrbStyle.success, fontSize = 13.sp) }
 
             val state = rawState
-            if (state == null && error == null) {
+            val unavailReason = unavailable
+            if (unavailReason != null) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(16.dp))
+                        .background(OrbStyle.surface)
+                        .border(1.dp, OrbStyle.border, RoundedCornerShape(16.dp))
+                        .padding(14.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Text("Assistant not set up on this Core", color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+                    Text(
+                        "$unavailReason. The Assistant runs on a Hermes gateway that Core proxies for the user named in HERMES_CLOUD_OWNER. Missions and local agents work without it.",
+                        color = OrbStyle.textSecondary,
+                        fontSize = 13.sp
+                    )
+                    TextButton(onClick = { reloadNonce += 1 }, enabled = !loading) {
+                        Text("Check again", color = Color.White)
+                    }
+                }
+            } else if (state == null && loading) {
                 Text("Loading Hermes settings…", color = OrbStyle.textMuted, fontSize = 13.sp)
             } else if (state != null) {
                 // Runtime & gateway

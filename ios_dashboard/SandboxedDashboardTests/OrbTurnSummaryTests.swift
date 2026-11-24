@@ -125,6 +125,30 @@ final class OrbTurnSummaryTests: XCTestCase {
         let sessions = try JSONDecoder().decode(OrbJSON.self, from: Data(#"{"since":"2026-10-17T00:00:00Z","total":12,"open":2,"messages":40,"tool_calls":9,"by_source":{}}"#.utf8))
         XCTAssertEqual(OrbTurnSummary.hermesSessions(sessions), "12 · 2 open")
         XCTAssertNil(OrbTurnSummary.hermesSessions(.null))
+
+        let healthyRuntime = try JSONDecoder().decode(OrbJSON.self, from: Data(#"{"service_name":"hermes-assistant.service","service_active":true,"api_server_healthy":true,"uses_sandboxed_proxy":true,"token_present":true,"notes":[]}"#.utf8))
+        let healthyRows = OrbTurnSummary.hermesRuntime(healthyRuntime)
+        XCTAssertEqual(healthyRows.map(\.0), ["Service", "API", "Route"])
+        XCTAssertEqual(healthyRows.map(\.1), ["Active", "Healthy", "Via Core proxy"])
+
+        XCTAssertEqual(
+            OrbTurnSummary.hermesUnavailableMessage(for: OrbHTTPError(status: 403, detail: "Hermes is not connected for this account")),
+            "Hermes is not connected for this account"
+        )
+        XCTAssertEqual(
+            OrbTurnSummary.hermesUnavailableMessage(for: OrbHTTPError(status: 403, detail: "  ")),
+            "Hermes is not connected for this account"
+        )
+        XCTAssertNil(OrbTurnSummary.hermesUnavailableMessage(for: OrbHTTPError(status: 500, detail: "Internal")))
+
+        var hermesSel = OrbSelection()
+        hermesSel.provider = "hermes"
+        hermesSel.account = "paloma"
+        hermesSel.model = ""
+        hermesSel.params = .array([.object(["id": .string("effort"), "value": .string("high")])])
+        XCTAssertEqual(hermesSel.wire["provider"].text, "hermes")
+        XCTAssertEqual(hermesSel.wire["account"].text, "paloma")
+        XCTAssertEqual(hermesSel.wire["model_params"].items.first?["value"].text, "high")
     }
 
     @MainActor func testBannersAreSkippedForItemsAlreadyOnScreen() {

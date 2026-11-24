@@ -1598,8 +1598,8 @@ def cloud_inventory(binding, mission):
         if caps.get('follow_up') is True:
             if not any(t['phase'] in ('submission_uncertain', 'incompatible', 'reconnect_required') for t in turns):
                 actions.append('send')
-            if caps.get('cancel') is True and any(t.get('external_id') and t['phase'] in
-                    ('running', 'submitting', 'waiting_user') for t in turns):
+            if caps.get('cancel') is True and any(t['phase'] == 'queued' or (t.get('external_id') and t['phase'] in
+                    ('running', 'submitting', 'waiting_user')) for t in turns):
                 actions.append('cancel')
         phases = {'queued': 'Queued', 'submitting': 'Starting', 'submission_uncertain': 'Submission needs verification',
                   'running': 'Working', 'waiting_user': 'Waiting for your reply', 'reconnect_required': 'Reconnect account',

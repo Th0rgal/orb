@@ -1343,7 +1343,7 @@ def tickHermesMission
         let _ ← saveCloudExecutionCas store broadcastHub? missionId reqKey "hermes" (some nextRev)
           (claimedJv.setField "turns" (.arr ((claimedJv.fieldArr? "turns" |>.getD turns).set! turnIdx reTurn)))
         return false
-      else if code >= 500 then
+      else if code >= 500 || code == 429 then
         let retryTurn := claimingTurn.setField "detail" (.str s!"Hermes returned HTTP {code}; retrying with same idempotency key")
         let _ ← saveCloudExecutionCas store broadcastHub? missionId reqKey "hermes" (some nextRev)
           (claimedJv.setField "turns" (.arr ((claimedJv.fieldArr? "turns" |>.getD turns).set! turnIdx retryTurn)))

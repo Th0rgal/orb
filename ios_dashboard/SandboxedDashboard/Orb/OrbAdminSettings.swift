@@ -1104,8 +1104,10 @@ struct OrbHermesSettings: View {
     @State private var client = OrbSettingsClient()
     @State private var state: OrbJSON = .null
     @State private var draft = Draft()
+    @State private var loading = true
     @State private var busy = false
     @State private var error = ""
+    @State private var unavailable = ""
     @State private var notice = ""
 
     struct Draft: Equatable {
@@ -1138,19 +1140,38 @@ struct OrbHermesSettings: View {
         Form {
             OrbSettingsError(message: error)
             if !notice.isEmpty { Section { Text(notice).font(.footnote).foregroundStyle(OrbStyle.success) } }
-            if state == .null {
+            if !unavailable.isEmpty {
+                Section {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Assistant not set up on this Core")
+                            .font(.subheadline.weight(.semibold))
+                        Text("\(unavailable). The Assistant runs on a Hermes gateway that Core proxies for the user named in HERMES_CLOUD_OWNER. Missions and local agents work without it.")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+                    Button("Check again") { Task { await load() } }
+                        .disabled(loading)
+                }
+            } else if loading && state == .null {
                 Section { HStack(spacing: 8) { OrbRunningDots(size: 10); Text("Loading Hermes settings…").foregroundStyle(.secondary) } }
-            } else {
+            } else if state != .null {
                 runtimeSection
                 modelSection
                 memorySection
                 channelSection
                 actionsSection
+            } else if !error.isEmpty {
+                Section { Button("Retry") { Task { await load() } } }
             }
         }
         .scrollContentBackground(.hidden).background(OrbStyle.background)
         .navigationTitle("Assistant").navigationBarTitleDisplayMode(.inline)
-        .task { await load() }
+        .task(id: OrbCore.shared.connectionGeneration) {
+            client = OrbSettingsClient()
+            state = .null
+            notice = ""
+            await load()
+        }
     }
 
     private var runtimeSection: some View {
@@ -1185,9 +1206,9 @@ struct OrbHermesSettings: View {
     private var memorySection: some View {
         Section("Memory & context compression") {
             Toggle("Persistent memory (MEMORY.md)", isOn: $draft.memory)
-            if draft.memory { Stepper("Limit \(Int(draft.memoryLimit)) chars", value: $draft.memoryLimit, in: 1000...100_000, step: 1000) }
+            if draft.memory { Stepper("Limit \(Int(draft.memoryLimit)) chars", value: $draft.memoryLimit, in: 1000...200_000, step: 1000) }
             Toggle("User profile memory (USER.md)", isOn: $draft.userProfile)
-            if draft.userProfile { Stepper("Limit \(Int(draft.userLimit)) chars", value: $draft.userLimit, in: 1000...100_000, step: 1000) }
+            if draft.userProfile { Stepper("Limit \(Int(draft.userLimit)) chars", value: $draft.userLimit, in: 1000...200_000, step: 1000) }
             Toggle("Context auto-compression", isOn: $draft.compression)
             if draft.compression {
                 VStack(alignment: .leading) {
@@ -1225,17 +1246,43 @@ struct OrbHermesSettings: View {
     }
 
     private func load() async {
-        do { state = try await client.call("/api/cloud/hermes/settings"); draft = Draft(state); error = "" }
-        catch is CancellationError {} catch { self.error = error.localizedDescription }
+        loading = true
+        error = ""
+        unavailable = ""
+        defer { loading = false }
+        do {
+            state = try await client.call("/api/cloud/hermes/settings")
+            draft = Draft(state)
+            error = ""
+            unavailable = ""
+        } catch is CancellationError {}
+        catch {
+            state = .null
+            if let reason = OrbTurnSummary.hermesUnavailableMessage(for: error) {
+                unavailable = reason
+                self.error = ""
+            } else {
+                self.error = error.localizedDescription
+            }
+        }
     }
     private func save(restart: Bool) async {
         busy = true; defer { busy = false }
         notice = ""
         do {
             state = try await client.call("/api/cloud/hermes/settings", method: "PUT", body: draft.wire(restart: restart))
-            draft = Draft(state); error = ""
+            draft = Draft(state); error = ""; unavailable = ""
             notice = restart ? "Saved configuration and restarted Hermes service." : "Saved Hermes configuration."
-        } catch is CancellationError {} catch { self.error = error.localizedDescription }
+        } catch is CancellationError {}
+        catch {
+            if let reason = OrbTurnSummary.hermesUnavailableMessage(for: error) {
+                state = .null
+                unavailable = reason
+                self.error = ""
+            } else {
+                self.error = error.localizedDescription
+            }
+        }
     }
 }
 
