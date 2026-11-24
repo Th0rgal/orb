@@ -31,7 +31,7 @@ LEAN_EXPORT lean_obj_res orb_bin_udp_bind(b_lean_obj_arg host, uint16_t port, le
     if (fd < 0) return udp_bind_result(-(int32_t)(errno ? errno : EIO), 0);
     (void)fcntl(fd, F_SETFL, fcntl(fd, F_GETFL, 0) | O_NONBLOCK);
     (void)fcntl(fd, F_SETFD, FD_CLOEXEC);
-    int buf_sz = 1048576;
+    int buf_sz = 4194304;
     (void)setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &buf_sz, sizeof(buf_sz));
     (void)setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &buf_sz, sizeof(buf_sz));
     struct sockaddr_in sin;
@@ -62,14 +62,6 @@ LEAN_EXPORT lean_obj_res orb_bin_udp_bind(b_lean_obj_arg host, uint16_t port, le
 /* `[src_ip_host_order : u32][src_port : u16][tag = 1 : u16][payload...]`, or empty on timeout/error. */
 LEAN_EXPORT lean_obj_res orb_bin_udp_recvfrom_poll(int32_t fd, uint32_t timeout_ms, size_t max_bytes, lean_obj_arg w) {
     (void)w;
-    struct pollfd pfd;
-    pfd.fd = (int)fd;
-    pfd.events = POLLIN;
-    pfd.revents = 0;
-    int prc = poll(&pfd, 1, (int)(timeout_ms > 60000u ? 60000u : timeout_ms));
-    if (prc <= 0 || (pfd.revents & POLLIN) == 0) {
-        return lean_io_result_mk_ok(lean_alloc_sarray(1, 0, 0));
-    }
     size_t cap = max_bytes == 0 ? 1 : (max_bytes > 65535 ? 65535 : max_bytes);
     lean_object *ba = lean_alloc_sarray(1, 0, 8 + cap);
     uint8_t *p = lean_sarray_cptr(ba);
@@ -77,6 +69,14 @@ LEAN_EXPORT lean_obj_res orb_bin_udp_recvfrom_poll(int32_t fd, uint32_t timeout_
     socklen_t slen = sizeof(sin);
     memset(&sin, 0, sizeof(sin));
     ssize_t n = recvfrom((int)fd, p + 8, cap, MSG_DONTWAIT, (struct sockaddr *)&sin, &slen);
+    if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK) && timeout_ms > 0) {
+        struct pollfd pfd = { .fd = (int)fd, .events = POLLIN, .revents = 0 };
+        int prc = poll(&pfd, 1, (int)(timeout_ms > 60000u ? 60000u : timeout_ms));
+        if (prc > 0 && (pfd.revents & POLLIN) != 0) {
+            slen = sizeof(sin);
+            n = recvfrom((int)fd, p + 8, cap, MSG_DONTWAIT, (struct sockaddr *)&sin, &slen);
+        }
+    }
     if (n < 0) {
         lean_dec_ref(ba);
         return lean_io_result_mk_ok(lean_alloc_sarray(1, 0, 0));

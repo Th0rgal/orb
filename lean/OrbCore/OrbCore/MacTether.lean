@@ -240,6 +240,65 @@ private def lookupEndpoint?
     (pub32 : ByteArray) : Option (UdpEndpoint × UInt64) :=
   (xs.find? (fun (k, _, _) => k == pub32)).map (fun (_, ep, ts) => (ep, ts))
 
+private def pushU32BE (ba : ByteArray) (v : UInt32) : ByteArray :=
+  (((ba.push ((v >>> 24).toUInt8)).push ((v >>> 16).toUInt8)).push ((v >>> 8).toUInt8)).push v.toUInt8
+
+private def pushU16BE (ba : ByteArray) (v : UInt16) : ByteArray :=
+  (ba.push ((v >>> 8).toUInt8)).push v.toUInt8
+
+/-- Handle an in-band `"RNDZ"` (84-byte) P2P rendezvous query on `:51890`:
+    `["RNDZ" : 4][selfPub32 : 32][peerPub32 : 32][wgMac1(peerPub32, pkt[0..68]) : 16]`.
+    Returns a 16-byte `"RNDR"` reply with the authorized peer's observed public IPv4/UDP endpoint
+    so both peers can perform zero-open-port UDP hole-punching directly without relaying data. -/
+def handleBlindRelayRendezvous
+    (slots : Array RelayPairSlot)
+    (fwdMu : Std.Mutex RelayForwardState)
+    (pkt : UdpPacket)
+    (nowSec : UInt64) : IO (Option ByteArray) := do
+  let pay := pkt.payload
+  if pay.size != 84 then
+    return none
+  if (pay.get! 0) != 0x52 || (pay.get! 1) != 0x4E || (pay.get! 2) != 0x44 || (pay.get! 3) != 0x5A then
+    return none
+  let selfPub := pay.extract 4 36
+  let peerPub := pay.extract 36 68
+  let pktMac1 := pay.extract 68 84
+  let authorized := slots.any (fun s =>
+    (s.expiresAt == 0 || nowSec < s.expiresAt) &&
+    ((s.peerAPub32 == selfPub && s.peerBPub32 == peerPub) ||
+     (s.peerBPub32 == selfPub && s.peerAPub32 == peerPub)))
+  if !authorized then
+    return none
+  let expMac1 ← wgMac1 peerPub (pay.extract 0 68)
+  if expMac1 != pktMac1 then
+    return none
+  let (epIp, epPort, flags, ageSec) ← fwdMu.atomically do
+    let st ← get
+    match lookupEndpoint? st.establishedEp peerPub with
+    | some (ep, ts) =>
+      let age : UInt32 := if nowSec ≥ ts then (nowSec - ts).toUInt32 else 0
+      return (ep.ipHostOrder, ep.port, (1 : UInt16), age)
+    | none =>
+      match lookupEndpoint? st.candidateEp peerPub with
+      | some (ep, ts) =>
+        if nowSec ≤ ts + 60 then
+          let age : UInt32 := if nowSec ≥ ts then (nowSec - ts).toUInt32 else 0
+          return (ep.ipHostOrder, ep.port, (2 : UInt16), age)
+        else
+          return ((0 : UInt32), (0 : UInt16), (0 : UInt16), (0 : UInt32))
+      | none =>
+        return ((0 : UInt32), (0 : UInt16), (0 : UInt16), (0 : UInt32))
+  let mut out := ByteArray.mkEmpty 16
+  out := out.push 0x52  -- 'R'
+  out := out.push 0x4E  -- 'N'
+  out := out.push 0x44  -- 'D'
+  out := out.push 0x52  -- 'R'
+  out := pushU32BE out epIp
+  out := pushU16BE out epPort
+  out := pushU16BE out flags
+  out := pushU32BE out ageSec
+  return some out
+
 /-- Evaluate one inbound WireGuard UDP datagram against active relay pair slots and return `(dstEndpoint, bytes)` forwards.
     Never decrypts WireGuard payloads and never promotes an endpoint without a Noise_IK + PSK Type 2 response. -/
 def stepBlindRelayDatagram
@@ -364,25 +423,26 @@ def stepBlindRelayDatagram
   if msgType == 3 && pay.size != 64 then
     return #[]
   let receiverIdx := readU32LEAt pay 4
-  let activeSlotIds := activeSlots.map (·.slotId)
   if LeanMesh.Kernel.frameBoundsStep 0x4C4D5348 1 msgType 1 32 (pay.size - 32).toUInt64 1500 2048 != 1 then
     return #[]
   fwdMu.atomically do
     let st ← get
-    let mut updated : Array WgSessionRoute := Array.mkEmpty st.sessions.size
-    let mut dst? : Option UdpEndpoint := none
-    for r in st.sessions do
-      let slotAlive := activeSlotIds.contains r.slotId && (r.expiresAt == 0 || nowSec < r.expiresAt)
-      if slotAlive && nowSec ≤ r.lastSeenSec + 240 then
+    let mut match? : Option (Nat × WgSessionRoute) := none
+    for i in [:st.sessions.size] do
+      if let some r := st.sessions[i]? then
         if r.receiverIdx == receiverIdx then
-          dst? := some r.dstEp
-          updated := updated.push { r with lastSeenSec := nowSec }
-        else
-          updated := updated.push r
-    set { st with sessions := updated }
-    match dst? with
-    | some ep => return if ep != srcEp then #[ep] else #[]
+          let slotAlive := (r.expiresAt == 0 || nowSec < r.expiresAt) &&
+            activeSlots.any (fun s => s.slotId == r.slotId)
+          if slotAlive && nowSec ≤ r.lastSeenSec + 240 then
+            match? := some (i, r)
+            break
+    match match? with
     | none => return #[]
+    | some (idx, r) =>
+      -- Update `lastSeenSec` at most once per second so burst forwarding does zero array copies.
+      if r.lastSeenSec != nowSec then
+        set { st with sessions := st.sessions.set! idx { r with lastSeenSec := nowSec } }
+      return if r.dstEp != srcEp then #[r.dstEp] else #[]
 
 /-! ### SQLite Persistence & Relay Slot Synchronization -/
 
@@ -540,19 +600,36 @@ def startMacTetherRuntime (st : CoreStore) : IO MacTetherRuntime := do
       syncMacTetherRelaySlots st (some rt) (← coreEpochSec)
       discard <| bumpTetherGen (some rt)
       epoch.set latest
+  let lastRefreshSec ← IO.mkRef (← coreEpochSec)
   let worker ← IO.asTask (prio := .dedicated) do
     while !(← rt.stoppedRef.get) do
-      let pkt? ← match fd? with
+      let firstPkt? ← match fd? with
         | some fd => udpRecvFromPoll fd 250 2048
         | none => do IO.sleep 250; pure none
-      refresh
+      let nowSec ← coreEpochSec
+      -- Throttle SQLite lifecycle-epoch polling to at most once per second (or on idle poll)
+      -- so high-rate UDP relay bursts never block on SQLite per packet.
+      if firstPkt?.isNone || nowSec != (← lastRefreshSec.get) then
+        refresh
+        lastRefreshSec.set nowSec
       if let some fd := fd? then
-        if let some pkt := pkt? then
-          let nowSec ← coreEpochSec
+        if let some firstPkt := firstPkt? then
           let slots ← rt.slotsMu.atomically get
-          let dsts ← stepBlindRelayDatagram slots rt.fwdMu pkt nowSec
-          for dst in dsts do
-            let _ ← udpSendTo fd dst.ipHostOrder dst.port pkt.payload
+          let mut pkt? : Option UdpPacket := some firstPkt
+          let mut burst : Nat := 0
+          -- Drain queued datagrams in bursts (sharing `nowSec` and `slots`) before blocking in `poll()`.
+          while burst < 64 do
+            let some pkt := pkt? | break
+            if pkt.payload.size == 84 && pkt.payload.get! 0 == 0x52 then
+              if let some reply ← handleBlindRelayRendezvous slots rt.fwdMu pkt nowSec then
+                let _ ← udpSendTo fd pkt.srcIpHostOrder pkt.srcPort reply
+            else
+              let dsts ← stepBlindRelayDatagram slots rt.fwdMu pkt nowSec
+              for dst in dsts do
+                let _ ← udpSendTo fd dst.ipHostOrder dst.port pkt.payload
+            burst := burst + 1
+            if burst < 64 then
+              pkt? ← udpRecvFromPoll fd 0 2048
     if let some fd := fd? then closeFdRaw fd
   return {rt with worker? := some worker}
 
