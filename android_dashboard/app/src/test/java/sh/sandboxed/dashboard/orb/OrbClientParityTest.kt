@@ -263,5 +263,15 @@ class OrbClientParityTest {
         )
         assertEquals("builtin/deep" to "xhigh", hydratedFromSelection)
         assertNull(OrbAdminFormatting.extractCloudSelection(null))
+
+        val nativeBackends = listOf(
+            OrbRow(mapOf("id" to "claudecode")),
+            OrbRow(mapOf("id" to "codex"))
+        )
+        assertEquals(listOf("claudecode", "codex"), OrbAgentCatalog.backendOptions(nativeBackends, existing = true))
+        assertEquals(
+            listOf("hermes", "claudecode", "codex"),
+            OrbAgentCatalog.backendOptions(nativeBackends, existing = true, activeCloudBackend = "hermes")
+        )
     }
 }

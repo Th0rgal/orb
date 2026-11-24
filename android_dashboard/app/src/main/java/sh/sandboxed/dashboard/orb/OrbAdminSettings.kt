@@ -1922,7 +1922,13 @@ fun OrbHermesSettingsPage(core: OrbCore, onBack: () -> Unit) {
         unavailable = null
         notice = null
         try {
-            val s = core.fetchDict("/api/cloud/hermes/settings")
+            val s = OrbJSON.dict(
+                core.request(
+                    "/api/cloud/hermes/settings",
+                    explicitBaseURL = baseURL,
+                    explicitToken = token
+                )
+            ) ?: emptyMap()
             applyState(s)
             error = null
             unavailable = null
@@ -1978,7 +1984,15 @@ fun OrbHermesSettingsPage(core: OrbCore, onBack: () -> Unit) {
                     "soul_markdown" to subSoul,
                     "restart_service" to restart
                 )
-                val updated = OrbJSON.dict(core.request("/api/cloud/hermes/settings", "PUT", body = body))
+                val updated = OrbJSON.dict(
+                    core.request(
+                        "/api/cloud/hermes/settings",
+                        "PUT",
+                        body = body,
+                        explicitBaseURL = subBaseURL,
+                        explicitToken = subToken
+                    )
+                )
                 if (baseURL != subBaseURL || token != subToken || saveGeneration != subGen) return@launch
                 if (updated != null) {
                     rawState = updated
@@ -2193,6 +2207,10 @@ fun OrbHermesSettingsPage(core: OrbCore, onBack: () -> Unit) {
                     }
                 }
                 Spacer(Modifier.height(16.dp))
+            } else if (error != null) {
+                TextButton(onClick = { reloadNonce += 1 }, enabled = !loading) {
+                    Text("Retry", color = Color.White)
+                }
             }
         }
     }

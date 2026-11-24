@@ -131,10 +131,12 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -1936,8 +1938,14 @@ fun OrbConversationPage(
                         val accounts = if (cloudState.cloudAccounts.isNotEmpty()) {
                             cloudState.cloudAccounts
                         } else {
-                            runCatching { core.fetchRows("/api/cloud/accounts", "items") }.getOrDefault(emptyList()).also {
-                                if (it.isNotEmpty()) cloudState.cloudAccounts = it
+                            try {
+                                core.fetchRows("/api/cloud/accounts", "items").also {
+                                    if (it.isNotEmpty()) cloudState.cloudAccounts = it
+                                }
+                            } catch (e: CancellationException) {
+                                throw e
+                            } catch (_: Throwable) {
+                                emptyList()
                             }
                         }
                         val resolvedAccount = selectedAccount.ifEmpty {
@@ -2375,40 +2383,7 @@ fun OrbConversationPage(
 
     // Project context files for `@` mentions. Mirrors iOS OrbAttachments: the context
     // manifest (entries keyed by path) first, then a shallow walk of /files.
-    var projectFiles by remember(project.id) { mutableStateOf<List<String>>(emptyList()) }
-    LaunchedEffect(project.id) {
-        val slug = core.encodeComponent(project.str("slug", "id") ?: project.id)
-        val loaded = mutableListOf<String>()
-        orbTry(OrbLog.Category.Network, "/api/projects") {
-            val manifest = core.fetchDict("/api/projects/$slug/context/manifest")
-            val entries = OrbJSON.dict(manifest["entries"]) ?: emptyMap()
-            for ((path, meta) in entries) {
-                if (OrbJSON.bool(OrbJSON.dict(meta), "directory") != true) loaded.add(path)
-            }
-        }
-        if (loaded.isEmpty()) {
-            runCatching {
-                val queue = ArrayDeque(listOf("" to 0))
-                while (queue.isNotEmpty() && loaded.size < 160) {
-                    val (dir, depth) = queue.removeFirst()
-                    val rows = core.fetchRows(
-                        "/api/projects/$slug/files?path=${core.encodeComponent(dir)}",
-                        "entries"
-                    )
-                    for (r in rows) {
-                        val name = r.str("name") ?: continue
-                        val rel = if (dir.isEmpty()) name else "$dir/$name"
-                        if (r.str("kind") == "dir") {
-                            if (depth < 1) queue.addLast(rel to depth + 1)
-                        } else {
-                            loaded.add(rel)
-                        }
-                    }
-                }
-            }
-        }
-        projectFiles = loaded.distinct().sorted()
-    }
+    val projectFiles = rememberProjectContextFiles(core, project)
 
     val activeAtMentionQuery = remember(inputText) {
         val atIdx = inputText.lastIndexOf('@')
@@ -3549,278 +3524,113 @@ fun OrbConversationPage(
         }
     }
 
-    val transferKey = remember(missionId) { UUID.randomUUID().toString() }
-    var transferRequest by remember(missionId) { mutableStateOf<Map<String, Any?>?>(null) }
-    var transferredMission by remember(missionId) { mutableStateOf<OrbRow?>(null) }
-    if (showAgentPicker) {
-        val isCloudHandoffSheet = currentMission?.str("backend")?.startsWith("cloud_") == true
-        val canCloudHandoff = isCloudHandoffSheet && OrbKernel.cloudHandoffStep(
-            sourceIsCloud = true,
-            isSideQuestion = false,
-            targetIsNative = selectedBackend !in setOf("cursor_cloud", "grok_bot", "hermes") && !selectedBackend.startsWith("cloud_"),
-            hasHistoryTurns = latestTurns.isNotEmpty() || messages.isNotEmpty(),
-            targetPlacementValid = true
-        ) == OrbKernel.CloudHandoffStepResult.ALLOW_HANDOFF
-        OrbAgentPickerSheet(
-            backends = backends,
-            backendModels = cloudState.effectiveBackendModels(backendModels),
-            workspaces = workspaces,
-            nodes = nodes,
-            managedCatalog = managedCatalog,
-            providers = providers,
-            repositories = repositories,
-            selectedBackend = selectedBackend,
-            onSelectBackend = {
-                userExplicitlyPickedAgent = true
-                if (it != selectedBackend) {
-                    selectedModel = ""
-                    cloudState.selectedCloudEffort = ""
-                }
-                selectedBackend = it
-            },
-            selectedModel = selectedModel,
-            onSelectModel = {
-                selectedModel = it
-                if (selectedBackend == "hermes" || isCloudMission) cloudState.userEditedSelection = true
-            },
-            effortChoices = if (selectedBackend == "hermes") cloudState.hermesEffortChoices else emptyList(),
-            selectedEffort = cloudState.selectedCloudEffort,
-            onSelectEffort = {
-                cloudState.selectedCloudEffort = it
-                cloudState.userEditedSelection = true
-            },
-            permissionMode = selectedPermissionMode,
-            showClaudePermissions = selectedBackend == "claudecode",
-            onSelectPermissionMode = { mode ->
-                selectedPermissionMode = mode
-                val mid = currentMission?.id
-                if (mid != null && !isCloudMission) {
-                    scope.launch {
-                        runCatching {
-                            core.request(
-                                "/api/control/missions/${core.encodeComponent(mid)}/permission-mode",
-                                method = "POST",
-                                body = mapOf("permission_mode" to mode.wire)
-                            )
-                        }
-                    }
-                }
-            },
-            worktreeMode = selectedWorktreeMode,
-            showWorktreeMode = currentMission == null && !isCloudComposer,
-            onSelectWorktreeMode = { selectedWorktreeMode = it },
-            cyberMode = selectedCyber,
-            showCyber = OrbCyberAccess.nativeCodex(selectedBackend, currentMission?.dict("cloud")),
-            cyberSummary = if (currentMission == null) "Uses the account’s default access unless explicitly selected." else
-                cyberSelection?.summary ?: "Cyber: unavailable",
-            cyberEnabled = !cyberLoading && (currentMission == null || cyberSelection != null),
-            cyberRemote = currentMission?.let { OrbCyberAccess.remote(it) } ?: (selectedWorkspaceId.isEmpty() &&
-                selectedNodeId.isNotEmpty() && selectedNodeId != "core"),
-            onSelectCyber = { mode ->
-                if (!isSending) {
-                    val mission = currentMission
-                    val model = selectedModel
-                    val prompt = composeMode.wrapPrompt(inputText)
-                    val remote = mission?.let { OrbCyberAccess.remote(it) } ?: (selectedWorkspaceId.isEmpty() &&
-                        selectedNodeId.isNotEmpty() && selectedNodeId != "core")
-                    isSending = true
-                    scope.launch {
-                        try {
-                            if (prompt.trim().equals("/goal", ignoreCase = true))
-                                throw OrbError(OrbCyberAccess.EMPTY_GOAL)
-                            OrbCyberAccess.requireSupport(model, mode, remote,
-                                OrbCyberAccess.nativeGoal(selectedBackend, prompt)) { path ->
-                                OrbJSON.dict(core.request(path)) ?: emptyMap()
-                            }
-                            if (mission == null) selectedCyber = mode
-                            else {
-                                val patchBody = mutableMapOf<String, Any?>("mode" to mode.wire)
-                                cyberSelection?.revision?.takeIf { it.isNotEmpty() }?.let { patchBody["expected_revision"] = it }
-                                val value = OrbJSON.dict(core.request("/api/control/missions/${core.encodeComponent(mission.id)}/cyber",
-                                    method = "PATCH", body = patchBody)) ?: throw OrbError("Cyber settings unavailable")
-                                cyberSelection = OrbCyberSelection.parse(value)
-                                selectedCyber = cyberSelection!!.mode
-                            }
-                        } catch (e: Exception) { errorMessage = OrbCyberAccess.error(e) }
-                        finally { isSending = false }
-                    }
-                }
-            },
-            selectedWorkspaceId = selectedWorkspaceId,
-            onSelectWorkspaceId = {
-                selectedWorkspaceId = it
-                if (it.isNotEmpty()) {
-                    selectedNodeId = ""
-                    nodePinnedByUser = false
-                    allow24hCommitment = false
-                }
-            },
-            selectedNodeId = selectedNodeId,
-            onSelectNodeId = { nodeId, allow24h ->
-                selectedNodeId = nodeId
-                nodePinnedByUser = true
-                allow24hCommitment = allow24h
-                selectedWorkspaceId = ""
-            },
-            selectedAccount = selectedAccount,
-            onSelectAccount = { selectedAccount = it },
-            selectedRepo = selectedRepo,
-            onSelectRepo = { selectedRepo = it },
-            selectedGitRef = selectedGitRef,
-            onSelectGitRef = { selectedGitRef = it },
-            selectedConfigProfile = selectedConfigProfile,
-            onSelectConfigProfile = { selectedConfigProfile = it },
-            existing = currentMission != null,
-            isAdmin = isAdmin,
-            cloudHandoff = isCloudHandoffSheet,
-            locked = isSending || transferRequest != null,
-            busy = isSending,
-            transferError = errorMessage,
-            onTransfer = if (currentMission != null && (!isCloudHandoffSheet || canCloudHandoff)) ({
-                val targetBackend = if (selectedBackend in setOf("cursor_cloud", "grok_bot", "hermes") || selectedBackend.startsWith("cloud_")) {
-                    backends.firstOrNull()?.str("id", "slug") ?: "claudecode"
-                } else {
-                    selectedBackend
-                }
-                if (!isSending && targetBackend.isNotEmpty()) {
-                    isSending = true
-                    errorMessage = null
-                    scope.launch {
-                        try {
-                            val source = currentMission ?: throw OrbError("Conversation unavailable.")
-                            OrbCyberAccess.requireInherited(core, source.id, selectedBackend, selectedModel, "")
-                            val base = "/api/control/missions/${core.encodeComponent(source.id)}"
-                            var next = transferredMission
-                            if (next == null) {
-                                if (!isCloudHandoffSheet) {
-                                    OrbHarnessTransfer.stopSource(core, base)
-                                }
-                                if (transferRequest == null) {
-                                    val req = mutableMapOf<String, Any?>(
-                                        "backend" to targetBackend,
-                                        "model_override" to selectedModel,
-                                        "idempotency_key" to transferKey
-                                    )
-                                    if (isCloudHandoffSheet && selectedNodeId.isNotEmpty() && selectedNodeId != "core") {
-                                        req["remote_node_id"] = selectedNodeId
-                                    }
-                                    if (isCloudHandoffSheet && selectedWorkspaceId.isNotEmpty()) {
-                                        req["workspace_id"] = selectedWorkspaceId
-                                    }
-                                    transferRequest = req
-                                }
-                                val value = OrbJSON.dict(core.request("$base/fork", method = "POST", body = transferRequest)) ?: throw OrbError("Transfer response unavailable. Retry to recover it.")
-                                next = OrbRow(value)
-                                transferredMission = next
-                            }
-                            if (!isCloudHandoffSheet) {
-                                core.request("$base/status", method = "POST", body = mapOf("status" to "acknowledged"))
-                            }
-                            showAgentPicker = false
-                            currentMission = next
-                            core.refreshMissionsQuietly()
-                        } catch (e: Exception) {
-                            errorMessage = (if (transferredMission != null) "The new agent is ready, but the original could not be archived. " else "") + (e.message ?: "Transfer failed. Retry.")
-                        } finally { isSending = false }
-                    }
-                }
-            }) else null,
-            onDismiss = {
-                if (!isSending) {
-                    showAgentPicker = false
-                    currentMission?.id?.let { persistMissionModelIfNeeded(it) }
-                }
+    OrbConversationAgentSheetHost(
+        showAgentPicker = showAgentPicker,
+        core = core,
+        scope = scope,
+        missionId = missionId,
+        currentMission = currentMission,
+        onMissionChanged = { currentMission = it },
+        backends = backends,
+        backendModels = backendModels,
+        workspaces = workspaces,
+        nodes = nodes,
+        managedCatalog = managedCatalog,
+        providers = providers,
+        repositories = repositories,
+        cloudState = cloudState,
+        selectedBackend = selectedBackend,
+        onSelectBackend = { selectedBackend = it },
+        selectedModel = selectedModel,
+        onSelectModel = { selectedModel = it },
+        selectedPermissionMode = selectedPermissionMode,
+        onSelectPermissionMode = { selectedPermissionMode = it },
+        selectedWorktreeMode = selectedWorktreeMode,
+        onSelectWorktreeMode = { selectedWorktreeMode = it },
+        selectedCyber = selectedCyber,
+        onSelectCyberMode = { selectedCyber = it },
+        cyberSelection = cyberSelection,
+        onCyberSelectionChanged = { cyberSelection = it },
+        cyberLoading = cyberLoading,
+        selectedWorkspaceId = selectedWorkspaceId,
+        onSelectWorkspaceId = {
+            selectedWorkspaceId = it
+            if (it.isNotEmpty()) {
+                selectedNodeId = ""
+                nodePinnedByUser = false
+                allow24hCommitment = false
             }
-        )
-    }
+        },
+        selectedNodeId = selectedNodeId,
+        onSelectNodeId = { nodeId, allow24h ->
+            selectedNodeId = nodeId
+            nodePinnedByUser = true
+            allow24hCommitment = allow24h
+            selectedWorkspaceId = ""
+        },
+        selectedAccount = selectedAccount,
+        onSelectAccount = { selectedAccount = it },
+        selectedRepo = selectedRepo,
+        onSelectRepo = { selectedRepo = it },
+        selectedGitRef = selectedGitRef,
+        onSelectGitRef = { selectedGitRef = it },
+        selectedConfigProfile = selectedConfigProfile,
+        onSelectConfigProfile = { selectedConfigProfile = it },
+        isAdmin = isAdmin,
+        isCloudMission = isCloudMission,
+        isCloudComposer = isCloudComposer,
+        hasHistoryTurns = latestTurns.isNotEmpty() || messages.isNotEmpty(),
+        inputText = inputText,
+        composeMode = composeMode,
+        isSending = isSending,
+        onIsSendingChanged = { isSending = it },
+        errorMessage = errorMessage,
+        onErrorMessageChanged = { errorMessage = it },
+        onUserExplicitlyPickedAgent = { userExplicitlyPickedAgent = true },
+        onPersistMissionModel = { persistMissionModelIfNeeded(it) },
+        onDismiss = { showAgentPicker = false }
+    )
 
-    sideAgentSession?.let { session ->
-        OrbSideAgentSheet(
-            core = core,
-            session = session,
-            onOpen = { child ->
-                sideAgentSession = null
-                currentMission = child
-            },
-            onDismiss = { sideAgentSession = null }
-        )
-    }
-
-    commandBanner?.let { msg ->
-        LaunchedEffect(msg) {
-            delay(2500)
-            commandBanner = null
-        }
-    }
-
-    fileRef?.let { ref ->
-        OrbFileViewerSheet(core = core, ref = ref, scope = fileScope, onDismiss = { fileRef = null })
-    }
-    if (showFiles) {
-        OrbFilesSheet(core = core, scope = fileScope, onDismiss = { showFiles = false })
-    }
-    if (showChanges && missionId != null) {
-        OrbChangesSheet(
-            core = core,
-            missionId = missionId,
-            onRestored = { scope.launch { loadHistory(missionId) } },
-            onDismiss = { showChanges = false }
-        )
-    }
-
-    if (showShareDialog && missionId != null) {
-        OrbShareMissionDialog(
-            core = core,
-            missionId = missionId,
-            title = OrbJSON.cleanTitle((liveRow ?: currentMission)?.str("title", "name") ?: ""),
-            onDismiss = { showShareDialog = false }
-        )
-    }
-
-    if (showMissionSettingsDialog && missionId != null) {
-        OrbMissionSettingsDialog(
-            core = core,
-            missionId = missionId,
-            title = OrbJSON.cleanTitle((liveRow ?: currentMission)?.str("title", "name") ?: ""),
-            readOnly = isParticipant,
-            onDismiss = { showMissionSettingsDialog = false }
-        )
-    }
-
-    if (showRenameDialog && missionId != null) {
-        OrbRenameConversationDialog(
-            draft = renameDraft,
-            onDraftChange = { renameDraft = it },
-            onDismiss = { showRenameDialog = false },
-            onSave = { next ->
-                showRenameDialog = false
-                if (next.isNotEmpty()) {
-                    scope.launch {
-                        orbTry(OrbLog.Category.Network, "/api/control/missions") {
-                            core.request(
-                                path = "/api/control/missions/${core.encodeComponent(missionId)}/title",
-                                method = "POST",
-                                body = mapOf("title" to next)
-                            )
-                            currentMission?.let { cur ->
-                                currentMission = OrbRow(cur.id, cur.raw.toMutableMap().apply { put("title", next) })
-                            }
-                            core.refreshMissionsQuietly()
-                        }.onFailure { errorMessage = it.message ?: "Couldn’t rename the conversation." }
-                    }
-                }
+    OrbConversationAuxiliaryOverlays(
+        core = core,
+        scope = scope,
+        missionId = missionId,
+        title = OrbJSON.cleanTitle((liveRow ?: currentMission)?.str("title", "name") ?: ""),
+        isParticipant = isParticipant,
+        fileScope = fileScope,
+        selectedWorkspaceId = selectedWorkspaceId,
+        sideAgentSession = sideAgentSession,
+        onOpenSideAgent = { child ->
+            sideAgentSession = null
+            currentMission = child
+        },
+        onDismissSideAgent = { sideAgentSession = null },
+        commandBanner = commandBanner,
+        onClearCommandBanner = { commandBanner = null },
+        fileRef = fileRef,
+        onDismissFileRef = { fileRef = null },
+        showFiles = showFiles,
+        onDismissFiles = { showFiles = false },
+        showChanges = showChanges,
+        onRestoredChanges = { if (missionId != null) scope.launch { loadHistory(missionId) } },
+        onDismissChanges = { showChanges = false },
+        showShareDialog = showShareDialog,
+        onDismissShareDialog = { showShareDialog = false },
+        showMissionSettingsDialog = showMissionSettingsDialog,
+        onDismissMissionSettingsDialog = { showMissionSettingsDialog = false },
+        showRenameDialog = showRenameDialog,
+        renameDraft = renameDraft,
+        onRenameDraftChange = { renameDraft = it },
+        onDismissRenameDialog = { showRenameDialog = false },
+        onRenamedTitle = { next ->
+            currentMission?.let { cur ->
+                currentMission = OrbRow(cur.id, cur.raw.toMutableMap().apply { put("title", next) })
             }
-        )
-    }
-
-    previewFilePath?.let { path ->
-        OrbPreviewSheet(
-            core = core,
-            path = path,
-            workspaceId = selectedWorkspaceId.takeIf { it.isNotEmpty() },
-            onDismiss = { previewFilePath = null }
-        )
-    }
+        },
+        onErrorMessageChanged = { errorMessage = it },
+        previewFilePath = previewFilePath,
+        onDismissPreviewFile = { previewFilePath = null }
+    )
 }
 
 @Composable
@@ -4927,6 +4737,45 @@ private fun OrbBackgroundWakeRow(turn: OrbTurn.Wake) {
     }
 }
 
+@Composable
+private fun rememberProjectContextFiles(core: OrbCore, project: OrbRow): List<String> {
+    var projectFiles by remember(project.id) { mutableStateOf<List<String>>(emptyList()) }
+    LaunchedEffect(project.id) {
+        val slug = core.encodeComponent(project.str("slug", "id") ?: project.id)
+        val loaded = mutableListOf<String>()
+        orbTry(OrbLog.Category.Network, "/api/projects") {
+            val manifest = core.fetchDict("/api/projects/$slug/context/manifest")
+            val entries = OrbJSON.dict(manifest["entries"]) ?: emptyMap()
+            for ((path, meta) in entries) {
+                if (OrbJSON.bool(OrbJSON.dict(meta), "directory") != true) loaded.add(path)
+            }
+        }
+        if (loaded.isEmpty()) {
+            runCatching {
+                val queue = ArrayDeque(listOf("" to 0))
+                while (queue.isNotEmpty() && loaded.size < 160) {
+                    val (dir, depth) = queue.removeFirst()
+                    val rows = core.fetchRows(
+                        "/api/projects/$slug/files?path=${core.encodeComponent(dir)}",
+                        "entries"
+                    )
+                    for (r in rows) {
+                        val name = r.str("name") ?: continue
+                        val rel = if (dir.isEmpty()) name else "$dir/$name"
+                        if (r.str("kind") == "dir") {
+                            if (depth < 1) queue.addLast(rel to depth + 1)
+                        } else {
+                            loaded.add(rel)
+                        }
+                    }
+                }
+            }
+        }
+        projectFiles = loaded.distinct().sorted()
+    }
+    return projectFiles
+}
+
 private class OrbCloudComposerState {
     var cloudAccounts by mutableStateOf<List<OrbRow>>(emptyList())
     var hermesModelItems by mutableStateOf<List<OrbDict>>(emptyList())
@@ -4982,7 +4831,17 @@ private fun rememberOrbCloudComposerState(
         state.selectionHydratedFor = null
         state.userEditedSelection = false
         onConnectionReset()
-        state.cloudAccounts = runCatching { core.fetchRows("/api/cloud/accounts", "items") }.getOrDefault(emptyList())
+        val fetched = try {
+            val raw = core.request("/api/cloud/accounts", explicitBaseURL = baseURL, explicitToken = token)
+            val dict = OrbJSON.dict(raw)
+            OrbJSON.dictList(dict?.get("items") ?: raw).map { OrbRow(it) }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Throwable) {
+            emptyList()
+        }
+        coroutineContext.ensureActive()
+        state.cloudAccounts = fetched
     }
 
     LaunchedEffect(currentMissionId) {
@@ -5023,7 +4882,14 @@ private fun rememberOrbCloudComposerState(
             state.hermesEffortChoices = emptyList()
             return@LaunchedEffect
         }
-        val opts = runCatching { core.fetchDict("/api/cloud/hermes/options") }.getOrNull()
+        val opts = try {
+            OrbJSON.dict(core.request("/api/cloud/hermes/options", explicitBaseURL = baseURL, explicitToken = token))
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Throwable) {
+            null
+        }
+        coroutineContext.ensureActive()
         val items = OrbJSON.dictList(OrbJSON.dict(opts?.get("models"))?.get("items"))
             .filter { !OrbJSON.str(it, "id", "value").isNullOrEmpty() }
         val rawEfforts = OrbJSON.dictList(opts?.get("efforts")).ifEmpty {
@@ -5039,6 +4905,377 @@ private fun rememberOrbCloudComposerState(
     }
 
     return state
+}
+
+@Composable
+private fun OrbConversationAgentSheetHost(
+    showAgentPicker: Boolean,
+    core: OrbCore,
+    scope: kotlinx.coroutines.CoroutineScope,
+    missionId: String?,
+    currentMission: OrbRow?,
+    onMissionChanged: (OrbRow) -> Unit,
+    backends: List<OrbRow>,
+    backendModels: OrbDict,
+    workspaces: List<OrbRow>,
+    nodes: List<OrbRow>,
+    managedCatalog: ManagedMachinesResponse?,
+    providers: List<OrbRow>,
+    repositories: List<OrbRow>,
+    cloudState: OrbCloudComposerState,
+    selectedBackend: String,
+    onSelectBackend: (String) -> Unit,
+    selectedModel: String,
+    onSelectModel: (String) -> Unit,
+    selectedPermissionMode: OrbClaudePermissionMode,
+    onSelectPermissionMode: (OrbClaudePermissionMode) -> Unit,
+    selectedWorktreeMode: OrbWorktreeLaunchMode,
+    onSelectWorktreeMode: (OrbWorktreeLaunchMode) -> Unit,
+    selectedCyber: OrbCyberMode,
+    onSelectCyberMode: (OrbCyberMode) -> Unit,
+    cyberSelection: OrbCyberSelection?,
+    onCyberSelectionChanged: (OrbCyberSelection?) -> Unit,
+    cyberLoading: Boolean,
+    selectedWorkspaceId: String,
+    onSelectWorkspaceId: (String) -> Unit,
+    selectedNodeId: String,
+    onSelectNodeId: (String, Boolean) -> Unit,
+    selectedAccount: String,
+    onSelectAccount: (String) -> Unit,
+    selectedRepo: String,
+    onSelectRepo: (String) -> Unit,
+    selectedGitRef: String,
+    onSelectGitRef: (String) -> Unit,
+    selectedConfigProfile: String,
+    onSelectConfigProfile: (String) -> Unit,
+    isAdmin: Boolean,
+    isCloudMission: Boolean,
+    isCloudComposer: Boolean,
+    hasHistoryTurns: Boolean,
+    inputText: String,
+    composeMode: OrbComposeMode,
+    isSending: Boolean,
+    onIsSendingChanged: (Boolean) -> Unit,
+    errorMessage: String?,
+    onErrorMessageChanged: (String?) -> Unit,
+    onUserExplicitlyPickedAgent: () -> Unit,
+    onPersistMissionModel: (String) -> Unit,
+    onDismiss: () -> Unit
+) {
+    val transferKey = remember(missionId) { UUID.randomUUID().toString() }
+    var transferRequest by remember(missionId) { mutableStateOf<Map<String, Any?>?>(null) }
+    var transferredMission by remember(missionId) { mutableStateOf<OrbRow?>(null) }
+    if (!showAgentPicker) return
+
+    val activeCloudProvider = currentMission?.str("backend")?.takeIf { it.startsWith("cloud_") }?.removePrefix("cloud_")
+    val isCloudHandoffSheet = activeCloudProvider != null
+    // Keep handoff target selection local to the sheet on existing cloud missions so inspecting a
+    // native harness and dismissing without transferring never corrupts Hermes model/effort state.
+    var handoffBackend by remember(missionId, activeCloudProvider) {
+        mutableStateOf(activeCloudProvider ?: selectedBackend)
+    }
+    var handoffModel by remember(missionId, activeCloudProvider) { mutableStateOf("") }
+    val effectiveBackend = if (isCloudHandoffSheet) handoffBackend else selectedBackend
+    val effectiveModel = if (isCloudHandoffSheet && handoffBackend != activeCloudProvider) handoffModel else selectedModel
+    val canCloudHandoff = isCloudHandoffSheet && OrbKernel.cloudHandoffStep(
+        sourceIsCloud = true,
+        isSideQuestion = false,
+        targetIsNative = effectiveBackend !in setOf("cursor_cloud", "grok_bot", "hermes") && !effectiveBackend.startsWith("cloud_"),
+        hasHistoryTurns = hasHistoryTurns,
+        targetPlacementValid = true
+    ) == OrbKernel.CloudHandoffStepResult.ALLOW_HANDOFF
+
+    OrbAgentPickerSheet(
+        backends = backends,
+        backendModels = cloudState.effectiveBackendModels(backendModels),
+        workspaces = workspaces,
+        nodes = nodes,
+        managedCatalog = managedCatalog,
+        providers = providers,
+        repositories = repositories,
+        selectedBackend = effectiveBackend,
+        onSelectBackend = { picked ->
+            if (isCloudHandoffSheet) {
+                if (picked != handoffBackend) {
+                    handoffBackend = picked
+                    if (picked != activeCloudProvider) handoffModel = ""
+                }
+            } else {
+                onUserExplicitlyPickedAgent()
+                if (picked != selectedBackend) {
+                    onSelectModel("")
+                    cloudState.selectedCloudEffort = ""
+                }
+                onSelectBackend(picked)
+            }
+        },
+        selectedModel = effectiveModel,
+        onSelectModel = { picked ->
+            if (isCloudHandoffSheet && handoffBackend != activeCloudProvider) {
+                handoffModel = picked
+            } else {
+                onSelectModel(picked)
+                if (effectiveBackend == "hermes" || isCloudMission) cloudState.userEditedSelection = true
+            }
+        },
+        effortChoices = if (effectiveBackend == "hermes") cloudState.hermesEffortChoices else emptyList(),
+        selectedEffort = cloudState.selectedCloudEffort,
+        onSelectEffort = { picked ->
+            cloudState.selectedCloudEffort = picked
+            cloudState.userEditedSelection = true
+        },
+        permissionMode = selectedPermissionMode,
+        showClaudePermissions = !isCloudHandoffSheet && effectiveBackend == "claudecode",
+        onSelectPermissionMode = { mode ->
+            onSelectPermissionMode(mode)
+            val mid = currentMission?.id
+            if (mid != null && !isCloudMission) {
+                scope.launch {
+                    runCatching {
+                        core.request(
+                            "/api/control/missions/${core.encodeComponent(mid)}/permission-mode",
+                            method = "POST",
+                            body = mapOf("permission_mode" to mode.wire)
+                        )
+                    }
+                }
+            }
+        },
+        worktreeMode = selectedWorktreeMode,
+        showWorktreeMode = currentMission == null && !isCloudComposer,
+        onSelectWorktreeMode = onSelectWorktreeMode,
+        cyberMode = selectedCyber,
+        showCyber = !isCloudHandoffSheet && OrbCyberAccess.nativeCodex(effectiveBackend, currentMission?.dict("cloud")),
+        cyberSummary = if (currentMission == null) "Uses the account’s default access unless explicitly selected." else
+            cyberSelection?.summary ?: "Cyber: unavailable",
+        cyberEnabled = !cyberLoading && (currentMission == null || cyberSelection != null),
+        cyberRemote = currentMission?.let { OrbCyberAccess.remote(it) } ?: (selectedWorkspaceId.isEmpty() &&
+            selectedNodeId.isNotEmpty() && selectedNodeId != "core"),
+        onSelectCyber = { mode ->
+            if (!isSending) {
+                val mission = currentMission
+                val model = effectiveModel
+                val prompt = composeMode.wrapPrompt(inputText)
+                val remote = mission?.let { OrbCyberAccess.remote(it) } ?: (selectedWorkspaceId.isEmpty() &&
+                    selectedNodeId.isNotEmpty() && selectedNodeId != "core")
+                onIsSendingChanged(true)
+                scope.launch {
+                    try {
+                        if (prompt.trim().equals("/goal", ignoreCase = true))
+                            throw OrbError(OrbCyberAccess.EMPTY_GOAL)
+                        OrbCyberAccess.requireSupport(model, mode, remote,
+                            OrbCyberAccess.nativeGoal(effectiveBackend, prompt)) { path ->
+                            OrbJSON.dict(core.request(path)) ?: emptyMap()
+                        }
+                        if (mission == null) onSelectCyberMode(mode)
+                        else {
+                            val patchBody = mutableMapOf<String, Any?>("mode" to mode.wire)
+                            cyberSelection?.revision?.takeIf { it.isNotEmpty() }?.let { patchBody["expected_revision"] = it }
+                            val value = OrbJSON.dict(core.request("/api/control/missions/${core.encodeComponent(mission.id)}/cyber",
+                                method = "PATCH", body = patchBody)) ?: throw OrbError("Cyber settings unavailable")
+                            val parsed = OrbCyberSelection.parse(value)
+                            onCyberSelectionChanged(parsed)
+                            onSelectCyberMode(parsed.mode)
+                        }
+                    } catch (e: Exception) { onErrorMessageChanged(OrbCyberAccess.error(e)) }
+                    finally { onIsSendingChanged(false) }
+                }
+            }
+        },
+        selectedWorkspaceId = selectedWorkspaceId,
+        onSelectWorkspaceId = onSelectWorkspaceId,
+        selectedNodeId = selectedNodeId,
+        onSelectNodeId = onSelectNodeId,
+        selectedAccount = selectedAccount,
+        onSelectAccount = onSelectAccount,
+        selectedRepo = selectedRepo,
+        onSelectRepo = onSelectRepo,
+        selectedGitRef = selectedGitRef,
+        onSelectGitRef = onSelectGitRef,
+        selectedConfigProfile = selectedConfigProfile,
+        onSelectConfigProfile = onSelectConfigProfile,
+        existing = currentMission != null,
+        activeCloudBackend = activeCloudProvider,
+        isAdmin = isAdmin,
+        cloudHandoff = isCloudHandoffSheet,
+        locked = isSending || transferRequest != null,
+        busy = isSending,
+        transferError = errorMessage,
+        onTransfer = if (currentMission != null && (!isCloudHandoffSheet || canCloudHandoff)) ({
+            val targetBackend = if (effectiveBackend in setOf("cursor_cloud", "grok_bot", "hermes") || effectiveBackend.startsWith("cloud_")) {
+                backends.firstOrNull()?.str("id", "slug") ?: "claudecode"
+            } else {
+                effectiveBackend
+            }
+            val targetModel = effectiveModel
+            if (!isSending && targetBackend.isNotEmpty()) {
+                onIsSendingChanged(true)
+                onErrorMessageChanged(null)
+                scope.launch {
+                    try {
+                        val source = currentMission ?: throw OrbError("Conversation unavailable.")
+                        OrbCyberAccess.requireInherited(core, source.id, targetBackend, targetModel, "")
+                        val base = "/api/control/missions/${core.encodeComponent(source.id)}"
+                        var next = transferredMission
+                        if (next == null) {
+                            if (!isCloudHandoffSheet) {
+                                OrbHarnessTransfer.stopSource(core, base)
+                            }
+                            if (transferRequest == null) {
+                                val req = mutableMapOf<String, Any?>(
+                                    "backend" to targetBackend,
+                                    "model_override" to targetModel,
+                                    "idempotency_key" to transferKey
+                                )
+                                if (isCloudHandoffSheet && selectedNodeId.isNotEmpty() && selectedNodeId != "core") {
+                                    req["remote_node_id"] = selectedNodeId
+                                }
+                                if (isCloudHandoffSheet && selectedWorkspaceId.isNotEmpty()) {
+                                    req["workspace_id"] = selectedWorkspaceId
+                                }
+                                transferRequest = req
+                            }
+                            val value = OrbJSON.dict(core.request("$base/fork", method = "POST", body = transferRequest)) ?: throw OrbError("Transfer response unavailable. Retry to recover it.")
+                            next = OrbRow(value)
+                            transferredMission = next
+                        }
+                        if (!isCloudHandoffSheet) {
+                            core.request("$base/status", method = "POST", body = mapOf("status" to "acknowledged"))
+                        }
+                        onDismiss()
+                        onMissionChanged(next)
+                        core.refreshMissionsQuietly()
+                    } catch (e: Exception) {
+                        onErrorMessageChanged((if (transferredMission != null) "The new agent is ready, but the original could not be archived. " else "") + (e.message ?: "Transfer failed. Retry."))
+                    } finally { onIsSendingChanged(false) }
+                }
+            }
+        }) else null,
+        onDismiss = {
+            if (!isSending) {
+                onDismiss()
+                currentMission?.id?.let { onPersistMissionModel(it) }
+            }
+        }
+    )
+}
+
+@Composable
+private fun OrbConversationAuxiliaryOverlays(
+    core: OrbCore,
+    scope: kotlinx.coroutines.CoroutineScope,
+    missionId: String?,
+    title: String,
+    isParticipant: Boolean,
+    fileScope: OrbFileScope,
+    selectedWorkspaceId: String,
+    sideAgentSession: OrbSideAgentSession?,
+    onOpenSideAgent: (OrbRow) -> Unit,
+    onDismissSideAgent: () -> Unit,
+    commandBanner: String?,
+    onClearCommandBanner: () -> Unit,
+    fileRef: OrbFileRef?,
+    onDismissFileRef: () -> Unit,
+    showFiles: Boolean,
+    onDismissFiles: () -> Unit,
+    showChanges: Boolean,
+    onRestoredChanges: () -> Unit,
+    onDismissChanges: () -> Unit,
+    showShareDialog: Boolean,
+    onDismissShareDialog: () -> Unit,
+    showMissionSettingsDialog: Boolean,
+    onDismissMissionSettingsDialog: () -> Unit,
+    showRenameDialog: Boolean,
+    renameDraft: String,
+    onRenameDraftChange: (String) -> Unit,
+    onDismissRenameDialog: () -> Unit,
+    onRenamedTitle: (String) -> Unit,
+    onErrorMessageChanged: (String?) -> Unit,
+    previewFilePath: String?,
+    onDismissPreviewFile: () -> Unit
+) {
+    sideAgentSession?.let { session ->
+        OrbSideAgentSheet(
+            core = core,
+            session = session,
+            onOpen = onOpenSideAgent,
+            onDismiss = onDismissSideAgent
+        )
+    }
+
+    commandBanner?.let { msg ->
+        LaunchedEffect(msg) {
+            delay(2500)
+            onClearCommandBanner()
+        }
+    }
+
+    fileRef?.let { ref ->
+        OrbFileViewerSheet(core = core, ref = ref, scope = fileScope, onDismiss = onDismissFileRef)
+    }
+    if (showFiles) {
+        OrbFilesSheet(core = core, scope = fileScope, onDismiss = onDismissFiles)
+    }
+    if (showChanges && missionId != null) {
+        OrbChangesSheet(
+            core = core,
+            missionId = missionId,
+            onRestored = onRestoredChanges,
+            onDismiss = onDismissChanges
+        )
+    }
+
+    if (showShareDialog && missionId != null) {
+        OrbShareMissionDialog(
+            core = core,
+            missionId = missionId,
+            title = title,
+            onDismiss = onDismissShareDialog
+        )
+    }
+
+    if (showMissionSettingsDialog && missionId != null) {
+        OrbMissionSettingsDialog(
+            core = core,
+            missionId = missionId,
+            title = title,
+            readOnly = isParticipant,
+            onDismiss = onDismissMissionSettingsDialog
+        )
+    }
+
+    if (showRenameDialog && missionId != null) {
+        OrbRenameConversationDialog(
+            draft = renameDraft,
+            onDraftChange = onRenameDraftChange,
+            onDismiss = onDismissRenameDialog,
+            onSave = { next ->
+                onDismissRenameDialog()
+                if (next.isNotEmpty()) {
+                    scope.launch {
+                        orbTry(OrbLog.Category.Network, "/api/control/missions") {
+                            core.request(
+                                path = "/api/control/missions/${core.encodeComponent(missionId)}/title",
+                                method = "POST",
+                                body = mapOf("title" to next)
+                            )
+                            onRenamedTitle(next)
+                            core.refreshMissionsQuietly()
+                        }.onFailure { onErrorMessageChanged(it.message ?: "Couldn’t rename the conversation.") }
+                    }
+                }
+            }
+        )
+    }
+
+    previewFilePath?.let { path ->
+        OrbPreviewSheet(
+            core = core,
+            path = path,
+            workspaceId = selectedWorkspaceId.takeIf { it.isNotEmpty() },
+            onDismiss = onDismissPreviewFile
+        )
+    }
 }
 
 /** Pure harness and model catalog projection for Android's agent picker; unit-tested. */
@@ -5057,11 +5294,20 @@ object OrbAgentCatalog {
 
     data class ModelChoice(val value: String, val label: String)
 
-    fun backendOptions(backends: List<OrbRow>, existing: Boolean): List<String> {
+    fun backendOptions(
+        backends: List<OrbRow>,
+        existing: Boolean,
+        activeCloudBackend: String? = null
+    ): List<String> {
         val fromServer = backends
             .mapNotNull { it.str("id", "slug", "name") }
             .filter { it != "gemini" }
-        return if (existing) fromServer.distinct() else (fromServer + listOf("hermes", "cursor_cloud", "grok_bot")).distinct()
+        if (!existing) return (fromServer + listOf("hermes", "cursor_cloud", "grok_bot")).distinct()
+        return if (!activeCloudBackend.isNullOrEmpty()) {
+            (listOf(activeCloudBackend) + fromServer).distinct()
+        } else {
+            fromServer.distinct()
+        }
     }
 
     fun backendLabel(id: String, backends: List<OrbRow>): String =
@@ -5121,6 +5367,7 @@ fun OrbAgentPickerSheet(
     selectedConfigProfile: String,
     onSelectConfigProfile: (String) -> Unit,
     existing: Boolean = false,
+    activeCloudBackend: String? = null,
     isAdmin: Boolean = true,
     cloudHandoff: Boolean = false,
     locked: Boolean = false,
@@ -5132,8 +5379,8 @@ fun OrbAgentPickerSheet(
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true, confirmValueChange = { !busy || it != androidx.compose.material3.SheetValue.Hidden })
     val isCloudService = selectedBackend in setOf("cursor_cloud", "grok_bot", "hermes")
 
-    val backendOptions = remember(backends, existing, cloudHandoff) {
-        OrbAgentCatalog.backendOptions(backends, existing || cloudHandoff)
+    val backendOptions = remember(backends, existing, cloudHandoff, activeCloudBackend) {
+        OrbAgentCatalog.backendOptions(backends, existing || cloudHandoff, activeCloudBackend)
     }
     val modelChoices = remember(selectedBackend, backendModels) {
         OrbAgentCatalog.modelsForBackend(selectedBackend, backendModels)
