@@ -164,7 +164,6 @@ fun OrbComputersBlock(core: OrbCore, computers: List<OrbRow>, ready: Boolean) {
     if (startingSideSystem) {
         OrbSideSystemStartDialog(core = core, onDismiss = { startingSideSystem = false }) { missionId ->
             startingSideSystem = false
-            core.refreshMissionsQuietly()
             core.requestMissionFocus(missionId)
         }
     }
@@ -235,7 +234,10 @@ private fun OrbSideSystemStartDialog(
                                     title = ""
                                 )
                                 if (row.id.isBlank()) error = "SideSystem did not return a mission."
-                                else onStarted(row.id)
+                                else {
+                                    core.refreshMissionsQuietly()
+                                    onStarted(row.id)
+                                }
                             } catch (e: Throwable) {
                                 error = e.message ?: "Could not start in NixOS SideSystem."
                             } finally {
