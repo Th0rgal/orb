@@ -1474,6 +1474,311 @@ class Delivery(unittest.TestCase):
         with self.assertRaises(ValueError):
             live.projection(Connection(), 'a')
 
+    def test_u6a_live_create_ime_send_stop_archive_and_separate_client_read(self):
+        """U6a deterministic live-writes E2E against a persistent SQLite mock Core:
+        Create with IME/Unicode, Send follow-up with IME/Unicode, refuse busy Archive,
+        Stop running turn, Archive, restart mock Core, and verify via a separate Core client."""
+        expected_initial = 'Launch U6a 日本語 🚀'
+        expected_followup = 'Follow-up café 漢字テスト ✓'
+        with tempfile.TemporaryDirectory(prefix='orb-u6a-mock-') as root:
+            db_path = Path(root) / 'core.db'
+
+            def init_db():
+                conn = sqlite3.connect(db_path, check_same_thread=False)
+                conn.executescript('''
+                    CREATE TABLE IF NOT EXISTS missions(
+                        id TEXT PRIMARY KEY,
+                        title TEXT NOT NULL,
+                        status TEXT NOT NULL,
+                        project TEXT NOT NULL DEFAULT '',
+                        backend TEXT NOT NULL DEFAULT 'codex',
+                        owner_user_id TEXT NOT NULL DEFAULT 'owner',
+                        history_json TEXT NOT NULL DEFAULT '[]',
+                        stopped_turns INTEGER NOT NULL DEFAULT 0
+                    );
+                    CREATE TABLE IF NOT EXISTS mission_shares(
+                        mission_id TEXT NOT NULL,
+                        user_id TEXT NOT NULL
+                    );
+                    CREATE TABLE IF NOT EXISTS mission_events(
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        mission_id TEXT NOT NULL,
+                        seq INTEGER NOT NULL,
+                        sequence INTEGER NOT NULL,
+                        event_type TEXT NOT NULL,
+                        payload TEXT NOT NULL,
+                        metadata TEXT NOT NULL DEFAULT '{}',
+                        content TEXT NOT NULL DEFAULT ''
+                    );
+                    CREATE TABLE IF NOT EXISTS seen_messages(
+                        client_message_id TEXT PRIMARY KEY,
+                        mission_id TEXT NOT NULL
+                    );
+                ''')
+                conn.commit()
+                return conn
+
+            def start_mock_core():
+                db = init_db()
+                lock = threading.Lock()
+                state = {'counter': 0, 'turn1_polls': 0}
+
+                def next_seq(mid):
+                    row = db.execute(
+                        'SELECT COALESCE(MAX(sequence), 0) FROM mission_events WHERE mission_id=?',
+                        (mid,),
+                    ).fetchone()
+                    return (row[0] or 0) + 1
+
+                def add_event(mid, kind, content, payload_extra=None):
+                    seq = next_seq(mid)
+                    payload = {'content': content, **(payload_extra or {})}
+                    db.execute(
+                        'INSERT INTO mission_events(mission_id,seq,sequence,event_type,payload,metadata,content) VALUES(?,?,?,?,?,?,?)',
+                        (mid, seq, seq, kind, json.dumps(payload), '{}', content),
+                    )
+                    db.commit()
+                    return seq
+
+                class MockCore(BaseHTTPRequestHandler):
+                    def reply(self, body, code=200):
+                        self.send_response(code)
+                        self.send_header('Content-Type', 'application/json')
+                        self.end_headers()
+                        try:
+                            self.wfile.write(json.dumps(body).encode())
+                        except (BrokenPipeError, ConnectionResetError):
+                            pass
+
+                    def read_json(self):
+                        length = int(self.headers.get('Content-Length') or '0')
+                        return json.loads(self.rfile.read(length)) if length else {}
+
+                    def do_GET(self):
+                        if self.headers.get('Authorization') != 'Bearer u6a-token':
+                            self.reply({'error': 'unauthorized'}, 401)
+                            return
+                        path = self.path
+                        base_path = path.split('?')[0]
+                        with lock:
+                            if base_path == '/api/auth/me':
+                                self.reply({'user': {'username': 'u6a-tester'}})
+                                return
+                            if base_path == '/api/projects':
+                                self.reply({'projects': [{'slug': 'source', 'title': 'Source', 'objective': '', 'color': 'blue'}]})
+                                return
+                            if base_path == '/api/machines':
+                                self.reply([{'id': 'core', 'name': 'orb-core', 'state': 'online', 'status': 'online'}])
+                                return
+                            if base_path == live.INBOX_PATH:
+                                self.reply({'_versions': {}})
+                                return
+                            if base_path == '/api/control/missions':
+                                rows = db.execute('SELECT id,title,status,project,backend,stopped_turns FROM missions').fetchall()
+                                self.reply([
+                                    dict(id=r[0], title=r[1], status=r[2], project=r[3], backend=r[4], stopped_turns=r[5])
+                                    for r in rows
+                                ])
+                                return
+                            if base_path.startswith('/api/control/missions/'):
+                                rest = base_path.removeprefix('/api/control/missions/')
+                                parts = rest.split('/')
+                                mid = parts[0]
+                                row = db.execute(
+                                    'SELECT id,title,status,project,backend,stopped_turns FROM missions WHERE id=?',
+                                    (mid,),
+                                ).fetchone()
+                                if not row:
+                                    self.reply({'error': 'not_found'}, 404)
+                                    return
+                                if len(parts) == 1:
+                                    self.reply(dict(
+                                        id=row[0], title=row[1], status=row[2], project=row[3], backend=row[4],
+                                        stopped_turns=row[5],
+                                        execution={'state': 'running' if row[2] == 'active' else 'idle'},
+                                    ))
+                                    return
+                                sub = parts[1]
+                                if sub == 'events':
+                                    ev_rows = db.execute(
+                                        'SELECT id,sequence,event_type,content FROM mission_events WHERE mission_id=? ORDER BY sequence ASC, id ASC',
+                                        (mid,),
+                                    ).fetchall()
+                                    self.reply([
+                                        dict(id=e[0], mission_id=mid, sequence=e[1], event_type=e[2], content=e[3])
+                                        for e in ev_rows
+                                    ])
+                                    return
+                                if sub == 'open':
+                                    ev_rows = db.execute(
+                                        'SELECT id,sequence,event_type,content FROM mission_events WHERE mission_id=? ORDER BY sequence ASC, id ASC',
+                                        (mid,),
+                                    ).fetchall()
+                                    events = [
+                                        dict(id=e[0], mission_id=mid, sequence=e[1], event_type=e[2], content=e[3])
+                                        for e in ev_rows
+                                    ]
+                                    self.reply(dict(
+                                        protocol=1, mission=dict(id=mid), events=events, spine=[],
+                                        queue=[], max_seq=events[-1]['sequence'] if events else 0,
+                                        has_more=False, spine_has_more=False, spine_next_cursor=None,
+                                        next_cursor=None, page_max_seq=None, reset=False,
+                                    ))
+                                    return
+                                if sub == 'current-bubble':
+                                    # Deterministic staged assistant turn progression on poll:
+                                    # after Create, complete Turn 1 so the UI transitions to awaiting_user.
+                                    if row[2] == 'active' and not db.execute(
+                                        "SELECT 1 FROM mission_events WHERE mission_id=? AND event_type='assistant_message'",
+                                        (mid,),
+                                    ).fetchone():
+                                        state['turn1_polls'] += 1
+                                        if state['turn1_polls'] >= 1:
+                                            add_event(mid, 'assistant_message', 'Turn 1 reply', {'queued': False})
+                                            db.execute("UPDATE missions SET status='awaiting_user' WHERE id=?", (mid,))
+                                            db.commit()
+                                    # After follow-up user_message (seq >= 3), stream Turn 2 while staying active.
+                                    user_count = db.execute(
+                                        "SELECT COUNT(*) FROM mission_events WHERE mission_id=? AND event_type='user_message'",
+                                        (mid,),
+                                    ).fetchone()[0]
+                                    if row[2] == 'active' and user_count >= 2 and not db.execute(
+                                        "SELECT 1 FROM mission_events WHERE mission_id=? AND event_type='text_delta'",
+                                        (mid,),
+                                    ).fetchone():
+                                        add_event(mid, 'text_delta', 'Turn 2 streaming...', {'queued': False})
+                                    qrow = db.execute(
+                                        QUERY, {'1': mid, '2': '0', '3': 'owner', '4': '0'},
+                                    ).fetchone()
+                                    if not qrow:
+                                        self.reply({'error': 'not_found'}, 404)
+                                        return
+                                    self.reply(dict(id=mid, title=qrow[0], status=qrow[1], text=qrow[2]))
+                                    return
+                            self.reply({'error': 'not_found'}, 404)
+
+                    def do_POST(self):
+                        if self.headers.get('Authorization') != 'Bearer u6a-token':
+                            self.reply({'error': 'unauthorized'}, 401)
+                            return
+                        data = self.read_json()
+                        with lock:
+                            if self.path == '/api/control/missions':
+                                state['counter'] += 1
+                                mid = f"m-u6a-{state['counter']}"
+                                prompt = data.get('prompt', '')
+                                title = data.get('title') or 'New mission'
+                                project = data.get('project') or ''
+                                backend = data.get('backend') or 'codex'
+                                db.execute(
+                                    "INSERT INTO missions(id,title,status,project,backend) VALUES(?,?,'active',?,?)",
+                                    (mid, title, project, backend),
+                                )
+                                if prompt:
+                                    add_event(mid, 'user_message', prompt, {'queued': False})
+                                self.reply(dict(
+                                    id=mid, title=title, status='active', project=project, backend=backend,
+                                    model_override=data.get('model_override') or '',
+                                    model_effort=data.get('model_effort') or '',
+                                    permission_mode=data.get('permission_mode') or 'supervised',
+                                ))
+                                return
+                            if self.path == '/api/control/message':
+                                mid = data['mission_id']
+                                cid = data['client_message_id']
+                                content = data['content']
+                                row = db.execute('SELECT status FROM missions WHERE id=?', (mid,)).fetchone()
+                                if not row:
+                                    self.reply({'error': 'not_found'}, 404)
+                                    return
+                                if not db.execute('SELECT 1 FROM seen_messages WHERE client_message_id=?', (cid,)).fetchone():
+                                    db.execute('INSERT INTO seen_messages VALUES(?,?)', (cid, mid))
+                                    add_event(mid, 'user_message', content, {'queued': False})
+                                    db.execute("UPDATE missions SET status='active' WHERE id=?", (mid,))
+                                    db.commit()
+                                self.reply({'id': cid, 'message_accepted': True})
+                                return
+                            if self.path.startswith('/api/control/missions/') and self.path.endswith('/cancel'):
+                                mid = self.path.removeprefix('/api/control/missions/').removesuffix('/cancel')
+                                row = db.execute('SELECT status FROM missions WHERE id=?', (mid,)).fetchone()
+                                if not row:
+                                    self.reply({'error': 'not_found'}, 404)
+                                    return
+                                db.execute(
+                                    "UPDATE missions SET status='interrupted', stopped_turns=stopped_turns+1 WHERE id=?",
+                                    (mid,),
+                                )
+                                add_event(mid, 'turn_stopped', 'stopped by user', {'queued': False})
+                                self.reply({'ok': True, 'status': 'interrupted'})
+                                return
+                            if self.path.startswith('/api/control/missions/') and self.path.endswith('/status'):
+                                mid = self.path.removeprefix('/api/control/missions/').removesuffix('/status')
+                                row = db.execute('SELECT status FROM missions WHERE id=?', (mid,)).fetchone()
+                                if not row:
+                                    self.reply({'error': 'not_found'}, 404)
+                                    return
+                                if data.get('status') == 'acknowledged' and row[0] == 'active':
+                                    self.reply({'error': 'mission_running'}, 409)
+                                    return
+                                db.execute('UPDATE missions SET status=? WHERE id=?', (data['status'], mid))
+                                db.commit()
+                                self.reply({'ok': True, 'status': data['status']})
+                                return
+                            self.reply({'error': 'not_found'}, 404)
+
+                    def log_message(self, *_):
+                        pass
+
+                server = ThreadingHTTPServer(('127.0.0.1', 0), MockCore)
+                threading.Thread(target=server.serve_forever, daemon=True).start()
+                return server, db
+
+            # Phase 1: run LeanUI live-writes client against the mock Core server.
+            server1, db1 = start_mock_core()
+            try:
+                url1 = f'http://127.0.0.1:{server1.server_port}'
+                (Path(root) / 'connection.json').write_text(json.dumps(dict(api_url=url1, token='u6a-token')))
+                subprocess.run(
+                    ['lean', '-j', '1', '-M', '1024', '--run', 'tests/LiveDelivery.lean', 'u6a-live-writes'],
+                    cwd=PKG,
+                    env={**os.environ, 'ORB_STATE_DIR': root},
+                    check=True,
+                    timeout=45,
+                )
+            finally:
+                server1.shutdown()
+                server1.server_close()
+                db1.close()
+
+            created_id = (Path(root) / 'u6a-created-id').read_text().strip()
+            self.assertEqual(created_id, 'm-u6a-1')
+
+            # Phase 2: restart mock Core on the same SQLite DB and verify via a SEPARATE Core HTTP client.
+            server2, db2 = start_mock_core()
+            try:
+                def independent_client_get(path):
+                    req = live.urllib.request.Request(
+                        f'http://127.0.0.1:{server2.server_port}' + path,
+                        headers={'Authorization': 'Bearer u6a-token', 'Accept': 'application/json'},
+                    )
+                    with live.urllib.request.urlopen(req, timeout=5) as resp:
+                        return json.load(resp)
+
+                mission = independent_client_get(f'/api/control/missions/{created_id}')
+                self.assertEqual(mission['id'], created_id)
+                self.assertEqual(mission['status'], 'acknowledged')
+                self.assertEqual(mission['stopped_turns'], 1)
+
+                events = independent_client_get(f'/api/control/missions/{created_id}/events')
+                user_messages = [e['content'] for e in events if e['event_type'] == 'user_message']
+                stopped_events = [e for e in events if e['event_type'] == 'turn_stopped']
+                self.assertEqual(user_messages, [expected_initial, expected_followup])
+                self.assertEqual(len(stopped_events), 1)
+            finally:
+                server2.shutdown()
+                server2.server_close()
+                db2.close()
+
     def test_sql_bounds_current_text_and_scopes_reader(self):
         with contextlib.closing(fixture()) as db:
             db.execute("DELETE FROM mission_events WHERE event_type='assistant_message_canonical'")

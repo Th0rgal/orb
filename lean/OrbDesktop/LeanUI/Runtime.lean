@@ -471,9 +471,12 @@ def runWindow {σ : Type} (rt0 : RuntimeState σ)
       for ev in evs do
         rt := rt.stepEvent (onEvent rt) ev
     else
+      let before := rt.app
       let (app, damage) ← pollFrame rt
       rt := { rt with app }
       if let some rect := damage then rt := rt.markDirty rect
+      if let some target := focusChange before app (.time 0) then
+        rt := rt.requestFocus target rt.viewportDeviceRect
       let rendered := rt.framesRendered
       rt ← stepFrameWithRegions rt onEvent view focusChange
       let shape : UInt32 := match rt.hoveredEntity with

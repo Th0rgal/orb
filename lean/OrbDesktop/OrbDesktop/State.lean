@@ -1308,11 +1308,13 @@ def desktopFocusChange (before after : DesktopState) (ev : Event) : Option Nat :
   else if after.screen == .resources && after.resourceRows.isSome && before.resourcePage != after.resourcePage then
     some (if before.resourcePage < after.resourcePage then 947 else 946)
   else if after.screen == .inbox && before.screen != .inbox then some (if after.inboxItems.isEmpty then 102 else 940)
-  else if after.hasLiveConnection && after.missionMenu.isNone && after.screen == .controlEmpty then
+  else if after.hasLiveConnection && after.missionMenu.isNone &&
+      (after.screen == .controlEmpty || after.screen == .controlPopulated) then
     let shortcut := match ev with
       | .key key mods .pressed => (key == 0x6e || key == 0x4e) && mods &&& 0x0a != 0
+      | .activate 101 => true
       | _ => false
-    if shortcut || before.screen != after.screen || before.draftProject != after.draftProject then some 1 else none
+    if !before.hasLiveConnection || shortcut || before.screen != after.screen || before.draftProject != after.draftProject then some 1 else none
   else none
 
 private def stepMissionMenu (st : DesktopState) (menu : MissionMenu) (ev : Event) (viewport : Rect) :
@@ -1543,7 +1545,7 @@ def stepDesktopEvent (scale120 : Nat) (viewport : Rect) (st : DesktopState) (ev 
       if st.screen == .inference || st.screen == .machinesFleet then return (st, none)
       if !st.composer.imePreeditText.isEmpty then return (st, none)
       if shift then return stepDesktopInput scale120 viewport st (.text "\n")
-      if st.composer.isRunning then return (st, none)
+      if st.composer.isRunning && !st.unconfirmedSend.any (·.2 == st.composer.text) then return (st, none)
     let activation := match ev with
       | .activate id => some id
       | .composerReturn false => some 2
@@ -1583,7 +1585,7 @@ def stepDesktopEvent (scale120 : Nat) (viewport : Rect) (st : DesktopState) (ev 
           else if st.unconfirmedSend.any (·.2 == st.composer.text) && st.composer.imePreeditText.isEmpty then
             some (.send card.missionId st.composer.text)
           else if st.composer.isRunning then some (.stop card.missionId)
-          else if st.composer.imePreeditText.isEmpty && !st.composer.text.isEmpty then
+          else if st.composer.imePreeditText.isEmpty && !st.composer.text.trimAscii.isEmpty then
             some (.send card.missionId st.composer.text)
           else none
         return ({ st with writeRequest := request }, none)
@@ -1937,15 +1939,22 @@ def applyHistoryBatch (scale : Nat) (viewport : Rect) (st : DesktopState) (missi
       let mergedTurns := st.liveTurns.take prefixLen ++ addedTexts.toList
       let mergedIds := st.liveTurnIds ++ addedIds.toList
       let mergedCount := mergedTurns.length
-      if mergedTurns == st.liveTurns && mergedIds == st.liveTurnIds &&
-          mergedCount == st.livePersistedCount && !st.historyLoading && !st.historyLoadError then
+      let turnsAdvanced := mergedTurns != st.liveTurns || mergedIds != st.liveTurnIds ||
+        mergedCount != st.livePersistedCount
+      if !turnsAdvanced && !st.historyLoading && !st.historyLoadError then
         return (st, none)
+      -- When persisted history advances past the previously-streamed turn (e.g. after
+      -- a live Send or degraded recovery), clear `stream` so the accompanying empty `B`
+      -- turn-boundary frame does not archive the already-persisted turn a second time.
+      let nextStream :=
+        if turnsAdvanced then { st.stream with shown := [], pending := [] } else st.stream
       return ({ st with
         liveTurns := mergedTurns
         liveTurnIds := mergedIds
         livePersistedCount := mergedCount
         historyLoading := false
-        historyLoadError := false },
+        historyLoadError := false
+        stream := nextStream },
         some (transcriptDamageRect scale viewport st.sidebarWidth))
   let textList := texts.toList
   let idList := ids.toList
