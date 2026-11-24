@@ -994,7 +994,12 @@ def buildSearchModalOverlay (theme : Theme) (availW availH : SubPx)
         |>.withFixedSize innerW (pxToSub 46))
       [ chromeIcon "search" pal.textSecondary 16
       , WidgetNode.focusable spec.inputWidgetId <|
-          screenTextLine theme (pxToSub 748) (pxToSub 22) (pxToSub 15) (pxToSub 22) queryColor queryDisplay
+          let stRun : TextStyle := { Theme.bodyText theme with
+            sizeSub := pxToSub 15, lineHeightSub := pxToSub 22, color := queryColor, weight := 400 }
+          let baseRun := overlaySynthRun stRun queryDisplay
+          let run := if spec.query.isEmpty then baseRun else { baseRun with editorStart := some 0 }
+          WidgetNode.text (BoxStyle.row 0 |>.withFixedSize (pxToSub 748) (pxToSub 22)) (pxToSub 22) [run] none
+            (some { owner := spec.inputWidgetId, pos := spec.query.length, length := spec.query.length, color := pal.textPrimary })
       , WidgetNode.focusable searchClearId <|
           WidgetNode.box
             (BoxStyle.row 0 |>.withAlign .center |>.withJustify .center |>.withFixedSize (pxToSub 22) (pxToSub 22))
@@ -1435,16 +1440,21 @@ def buildDesktopScreen (st : DesktopState) (availW availH : SubPx)
            let v := currentSettings st ""
            let machine := ((st.launchMachines.getD []).lookup v.machine).getD <|
              ((st.fleetMachines.find? (·.machineId == v.machine)).map (·.name)).getD (if v.machine.isEmpty then "Choose machine" else v.machine)
-           let projectPicker := WidgetNode.focusable draftProjectPickerId <| WidgetNode.box (BoxStyle.row (pxToSub 4) |>.withAlign .center)
-             [chromeLabel (pxToSub 18) [overlaySynthRun (Theme.mutedText theme) project],
+           let pillStyle := BoxStyle.row (pxToSub 5)
+             |>.withAlign .center
+             |>.withPadding (Edges.xy (pxToSub 7) (pxToSub 2))
+             |>.withRadius (pxToSub 6)
+           let pillTextStyle : TextStyle := { Theme.mutedText theme with weight := 500 }
+           let projectPicker := WidgetNode.focusable draftProjectPickerId <| WidgetNode.box pillStyle
+             [chromeLabel (pxToSub 18) [overlaySynthRun pillTextStyle project],
               chromeIcon "chevron-down" pal.textMuted 10] (some draftProjectPickerId)
-           let destination := WidgetNode.focusable 720 <| WidgetNode.box (BoxStyle.row (pxToSub 4) |>.withAlign .center)
-             [chromeIcon "server" pal.textMuted 14, chromeLabel (pxToSub 18) [overlaySynthRun (Theme.mutedText theme) machine],
+           let destination := WidgetNode.focusable 720 <| WidgetNode.box pillStyle
+             [chromeIcon "server" pal.textMuted 14, chromeLabel (pxToSub 18) [overlaySynthRun pillTextStyle machine],
               chromeIcon "chevron-down" pal.textMuted 10] (some 720)
            let folderLabel := ((st.draftDirectory.splitOn "/").filter (!·.isEmpty)).getLast?.getD (if st.draftDirectory.isEmpty then "Folder" else "/")
-           let folderPicker := WidgetNode.focusable draftDirectoryPickerId <| WidgetNode.box (BoxStyle.row (pxToSub 4) |>.withAlign .center)
-             [chromeIcon "folder" pal.textMuted 14, chromeLabel (pxToSub 18) [overlaySynthRun (Theme.mutedText theme) folderLabel]] (some draftDirectoryPickerId)
-           let header := WidgetNode.box (BoxStyle.row (pxToSub 16) |>.withAlign .center |>.withFixedSize width (pxToSub 24))
+           let folderPicker := WidgetNode.focusable draftDirectoryPickerId <| WidgetNode.box pillStyle
+             [chromeIcon "folder" pal.textMuted 14, chromeLabel (pxToSub 18) [overlaySynthRun pillTextStyle folderLabel]] (some draftDirectoryPickerId)
+           let header := WidgetNode.box (BoxStyle.row (pxToSub 10) |>.withAlign .center |>.withFixedSize width (pxToSub 26))
              ([projectPicker, destination] ++ if v.machine.startsWith "auto-managed" then [] else [folderPicker])
            let voiceButton (id : Nat) (icon : String) :=
              WidgetNode.focusable id <| WidgetNode.box

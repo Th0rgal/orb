@@ -10,13 +10,21 @@ namespace LeanUI
 /-- Semantic widget identity alias (`EntityId`). -/
 abbrev WidgetId := EntityId
 
+/-- Caret overlay drawn inside a `WidgetPayload.text` when `focusState.owner == some owner`. -/
+structure TextCaretSpec where
+  owner : WidgetId
+  pos : Nat
+  length : Nat
+  color : Color
+  deriving DecidableEq, Repr, Inhabited
+
 /-- Visual payload carried by a declarative `WidgetNode`. -/
 inductive WidgetPayload where
   | container
   | rrect (fill : Color) (radii : CornerRadii) (border : BorderStyle)
   | shadow (shadow : ShadowStyle) (radius : SubPx)
   | linearGradient (c0 c1 : Color) (angleDeg : Nat) (radius : SubPx)
-  | text (lineHeightSub : SubPx) (runs : List InlineRun)
+  | text (lineHeightSub : SubPx) (runs : List InlineRun) (caret : Option TextCaretSpec := none)
   | iconMask (page : Nat) (src : Rect) (color : Color) (badgeBg : Option Color := none)
   /-- Round-capped polylines in a 16px view box, coordinates in tenths of a pixel.
   `strokeTenths` is the stroke radius in tenths of a view unit (55 → the historical
@@ -89,8 +97,8 @@ namespace WidgetNode
 
 /-- Declarative inline text run widget builder. -/
 @[inline] def text (style : BoxStyle) (lineHeightSub : SubPx) (runs : List InlineRun)
-    (id : Option WidgetId := none) : WidgetNode :=
-  .mk id false id.isSome style (.text lineHeightSub runs) []
+    (id : Option WidgetId := none) (caret : Option TextCaretSpec := none) : WidgetNode :=
+  .mk id false id.isSome style (.text lineHeightSub runs caret) []
 
 /-- Declarative coverage-mask icon / vector glyph widget builder. -/
 @[inline] def icon (style : BoxStyle) (page : Nat) (src : Rect) (color : Color)
@@ -130,7 +138,7 @@ def downChevronPaths : List (List (Int × Int)) := [[(50,65),(80,95),(110,65)]]
 def toLayoutNode : WidgetNode → LayoutNode
   | .mk id _ _ style payload children =>
     match payload with
-    | .text lineHeightSub runs =>
+    | .text lineHeightSub runs _ =>
       .text id style lineHeightSub runs
     | .scrollClip sc =>
       let childLayout := match children with
@@ -204,8 +212,42 @@ where
       (if gw > 0 && gh > 0 then [Prim.glyph pg.glyph.atlasSrc dst pg.color pg.glyph.isColor] else []) ++
         emitLineGlyphs scale120 originXSub originYSub lineHSub pgs
 
+/-- Emit a crisp vertical caret bar at the logical scalar insertion point when `owner` is focused. -/
+def emitTextCaret (scale120 : Nat) (focusState : FocusState) (box : ComputedBox)
+    (lineH : SubPx) : Option TextCaretSpec → List Prim
+  | none => []
+  | some c =>
+    if focusState.owner != some c.owner then []
+    else
+      let barW : Int := Int.ofNat (max 1 (scaleSubPx scale120 (pxToSub 1 + pxToSub 1 / 2)))
+      if c.length == 0 then
+        let r : Rect := {
+          x := roundDev scale120 box.contentRectSub.x,
+          y := roundDev scale120 (box.contentRectSub.y + pxToSub 1),
+          w := barW,
+          h := Int.ofNat (max 1 (scaleSubPx scale120 (lineH - pxToSub 2)))
+        }
+        [Prim.quad r c.color 0 0 0]
+      else
+        let rows := editorRows box.lines c.length
+        let row := rows[editorRowIndex rows c.pos]?.getD
+          { start := 0, stops := [(0, 0)], top := 0, height := lineH }
+        let relX : SubPx :=
+          match row.stops.find? (fun p => p.1 >= c.pos) with
+          | some (_, x) => x
+          | none => match row.stops.getLast? with
+            | some (_, x) => x
+            | none => 0
+        let r : Rect := {
+          x := roundDev scale120 (box.contentRectSub.x + Int.ofNat relX),
+          y := roundDev scale120 (box.contentRectSub.y + Int.ofNat row.top + pxToSub 1),
+          w := barW,
+          h := Int.ofNat (max 1 (scaleSubPx scale120 (row.height - pxToSub 2)))
+        }
+        [Prim.quad r c.color 0 0 0]
+
 /-- Emit payload-specific primitives for a single laid-out node. -/
-def emitPayloadPrims (scale120 : Nat) (box : ComputedBox) : WidgetPayload → List Prim
+def emitPayloadPrims (scale120 : Nat) (focusState : FocusState) (box : ComputedBox) : WidgetPayload → List Prim
   | .container => []
   | .rrect fill radii border =>
     let radiiPx := radii.toDevTuple scale120
@@ -221,8 +263,9 @@ def emitPayloadPrims (scale120 : Nat) (box : ComputedBox) : WidgetPayload → Li
     [.shadow shRect sh.color (scaleSubPx scale120 radius) (scaleSubPx scale120 sh.blur)]
   | .linearGradient c0 c1 angleDeg radius =>
     [.linear box.rectDev c0 c1 angleDeg (scaleSubPx scale120 radius)]
-  | .text _ _ =>
-    emitWrappedLineGlyphs scale120 box.contentRectSub.x box.contentRectSub.y box.lines
+  | .text lineH _ caret =>
+    emitWrappedLineGlyphs scale120 box.contentRectSub.x box.contentRectSub.y box.lines ++
+      emitTextCaret scale120 focusState box lineH caret
   | .iconMask page src color none =>
     [.mask page src box.contentRectDev color]
   | .iconMask page src color (some bg) =>
@@ -383,7 +426,7 @@ def lowerWidgetPair (scale120 : Nat) (focusState : FocusState) (theme : Theme)
     let clipPopPrims : List Prim :=
       if needsRoundedClip || needsRectClip then [.clipPop] else []
     let selfBoxPrims := emitBoxStylePrims scale120 box.rectDev style
-    let selfPayloadPrims := emitPayloadPrims scale120 box payload
+    let selfPayloadPrims := emitPayloadPrims scale120 focusState box payload
     let (childPrims, childFocusOrder, childHitsSub, childHitsDev) :=
       lowerWidgetChildren scale120 focusState theme nextClipSub nextClipDev children box.children
     let isFocused := match id, focusState.owner with
@@ -425,6 +468,27 @@ def lowerWidgetPair (scale120 : Nat) (focusState : FocusState) (theme : Theme)
           if hitR.isEmpty then [] else [(wid, hitR)]
         else []
       | none => []
+    let scrollbarPrims : List Prim :=
+      match payload, box.scrollLimitXY with
+      | .scrollClip _, some (_, limitY) =>
+        if limitY == 0 then []
+        else
+          let viewH := box.contentRectDev.h
+          let limitDev := Int.ofNat (max 1 (scaleSubPx scale120 limitY))
+          let contentH := viewH + limitDev
+          let offDev := Int.ofNat (scaleSubPx scale120 (box.scrollOffset.getD (0, 0)).2)
+          let minThumb := Int.ofNat (scaleSubPx scale120 (pxToSub 28))
+          let padY := Int.ofNat (scaleSubPx scale120 (pxToSub 4))
+          let usableH := max 1 (viewH - 2 * padY)
+          let thumbH := min usableH (max minThumb ((usableH * viewH) / max 1 contentH))
+          let travel := max 0 (usableH - thumbH)
+          let thumbY := box.contentRectDev.y + padY + (min offDev limitDev * travel) / limitDev
+          let thumbW := Int.ofNat (max 4 (scaleSubPx scale120 (pxToSub 6)))
+          let thumbX := box.contentRectDev.right - thumbW - Int.ofNat (scaleSubPx scale120 (pxToSub 3))
+          let thumbCol : Color := if theme.isDark then 0xFFFFFF38 else 0x00000030
+          [Prim.quad { x := thumbX, y := thumbY, w := thumbW, h := thumbH } thumbCol
+            (scaleSubPx scale120 (pxToSub 3)) 0 0]
+      | _, _ => []
     let allPrims :=
       layerPushPrims ++
         selfBoxPrims ++
@@ -432,6 +496,7 @@ def lowerWidgetPair (scale120 : Nat) (focusState : FocusState) (theme : Theme)
         (match payload with
          | .iconMask _ _ _ (some _) => childPrims ++ selfPayloadPrims
          | _ => selfPayloadPrims ++ childPrims) ++
+        scrollbarPrims ++
         clipPopPrims ++
         focusPrim ++
         layerPopPrims

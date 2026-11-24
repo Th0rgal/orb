@@ -45,7 +45,7 @@ structure RuntimeConfig where
   scale120 : Nat := 120
   darkTheme : Bool := true
   maxFrames : Nat := 1
-  fontPattern : String := "Inter"
+  fontPattern : String := "IBM Plex Sans,Inter,sans-serif"
   title : String := "Orb Desktop"
   deriving Repr, Inhabited
 
@@ -285,6 +285,15 @@ def stepEventWithFocus (rt : RuntimeState σ) (onEvent : σ → Event → σ × 
 
 end RuntimeState
 
+/-- Coalesce adjacent `.scroll` events in the same Wayland frame so high-rate touchpad bursts
+update layout and repaint once per frame instead of once per axis tick. -/
+private def coalesceScrollEvents (evs : Array Event) : Array Event :=
+  evs.foldl (init := #[]) fun acc ev =>
+    match ev, acc.back? with
+    | .scroll x2 y2 dx2 dy2, some (.scroll _ _ dx1 dy1) =>
+      acc.pop.push (.scroll x2 y2 (dx1 + dx2) (dy1 + dy2))
+    | _, _ => acc.push ev
+
 /-- Execute one frame tick:
 1. Pump Wayland events (`Wayland.pumpEvents`) and reduce them through `stepEvent`.
 2. Check `needsRedraw rt.damage`: if `false`, skip rendering completely (`quiescentSkips + 1`).
@@ -297,6 +306,7 @@ def stepFrameWithRegions {σ : Type} (rt : RuntimeState σ)
     (focusTraps : σ → List (List EntityId) := fun _ => []) :
     IO (RuntimeState σ) := do
   let (wl1, evs) ← Wayland.pumpEvents rt.wayland
+  let evs := coalesceScrollEvents evs
   let mut st := { rt with wayland := wl1 }
   for ev in evs do
     let before := st.app
@@ -431,10 +441,10 @@ def initRuntimeOn {σ : Type} (cfg : RuntimeConfig) (wl : Wayland.WaylandClient)
   let (bw, bh) := wl.deviceBufferSize
   let vk ← Vulkan.initVulkan bw bh
   let font ← Text.openFont 1 cfg.fontPattern
-  let mono ← Text.openFont 2 "DejaVu Sans Mono"
-  let bold ← Text.openFont 3 "Inter:weight=bold"
-  let medium ← Text.openFont 4 "Inter:weight=medium"
-  let semibold ← Text.openFont 5 "Inter:weight=demibold"
+  let mono ← Text.openFont 2 "Lilex,IBM Plex Mono,monospace"
+  let bold ← Text.openFont 3 s!"{cfg.fontPattern}:weight=bold"
+  let medium ← Text.openFont 4 s!"{cfg.fontPattern}:weight=medium"
+  let semibold ← Text.openFont 5 s!"{cfg.fontPattern}:weight=demibold"
   let focus0 : FocusState := { owner := some 1, traps := [] }
   let initDmg : Damage := some { x := 0, y := 0, w := (bw : Int), h := (bh : Int) }
   return {

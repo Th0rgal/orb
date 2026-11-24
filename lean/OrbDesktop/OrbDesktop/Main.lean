@@ -94,7 +94,7 @@ def shapeDesktopRuns (ac : Text.GlyphAtlasCache) (font : Text.FontHandle)
   if font.facePtr != 0 then
     -- Cache short labels, not the growing stream. UVs remain valid through
     -- append-only shelf allocation; resetAll discards all resolved runs.
-    let cacheable := text.utf8ByteSize ≤ 128
+    let cacheable := text.utf8ByteSize ≤ 512
     if cacheable then
       if let some hit := ac.resolved.find? (fun e => e.face == font.facePtr && e.scale == scale120 && e.text == text && e.style == style) then
         return (ac, [hit.run])
@@ -137,7 +137,7 @@ def shapeDesktopRuns (ac : Text.GlyphAtlasCache) (font : Text.FontHandle)
     }
     if cacheable then
       let entries := curAc.resolved.push ⟨font.facePtr, scale120, text, style, run⟩
-      curAc := { curAc with resolved := if entries.size > 128 then entries.extract 1 entries.size else entries }
+      curAc := { curAc with resolved := if entries.size > 2048 then entries.extract 1 entries.size else entries }
     return (curAc, [run])
   else
     return (ac, [overlaySynthRun style text])
@@ -198,7 +198,7 @@ partial def shapeWidgetTree (ac : Text.GlyphAtlasCache) (font mono bold medium s
           | none => curAc.insertRasterized key (Text.rasterizeIcon paths size strokeTenths)
         curAc := ac'
         pure (WidgetPayload.iconMask entry.page entry.uv color badgeBg)
-      | .text lineHeightSub runs =>
+      | .text lineHeightSub runs caret =>
         let mut shapedRuns : Array InlineRun := #[]
         for r in runs do
           let isSynth := !r.glyphs.isEmpty && r.glyphs.all (fun g => g.sizePx.1 == 0 && g.sizePx.2 == 0)
@@ -238,7 +238,7 @@ partial def shapeWidgetTree (ac : Text.GlyphAtlasCache) (font mono bold medium s
             shapedRuns := #[( { r with glyphs := glyphs.toList, allowBreakAfter := false } )]
             for dot in dots do
               shapedRuns := shapedRuns.push dot
-        pure (WidgetPayload.text lineHeightSub shapedRuns.toList)
+        pure (WidgetPayload.text lineHeightSub shapedRuns.toList caret)
       | other => pure other
     let mut shapedChildren : Array WidgetNode := #[]
     for c in children do

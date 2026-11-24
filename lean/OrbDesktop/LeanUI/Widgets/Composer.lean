@@ -336,34 +336,39 @@ def buildComposerWidget (theme : Theme) (availW composerH : SubPx)
   let lineH := pxToSub 18
   let editW := colW - pxToSub 26
   let inset := Edges.trbl 0 0 0 (pxToSub 2)
+  let indexEditorRuns (rs : List InlineRun) : List InlineRun := Id.run do
+    let mut start := 0
+    let mut indexed := #[]
+    for r in rs do
+      let glyphs := r.glyphs.map fun g => { g with cluster := start + g.cluster }
+      indexed := indexed.push { r with editorStart := some start, glyphs }
+      start := start + glyphs.length + (if r.hardBreakAfter then 1 else 0)
+    return indexed.toList
+  let caretPos := buf.cursorOffset + buf.imePreeditText.length
+  let caretLen := buf.text.length + buf.imePreeditText.length
+  let caretSpec : Option TextCaretSpec :=
+    some { owner := buf.composerWidgetId, pos := caretPos, length := caretLen, color := pal.textPrimary }
   let textNode : WidgetNode := if tall then
     let style := { BoxStyle.col 0 with
       minWidth := editW, maxWidth := editW
       minHeight := pxToSub 48, maxHeight := pxToSub 180 }
-    let runs := Id.run do
-      let mut start := 0
-      let mut indexed := #[]
-      for r in runs do
-        let glyphs := r.glyphs.map fun g => { g with cluster := start + g.cluster }
-        indexed := indexed.push { r with editorStart := some start, glyphs }
-        start := start + glyphs.length + (if r.hardBreakAfter then 1 else 0)
-      return indexed.toList
+    let runs := indexEditorRuns runs
     -- A final newline opens an empty editing line.
     let editorRuns := match runs.getLast? with
       | some r => if r.hardBreakAfter then runs ++ [{ r with glyphs := [] }] else runs
       | none => []
-    let caret := if buf.wheelTop.isSome then none else
-      some (buf.cursorOffset + buf.imePreeditText.length, buf.text.length + buf.imePreeditText.length)
+    let caret := if buf.wheelTop.isSome then none else some (caretPos, caretLen)
     let childStyle := { BoxStyle.row 0 with minWidth := editW, maxWidth := editW, padding := inset }
     WidgetNode.scrollClip style { revealCaret := caret, offsetY := buf.wheelTop.getD 0 }
-      (WidgetNode.text childStyle lineH editorRuns) (some composerViewportId) (hitTestable := false)
+      (WidgetNode.text childStyle lineH editorRuns none caretSpec) (some composerViewportId) (hitTestable := false)
   else
+    let displayRuns := if hasText then indexEditorRuns runs else runs
     WidgetNode.text
       { BoxStyle.row 0 with
         grow := 1, clip := !hasText
         maxWidth := if hasText then (BoxStyle.row 0).maxWidth else placeholderWidth
         minHeight := lineH, maxHeight := lineH, padding := inset }
-      lineH runs
+      lineH displayRuns none caretSpec
   let sendBgCol := if hasText || isRunning then pal.sendBg else ((pal.sendBg &&& 0xFFFFFF00) ||| 0x47)
   let glyph : WidgetNode := if isRunning then
       WidgetNode.rrect (BoxStyle.row 0 |>.withFixedSize (pxToSub 6) (pxToSub 6)) pal.sendFg
