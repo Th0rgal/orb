@@ -355,6 +355,7 @@ structure AccountRoutePage where
   previousTop : SubPx := 0
   options : Option (List AccountRouteOption) := none
   pending : Option AccountRouteOption := none
+  polling : Bool := false
   failed : Bool := false
   deriving BEq, Repr, Inhabited
 
@@ -1463,13 +1464,13 @@ def stepDesktopEvent (scale120 : Nat) (viewport : Rect) (st : DesktopState) (ev 
         if navId == providersBackId || (ev matches .key 0xff1b _ .pressed) then
           return ({ st with accountRoutePage := none, fleetTopSub := page.previousTop, writeError := "" }, some viewport)
         if navId == providersRetryId && page.failed then
-          return ({ st with accountRoutePage := some { page with options := none, pending := none, failed := false }, writeError := "" }, some viewport)
+          return ({ st with accountRoutePage := some { page with options := none, pending := none, polling := false, failed := false }, writeError := "" }, some viewport)
         if navId >= providerRouteId 0 && !page.failed && page.pending.isNone then
           if let some row := (page.options.getD [])[navId - providerRouteId 0]? then
             if row.action == "refresh" then
-              return ({ st with accountRoutePage := some { page with options := none }, writeError := "" }, some viewport)
+              return ({ st with accountRoutePage := some { page with options := none, polling := false }, writeError := "" }, some viewport)
             if row.action == "vpn" || row.action == "routers" then
-              return ({ st with accountRoutePage := some { page with pending := some row }, writeError := "" }, some viewport)
+              return ({ st with accountRoutePage := some { page with pending := some row, polling := false }, writeError := "" }, some viewport)
       else if navId >= providerSettingsId 0 then
         if let some account := (st.providers.getD [])[navId - providerSettingsId 0]? then
           return ({ st with accountRoutePage := some { account, previousTop := st.fleetTopSub }, fleetTopSub := 0, writeError := "" }, some viewport)

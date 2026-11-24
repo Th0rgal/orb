@@ -372,7 +372,7 @@ class Delivery(unittest.TestCase):
             'accounts', 'A\ttest-member\tWork\tGoogle\t0\t1\t', 'A\tsecond\tCloud\tcustom\t1\t0\tcustom'])
 
     def test_account_connection_rechecks_both_settings_after_one_failed_write(self):
-        direct = {'can_configure': True, 'countries': ['NL', 'FI', 'NL'], 'mode': 'direct', 'status': 'direct'}
+        direct = {'can_configure': True, 'countries': ['NL', 'FI', 'NL'], 'mode': 'direct', 'status': 'direct', 'saved': True}
         with patch.object(live, 'Connection') as conn, contextlib.redirect_stdout(io.StringIO()) as output:
             c = conn.return_value
             c.binding = 'ben'
@@ -396,8 +396,11 @@ class Delivery(unittest.TestCase):
             c = conn.return_value
             c.get.side_effect = [read_only, live.urllib.error.HTTPError('x', 503, 'Unavailable', {}, None)]
             rows = list(live.account_route_rows(c, 'ok', True))
-            self.assertEqual(rows, [('', '', 'Account connection', 'Verified exit · NL · fixture · 192.0.2.1'),
-                                    ('refresh', '', 'Alternative routers', 'Could not load. Retry')])
+            self.assertEqual(rows, [
+                ('refresh', '', 'Account connection',
+                 'AirVPN · NL · Verified exit · fixture · 192.0.2.1 · VPN routing is unavailable for this credential.'),
+                ('refresh', '', 'Alternative routers', 'Could not load. Retry'),
+            ])
             c.get.side_effect = [live.urllib.error.HTTPError('x', code, 'Unavailable', {}, None) for code in (403, 404)]
             self.assertEqual(list(live.account_route_rows(c, 'shared', True)), [])
             c.binding = 'thomas'
@@ -435,11 +438,204 @@ class Delivery(unittest.TestCase):
             c.request.assert_called_once_with('/api/ai/providers/shared%2Faccount/vpn',
                 body={'mode': 'vpn', 'country': 'NL'}, method='PUT', deadline=120)
             saved = output.getvalue()
-            self.assertIn('Verified exit · NL · fixture · 192.0.2.35', saved)
+            self.assertIn('Verified exit · fixture · 192.0.2.35', saved)
+            self.assertIn('D\t\tNL\tAirVPN · NL\tSelected', saved)
             c.binding = 'thomas'
             live.account_routes('thomas', 'shared/account', 'openai', '', '')
             self.assertEqual(output.getvalue(), saved * 2)
             self.assertEqual(c.request.call_count, 1)
+
+    def test_account_vpn_matches_shared_fixture(self):
+        spec = json.loads((PKG.parents[1] / 'shared/orb-spec/fixtures/account-vpn.json').read_text())
+        self.assertGreater(len(spec['routes']), 0)
+        self.assertGreater(len(spec['invalid_routes']), 0)
+
+        for case in spec['routes']:
+            with self.subTest(route=case['name']):
+                route = live.account_vpn_route(case['payload'])
+                self.assertIsNotNone(route)
+                view = live.account_vpn_view(route, case['native'])
+                self.assertEqual(view, case['view'])
+
+                rows = list(live.vpn_options(case['payload'], case['native']))
+                header_row, *choice_rows = rows
+                expected = case['view']
+                self.assertEqual(header_row[2], 'Account connection')
+                self.assertEqual(header_row[0], 'refresh' if not expected['editable'] else '')
+                if expected['status']:
+                    self.assertIn(expected['status'], header_row[3])
+                if expected['notice']:
+                    self.assertIn(expected['notice'], header_row[3])
+                if not expected['status'] and not expected['notice']:
+                    self.assertEqual(header_row[3], 'AirVPN · ' + expected['selected'] if expected['selected'] else 'Direct')
+
+                if expected['editable']:
+                    self.assertEqual([r[1] for r in choice_rows], ['', *expected['countries']])
+                    self.assertEqual([r[2] for r in choice_rows],
+                                     ['Direct', *('AirVPN · ' + c for c in expected['countries'])])
+                    for action, value, _, detail in choice_rows:
+                        if value == expected['selected']:
+                            if expected['retry']:
+                                self.assertEqual((action, detail), ('vpn', 'Retry verification'))
+                            elif not value and expected['confirm_direct']:
+                                self.assertEqual((action, detail), ('vpn', 'Confirm Direct route'))
+                            else:
+                                self.assertEqual((action, detail), ('', 'Selected'))
+                        else:
+                            self.assertEqual((action, detail), ('vpn', ''))
+                else:
+                    self.assertEqual(choice_rows, [])
+
+                retry_rows = [r for r in rows if r[3] == 'Retry verification']
+                self.assertEqual(len(retry_rows), 1 if (expected['editable'] and expected['retry']) else 0)
+
+                with patch.object(live, 'Connection') as conn, contextlib.redirect_stdout(io.StringIO()) as out:
+                    c = conn.return_value
+                    c.binding = 'ben'
+                    c.get.side_effect = [case['payload'], {'allowed': False}] if case['native'] else [case['payload']]
+                    live.account_routes('ben', 'acct', 'antigravity' if case['native'] else 'openai', '', '')
+                lines = out.getvalue().splitlines()
+                self.assertEqual(lines[0], 'routes\tpoll' if expected['poll'] else 'routes')
+
+        for idx, payload in enumerate(spec['invalid_routes']):
+            with self.subTest(invalid_route=idx, payload=payload):
+                self.assertIsNone(live.account_vpn_route(payload))
+                with self.assertRaises(ValueError):
+                    list(live.vpn_options(payload))
+                c = Mock(get=Mock(return_value=payload))
+                rows, should_poll = live.account_route_state(c, 'acct', False)
+                self.assertEqual(rows, [('refresh', '', 'Account connection', 'Could not load. Retry')])
+                self.assertFalse(should_poll)
+
+        for case in spec['writes']:
+            self.assertEqual(live.account_vpn_write(case['country']), case['body'])
+
+        for case in spec['read_errors']:
+            self.assertEqual(live.missing_account_setting(case['status'], case['body'], case['path']),
+                             case['missing_endpoint'])
+
+        for case in spec['router_access']:
+            self.assertEqual(live.alternative_router_access(case['payload']), case['allowed'])
+
+    def test_pending_route_reread_interval_and_settle_unit(self):
+        awaiting = {'countries': ['NL'], 'can_configure': True, 'mode': 'vpn', 'country': 'NL',
+                    'status': 'blocked', 'reason': 'vpn_awaiting_verification',
+                    'message': 'Waiting for exit verification.'}
+        stopped = {'countries': ['NL'], 'can_configure': True, 'mode': 'vpn', 'country': 'NL',
+                   'status': 'blocked', 'reason': 'vpn_tunnel_stopped',
+                   'message': 'The VPN tunnel stopped. Retry verification to start a new one.'}
+        verified = {'countries': ['NL'], 'can_configure': True, 'mode': 'vpn', 'country': 'NL',
+                    'status': 'verified', 'server': 'Alkaid', 'exits': ['192.0.2.20']}
+
+        with patch.object(live, 'Connection') as conn, patch.object(live.time, 'sleep') as sleep:
+            c = conn.return_value
+            c.binding = 'ben'
+            c.get.side_effect = [awaiting, awaiting, stopped, awaiting, verified]
+            c.request.return_value = awaiting
+
+            def run(action='', value='', poll=''):
+                out = io.StringIO()
+                with contextlib.redirect_stdout(out):
+                    live.account_routes('ben', 'acct', 'openai', action, value, poll)
+                return out.getvalue().splitlines()
+
+            first = run()
+            sleep.assert_not_called()
+            self.assertEqual(first[0], 'routes\tpoll')
+            self.assertIn('D\t\tNL\tAirVPN · NL\tSelected', first)
+            self.assertFalse(any('Retry verification' in line for line in first))
+
+            still_pending = run(poll='poll')
+            sleep.assert_called_once_with(live.ACCOUNT_VPN_POLL_SECONDS)
+            self.assertEqual(live.ACCOUNT_VPN_POLL_SECONDS, 5)
+            self.assertEqual(still_pending[0], 'routes\tpoll')
+            self.assertFalse(any('Retry verification' in line for line in still_pending))
+
+            failed = run(poll='poll')
+            self.assertEqual([c.args[0] for c in sleep.call_args_list], [5, 5])
+            self.assertEqual(failed[0], 'routes')
+            self.assertIn('D\tvpn\tNL\tAirVPN · NL\tRetry verification', failed)
+
+            retried = run(action='vpn', value='NL', poll='poll')
+            self.assertEqual([c.args[0] for c in sleep.call_args_list], [5, 5])
+            c.request.assert_called_once_with('/api/ai/providers/acct/vpn',
+                                              body={'mode': 'vpn', 'country': 'NL'}, method='PUT', deadline=120)
+            self.assertEqual(retried[0], 'routes\tpoll')
+            self.assertFalse(any('Retry verification' in line for line in retried))
+
+            settled = run(poll='poll')
+            self.assertEqual([c.args[0] for c in sleep.call_args_list], [5, 5, 5])
+            self.assertEqual(settled[0], 'routes')
+            self.assertIn('D\t\t\tAccount connection\tVerified exit · Alkaid · 192.0.2.20', settled)
+            self.assertIn('D\t\tNL\tAirVPN · NL\tSelected', settled)
+
+    def test_pending_account_route_rereads_until_settled_over_core_wire(self):
+        awaiting = {'countries': ['NL'], 'can_configure': True, 'mode': 'vpn', 'country': 'NL',
+                    'status': 'blocked', 'reason': 'vpn_awaiting_verification',
+                    'message': 'Waiting for exit verification.'}
+        stopped = {'countries': ['NL'], 'can_configure': True, 'mode': 'vpn', 'country': 'NL',
+                   'status': 'blocked', 'reason': 'vpn_tunnel_stopped',
+                   'message': 'The VPN tunnel stopped. Retry verification to start a new one.'}
+        verified = {'countries': ['NL'], 'can_configure': True, 'mode': 'vpn', 'country': 'NL',
+                    'status': 'verified', 'server': 'Alkaid', 'exits': ['192.0.2.20']}
+        vpn_gets = []
+        vpn_puts = []
+        responses = [awaiting, stopped, awaiting, verified]
+
+        class Core(BaseHTTPRequestHandler):
+            def reply(self, body, code=200):
+                self.send_response(code)
+                self.end_headers()
+                self.wfile.write(json.dumps(body).encode())
+
+            def do_GET(self):
+                if self.path == '/api/auth/me':
+                    self.reply({'user': {'username': 'Ben'}})
+                elif self.path == '/api/projects':
+                    self.reply({'projects': []})
+                elif self.path == '/api/machines':
+                    self.reply([])
+                elif self.path == '/api/ai/providers':
+                    self.reply({'providers': [{'id': 'acct', 'name': 'OpenAI', 'provider_type': 'openai',
+                                               'enabled': True, 'user_enabled': True}]})
+                elif self.path == '/api/ai/providers/acct/vpn':
+                    idx = min(len(vpn_gets), len(responses) - 1)
+                    vpn_gets.append(time.monotonic())
+                    self.reply(responses[idx])
+                elif self.path == '/api/backends':
+                    self.reply({'backends': []})
+                elif self.path == '/api/providers/backend-models':
+                    self.reply({'backends': {}})
+                elif self.path == '/api/model-routing/chains':
+                    self.reply([])
+                else:
+                    self.reply([])
+
+            def do_PUT(self):
+                if self.path != '/api/ai/providers/acct/vpn':
+                    self.send_error(404)
+                    return
+                body = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
+                vpn_puts.append(body)
+                self.reply(awaiting)
+
+            def log_message(self, *_):
+                pass
+
+        with ThreadingHTTPServer(('127.0.0.1', 0), Core) as server, tempfile.TemporaryDirectory() as root:
+            threading.Thread(target=server.serve_forever, daemon=True).start()
+            try:
+                (Path(root) / 'connection.json').write_text(json.dumps(dict(
+                    api_url=f'http://127.0.0.1:{server.server_port}', token='fixture')))
+                subprocess.run(['lean', '-j', '1', '-M', '1024', '--run', 'tests/LiveDelivery.lean', 'account-vpn-poll'],
+                               cwd=PKG, env={**os.environ, 'ORB_STATE_DIR': root}, check=True, timeout=45)
+            finally:
+                server.shutdown()
+
+        self.assertEqual(len(vpn_gets), 4)
+        self.assertEqual(vpn_puts, [{'mode': 'vpn', 'country': 'NL'}])
+        self.assertGreaterEqual(vpn_gets[1] - vpn_gets[0], 4.5)
+        self.assertGreaterEqual(vpn_gets[3] - vpn_gets[2], 4.5)
 
     def test_provider_toggle_requires_the_selected_account_receipt(self):
         with patch.object(live, 'Connection') as conn:

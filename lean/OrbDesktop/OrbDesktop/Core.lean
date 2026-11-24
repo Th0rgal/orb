@@ -88,7 +88,7 @@ private inductive ReadKind where
   | cloud (mission : String)
   | resources (range : String)
   | nativeModels (machine : String)
-  | accountRoutes (account provider action value : String)
+  | accountRoutes (account provider action value : String) (poll : Bool := false)
   | directories (machine path : String)
   | launchMachines (admin : Bool) (harness : String)
   deriving BEq
@@ -104,7 +104,8 @@ private def startLiveRead (binding : String) (kind : ReadKind) (notify : IO Unit
     | .account => #["-I", "-c", transport ++ "\nobserve_account(sys.argv[1])", binding]
     | .roster previous => #["-I", "-c", transport ++ "\nrecover_roster(sys.argv[1])", previous]
     | .nativeModels machine => #["-I", "-c", transport ++ "\nnative_models(*sys.argv[1:])", binding, machine]
-    | .accountRoutes account provider action value => #["-I", "-c", transport ++ "\naccount_routes(*sys.argv[1:])", binding, account, provider, action, value]
+    | .accountRoutes account provider action value poll =>
+      #["-I", "-c", transport ++ "\naccount_routes(*sys.argv[1:])", binding, account, provider, action, value, if poll then "poll" else ""]
     | .directories machine path => #["-I", "-c", transport ++ "\nlist_directories(*sys.argv[1:])", binding, machine, path]
     | .launchMachines admin harness => #["-I", "-c", transport ++ "\nlaunch_machines(*sys.argv[1:])", binding, if admin then "admin" else "member", harness]
     | .cloud mission => #["-I", "-c", transport ++ "\ncloud_inventory(*sys.argv[1:])", binding, mission]
@@ -146,15 +147,16 @@ def withLiveSources {α : Type} (isDark : Bool) (notify : IO Unit)
         else if st.screen == .resources && st.resourceRows.isNone && !st.resourceFailed then some (.resources st.resourceRange)
         else if st.screen == .inference && st.providers.isNone && !st.providerReadFailed then some .providers
         else if let some page := st.accountRoutePage then
-          if st.screen == .inference && !page.failed && (page.options.isNone || page.pending.isSome) then
-            some (.accountRoutes page.account.id page.account.providerType ((page.pending.map (·.action)).getD "") ((page.pending.map (·.value)).getD ""))
+          if st.screen == .inference && !page.failed && (page.options.isNone || page.pending.isSome || page.polling) then
+            let poll := page.options.isSome && page.pending.isNone && page.polling
+            some (.accountRoutes page.account.id page.account.providerType ((page.pending.map (·.action)).getD "") ((page.pending.map (·.value)).getD "") poll)
           else if st.catalogLoading then some (.catalog st.catalogRevision) else none
         else if st.catalogLoading then some (.catalog st.catalogRevision)
         else (nativeCatalogRequest st).map ReadKind.nativeModels
       -- Navigation may cancel a stale read. A submitted shared account update
       -- must settle before another page fetches the account's saved route.
       if let some source := current then
-        if let .accountRoutes _ _ action _ := source.kind then
+        if let .accountRoutes _ _ action _ _ := source.kind then
           if !action.isEmpty && source.binding == st.connectionBinding && some source.kind != kind then
             if (← source.take).isNone then return none
             close
@@ -214,19 +216,28 @@ def withLiveSources {α : Type} (isDark : Bool) (notify : IO Unit)
           | ["N", id, name] => some ({ backend := "antigravity", harnessName := "Antigravity CLI", model := id, modelName := name } : CatalogModel)
           | _ => none
         return some (applyNativeCatalog { st with missionMenu := menu } machine rows)
-      if let .accountRoutes account _ _ _ := source.kind then
+      if let .accountRoutes account provider _ _ isPoll := source.kind then
         let some page := st.accountRoutePage | return none
         if page.account.id != account then return none
-        if ![some "routes", some "unconfirmed"].contains lines.head? then
-          return some { st with accountRoutePage := some { page with failed := true, pending := none } }
+        let header := splitTab (lines.head?.getD "")
+        let status := col header 0
+        let shouldPoll := col header 1 == "poll"
+        if status != "routes" && status != "unconfirmed" then
+          return some { st with accountRoutePage := some { page with failed := true, pending := none, polling := false } }
         let rows := lines.filterMap fun line => match splitTab line with
           | ["D", action, value, title, detail] => some ({ action, value, title, detail } : AccountRouteOption)
           | _ => none
         let changed := page.pending.isSome
-        return some { st with accountRoutePage := some { page with options := some rows, pending := none }
+        let writeError := if status == "unconfirmed" then "Core could not confirm the change. Check the current setting."
+          else if isPoll then st.writeError else ""
+        if shouldPoll then
+          slot.set (some (← startLiveRead st.connectionBinding (.accountRoutes account provider "" "" true) notify))
+        let nextPage := { page with options := some rows, pending := none, polling := shouldPoll }
+        if !changed && page == nextPage && st.writeError == writeError then return none
+        return some { st with accountRoutePage := some nextPage
                               catalogLoading := st.catalogLoading || changed
                               catalogRevision := st.catalogRevision + (if changed then 1 else 0)
-                              writeError := if lines.head? == some "unconfirmed" then "Core could not confirm the change. Check the current setting." else "" }
+                              writeError }
       if let .directories .. := source.kind then
         let entries := lines.filterMap fun line => match splitTab line with
           | ["D", path, title] => some (path, title)
