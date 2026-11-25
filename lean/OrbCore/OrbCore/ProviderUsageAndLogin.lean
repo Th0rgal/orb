@@ -2702,12 +2702,34 @@ def reconcileCliLoginCompletion
       }
     let providerType := (affected[0]?.map (·.providerType)).getD
       (if sess.authFileType == "claude" then "anthropic" else if sess.authFileType == "codex" then "openai" else sess.authFileType)
+    let matchedFile? := files.find? candidate
+    let mut completedProvId := sess.targetProvId?.getD ""
+    if sess.targetProvId?.isNone && !sess.userId.isEmpty then
+      if let some newFile := matchedFile? then
+        let newProvId := fileAccountId providerType newFile.fileName
+        completedProvId := newProvId
+        if (← getAIProvider? store newProvId).isNone then
+          let baseName := (lookupProviderMeta providerType).name
+          let cleanEmail := newFile.email.trimAscii.toString
+          let dispName := if cleanEmail.isEmpty then baseName else s!"{baseName} ({cleanEmail})"
+          discard <| upsertAIProvider store {
+            id := newProvId
+            providerType := providerType
+            name := dispName
+            enabled := !newFile.disabled
+            baseUrl := ""
+            apiKey := "cli-proxy-managed"
+            updatedAt := formatEpochIso8601Utc now
+            createdByUserId := sess.userId
+          }
     let typeKey := s!"cliproxyapi:{providerType}"
     let typePrefix := s!"{typeKey}:"
     let mut oauthRowIds := (affected.filter (fun hp => hp.hasOAuth && !hp.hasApiKey)).map (·.id)
+    if !completedProvId.isEmpty && !oauthRowIds.contains completedProvId then
+      oauthRowIds := oauthRowIds.push completedProvId
     let targetedCodex := sess.authFileType == "codex" && sess.targetProvId?.isSome
     if targetedCodex then
-      if let some file := files.find? candidate then
+      if let some file := matchedFile? then
         oauthRowIds := oauthRowIds.push (fileAccountId providerType file.fileName)
     let matchesLoginKey (k : String) : Bool :=
       oauthRowIds.contains k || k == typeKey || (!targetedCodex && k.startsWith typePrefix)
@@ -2721,7 +2743,7 @@ def reconcileCliLoginCompletion
     for hp in affected do
       refreshProviderUsageAsync hub hp
     result := { result with status := "completed", message? := some "Connected" }
-    appendProviderAuditLog store sess.userId "" "login_complete" (sess.targetProvId?.getD "")
+    appendProviderAuditLog store sess.userId "" "login_complete" completedProvId
       #[s!"provider_type:{sess.providerSlug}"] (formatEpochIso8601Utc now)
   else if now >= started + 60 then
     result := { result with status := "failed", message? := some "Authentication completed but the new auth file was not visible within 60 seconds. Try reconnecting again." }
@@ -3025,7 +3047,6 @@ def dispatchProviderAndAiRoute
     return some (jsonResp 200 (.obj #[("snapshots", .arr #[])]))
 
   if segs == ["api", "providers", "catalog", "refresh"] && method == "POST" then
-    if !effAdmin then return some (jsonErr 403 "admin_required")
     refreshCustomModelDiscovery store workingDir hub
     let _ ← nativeCatalogForRequest (← NativeCanary.load) hub store workingDir callerUserId rawTarget effAdmin true true
     let nowSec ← nowEpoch
@@ -3862,13 +3883,15 @@ def dispatchProviderAndAiRoute
 
       -- `POST /api/ai/providers/:id/antigravity/recheck`
       if method == "POST" && segs.length == 6 && segs[4]? == some "antigravity" && segs[5]? == some "recheck" then
-        if !effAdmin then return some (jsonErr 403 "admin_required")
         let some hp := matchedProv?
           | return some (jsonErr 404 "Provider not found")
+        if !effAdmin && !providerAddedBy hp callerUserId then
+          return some (jsonErr 403 "admin_required")
         let cur ← proxyCooldownsRef.get
         proxyCooldownsRef.set (cur.filter (fun c => c.accountId != hp.id))
         let live ← probeProviderUsage hub hp
-        return some (jsonResp 200 live)
+        let projected := if effAdmin || providerAddedBy hp callerUserId then live else projectMemberProviderUsageJv live (memberProviderDisplayName hps hp)
+        return some (jsonResp 200 projected)
 
       -- `GET /api/ai/providers/:id/auth/methods`
       if method == "GET" && segs.length == 6 && segs[4]? == some "auth" && segs[5]? == some "methods" then

@@ -96,6 +96,12 @@ def memberSharedProviderRules
   -- member_cannot_delete_owner_account
   let (delOwner, _) ← send "DELETE" "/api/ai/providers/prov-anth-1" member (.obj #[]) app
   check (delOwner == 403 && (← getAIProvider? store "prov-anth-1").isSome) s!"member_cannot_delete_owner_account (got {delOwner})"
+  -- member_toggles_enabled_on_own_account_and_refreshes_catalog
+  let (ownDisableSt, _) ← send "PUT" s!"/api/ai/providers/{probeId}" member (.obj #[("enabled", .bool false)]) app
+  let (ownEnableSt, _) ← send "PUT" s!"/api/ai/providers/{probeId}" member (.obj #[("enabled", .bool true)]) app
+  let (catRefSt, _) ← send "POST" "/api/providers/catalog/refresh" member (.obj #[]) app
+  check (ownDisableSt == 200 && ownEnableSt == 200 && catRefSt == 200)
+    s!"member_toggles_enabled_on_own_account_and_refreshes_catalog ({ownDisableSt},{ownEnableSt},{catRefSt})"
   -- member_deletes_own_account
   let mut delOk := true
   for pid in #[probeId, (c4.fieldStr? "id").getD "", noKeyId] do
