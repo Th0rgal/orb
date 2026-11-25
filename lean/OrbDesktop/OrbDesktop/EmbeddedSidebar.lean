@@ -307,6 +307,9 @@ structure PaletteRasterCache where
   /-- The framebuffer last returned was composed over this exact chrome, from `content`. -/
   composed : Bool := false
   content : Scene := #[]
+  /-- Rectangle of the last frame that differs from the frame before it; `none` when unknown
+      (the whole frame must be handed over). -/
+  lastRegion : Option Rect := none
   chromeRenders : Nat := 0
   chromeResizes : Nat := 0
   contentRenders : Nat := 0
@@ -440,7 +443,7 @@ def paletteCpuRaster (cacheRef : IO.Ref PaletteRasterCache) (w h : Nat) (atlas :
   let n := chrome.size
   -- Chrome must be a strict prefix of the scene; otherwise paint the whole frame.
   if full.size < n || full.extract 0 n != chrome then
-    cacheRef.modify ({ · with composed := false })
+    cacheRef.modify ({ · with composed := false, lastRegion := none })
     return (Vulkan.rasterizeScene w h 0 atlas full).1
   let content := full.extract n full.size
   -- Take the chrome out of the cache so an in-place resize does not copy it.
@@ -466,8 +469,10 @@ def paletteCpuRaster (cacheRef : IO.Ref PaletteRasterCache) (w h : Nat) (atlas :
   let profile := (← IO.getEnv "ORB_PAL_PROFILE") == some "1"
   let t0 ← IO.monoNanosNow
   let mut fb := base
+  let mut changed : Option Rect := none
   if let some r := region? then
     let d := intersectRect vp r
+    changed := some d
     if !d.isEmpty then
       let x := d.x.toNat
       let rowBytes := d.w.toNat * 4
@@ -479,7 +484,11 @@ def paletteCpuRaster (cacheRef : IO.Ref PaletteRasterCache) (w h : Nat) (atlas :
         (#[Prim.clipPush d] ++ content ++ #[Prim.clipPop])).1
       if profile then
         IO.eprintln s!"pal-raster prev={prevOk} chrome={match chromeChange with | some none => "same" | some _ => "resized" | none => "full"} d={d.w}x{d.h} restore_us={(t1 - t0) / 1000} raster_us={((← IO.monoNanosNow) - t1) / 1000}"
-  cacheRef.set { c with composed := true, content, contentRenders := c.contentRenders + 1 }
+  -- Only a frame painted over the previous one has a known changed region.
+  let lastRegion := match chromeChange, prevOk with
+    | some _, true => some (changed.getD ⟨0, 0, 0, 0⟩)
+    | _, _ => none
+  cacheRef.set { c with composed := true, content, lastRegion, contentRenders := c.contentRenders + 1 }
   return fb
 
 /-- Render one palette request through the LeanUI layout and scene pipeline, rasterized on the
@@ -735,6 +744,16 @@ def prepareSidebarFrame (request : String) (atlas : IO.Ref Text.GlyphAtlasCache)
   return { theme, scene, hitPayload := String.intercalate "\n" (limitLine :: hits)
            devW := width * factor, devH := height * factor, wlDisplay, wlSurface }
 
+/-- A palette frame that hands over only `d`: the hit payload is prefixed with
+    `"\x01<stride> <x> <y> <w> <h>\n"` and the pixels are the RGBA rows of `d`. -/
+def paletteRegionFrame (stride : Nat) (hits : String) (fb : ByteArray) (d : Rect) : String × ByteArray := Id.run do
+  let x := d.x.toNat
+  let w := d.w.toNat
+  let mut out := ByteArray.emptyWithCapacity (w * d.h.toNat * 4)
+  for y in [d.y.toNat : d.bottom.toNat] do
+    out := fb.copySlice ((y * stride + x) * 4) out out.size (w * 4)
+  return (s!"\x01{stride} {x} {d.y.toNat} {w} {d.h.toNat}\n" ++ hits, out)
+
 /-- Dispatch one embedded paint request, routing `"P\t"` exclusively to the palette pipeline
     and `"D\t"` to GPU surface teardown so malformed headers never fall through or clobber state. -/
 def dispatchEmbeddedRequest (request : String)
@@ -753,14 +772,23 @@ def dispatchEmbeddedRequest (request : String)
       if oldCtx.gpuSession.isSome then
         Vulkan.shutdownVulkan oldCtx
     return ("GPU_DETACHED", ByteArray.empty)
+  -- `F`: the host's surface is new, so it needs a whole frame rather than the changed region.
+  let freshSurface := request.startsWith "FP\t"
+  let request := if freshSurface then (request.drop 1).toString else request
   if request.startsWith "P\t" then
     let some palReq := parsePaletteRequest? request
       | throw (IO.userError "invalid palette allocation")
     let palCtx ← paletteFramebuffer.modifyGet fun c => (c, { c with framebuffer := ByteArray.empty, previousPaint := none })
+    if let some r := paletteRaster? then r.modify ({ · with lastRegion := none })
     let (hits, ac, next) ← renderPaletteFrame palReq (← atlas.get) palCtx shape paletteGpu? paletteRaster?
     paletteFramebuffer.set next
     atlas.set ac
-    return (hits, next.framebuffer)
+    let region ← match paletteRaster? with
+      | some r => pure (← r.get).lastRegion
+      | none => pure none
+    match region, freshSurface with
+    | some d, false => return paletteRegionFrame next.width hits next.framebuffer d
+    | _, _ => return (hits, next.framebuffer)
   let frame ← prepareSidebarFrame request atlas sidebarCache shape (← IO.monoMsNow)
   let { theme, scene, hitPayload, devW, devH, wlDisplay, wlSurface } := frame
   if wlDisplay != 0 && wlSurface != 0 then
@@ -1033,6 +1061,39 @@ def embeddedPaletteSelfTest : IO Unit := do
       let (fullFb, _) := Vulkan.rasterizeScene w h 0 acI scene.prims
       unless incNext.framebuffer == fullFb do
         throw (IO.userError s!"cached palette raster diverged at {w}x{h} light={light} sel={sel} q={q}")
+    -- 4g. Region handoff: a host that applies whole frames, or only the announced rectangle, and
+    --     starts from a blank surface after a reopen (`F`), always holds the full raster.
+    let palRaster ← IO.mkRef ({} : PaletteRasterCache)
+    let palFb2 ← IO.mkRef { rt.vulkan with previousPaint := none, framebuffer := ByteArray.empty }
+    let mut mirror := ByteArray.empty
+    let mut regionFrames := 0
+    let steps : List (Bool × Nat × String) :=
+      [(true, 0, "m"), (false, 1, "m"), (false, 2, "m"), (false, 2, "mi"), (true, 2, "mi"), (false, 3, "mis"), (false, 0, "m")]
+    for (reopen, sel, q) in steps do
+      let reqStr := String.intercalate "\n" (s!"P\t800\t700\t1\t0\t{sel}\t{q}" :: manyLines.take (16 - q.length * 4))
+      if reopen then mirror := ByteArray.mk (Array.replicate (800 * 700 * 4) 0)
+      let (hits, px) ← dispatchEmbeddedRequest ((if reopen then "F" else "") ++ reqStr) atlasRef sbFbRef palFb2 sbCache
+        paletteIdentityShape none none (some palRaster)
+      if hits.startsWith "\x01" then
+        regionFrames := regionFrames + 1
+        let some header := (hits.drop 1).toString.splitOn "\n" |>.head? | throw (IO.userError "region header")
+        let [stS, xS, yS, wS, hS] := header.splitOn " " | throw (IO.userError s!"region header {header}")
+        let (some stride, some x, some y, some w, some h) := (stS.toNat?, xS.toNat?, yS.toNat?, wS.toNat?, hS.toNat?)
+          | throw (IO.userError s!"region header {header}")
+        unless stride == 800 && px.size == w * h * 4 && !reopen do throw (IO.userError "bad region frame")
+        for row in [:h] do
+          mirror := px.copySlice (row * w * 4) mirror (((y + row) * stride + x) * 4) (w * 4)
+      else
+        unless px.size == 800 * 700 * 4 do throw (IO.userError "palette frame is neither whole nor a region")
+        mirror := px
+      let some req := parsePaletteRequest? reqStr | throw (IO.userError "palette handoff request")
+      let (theme, root) := buildPaletteChrome req
+      let box := layoutNode 120 none theme.palette.focusRing 0 0 (pxToSub 800) (pxToSub 700) root.toLayoutNode
+      let scene := buildSceneFromLayout 120 {} theme root box (recordNodes := false)
+      unless mirror == (Vulkan.rasterizeScene 800 700 0 (← atlasRef.get) scene.prims).1 do
+        throw (IO.userError s!"host surface diverged after sel={sel} q={q} reopen={reopen}")
+    unless regionFrames ≥ 3 do throw (IO.userError s!"palette never handed over a region ({regionFrames})")
+
     let st ← rc.get
     unless st.contentRenders == seq.length && st.chromeRenders ≤ 5 && st.chromeResizes ≥ 2 do
       throw (IO.userError s!"palette chrome cache unused: chrome={st.chromeRenders} resizes={st.chromeResizes} content={st.contentRenders}")

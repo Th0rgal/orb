@@ -51,6 +51,7 @@ static gboolean pal_paint(gpointer data) {
         cairo_image_surface_get_height(p->surface) != h) {
         if (p->surface) cairo_surface_destroy(p->surface);
         p->surface = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, w, h);
+        p->surface_fresh = TRUE;
     }
     if (cairo_surface_status(p->surface) != CAIRO_STATUS_SUCCESS) return G_SOURCE_REMOVE;
     GString *req = g_string_sized_new(1024);
@@ -63,8 +64,11 @@ static gboolean pal_paint(gpointer data) {
                                     it->subtitle, it->status, it->shortcut, it->color);
         if (n > 0) g_string_append_len(req, buf, n);
     }
+    /* "F": the surface holds no earlier frame, so the renderer must send a whole one. */
+    if (p->surface_fresh) g_string_prepend_c(req, 'F');
     cairo_surface_flush(p->surface);
     if (orb_leanui_paint(req->str, cairo_image_surface_get_data(p->surface), (size_t)w * (size_t)h * 4, pal_hits_cb, p)) {
+        p->surface_fresh = FALSE;
         cairo_surface_set_device_scale(p->surface, scale, scale);
         cairo_surface_mark_dirty(p->surface);
         gtk_widget_queue_draw(p->canvas);
