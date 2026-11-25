@@ -160,6 +160,7 @@
 
 * { box-sizing: border-box; }
 :root { --t: 90ms; --ease: cubic-bezier(.2, .7, .2, 1); }
+.orb-pal-blur .app { filter: blur(6px); transition: filter 90ms ease-out; }
 /* Queued messages sit a step below the composer, as in Cursor. */
 :root { --queue-bg: color-mix(in srgb, var(--bg-elev) 50%, var(--bg)); }
 html, body, #root, .app { height: 100%; margin: 0; background: transparent; }
