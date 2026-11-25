@@ -1249,7 +1249,7 @@ def run (root : String) : IO Unit := do
         ("expires_at", .str "2099-01-01T00:00:00Z")
       ]])
     ]
-    discard <| writeDataJsonObj store.rootDir "mission_access.json" grantDoc
+    IO.FS.writeFile (System.FilePath.mk s!"{store.rootDir}/mission_access.json") (renderCompact grantDoc)
     let afterGrantMission ← call memberSession "get_mission" (.obj #[("mission_id", .str "member-other")])
     let afterGrantEvents ← call memberSession "get_mission_events" (.obj #[("mission_id", .str "member-other")])
     let afterGrantCancel ← call memberSession "cancel_mission" (.obj #[("mission_id", .str "member-other"), ("idempotency_key", .str "cancel-denied-read-grant")])
