@@ -1233,6 +1233,53 @@ def run (root : String) : IO Unit := do
       escalatedSettings.fieldBool? "ok" == some false &&
       (escalatedSettings.fieldOrNull "error").fieldStr? "code" == some "forbidden_tool_role")
       s!"r16_same_user_unrelated_tree_isolated (machines={renderCompact scopedMachines}, missions={renderCompact scopedMissions}, budget={renderCompact scopedBudget}, roles={renderCompact escalatedSettings})"
+    -- Regression 1: approved cross-mission read grant unlocks read tools for unrelated same-user tree, never writes.
+    let beforeGrantRead ← call memberSession "get_mission" (.obj #[("mission_id", .str "member-other")])
+    check (beforeGrantRead.fieldBool? "ok" == some false &&
+      (beforeGrantRead.fieldOrNull "error").fieldStr? "code" == some "not_found")
+      "cross-mission read denied before approval"
+    let grantDoc : JVal := .obj #[
+      ("requests", .arr #[]),
+      ("grants", .arr #[.obj #[
+        ("id", .str "grant-member-other"),
+        ("requester_mission_id", .str "member-mission"),
+        ("requester_subject", .str "mission:member-mission"),
+        ("target_mission_id", .str "member-other"),
+        ("scope", .str "read"),
+        ("expires_at", .str "2099-01-01T00:00:00Z")
+      ]])
+    ]
+    IO.FS.writeFile (System.FilePath.mk s!"{store.rootDir}/mission_access.json") (renderCompact grantDoc)
+    let afterGrantMission ← call memberSession "get_mission" (.obj #[("mission_id", .str "member-other")])
+    let afterGrantEvents ← call memberSession "get_mission_events" (.obj #[("mission_id", .str "member-other")])
+    let afterGrantCancel ← call memberSession "cancel_mission" (.obj #[("mission_id", .str "member-other"), ("idempotency_key", .str "cancel-denied-read-grant")])
+    check (afterGrantMission.fieldBool? "ok" == some true &&
+      afterGrantEvents.fieldBool? "ok" == some true &&
+      afterGrantCancel.fieldBool? "ok" == some false &&
+      (afterGrantCancel.fieldOrNull "error").fieldStr? "code" == some "not_found")
+      s!"cross_mission_approved_read_grant (get={renderCompact afterGrantMission}, events={renderCompact afterGrantEvents}, cancel={renderCompact afterGrantCancel})"
+    -- Regression 2: child `/btw` reads its direct parent, and parent reads transitive grandchild without Touch ID.
+    let .ok () ← upsertMission store {
+      id := "member-btw", ownerUserId := "member", parentMissionId := "member-mission",
+      title := "member-btw-child", status := "active", backend := "opencode", modelOverride := "",
+      workingDirectory := path, project := "member-project", updatedAt := "2026-11-13T10:01:00Z" }
+      | throw (IO.userError "isolation btw child")
+    let .ok () ← upsertMission store {
+      id := "member-grandchild", ownerUserId := "member", parentMissionId := "member-btw",
+      title := "member-grandchild", status := "active", backend := "opencode", modelOverride := "",
+      workingDirectory := path, project := "member-project", updatedAt := "2026-11-13T10:02:00Z" }
+      | throw (IO.userError "isolation grandchild")
+    let (btwSt, btwSess) ← send "POST" "/api/mcp/session" member (.obj #[
+      ("mission_id", .str "member-btw"), ("role", .str "executor"), ("project", .str "member-project")])
+    let btwToken := (btwSess.fieldStr? "token").getD ""
+    check (btwSt == 200 && !btwToken.isEmpty) "mint btw child session"
+    let btwReadsParent ← call btwToken "get_mission" (.obj #[("mission_id", .str "member-mission")])
+    let btwReadsParentEvents ← call btwToken "get_mission_events" (.obj #[("mission_id", .str "member-mission")])
+    let parentReadsGrandchild ← call memberSession "get_mission" (.obj #[("mission_id", .str "member-grandchild")])
+    check (btwReadsParent.fieldBool? "ok" == some true &&
+      btwReadsParentEvents.fieldBool? "ok" == some true &&
+      parentReadsGrandchild.fieldBool? "ok" == some true)
+      s!"btw_parent_and_transitive_descendant_read (parent={renderCompact btwReadsParent}, events={renderCompact btwReadsParentEvents}, grandchild={renderCompact parentReadsGrandchild})"
     -- Project board contract: owner nomination, controller-only mutation, shared reads.
     let emptyBoard ← call memberSession "read_project_board"
     check (emptyBoard.fieldBool? "ok" == some true &&
