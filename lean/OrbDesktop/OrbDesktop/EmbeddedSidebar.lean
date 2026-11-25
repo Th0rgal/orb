@@ -311,7 +311,8 @@ def dispatchEmbeddedRequest (request : String)
   if request.startsWith "P\t" then
     let some palReq := parsePaletteRequest? request
       | throw (IO.userError "invalid palette allocation")
-    let (hits, ac, next) ← renderPaletteFrame palReq (← atlas.get) (← paletteFramebuffer.get) shape
+    let palCtx ← paletteFramebuffer.modifyGet fun c => (c, { c with framebuffer := ByteArray.empty, previousPaint := none })
+    let (hits, ac, next) ← renderPaletteFrame palReq (← atlas.get) palCtx shape
     paletteFramebuffer.set next
     atlas.set ac
     return (hits, next.framebuffer)
@@ -337,7 +338,7 @@ def dispatchEmbeddedRequest (request : String)
   let box := layoutNode sc none theme.palette.focusRing 0 0 (pxToSub width) (pxToSub height) tree.toLayoutNode
   let scene := buildSceneFromLayout sc {} theme tree box (recordNodes := false)
   let ac := ac.finishUploads
-  let ctx ← framebuffer.get
+  let ctx ← framebuffer.modifyGet fun c => (c, { c with framebuffer := ByteArray.empty, previousPaint := none })
   let next ← Vulkan.renderFrameDamage { ctx with width := width * factor, height := height * factor }
     0 ac ⟨0, 0, 1, 1⟩ scene.prims
   framebuffer.set next

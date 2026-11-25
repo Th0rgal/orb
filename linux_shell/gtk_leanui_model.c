@@ -106,6 +106,7 @@ void orb_leanui_rows(GtkWidget *view, JSCValue *rows, JSCValue *footer, const ch
     if (g_strcmp0(scope, s->scope)) {
         orb_sel_clear(view);
         s->scroll = 0;
+        s->scroll_pos = 0.0;
         g_free(s->scope);
         s->scope = g_strdup(scope);
     }
@@ -157,12 +158,12 @@ void orb_sidebar_hits(void *view, const char *regions) {
     OrbSidebar *s = view;
     g_auto(GStrv) lines = g_strsplit(regions, "\n", -1);
     s->limit = atoi(lines[0]);
-    if (s->scroll > s->limit) { s->scroll = s->limit; orb_sidebar_invalidate(s); }
+    if (s->scroll > s->limit) { s->scroll = s->limit; s->scroll_pos = (double)s->limit; orb_sidebar_invalidate(s); }
     GHashTableIter iter;
     gpointer child;
     g_hash_table_iter_init(&iter,s->buttons);
     while (g_hash_table_iter_next(&iter,NULL,&child)) g_object_set_data(child,"orb-visible",NULL);
-    gboolean running = FALSE;
+    gboolean running = FALSE, moved = FALSE;
     for (char **line = lines+1; *line; line++) {
         unsigned id;
         GdkRectangle r;
@@ -174,11 +175,12 @@ void orb_sidebar_hits(void *view, const char *regions) {
         GdkRectangle *old = g_object_get_data(G_OBJECT(b),"orb-hit");
         if (!old || !gdk_rectangle_equal(old,&r)) {
             g_object_set_data_full(G_OBJECT(b),"orb-hit",g_memdup2(&r,sizeof r),g_free);
-            gtk_widget_queue_resize(b);
+            moved = TRUE;
         }
         g_object_set_data(G_OBJECT(b),"orb-visible",GINT_TO_POINTER(1));
         gtk_widget_show(b);
     }
+    if (moved) gtk_widget_queue_allocate(s->overlay);
     g_hash_table_iter_init(&iter,s->buttons);
     while (g_hash_table_iter_next(&iter,NULL,&child)) {
         if (g_object_get_data(child,"orb-visible")) continue;
