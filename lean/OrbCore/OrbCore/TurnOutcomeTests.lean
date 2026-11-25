@@ -926,6 +926,21 @@ private def verifyAdminDirectAntigravityStaticTarget (root : String) : IO Unit :
         "SELECT COUNT(*) FROM proxy_usage WHERE mission_id='m-agy-zero';" #[]
         | throw (IO.userError "proxy_usage zero query failed")
       check ((zRows[1]?.bind (·[0]?)).getD "" == "0") "zero-token native turn must not insert proxy_usage row"
+      -- Price-adjusted tokens: Antigravity (6x out, 0.1x cache_read): 12000 + 3500*6 + 8000*0.1 = 33800
+      -- Anthropic Claude (5x out, 0.1x cache_read, 1.25x cache_write): 1000 + 1000*5 + 10000*0.1 + 400*1.25 = 7500
+      -- OpenAI GPT-6 (8x out, 0.1x cache_read): 1000 + 1000*8 + 5000*0.1 = 9500
+      OrbCore.Proxy.recordProxyUsage store nowSec "claude-opus-5-5" "anthropic" "acct-c" "" "m-adj-claude" "mission"
+        { input := 1000, output := 1000, cacheCreate := 400, cacheRead := 10000 }
+      OrbCore.Proxy.recordProxyUsage store nowSec "gpt-6-astra" "openai" "acct-o" "" "m-adj-gpt6" "mission"
+        { input := 1000, output := 1000, cacheCreate := 0, cacheRead := 5000 }
+      let .ok adjRows ← execParamQuery store.missionsDb
+        s!"SELECT mission_id, SUM({OrbCore.ResourcesAndSystem.adjustedTokenSumSql}) FROM proxy_usage WHERE mission_id IN ('m-agy-res','m-adj-claude','m-adj-gpt6') GROUP BY 1 ORDER BY 1;" #[]
+        | throw (IO.userError "adjustedTokenSumSql query failed")
+      check (adjRows.size == 4 &&
+             (adjRows[1]![0]?).getD "" == "m-adj-claude" && (adjRows[1]![1]?).getD "" == "7500" &&
+             (adjRows[2]![0]?).getD "" == "m-adj-gpt6" && (adjRows[2]![1]?).getD "" == "9500" &&
+             (adjRows[3]![0]?).getD "" == "m-agy-res" && (adjRows[3]![1]?).getD "" == "33800")
+        s!"unexpected adjustedTokenSumSql results: {reprStr adjRows}"
     finally
       closeCoreStore store
   finally

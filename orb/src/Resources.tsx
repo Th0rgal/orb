@@ -1026,7 +1026,15 @@ export default function Resources(props: {
         </div>
 
         <div class="res-topbar-right">
-          <div class="res-stamp" data-testid="res-summary-stamp">
+          <div
+            class="res-stamp"
+            data-testid="res-summary-stamp"
+            title={
+              lens() === "inference" && metric() === "raw"
+                ? "Price-adjusted input-equivalent tokens (output & cache tokens scaled by model price ratio)"
+                : undefined
+            }
+          >
             <strong>{headerStamp().primary}</strong>
             <Show when={headerStamp().secondary}>
               <span class="res-stamp-sep">·</span>
