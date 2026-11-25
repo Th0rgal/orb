@@ -407,6 +407,30 @@ private def drawRoundedBox (vw vh : Nat) (fb : ByteArray) (curClip r : Rect)
     for y in [y0.toNat:y1.toNat] do
       out := row.copySlice 0 out ((y * vw + x0.toNat) * 4) row.size
     return out
+  -- Blend `c` over the part of `[ax0, ax1) × [ay0, ay1)` inside the clamped bounds. `blendRect`
+  -- uses the same arithmetic as `blendOver`, so full-coverage spans match the per-pixel path.
+  let blendSpan (o : ByteArray) (ax0 ay0 ax1 ay1 : Int) (c : Color) : ByteArray :=
+    let bx0 := max x0 ax0
+    let by0 := max y0 ay0
+    let bx1 := min x1 ax1
+    let by1 := min y1 ay1
+    if bx1 ≤ bx0 || by1 ≤ by0 then o
+    else FFI.blendRect o (by0.toNat * vw + bx0.toNat).toUSize vw.toUSize
+      (bx1 - bx0).toNat.toUSize (by1 - by0).toNat.toUSize c
+  if radii == (0, 0, 0, 0) then
+    -- Square corners: every pixel has full coverage, so the fill and the border bands (the
+    -- pixels outside the inner rectangle) are solid spans, painted fill first as below.
+    if fa > 0 then out := blendSpan out x0 y0 x1 y1 fill
+    if hasBorder then
+      let iy0 := min r.bottom (r.y + (bt : Int))
+      let iy1 := max iy0 (r.bottom - (bbW : Int))
+      let ix0 := min r.right (r.x + (blW : Int))
+      let ix1 := max ix0 (r.right - (brW : Int))
+      out := blendSpan out r.x r.y r.right iy0 borderCol
+      out := blendSpan out r.x iy1 r.right r.bottom borderCol
+      out := blendSpan out r.x iy0 ix0 iy1 borderCol
+      out := blendSpan out ix1 iy0 r.right iy1 borderCol
+    return out
   let innerRect : Rect :=
     { x := r.x + (blW : Int)
       y := r.y + (bt : Int)
@@ -426,10 +450,19 @@ private def drawRoundedBox (vw vh : Nat) (fb : ByteArray) (curClip r : Rect)
   let top := if hasBorder then max y0 innerRect.y else y0
   let bottom := if hasBorder then min y1 innerRect.bottom else y1
   let bulk := spanR - spanL ≥ 16 && top < bottom
+  -- Without a border, rows clear of the corner radius have full coverage across the whole width.
+  let sTop := if hasBorder then y0 else min y1 (max y0 (r.y + margin))
+  let sBot := if hasBorder then y0 else max sTop (min y1 (r.bottom - margin))
+  if sBot > sTop then out := blendSpan out x0 sTop x1 sBot fill
   if bulk then
-    out := FFI.blendRect out (top.toNat * vw + spanL.toNat).toUSize vw.toUSize
-      (spanR-spanL).toNat.toUSize (bottom-top).toNat.toUSize fill
+    if sBot > sTop then
+      out := blendSpan out spanL top spanR sTop fill
+      out := blendSpan out spanL sBot spanR bottom fill
+    else
+      out := FFI.blendRect out (top.toNat * vw + spanL.toNat).toUSize vw.toUSize
+        (spanR-spanL).toNat.toUSize (bottom-top).toNat.toUSize fill
   for py in [y0.toNat : y1.toNat] do
+    if (py : Int) ≥ sTop && (py : Int) < sBot then continue
     let y : Int := py
     let straightRow := y ≥ r.y + margin && y < r.bottom - margin
     let innerRow := y ≥ innerRect.y && y < innerRect.bottom
@@ -755,21 +788,31 @@ def rasterizeSceneInto (vw vh : Nat) (clearColor : Color) (atlas : Text.GlyphAtl
         let (x0, y0, x1, y1) := clampBounds vw vh curClip dst
         if x1 > x0 && y1 > y0 && sa > 0 then
           let saved := if activeRClips.isEmpty then ByteArray.empty else fb
-          for py in [y0.toNat : y1.toNat] do
-            let ty := src.y.toNat + (py - dst.y.toNat)
-            if ty < ph then
-              for px in [x0.toNat : x1.toNat] do
-                let tx := src.x.toNat + (px - dst.x.toNat)
-                if tx < pw then
-                  let aIdx := (ty * pw + tx) * 4
-                  if aIdx + 4 ≤ page.rgba.size then
-                    let cov := page.rgba.get! (aIdx + 3)
-                    let effA := ((sa.toNat * cov.toNat + 127) / 255).toUInt8
-                    let idx := (py * vw + px) * 4
-                    let (nr, ng, nb, na) :=
-                      blendOver (fb.get! idx) (fb.get! (idx + 1)) (fb.get! (idx + 2)) (fb.get! (idx + 3))
-                        sr sg sb effA
-                    fb := fb.set! idx nr |>.set! (idx + 1) ng |>.set! (idx + 2) nb |>.set! (idx + 3) na
+          -- A coverage mask tinted by `col` is a monochrome glyph: blend it natively when its
+          -- atlas rows are in range (same arithmetic as the loop below).
+          let sx := src.x.toNat + (x0.toNat - dst.x.toNat)
+          let sy := src.y.toNat + (y0.toNat - dst.y.toNat)
+          let mw := min (pw - sx) (x1 - x0).toNat
+          let mh := min (ph - sy) (y1 - y0).toNat
+          if mh > 0 && mw > 0 && (sy + mh - 1) * pw + sx + mw ≤ page.rgba.size / 4 then
+            fb := FFI.blitGlyph fb page.rgba (y0.toNat * vw + x0.toNat).toUSize (sy * pw + sx).toUSize
+              vw.toUSize pw.toUSize mw.toUSize mh.toUSize col false
+          else
+            for py in [y0.toNat : y1.toNat] do
+              let ty := src.y.toNat + (py - dst.y.toNat)
+              if ty < ph then
+                for px in [x0.toNat : x1.toNat] do
+                  let tx := src.x.toNat + (px - dst.x.toNat)
+                  if tx < pw then
+                    let aIdx := (ty * pw + tx) * 4
+                    if aIdx + 4 ≤ page.rgba.size then
+                      let cov := page.rgba.get! (aIdx + 3)
+                      let effA := ((sa.toNat * cov.toNat + 127) / 255).toUInt8
+                      let idx := (py * vw + px) * 4
+                      let (nr, ng, nb, na) :=
+                        blendOver (fb.get! idx) (fb.get! (idx + 1)) (fb.get! (idx + 2)) (fb.get! (idx + 3))
+                          sr sg sb effA
+                      fb := fb.set! idx nr |>.set! (idx + 1) ng |>.set! (idx + 2) nb |>.set! (idx + 3) na
           if !activeRClips.isEmpty then fb := applyRoundedClips vw vh saved fb ⟨x0, y0, x1 - x0, y1 - y0⟩ activeRClips
     | .image _tex src dst rad =>
       let radii : CornerRadii := (rad, rad, rad, rad)

@@ -24,7 +24,7 @@ typedef struct {
     guint64 req_gen, applied_gen;
     cairo_surface_t *surface;
     guint idle;
-    gboolean open, light, closed, dirty, pending_enter;
+    gboolean open, light, closed, dirty, pending_enter, surface_fresh;
 } OrbPalette;
 
 void orb_pal_clear_items(OrbPalette *p);
