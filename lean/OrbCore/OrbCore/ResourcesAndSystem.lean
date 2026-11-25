@@ -324,7 +324,31 @@ private def staticNodeVcpuMilli : Nat := 8000
 
 private def externalTrafficId : String := "__external__"
 
-private def tokenSumSql : String := "input_tokens + output_tokens + cache_read_tokens + cache_creation_tokens"
+/-- Price-adjusted (input-equivalent) token count SQL expression:
+    `input + output * (b/a) + cache_read * (cr/a) + cache_creation * (cw/a)`
+    where `a` is input token price and `b, cr, cw` are output, cache-read, and cache-write
+    prices per provider/model family (scaled by 100 in integer arithmetic; sensible default
+    5.0x output, 0.10x cache-read, 1.00x cache-write). -/
+def adjustedTokenSumSql (pfx : String := "") : String :=
+  let m := s!"LOWER(COALESCE({pfx}model,''))"
+  let p := s!"LOWER(COALESCE({pfx}provider,''))"
+  let outWeight :=
+    s!"CASE WHEN {m} LIKE '%gpt-5%' OR {m} LIKE '%gpt-6%' OR {m} LIKE '%codex%' THEN 800 " ++
+    s!"WHEN {m} LIKE '%gemini%' OR {p} IN ('google','gemini','antigravity') THEN 600 " ++
+    s!"WHEN {m} LIKE '%claude%' OR {p} = 'anthropic' THEN 500 " ++
+    s!"WHEN {m} LIKE '%grok%' OR {p} = 'xai' THEN 500 " ++
+    s!"WHEN {m} LIKE '%gpt-4%' OR {p} = 'openai' THEN 400 " ++
+    s!"WHEN {m} LIKE '%glm%' OR {p} = 'zai' THEN 400 " ++
+    s!"WHEN {m} LIKE '%mistral%' OR {m} LIKE '%devstral%' OR {m} LIKE '%codestral%' OR {p} = 'mistral' THEN 300 " ++
+    "ELSE 500 END"
+  let cacheReadWeight :=
+    s!"CASE WHEN {m} LIKE '%grok%' OR {p} = 'xai' THEN 25 " ++
+    s!"WHEN {m} LIKE '%glm%' OR {p} = 'zai' THEN 20 " ++
+    s!"WHEN {m} LIKE '%gpt-4%' THEN 50 " ++
+    "ELSE 10 END"
+  let cacheCreateWeight :=
+    s!"CASE WHEN {m} LIKE '%claude%' OR {p} = 'anthropic' THEN 125 ELSE 100 END"
+  s!"({pfx}input_tokens * 100 + {pfx}output_tokens * ({outWeight}) + {pfx}cache_read_tokens * ({cacheReadWeight}) + {pfx}cache_creation_tokens * ({cacheCreateWeight})) / 100"
 
 /-- Epoch seconds of a mission timestamp column that may hold ISO-8601 text or a bare epoch. -/
 private def epochOfColumnSql (col : String) : String :=
@@ -458,7 +482,7 @@ def buildResourcesOverviewJson
   let mut rootCache : Array (String × Option String) := #[]
   if let .ok rows ← execParamQuery store.missionsDb
       (s!"SELECT (CAST(strftime('%s',timestamp) AS INTEGER)/60 - CAST(?1 AS INTEGER))/CAST(?2 AS INTEGER), " ++
-       s!"COALESCE(NULLIF(provider,''),'unknown'), COALESCE(mission_id,''), SUM({tokenSumSql}), SUM(cost_cents) " ++
+       s!"COALESCE(NULLIF(provider,''),'unknown'), COALESCE(mission_id,''), SUM({adjustedTokenSumSql}), SUM(cost_cents) " ++
        "FROM proxy_usage WHERE timestamp >= ?3 GROUP BY 1,2,3;")
       #[toString firstMin, toString step, sinceIso] then
     for i in [1:rows.size] do
@@ -686,7 +710,7 @@ def buildMissionResourceDetailJson (store : CoreStore) (missionId : String)
   let mut usage : Array (String × String × Nat × Nat) := #[]
   if let .ok urs ← execParamQuery store.missionsDb
       (lineageIdsSql ++
-       s!"SELECT u.mission_id, COALESCE(NULLIF(u.provider,''),'unknown'), SUM({tokenSumSql}), SUM(u.cost_cents) " ++
+       s!"SELECT u.mission_id, COALESCE(NULLIF(u.provider,''),'unknown'), SUM({adjustedTokenSumSql "u."}), SUM(u.cost_cents) " ++
        "FROM proxy_usage u JOIN lineage l ON u.mission_id = l.id WHERE u.timestamp >= ?2 GROUP BY 1,2;")
       #[missionId, originIso] then
     for i in [1:urs.size] do
@@ -755,7 +779,7 @@ def buildMissionResourceDetailJson (store : CoreStore) (missionId : String)
   let mut tlCents : Array Nat := Array.replicate tlBuckets 0
   if let .ok trs ← execParamQuery store.missionsDb
       (lineageIdsSql ++
-       s!"SELECT (CAST(strftime('%s',u.timestamp) AS INTEGER) - CAST(?3 AS INTEGER))/CAST(?4 AS INTEGER), SUM({tokenSumSql}), SUM(u.cost_cents) " ++
+       s!"SELECT (CAST(strftime('%s',u.timestamp) AS INTEGER) - CAST(?3 AS INTEGER))/CAST(?4 AS INTEGER), SUM({adjustedTokenSumSql "u."}), SUM(u.cost_cents) " ++
        "FROM proxy_usage u JOIN lineage l ON u.mission_id = l.id WHERE u.timestamp >= ?2 GROUP BY 1;")
       #[missionId, originIso, toString originSec, toString tlSecs] then
     for i in [1:trs.size] do
