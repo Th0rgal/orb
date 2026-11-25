@@ -301,13 +301,20 @@ private partial def scrollLimit (box : ComputedBox) : Nat :=
   else box.children.foldl (fun n b => max n (scrollLimit b)) 0
 
 /-- Dispatch one embedded paint request, routing `"P\t"` exclusively to the palette pipeline
-    so malformed palette headers never fall through to the sidebar parser or clobber its framebuffer. -/
+    and `"D\t"` to GPU surface teardown so malformed headers never fall through or clobber state. -/
 def dispatchEmbeddedRequest (request : String)
     (atlas : IO.Ref Text.GlyphAtlasCache)
     (framebuffer : IO.Ref Vulkan.VulkanContext)
     (paletteFramebuffer : IO.Ref Vulkan.VulkanContext)
-    (shape : Text.GlyphAtlasCache → Nat → WidgetNode → IO (Text.GlyphAtlasCache × WidgetNode)) :
+    (shape : Text.GlyphAtlasCache → Nat → WidgetNode → IO (Text.GlyphAtlasCache × WidgetNode))
+    (gpuSurface? : Option (IO.Ref (USize × Vulkan.VulkanContext)) := none) :
     IO (String × ByteArray) := do
+  if request.startsWith "D\t" then
+    if let some gpuRef := gpuSurface? then
+      let (_, oldCtx) ← gpuRef.modifyGet fun p => (p, (0, {}))
+      if oldCtx.gpuSession.isSome then
+        Vulkan.shutdownVulkan oldCtx
+    return ("GPU_DETACHED", ByteArray.empty)
   if request.startsWith "P\t" then
     let some palReq := parsePaletteRequest? request
       | throw (IO.userError "invalid palette allocation")
@@ -317,7 +324,13 @@ def dispatchEmbeddedRequest (request : String)
     atlas.set ac
     return (hits, next.framebuffer)
   let header :: lines := request.splitOn "\n" | throw (IO.userError "missing sidebar allocation")
-  let [w, h, scale, light, offset, phase] := header.splitOn "\t" | throw (IO.userError "invalid sidebar allocation")
+  let (w, h, scale, light, offset, phase, wlDisplay, wlSurface) ←
+    match header.splitOn "\t" with
+    | [w, h, scale, light, offset, phase] => pure (w, h, scale, light, offset, phase, (0 : USize), (0 : USize))
+    | [w, h, scale, light, offset, phase, wd, ws] =>
+      pure (w, h, scale, light, offset, phase,
+        (wd.toNat?.getD 0).toUSize, (ws.toNat?.getD 0).toUSize)
+    | _ => throw (IO.userError "invalid sidebar allocation")
   let width := w.toNat?.getD 0
   let height := h.toNat?.getD 0
   let factor := scale.toNat?.getD 1
@@ -338,16 +351,42 @@ def dispatchEmbeddedRequest (request : String)
   let box := layoutNode sc none theme.palette.focusRing 0 0 (pxToSub width) (pxToSub height) tree.toLayoutNode
   let scene := buildSceneFromLayout sc {} theme tree box (recordNodes := false)
   let ac := ac.finishUploads
-  let ctx ← framebuffer.modifyGet fun c => (c, { c with framebuffer := ByteArray.empty, previousPaint := none })
-  let next ← Vulkan.renderFrameDamage { ctx with width := width * factor, height := height * factor }
-    0 ac ⟨0, 0, 1, 1⟩ scene.prims
-  framebuffer.set next
-  atlas.set ac
   let hits := scene.hitRegionsSub.filterMap fun (id, r) =>
     if id == rosterViewportId then none else
       let p := roundRect 120 r
       some s!"{id} {p.x} {p.y} {p.w} {p.h}"
-  return (String.intercalate "\n" (toString (scrollLimit box / subPerPx) :: hits), next.framebuffer)
+  let hitPayload := String.intercalate "\n" (toString (scrollLimit box / subPerPx) :: hits)
+  let devW := width * factor
+  let devH := height * factor
+  if wlDisplay != 0 && wlSurface != 0 then
+    if let some gpuRef := gpuSurface? then
+      let (curSurf, curCtx) ← gpuRef.modifyGet fun p => (p, (0, {}))
+      let vkCtx ←
+        if curSurf == wlSurface && curCtx.gpuSession.isSome then
+          pure { curCtx with width := devW, height := devH }
+        else
+          if curCtx.gpuSession.isSome then Vulkan.shutdownVulkan curCtx
+          Vulkan.initVulkanSurface devW devH wlDisplay wlSurface
+      if vkCtx.backend == .cpuShm || vkCtx.gpuSession.isNone then
+        if vkCtx.gpuSession.isSome then Vulkan.shutdownVulkan vkCtx
+        atlas.set ac
+        return ("GPU_FALLBACK", ByteArray.empty)
+      let (vkCtx', ac', handled, didPresent) ←
+        Vulkan.renderAndPresentGpu vkCtx theme.palette.sidebar ac scene.prims none (pure ()) (pure ())
+      atlas.set ac'
+      if !handled then
+        if vkCtx'.gpuSession.isSome then Vulkan.shutdownVulkan vkCtx'
+        return ("GPU_FALLBACK", ByteArray.empty)
+      gpuRef.set (wlSurface, vkCtx')
+      if !didPresent then
+        return ("GPU_SKIP", ByteArray.empty)
+      return ("GPU_OK\n" ++ hitPayload, ByteArray.empty)
+  let ctx ← framebuffer.modifyGet fun c => (c, { c with framebuffer := ByteArray.empty, previousPaint := none })
+  let next ← Vulkan.renderFrameDamage { ctx with width := devW, height := devH }
+    0 ac ⟨0, 0, 1, 1⟩ scene.prims
+  framebuffer.set next
+  atlas.set ac
+  return (hitPayload, next.framebuffer)
 
 /-- Paint the same widget tree used by the Wayland shell at the GTK allocation and device scale.
     Input regions are returned from this exact layout. There is no Core connection in the renderer. -/
@@ -358,11 +397,15 @@ def runEmbeddedSidebar (modulePath : String)
   let atlas ← IO.mkRef rt.atlas
   let framebuffer ← IO.mkRef rt.vulkan
   let paletteFramebuffer ← IO.mkRef { rt.vulkan with previousPaint := none, framebuffer := ByteArray.empty }
+  let gpuSurface ← IO.mkRef ((0 : USize), ({} : Vulkan.VulkanContext))
   try
     FFI.sidebarHost modulePath fun request =>
-      dispatchEmbeddedRequest request atlas framebuffer paletteFramebuffer fun a sc node =>
-        shape a rt.primaryFont rt.monoFont rt.boldFont rt.mediumFont rt.semiboldFont sc node
-  finally Runtime.shutdownRuntime rt
+      dispatchEmbeddedRequest request atlas framebuffer paletteFramebuffer (fun a sc node =>
+        shape a rt.primaryFont rt.monoFont rt.boldFont rt.mediumFont rt.semiboldFont sc node) (some gpuSurface)
+  finally
+    let (_, gctx) ← gpuSurface.modifyGet fun p => (p, (0, {}))
+    if gctx.gpuSession.isSome then Vulkan.shutdownVulkan gctx
+    Runtime.shutdownRuntime rt
 
 private def paletteIdentityShape (ac : Text.GlyphAtlasCache) (_sc : Nat) (node : WidgetNode) :
     IO (Text.GlyphAtlasCache × WidgetNode) :=
@@ -450,6 +493,18 @@ def embeddedPaletteSelfTest : IO Unit := do
     let sbAfter := (← sbFbRef.get).framebuffer
     unless threwMalformed && sbAfter == ByteArray.mk #[1, 2, 3, 4] do
       throw (IO.userError "malformed P\\t request fell through or clobbered sidebar framebuffer")
+
+    -- 4a2. GPU detach ("D\t...") returns GPU_DETACHED cleanly without touching sidebar framebuffer.
+    let gpuRef ← IO.mkRef ((0 : USize), ({} : Vulkan.VulkanContext))
+    let (detRes, detPx) ← dispatchEmbeddedRequest "D\t12345" atlasRef sbFbRef palFbRef paletteIdentityShape (some gpuRef)
+    unless detRes == "GPU_DETACHED" && detPx.isEmpty && (← sbFbRef.get).framebuffer == ByteArray.mk #[1, 2, 3, 4] do
+      throw (IO.userError s!"unexpected GPU detach response: {detRes}")
+    -- 4a3. 8-field sidebar header with wlDisplay=0, wlSurface=0 falls through to CPU buffer.
+    let (sb8Hits, sb8Px) ← dispatchEmbeddedRequest
+      "220\t200\t1\t0\t0\t0\t0\t0\n1000\tnav:new-agent\tnav\tNew Agent\t0\t\t⌘N\t0\t1\t0\t"
+      atlasRef sbFbRef palFbRef paletteIdentityShape (some gpuRef)
+    unless sb8Px.size == 220 * 200 * 4 && !sb8Hits.isEmpty do
+      throw (IO.userError s!"8-field CPU fallback failed: px={sb8Px.size}")
 
     let mut ac ← atlasRef.get
     let mut fb := rt.vulkan
