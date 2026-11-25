@@ -542,7 +542,7 @@ test("file actions rename, cut/paste, copy/paste, move and delete actual paths",
   expect(transfers[0]).toEqual({path:'context.md',destination:'renamed.md',copy:false});
 });
 
-test('folder deletion requires confirmation and agent badges overlap their icon', async ({page}) => {
+test('folder deletion requires confirmation and agents show one compact status icon', async ({page}) => {
   await setup(page);
   let deleted = false;
   await page.route('**/api/projects/test/files?*', route => route.fulfill({json:{entries:deleted ? [] : [{name:'reference',kind:'dir'}]}}));
@@ -553,10 +553,14 @@ test('folder deletion requires confirmation and agent badges overlap their icon'
   });
   await expandProject(page);
   const glyph=page.locator('.mission-glyph').first();
-  const identity=await glyph.boundingBox(), badge=await glyph.locator('.mission-status-mark').boundingBox();
+  // A single 15-16px status icon replaces the bot glyph plus its corner badge.
+  const identity=await glyph.boundingBox();
   expect(identity!.width).toBeLessThanOrEqual(18);
-  expect(badge!.x).toBeLessThan(identity!.x+identity!.width);
-  expect(badge!.y).toBeLessThan(identity!.y+identity!.height);
+  await expect(glyph.locator(':scope > svg')).toHaveCount(1);
+  await expect(glyph.locator('.mission-status-mark')).toHaveCount(0);
+  const icon=await glyph.locator(':scope > svg').boundingBox();
+  expect(icon!.width).toBeGreaterThanOrEqual(14);
+  expect(icon!.width).toBeLessThanOrEqual(16);
   const folder=page.locator('.row.folder').filter({hasText:'reference'});
   await folder.click({button:'right'});
   await page.getByRole('menuitem',{name:'Delete…',exact:true}).click();

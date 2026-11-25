@@ -1,4 +1,5 @@
-#include "gtk_wayland_subsurface.h"
+#include "gtk_leanui_private.h"
+#include <math.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -113,3 +114,61 @@ void orb_wl_subsurface_detach(OrbWlSubsurface *sub) {
 }
 
 #endif
+
+void orb_wl_subsurface_draw_mask(cairo_t *cr, int width, int height, gboolean light) {
+    cairo_save(cr);
+    cairo_set_operator(cr, CAIRO_OPERATOR_CLEAR);
+    cairo_paint(cr);
+    /* Compositors that round every wl_subsurface round the inner right corners too;
+     * square off the 12x12 top-right and bottom-right corners against the divider. */
+    if (width > 12 && height > 24) {
+        cairo_set_operator(cr, CAIRO_OPERATOR_SOURCE);
+        if (light) cairo_set_source_rgba(cr, 246.0 / 255.0, 246.0 / 255.0, 244.0 / 255.0, 1.0);
+        else cairo_set_source_rgba(cr, 18.0 / 255.0, 19.0 / 255.0, 19.0 / 255.0, 1.0);
+        cairo_rectangle(cr, width - 12, 0, 12, 12);
+        cairo_rectangle(cr, width - 12, height - 12, 12, 12);
+        cairo_fill(cr);
+    }
+    cairo_restore(cr);
+}
+
+gboolean orb_sidebar_kinetic_step(OrbSidebar *s) {
+    if (!s->kinetic_ts || fabs(s->scroll_vel) <= 8.0) return FALSE;
+    gint64 now = g_get_monotonic_time();
+    double dt = CLAMP((double)(now - s->kinetic_ts) / 1e6, 0.001, 0.05);
+    s->kinetic_ts = now;
+    double next_pos = CLAMP(s->scroll_pos + s->scroll_vel * dt, 0.0, (double)s->limit);
+    s->scroll_vel *= exp(-dt / 0.14);
+    if (next_pos == s->scroll_pos || next_pos <= 0.0 || next_pos >= (double)s->limit) {
+        s->scroll_vel = 0.0; s->kinetic_ts = 0;
+    }
+    s->scroll_pos = next_pos;
+    s->scroll = CLAMP((int)llround(next_pos), 0, s->limit);
+    return s->kinetic_ts && fabs(s->scroll_vel) > 8.0;
+}
+
+gboolean orb_sidebar_scroll_event(GtkWidget *widget, GdkEventScroll *event, OrbSidebar *s) {
+    (void)widget;
+    if (s->limit <= 0) return FALSE;
+    if (gdk_event_is_scroll_stop_event((GdkEvent *)event)) {
+        if (fabs(s->scroll_vel) > 24.0) { s->kinetic_ts = g_get_monotonic_time(); orb_sidebar_invalidate(s); }
+        return TRUE;
+    }
+    double dx, dy;
+    gboolean smooth = gdk_event_get_scroll_deltas((GdkEvent *)event, &dx, &dy);
+    if (!smooth) dy = event->direction == GDK_SCROLL_DOWN ? 1 : event->direction == GDK_SCROLL_UP ? -1 : 0;
+    if (dy == 0.0) return FALSE;
+    double step = dy * (smooth ? 20.0 : 64.0);
+    gint64 now = g_get_monotonic_time();
+    if (smooth && s->scroll_ts && now - s->scroll_ts < 120000) {
+        double dt = CLAMP((double)(now - s->scroll_ts) / 1e6, 0.004, 0.12);
+        s->scroll_vel = s->scroll_vel * 0.45 + (step / dt) * 0.55;
+    } else s->scroll_vel = 0.0;
+    s->scroll_ts = now; s->kinetic_ts = 0;
+    double next_pos = CLAMP(s->scroll_pos + step, 0.0, (double)s->limit);
+    if (next_pos == s->scroll_pos) return FALSE;
+    s->scroll_pos = next_pos;
+    int next = CLAMP((int)llround(next_pos), 0, s->limit);
+    if (next != s->scroll) { s->scroll = next; orb_sidebar_invalidate(s); }
+    return TRUE;
+}

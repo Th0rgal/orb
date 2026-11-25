@@ -5,20 +5,23 @@ import { MissionGlyph, missionStatusPresentation } from "../src/MissionGlyph";
 
 afterEach(cleanup);
 
-it("keeps agent identity while a live mission completes, pauses or fails", () => {
+it("shows one status icon in place of the bot glyph and its badge", () => {
   const [status, setStatus] = createSignal("active");
   const { container } = render(() => <MissionGlyph status={status()} />);
-  const bot = container.querySelector(".mission-glyph > svg");
-  expect(container.querySelector(".mission-status-spin")).not.toBeNull();
+  const icons = () => container.querySelectorAll(".mission-glyph > svg");
+  expect(icons()).toHaveLength(1);
+  expect(container.querySelector(".mission-glyph > svg.mission-status-spin")).not.toBeNull();
+  expect(container.querySelector(".mission-status-mark")).toBeNull();
   setStatus("completed");
   expect(container.querySelector(".mission-glyph")?.getAttribute("title")).toBe("Completed");
-  expect(container.querySelector(".mission-glyph > svg")).toBe(bot);
+  expect(icons()).toHaveLength(1);
   expect(container.querySelector(".mission-status-spin")).toBeNull();
   for (const state of ["idle", "blocked", "paused", "failed", "interrupted", "unrecognized"]) {
     setStatus(state);
     expect(container.querySelector(".success")).toBeNull();
-    expect(container.querySelector(".mission-glyph > svg")).toBe(bot);
+    expect(icons()).toHaveLength(1);
     expect(container.querySelector(".mission-status-spin")).toBeNull();
+    expect(container.querySelector(".mission-status-mark")).toBeNull();
   }
 });
 

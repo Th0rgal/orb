@@ -145,7 +145,7 @@
    and active pills translucent rather than solid hex cutouts. */
 :root[data-platform="linux"] {
   --sidebar-opacity: 78%;
-  --surface-opacity: 94%;
+  --surface-opacity: 100%;
   --bg-hover: color-mix(in srgb, var(--fg) 4.5%, transparent);
   --bg-active: color-mix(in srgb, var(--fg) 7.5%, transparent);
   --tb-traffic-left: 8px;
@@ -153,13 +153,14 @@
 }
 :root[data-platform="linux"][data-theme="light"] {
   --sidebar-opacity: 72%;
-  --surface-opacity: 95.5%;
+  --surface-opacity: 100%;
   --bg-hover: color-mix(in srgb, var(--fg) 4%, transparent);
   --bg-active: color-mix(in srgb, var(--fg) 6.5%, transparent);
 }
 
 * { box-sizing: border-box; }
 :root { --t: 90ms; --ease: cubic-bezier(.2, .7, .2, 1); }
+.orb-pal-blur .app { filter: blur(6px); transition: filter 90ms ease-out; }
 /* Queued messages sit a step below the composer, as in Cursor. */
 :root { --queue-bg: color-mix(in srgb, var(--bg-elev) 50%, var(--bg)); }
 html, body, #root, .app { height: 100%; margin: 0; background: transparent; }

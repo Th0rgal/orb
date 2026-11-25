@@ -142,6 +142,8 @@ structure ScrollSpec where
   contentHeight : SubPx := 0
   /-- Scalar caret and displayed text length, when following an editor insertion point. -/
   revealCaret : Option (Nat × Nat) := none
+  /-- Whether to paint the static overlay scrollbar thumb when content overflows. -/
+  showScrollbar : Bool := true
   deriving DecidableEq, Repr, Inhabited
 
 namespace ScrollSpec

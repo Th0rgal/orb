@@ -8,6 +8,7 @@
 #include <webkit2/webkit2.h>
 GtkWidget *orb_menu_page(void) {
     GtkWidget *menu = gtk_menu_new();
+    gtk_menu_set_reserve_toggle_size(GTK_MENU(menu), FALSE);
     gtk_style_context_add_class(gtk_widget_get_style_context(menu), "orb-ctx");
     return menu;
 }

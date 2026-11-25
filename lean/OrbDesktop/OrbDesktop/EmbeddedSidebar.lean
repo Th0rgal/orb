@@ -235,11 +235,12 @@ def buildPaletteChrome (req : PaletteRequest) : Theme × WidgetNode :=
   let sh : ShadowStyle := {
     offsetX := 0, offsetY := Int.ofNat (pxToSub 10), blur := pxToSub 24, spread := 0, color := pal.shadowColor
   }
+  let cardBg : Color := if req.light then 0xF6F6F4E2 else 0x1E1E1ED8
   let card : WidgetNode :=
     WidgetNode.box
       (BoxStyle.col 0
         |>.withFixedSize cardW cardH
-        |>.withBg pal.elevatedSurface
+        |>.withBg cardBg
         |>.withRadius theme.radiusLg
         |>.withBorder theme.borderWidth pal.border
         |>.withShadow sh)
@@ -251,7 +252,7 @@ def buildPaletteChrome (req : PaletteRequest) : Theme × WidgetNode :=
         |>.withAlign .center
         |>.withPadding (Edges.trbl topPad 0 0 0)
         |>.withFixedSize vpW vpH
-        |>.withBg (if req.light then 0x00000038 else 0x00000072))
+        |>.withBg (if req.light then 0x00000024 else 0x00000048))
       [card]
   (theme, scrim)
 

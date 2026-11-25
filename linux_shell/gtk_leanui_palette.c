@@ -16,6 +16,7 @@ void orb_pal_close(OrbPalette *p, gboolean restore_prev) {
     GdkWindow *gw = gtk_widget_get_window(p->canvas);
     if (gw) gdk_window_set_cursor(gw, NULL);
     gtk_widget_hide(p->canvas);
+    if (p->wv) webkit_web_view_evaluate_javascript(WEBKIT_WEB_VIEW(p->wv), "document.documentElement.classList.remove('orb-pal-blur')", -1, NULL, NULL, NULL, NULL, NULL);
     GtkWidget *target = (restore_prev && p->prev_focus && gtk_widget_get_visible(p->prev_focus) &&
                          gtk_widget_get_mapped(p->prev_focus) && gtk_widget_get_can_focus(p->prev_focus))
                             ? p->prev_focus : p->wv;
@@ -48,6 +49,7 @@ void orb_leanui_palette_open(GtkWidget *overlay) {
     p->pending_enter = FALSE; p->dirty = FALSE;
     p->req_gen++; p->applied_gen = p->req_gen; p->open = TRUE;
     gtk_widget_show(p->canvas); gtk_widget_grab_focus(p->canvas);
+    if (p->wv) webkit_web_view_evaluate_javascript(WEBKIT_WEB_VIEW(p->wv), "document.documentElement.classList.add('orb-pal-blur')", -1, NULL, NULL, NULL, NULL, NULL);
     orb_pal_query(p); orb_pal_invalidate(p);
 }
 
@@ -82,8 +84,10 @@ gboolean orb_leanui_palette_key(GtkWidget *overlay, GdkEventKey *ev) {
     guint mod = ev->state & gtk_accelerator_get_default_mod_mask(), key = gdk_keyval_to_lower(ev->keyval);
     gboolean ctrl = (mod & GDK_CONTROL_MASK) != 0;
     gboolean super = ((mod & (GDK_SUPER_MASK | GDK_META_MASK)) != 0) || ((ev->state & GDK_MOD4_MASK) != 0);
-    gboolean exclusive_primary = (ctrl != super) && !(mod & (GDK_SHIFT_MASK | GDK_MOD1_MASK));
-    if (exclusive_primary && key == GDK_KEY_k) {
+    gboolean primary = (ctrl != super) && !(mod & GDK_MOD1_MASK);
+    gboolean exclusive_primary = primary && !(mod & GDK_SHIFT_MASK);
+    gboolean primary_shift = primary && ((mod & GDK_SHIFT_MASK) != 0);
+    if (primary_shift && key == GDK_KEY_f) {
         if (p->open) orb_pal_close(p, TRUE); else orb_leanui_palette_open(overlay);
         return TRUE;
     }
