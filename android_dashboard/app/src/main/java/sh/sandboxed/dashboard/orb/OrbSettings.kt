@@ -538,11 +538,23 @@ fun OrbSetupView(
     var noticeMessage by remember { mutableStateOf<String?>(null) }
     var isConnecting by remember { mutableStateOf(false) }
     var errorMessage by remember { mutableStateOf<String?>(null) }
+    var localSideSystemReachable by remember { mutableStateOf(false) }
+    val localSideSystemUrl = "http://127.0.0.1:3000"
     val context = LocalContext.current
     val signedInToken by core.tokenFlow.collectAsState()
     val currentUser by core.currentUserFlow.collectAsState()
     val bgSyncState by OrbBackgroundSyncMonitor.stateFlow.collectAsState()
     val isConnectedSession = onBack != null && core.isConfigured && (!signedInToken.isNullOrEmpty() || authMode == "disabled")
+
+    LaunchedEffect(Unit) {
+        val ok = withContext(Dispatchers.IO) {
+            runCatching {
+                val req = okhttp3.Request.Builder().url("$localSideSystemUrl/api/health").get().build()
+                core.httpClient.newCall(req).execute().use { resp -> resp.isSuccessful }
+            }.getOrDefault(false)
+        }
+        localSideSystemReachable = ok
+    }
 
     LaunchedEffect(urlInput) {
         val cleanBase = urlInput.trim().trimEnd('/')
@@ -701,6 +713,55 @@ fun OrbSetupView(
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
                     modifier = Modifier.fillMaxWidth()
                 )
+            }
+            if (localSideSystemReachable || urlInput.trim().trimEnd('/') == localSideSystemUrl) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    val onLocal = urlInput.trim().trimEnd('/') == localSideSystemUrl
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(if (onLocal) OrbStyle.success.copy(alpha = 0.18f) else OrbStyle.surface)
+                            .border(
+                                1.dp,
+                                if (onLocal) OrbStyle.success else OrbStyle.border,
+                                RoundedCornerShape(8.dp)
+                            )
+                            .orbPressClickable {
+                                urlInput = localSideSystemUrl
+                                passwordInput = ""
+                            }
+                            .padding(horizontal = 10.dp, vertical = 6.dp)
+                    ) {
+                        Text(
+                            text = if (localSideSystemReachable) "Local SideSystem (Ready)" else "Local SideSystem",
+                            color = Color.White,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Medium
+                        )
+                    }
+                    if (onLocal) {
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(OrbStyle.surface)
+                                .border(1.dp, OrbStyle.border, RoundedCornerShape(8.dp))
+                                .orbPressClickable {
+                                    urlInput = "https://agent-backend.thomas.md"
+                                }
+                                .padding(horizontal = 10.dp, vertical = 6.dp)
+                        ) {
+                            Text(
+                                text = "Cloud Backend",
+                                color = OrbStyle.textMuted,
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Medium
+                            )
+                        }
+                    }
+                }
             }
         }
 
