@@ -203,7 +203,7 @@ void orb_sidebar_hits(void *view, const char *regions) {
     }
     gboolean animations = TRUE;
     g_object_get(gtk_widget_get_settings(s->overlay),"gtk-enable-animations",&animations,NULL);
-    if (running && animations && !s->animation) s->animation = g_timeout_add(100,animate,s);
+    if (running && animations && !s->animation) s->animation = g_timeout_add(16,animate,s);
     if ((!running || !animations) && s->animation) { g_source_remove(s->animation); s->animation = 0; }
 }
 

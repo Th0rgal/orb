@@ -9,7 +9,14 @@
 GtkWidget *orb_menu_page(void) {
     GtkWidget *menu = gtk_menu_new();
     gtk_menu_set_reserve_toggle_size(GTK_MENU(menu), FALSE);
+    gtk_widget_set_size_request(menu, 236, -1);
     gtk_style_context_add_class(gtk_widget_get_style_context(menu), "orb-ctx");
+    GtkWidget *top = gtk_widget_get_toplevel(menu);
+    if (top && GTK_IS_WINDOW(top)) {
+        GdkVisual *rgba = gdk_screen_get_rgba_visual(gtk_widget_get_screen(top));
+        if (rgba) gtk_widget_set_visual(top, rgba);
+        gtk_widget_set_app_paintable(top, TRUE);
+    }
     return menu;
 }
 void orb_menu_popup(GtkWidget *menu, GtkWidget *row, const GdkEvent *event) {

@@ -4428,12 +4428,25 @@ select.orb-select-native:disabled { cursor: default; }
 .bw-grant-row .bw-link-btn:disabled, .bw-grant-head .bw-link-btn:disabled { opacity: 0.5; }
 
 /* Execution settings follow account usage and read as secondary controls. */
-.p-acc-body > .p-native { margin-top:12px;padding-top:10px;color:var(--fg-3); }
-.p-acc-body > .p-native:first-child { margin-top:2px;padding-top:2px;border-top:0; }
-.p-acc-body > .p-rank-row + .p-native { margin-top:2px; }
-.p-acc-body > .p-native .p-native-managed { color:var(--fg-3);font-size:11px; }
-.p-acc-body > .p-native :is(.p-native-models-toggle,.p-native-where,.s-btn) { font-size:11px; }
-.p-reset-badge { color:var(--fg-2);font-weight:500; }
+.p-acc-settings { display: flex; flex-direction: column; border-top: 1px solid var(--stroke-soft); margin-top: 4px; }
+.p-acc-settings:first-child { border-top: 0; margin-top: 0; }
+.p-acc-body .s-row { padding: 10px 0; border-bottom: 1px solid var(--stroke-soft); }
+.p-acc-settings > .s-row:last-child { border-bottom: 0; }
+.p-vpn-ctrl { display: flex; flex-direction: column; align-items: flex-end; gap: 8px; }
+.p-vpn-ctrl .p-native-controls { justify-content: flex-end; }
+.p-ctrl-skel { display: inline-block; width: 7.5rem; height: 28px; border-radius: var(--radius-sm); background: var(--bg-hover); opacity: 0.7; }
+.p-ctrl-skel-toggle { width: 32px; height: 18px; border-radius: 999px; }
+.p-acc-body > .p-native { margin-top: 0; padding-top: 0; border-top: 1px solid var(--stroke-soft); color: var(--fg-3); gap: 0; }
+.p-acc-body > .p-native:first-child { margin-top: 2px; padding-top: 2px; border-top: 0; }
+.p-acc-body > .p-rank-row + .p-native { margin-top: 2px; }
+.p-acc-body > .p-native > .s-row { padding: 10px 0; border-bottom: 1px solid var(--stroke-soft); }
+.p-native-footer { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 8px; padding-top: 8px; min-height: 26px; }
+.p-native-sep { color: var(--fg-4); font-size: 11px; }
+.p-native-refresh { margin-left: auto; }
+.p-acc-body > .p-native .p-native-managed { color: var(--fg-3); font-size: 11px; }
+.p-acc-body > .p-native :is(.p-native-models-toggle, .p-native-where, .p-native-refresh) { font-size: 11.5px; }
+.provider-usage-unavailable { color: var(--fg-4); opacity: 0.75; }
+.p-reset-badge { color: var(--fg-2); font-weight: 500; }
 
 .startup-card { min-height: 14rem; max-width: 30rem; margin: 15vh auto; padding: 2rem; }
 .startup-card button { display: block; margin-top: 1rem; }

@@ -33,7 +33,7 @@ int orb_sidebar_host(OrbSidebarPaint callback, void *context) {
 
 static void render_frame(OrbSidebar *s) {
     if (s->width < 2 || s->height < 2 || !gtk_widget_get_mapped(s->overlay)) return;
-    guint phase = (guint)(g_get_monotonic_time() / 100000 % 12);
+    guint phase = (guint)(g_get_monotonic_time() / 16667 % 60);
     gboolean moved = FALSE;
     if (!s->gpu_disabled && orb_wl_subsurface_ensure(&s->wl, s->canvas, &moved)) {
         char *req = g_strdup_printf("%d\t%d\t%d\t%d\t%d\t%u\t%" PRIuPTR "\t%" PRIuPTR "\n%s",
@@ -160,10 +160,10 @@ GtkWidget *orb_leanui_new(GtkWidget *webview, OrbSidebarAction action, gpointer 
     /* GTK supplies focus, ATK names and input. Only transient input feedback is painted here. */
     GtkCssProvider *css = gtk_css_provider_new();
     gtk_css_provider_load_from_data(css,
-        ".orb-leanui > button {background:transparent;border:1px solid transparent;"
+        ".orb-leanui > button {background:transparent;border:1px solid transparent;border-radius:6px;"
         "box-shadow:none;outline:none;min-width:0;min-height:0;margin:0;padding:0;}"
         ".orb-leanui > button:hover,.orb-leanui > button.orb-multi {background:rgba(140,140,140,.12);}"
-        ".orb-keyboard-focus .orb-leanui > button:focus {border-color:#757575;}", -1, NULL);
+        ".orb-keyboard-focus .orb-leanui > button:focus {border-color:rgba(120,120,116,.55);}", -1, NULL);
     gtk_style_context_add_provider_for_screen(gtk_widget_get_screen(webview), GTK_STYLE_PROVIDER(css),
                                               GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
     g_object_unref(css);

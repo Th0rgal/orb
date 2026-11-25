@@ -1,4 +1,4 @@
-import { Show, createEffect, createResource, createSignal, onCleanup } from "solid-js";
+import { Show, Suspense, createEffect, createResource, createSignal, onCleanup } from "solid-js";
 import { api, connectionVersion } from "./api";
 import { AccountSettingReadError } from "./AccountSettingReadError";
 import { alternativeRouterAccess } from "./accountVpn";
@@ -42,13 +42,15 @@ export function AlternativeRouterSettings(p: { account: string }) {
     }
   }
   return <SettingsRow title="Alternative routers" desc="Allow OpenCode and other routed clients to use this account.">
-    <Show when={!setting.error} fallback={<AccountSettingReadError error={setting.error} path={uri(p.account)}
-      updateMessage="Update Core to configure alternative router access." retryLabel="Retry router settings" retry={() => void refetch()} />}>
-      <Show when={setting()}>{s =>
-        <Toggle label="Allow alternative routers" on={s().allowed} disabled={saving() || setting.loading}
-          onClick={() => void save(!s().allowed)} />
-      }</Show>
-    </Show>
+    <Suspense fallback={<span class="p-ctrl-skel p-ctrl-skel-toggle" aria-hidden="true" />}>
+      <Show when={!setting.error} fallback={<AccountSettingReadError error={setting.error} path={uri(p.account)}
+        updateMessage="Update Core to configure alternative router access." retryLabel="Retry router settings" retry={() => void refetch()} />}>
+        <Show when={setting()}>{s =>
+          <Toggle label="Allow alternative routers" on={s().allowed} disabled={saving() || setting.loading}
+            onClick={() => void save(!s().allowed)} />
+        }</Show>
+      </Show>
+    </Suspense>
     <Show when={error()}><span role="alert">{error()}</span></Show>
   </SettingsRow>;
 }
