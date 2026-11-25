@@ -297,11 +297,197 @@ def paletteGpuRaster (gpuRef : IO.Ref PaletteGpu) (w h : Nat) (atlas : Text.Glyp
     gpuRef.set { gpu with ctx := none, disabled := true }
     return none
 
+/-- The palette's static layer: scrim, card shadow and card background. Its blurred shadow is
+    most of a CPU palette frame, yet it only changes with the window, theme or card height. -/
+structure PaletteRasterCache where
+  width : Nat := 0
+  height : Nat := 0
+  chromePrims : Scene := #[]
+  chromeFb : ByteArray := ByteArray.empty
+  /-- The framebuffer last returned was composed over this exact chrome, from `content`. -/
+  composed : Bool := false
+  content : Scene := #[]
+  chromeRenders : Nat := 0
+  chromeResizes : Nat := 0
+  contentRenders : Nat := 0
+
+/-- The palette tree without the card's contents (same layout: the card has a fixed size). -/
+partial def paletteChromeOnly : WidgetNode → WidgetNode
+  | .mk id f h style payload children =>
+    if id == some paletteCardHitId then .mk id f h style payload []
+    else .mk id f h style payload (children.map paletteChromeOnly)
+
+private def unionBounds (prims : Array Prim) : Option Rect :=
+  prims.foldl (fun acc p => match p.bounds, acc with
+    | none, _ => acc
+    | some r, none => some r
+    | some r, some a =>
+      let x := min a.x r.x
+      let y := min a.y r.y
+      some ⟨x, y, max a.right r.right - x, max a.bottom r.bottom - y⟩) none
+
+/-- Clip pushes still open after `prims`, innermost first (pops of earlier pushes stay as `none`). -/
+private def openClips (prims : Array Prim) : List (Option Prim) :=
+  prims.foldl (fun st p => match p with
+    | .clipPush _ | .clipPushRounded _ _ => some p :: st
+    | .clipPop => match st with | some _ :: rest => rest | rest => none :: rest
+    | _ => st) []
+
+/-- Region that differs between two content scenes: the bounds of everything between their common
+    prefix and suffix. Prims whose clipping differs lie inside those ranges, so their bounds are
+    covered; the unchanged suffix is safe when both ranges leave the same clips open. `none` when
+    they do not, or when a range contains layering. -/
+def contentDamage (old new : Scene) : Option (Option Rect) := Id.run do
+  let n := min old.size new.size
+  let mut pre := 0
+  while pre < n && old[pre]? == new[pre]? do pre := pre + 1
+  let mut suf := 0
+  while suf < n - pre && old[old.size - 1 - suf]? == new[new.size - 1 - suf]? do suf := suf + 1
+  let a := old.extract pre (old.size - suf)
+  let b := new.extract pre (new.size - suf)
+  if openClips a != openClips b then return none
+  if (a ++ b).any fun p => match p with | .layerPush _ | .layerPop | .backdropBlur _ => true | _ => false then
+    return none
+  return some (unionBounds (a ++ b))
+
+/-- The rect of a painted chrome prim whose height is `dh` larger in `b` than in `a`, everything
+    else being equal; `some none` when the prims are identical; `none` otherwise. -/
+private def grownRect (dh : Int) (a b : Prim) : Option (Option Rect) :=
+  if a == b then some none else
+  let grow (r : Rect) : Rect := { r with h := r.h + dh }
+  match a, b with
+  | .quad r f rad bw bc, .quad .. => if Prim.quad (grow r) f rad bw bc == b then some (some r) else none
+  | .rrect r f radii bws bc, .rrect .. => if Prim.rrect (grow r) f radii bws bc == b then some (some r) else none
+  | .shadow r c rad blur, .shadow .. => if Prim.shadow (grow r) c rad blur == b then some (some r) else none
+  | _, _ => none
+
+private def firstShadow (scene : Scene) : Option (Rect × Nat × Nat) :=
+  scene.findSome? fun p => match p with
+    | .shadow r _ rad blur => some (r, blur, rad)
+    | _ => none
+
+/-- Derive, in place, the chrome of a taller or shorter card from the cached chrome without
+    re-blurring its shadow. Every grown prim is identical row by row farther than the shadow
+    support (two blur radii plus the corner radius) from its top and bottom edges, so that middle
+    band is resized and the rows below it shifted; below the ink and beside the shadow every row is
+    plain scrim. Requires every other chrome prim to cover the whole viewport. Returns the frame and
+    the rectangle that changed, or `none` unless the new chrome is the old one with only those
+    heights changed. -/
+def resizeChrome (w h : Nat) (oldChrome newChrome : Scene) (fb0 : ByteArray) : Option (ByteArray × Rect) := Id.run do
+  let some (oldS, blur, rad) := firstShadow oldChrome | return none
+  let some (newS, _, _) := firstShadow newChrome | return none
+  let dh := newS.h - oldS.h
+  if dh == 0 || oldChrome.size != newChrome.size || fb0.size != w * h * 4 then return none
+  let mut grown : Array Rect := #[]
+  for (a, b) in oldChrome.zip newChrome do
+    match grownRect dh a b with
+    | none => return none
+    | some none =>
+      match a.bounds with
+      | some r => if !(r.x ≤ 0 && r.y ≤ 0 && r.right ≥ w && r.bottom ≥ h) then return none
+      | none => return none
+    | some (some r) => grown := grown.push r
+  if grown.isEmpty then return none
+  let m : Int := 2 * Int.ofNat blur + Int.ofNat rad + 4
+  let ad : Int := if dh < 0 then -dh else dh
+  let bandTop := grown.foldl (fun a r => max a r.y) 0 + m
+  let oldBandBottom := grown.foldl (fun a r => min a r.bottom) (h : Int) - m
+  let newBandBottom := oldBandBottom + dh
+  let oldInk := grown.foldl (fun a r => max a r.bottom) 0 + m
+  -- Rows at or below the old ink are plain scrim; the shrink path repeats one of them.
+  let limit := min (h : Int) (max oldInk (oldInk + dh))
+  let x0 := max 0 (grown.foldl (fun a r => min a r.x) (w : Int) - m)
+  let x1 := min (w : Int) (grown.foldl (fun a r => max a r.right) 0 + m)
+  if bandTop < 0 || bandTop ≥ min oldBandBottom newBandBottom || oldInk ≥ h || x1 ≤ x0 then return none
+  let rowW := (x1 - x0).toNat * 4
+  let off (y : Nat) : Nat := (y * w + x0.toNat) * 4
+  let mid := fb0.extract (off bandTop.toNat) (off bandTop.toNat + rowW)
+  let mut fb := fb0
+  if dh > 0 then
+    -- Grow: move rows down from the bottom up, then repeat the band row in the gap.
+    let mut y := limit.toNat
+    while y > newBandBottom.toNat do
+      y := y - 1
+      let src := (y - dh.toNat)
+      fb := (fb.extract (off src) (off src + rowW)).copySlice 0 fb (off y) rowW
+    for gy in [oldBandBottom.toNat : newBandBottom.toNat] do
+      fb := mid.copySlice 0 fb (off gy) rowW
+  else
+    -- Shrink: move rows up from the top down; past the old ink they are the scrim row.
+    let scrim := fb.extract (off oldInk.toNat) (off oldInk.toNat + rowW)
+    for y in [newBandBottom.toNat : limit.toNat] do
+      let src := y + ad.toNat
+      let row := if src ≥ oldInk.toNat then scrim else fb.extract (off src) (off src + rowW)
+      fb := row.copySlice 0 fb (off y) rowW
+  let top := min oldBandBottom newBandBottom
+  return some (fb, ⟨x0, top, x1 - x0, limit - top⟩)
+
+private def unionRects (a b : Option Rect) : Option Rect :=
+  match a, b with
+  | none, r | r, none => r
+  | some a, some b =>
+    let x := min a.x b.x
+    let y := min a.y b.y
+    some ⟨x, y, max a.right b.right - x, max a.bottom b.bottom - y⟩
+
+/-- CPU palette raster over a cached chrome layer. Starting from the previous frame when it was
+    composed by this cache, only the region whose chrome or content changed is restored to chrome
+    and repainted with the content prims, in scene order, so the result equals a full raster. -/
+def paletteCpuRaster (cacheRef : IO.Ref PaletteRasterCache) (w h : Nat) (atlas : Text.GlyphAtlasCache)
+    (chrome full : Scene) (previous : ByteArray)
+    (renderChrome : Scene → IO ByteArray := fun sc => pure (Vulkan.rasterizeScene w h 0 atlas sc).1) :
+    IO ByteArray := do
+  let n := chrome.size
+  -- Chrome must be a strict prefix of the scene; otherwise paint the whole frame.
+  if full.size < n || full.extract 0 n != chrome then
+    cacheRef.modify ({ · with composed := false })
+    return (Vulkan.rasterizeScene w h 0 atlas full).1
+  let content := full.extract n full.size
+  -- Take the chrome out of the cache so an in-place resize does not copy it.
+  let c0 ← cacheRef.modifyGet fun c => (c, { c with chromeFb := ByteArray.empty })
+  let sameSize := c0.width == w && c0.height == h && c0.chromeFb.size == w * h * 4
+  let prevOk := c0.composed && sameSize && previous.size == w * h * 4
+  -- `some r`: chrome unchanged outside `r` (`r = none`: unchanged); `none`: repaint everything.
+  let (c, chromeChange) ←
+    if sameSize && c0.chromePrims == chrome then pure (c0, some none)
+    else match (if sameSize then resizeChrome w h c0.chromePrims chrome c0.chromeFb else none) with
+      | some (fb, r) => pure ({ c0 with chromePrims := chrome, chromeFb := fb, chromeResizes := c0.chromeResizes + 1 }, some (some r))
+      | none =>
+        let fb ← renderChrome chrome
+        pure ({ c0 with width := w, height := h, chromePrims := chrome, chromeFb := fb, chromeRenders := c0.chromeRenders + 1 }, none)
+  let contentChange : Option Rect :=
+    match contentDamage c0.content content with
+    | some r => r
+    | none => unionBounds (c0.content ++ content)
+  let (base, region?) := match chromeChange, prevOk with
+    | some chromeR, true => (previous, unionRects chromeR contentChange)
+    | _, _ => (c.chromeFb, unionBounds content)
+  let vp : Rect := ⟨0, 0, w, h⟩
+  let profile := (← IO.getEnv "ORB_PAL_PROFILE") == some "1"
+  let t0 ← IO.monoNanosNow
+  let mut fb := base
+  if let some r := region? then
+    let d := intersectRect vp r
+    if !d.isEmpty then
+      let x := d.x.toNat
+      let rowBytes := d.w.toNat * 4
+      for y in [d.y.toNat : d.bottom.toNat] do
+        let off := (y * w + x) * 4
+        fb := c.chromeFb.copySlice off fb off rowBytes
+      let t1 ← IO.monoNanosNow
+      fb := (Vulkan.rasterizeSceneInto w h 0 atlas (some fb) none
+        (#[Prim.clipPush d] ++ content ++ #[Prim.clipPop])).1
+      if profile then
+        IO.eprintln s!"pal-raster prev={prevOk} chrome={match chromeChange with | some none => "same" | some _ => "resized" | none => "full"} d={d.w}x{d.h} restore_us={(t1 - t0) / 1000} raster_us={((← IO.monoNanosNow) - t1) / 1000}"
+  cacheRef.set { c with composed := true, content, contentRenders := c.contentRenders + 1 }
+  return fb
+
 /-- Render one palette request through the LeanUI layout and scene pipeline, rasterized on the
-    GPU when `gpu?` is available and by the CPU damage rasterizer otherwise. -/
+    GPU when `gpu?` is available and by the CPU rasterizer otherwise (over the cached chrome
+    layer when `raster?` is given). -/
 def renderPaletteFrame (req : PaletteRequest) (ac0 : Text.GlyphAtlasCache) (fb0 : Vulkan.VulkanContext)
     (shape : Text.GlyphAtlasCache → Nat → WidgetNode → IO (Text.GlyphAtlasCache × WidgetNode))
-    (gpu? : Option (IO.Ref PaletteGpu) := none) :
+    (gpu? : Option (IO.Ref PaletteGpu) := none) (raster? : Option (IO.Ref PaletteRasterCache) := none) :
     IO (String × Text.GlyphAtlasCache × Vulkan.VulkanContext) := do
   let sc := 120 * req.scale
   let (theme, root) := buildPaletteChrome req
@@ -311,6 +497,24 @@ def renderPaletteFrame (req : PaletteRequest) (ac0 : Text.GlyphAtlasCache) (fb0 
   let ac := ac.finishUploads
   let devW := req.width * req.scale
   let devH := req.height * req.scale
+  if let some r := raster? then
+    -- The static chrome (scrim, blurred shadow, card) goes to the GPU when one is available, the
+    -- changing content is composited over it incrementally on the CPU.
+    let renderChrome (prims : Scene) : IO ByteArray := do
+      let gpuPx ← match gpu? with
+        | some g => paletteGpuRaster g devW devH ac prims
+        | none => pure none
+      match gpuPx with
+      | some px => if px.size == devW * devH * 4 then pure px else pure (Vulkan.rasterizeScene devW devH 0 ac prims).1
+      | none => pure (Vulkan.rasterizeScene devW devH 0 ac prims).1
+    let chromeTree := paletteChromeOnly tree
+    let chromeBox := layoutNode sc none theme.palette.focusRing 0 0 (pxToSub req.width) (pxToSub req.height) chromeTree.toLayoutNode
+    let chrome := (buildSceneFromLayout sc {} theme chromeTree chromeBox (recordNodes := false)).prims
+    -- Move the previous frame out of `fb0` so it is uniquely owned and painted in place.
+    let previous := fb0.framebuffer
+    let fb0 := { fb0 with framebuffer := ByteArray.empty, previousPaint := none }
+    let px ← paletteCpuRaster r devW devH ac chrome scene.prims previous renderChrome
+    return (formatPaletteHits scene, ac, { fb0 with width := devW, height := devH, framebuffer := px })
   let gpuPx ← match gpu? with
     | some g => paletteGpuRaster g devW devH ac scene.prims
     | none => pure none
@@ -385,8 +589,8 @@ abbrev RowShapeMemo := Std.HashMap WidgetId (WidgetNode × WidgetNode)
 
 /-- Shape `node`, reusing a previous frame's shaped row whenever its unshaped subtree is
     structurally identical (`BEq`). Only focusable rows are memoized; container shells above
-    them are shaped without children and reassembled. The state starts from `old` so hits cost
-    no insert; only reshaped rows are written back. Counts `(reused, reshaped)` rows. -/
+    them are shaped without children and reassembled. Every row visited is written to the new
+    memo, so rows that disappear are dropped. Counts `(reused, reshaped)` rows. -/
 partial def shapeWithRowMemo (shape : ShapeFn) (old : RowShapeMemo) (sc : Nat) :
     WidgetNode → StateT (Text.GlyphAtlasCache × RowShapeMemo × Nat × Nat) IO WidgetNode
   | node@(.mk id focusable hit style payload children) => do
@@ -394,7 +598,7 @@ partial def shapeWithRowMemo (shape : ShapeFn) (old : RowShapeMemo) (sc : Nat) :
       if let some wid := id then
         if let some (src, shaped) := old.get? wid then
           if src == node then
-            modify fun (ac, memo, hits, misses) => (ac, memo, hits + 1, misses)
+            modify fun (ac, memo, hits, misses) => (ac, memo.insert wid (src, shaped), hits + 1, misses)
             return shaped
         let (ac, memo, hits, misses) ← get
         let (ac', shaped) ← shape ac sc node
@@ -417,10 +621,12 @@ structure EmbeddedSidebarCache where
   body : List String := []
   rows : List ChromeSidebarRow := []
   expanded : List ChromeSidebarRow := []
-  /-- Inputs that fully determine the tree up to scroll: `(w, h, scale, light, phase)` + body. -/
-  treeKey : Nat × Nat × Nat × Bool × Nat := (0, 0, 0, false, 0)
-  /-- Shaped tree for `treeKey`, valid for `atlasGen` at `scale`. -/
-  shaped : Option WidgetNode := none
+  /-- Inputs that, with `body` and the spinner phase, determine the tree up to scroll:
+      `(w, h, scale, light)`. -/
+  treeKey : Nat × Nat × Nat × Bool := (0, 0, 0, false)
+  /-- Shaped trees for `treeKey` and `body` by spinner phase (at most 12, the spinner period),
+      valid for `atlasGen` at `scale`. Scroll and spinner frames after the first cycle reuse one. -/
+  shapedPhases : List (Nat × WidgetNode) := []
   atlasGen : UInt64 := 0
   memoScale : Nat := 0
   rowMemo : RowShapeMemo := {}
@@ -466,10 +672,11 @@ def prepareSidebarFrame (request : String) (atlas : IO.Ref Text.GlyphAtlasCache)
   let phaseN := phase.toNat?.getD 0
   let c0 ← cacheRef.get
   -- A disabled cache still tracks scroll history (the scrollbar fade) but never reuses work.
-  let c0 := if c0.enabled then c0 else { c0 with parses := 0, shaped := none, rowMemo := {} }
+  let c0 := if c0.enabled then c0 else { c0 with parses := 0, shapedPhases := [], rowMemo := {} }
   -- Rows are display-only and re-sent verbatim; parse them only when they change.
+  let bodySame := c0.enabled && c0.parses > 0 && c0.body == body
   let (c1, rows, expanded) :=
-    if c0.enabled && c0.parses > 0 && c0.body == body then (c0, c0.rows, c0.expanded)
+    if bodySame then (c0, c0.rows, c0.expanded)
     else
       let projected := body.filterMap projectedRow
       let rows := projected.map Prod.fst
@@ -479,13 +686,15 @@ def prepareSidebarFrame (request : String) (atlas : IO.Ref Text.GlyphAtlasCache)
   let lastScrollMs := if offsetPx != c1.lastOffset then some nowMs else c1.lastScrollMs
   let (opacity, wakeMs) := scrollbarFade (lastScrollMs.map (nowMs - ·))
   let theme := Theme.withWindowEffects (if isLight then orbLightTheme else orbDarkTheme)
-  let key := (width, height, factor, isLight, phaseN)
+  let key := (width, height, factor, isLight)
   let ac0 := (← atlas.get).beginUploads
   let sameAtlas := c1.atlasGen == ac0.generation && c1.memoScale == sc
+  let treesValid := c1.enabled && sameAtlas && bodySame && c1.treeKey == key
+  let cachedTree := if treesValid then c1.shapedPhases.lookup phaseN else none
   let (ac, tree, c2) ← do
-    if c1.enabled && sameAtlas && c1.treeKey == key && c1.body == body && c1.shaped.isSome then
-      -- Scroll-only frame: identical tree up to the viewport offset.
-      pure (ac0, (c1.shaped.getD default), { c1 with treeReuses := c1.treeReuses + 1 })
+    if let some cached := cachedTree then
+      -- Same rows, geometry and spinner phase: identical tree up to the viewport offset.
+      pure (ac0, cached, { c1 with treeReuses := c1.treeReuses + 1 })
     else
       let st := { DesktopState.liveUnavailable with
         theme, sidebarRows := rows
@@ -501,16 +710,16 @@ def prepareSidebarFrame (request : String) (atlas : IO.Ref Text.GlyphAtlasCache)
       else
         -- A new row model may drop widget ids; start a fresh memo then so it never grows.
         let old := if sameAtlas then c1.rowMemo else {}
-        let (tree, (ac, memo, reused, reshaped)) ← (shapeWithRowMemo shape old sc root).run
-          (ac0, (if c0.body == body then old else {}), 0, 0)
+        let (tree, (ac, memo, reused, reshaped)) ← (shapeWithRowMemo shape old sc root).run (ac0, {}, 0, 0)
         -- An atlas reset mid-frame invalidates every UV reused above: reshape from scratch.
         let (ac, tree, memo, reused, reshaped) ←
           if ac.generation != ac0.generation then do
             let (t, (ac', memo', n', m')) ← (shapeWithRowMemo shape {} sc root).run (ac, {}, 0, 0)
             pure (ac', t, memo', n', m')
           else pure (ac, tree, memo, reused, reshaped)
+        let phases := if treesValid && ac.generation == ac0.generation then (c1.shapedPhases.take 11) else []
         pure (ac, tree, { c1 with
-          treeKey := key, shaped := some tree, atlasGen := ac.generation, memoScale := sc, rowMemo := memo
+          treeKey := key, shapedPhases := (phaseN, tree) :: phases, atlasGen := ac.generation, memoScale := sc, rowMemo := memo
           rowReuses := c1.rowReuses + reused, rowShapes := c1.rowShapes + reshaped })
   let tree := withRosterScroll (pxToSub offsetPx) opacity tree
   let box := layoutNode sc none theme.palette.focusRing 0 0 (pxToSub width) (pxToSub height) tree.toLayoutNode
@@ -535,7 +744,8 @@ def dispatchEmbeddedRequest (request : String)
     (sidebarCache : IO.Ref EmbeddedSidebarCache)
     (shape : ShapeFn)
     (gpuSurface? : Option (IO.Ref (USize × Vulkan.VulkanContext)) := none)
-    (paletteGpu? : Option (IO.Ref PaletteGpu) := none) :
+    (paletteGpu? : Option (IO.Ref PaletteGpu) := none)
+    (paletteRaster? : Option (IO.Ref PaletteRasterCache) := none) :
     IO (String × ByteArray) := do
   if request.startsWith "D\t" then
     if let some gpuRef := gpuSurface? then
@@ -547,7 +757,7 @@ def dispatchEmbeddedRequest (request : String)
     let some palReq := parsePaletteRequest? request
       | throw (IO.userError "invalid palette allocation")
     let palCtx ← paletteFramebuffer.modifyGet fun c => (c, { c with framebuffer := ByteArray.empty, previousPaint := none })
-    let (hits, ac, next) ← renderPaletteFrame palReq (← atlas.get) palCtx shape paletteGpu?
+    let (hits, ac, next) ← renderPaletteFrame palReq (← atlas.get) palCtx shape paletteGpu? paletteRaster?
     paletteFramebuffer.set next
     atlas.set ac
     return (hits, next.framebuffer)
@@ -596,11 +806,12 @@ def runEmbeddedSidebar (modulePath : String)
   -- rasterizer and `ORB_LEANUI_GPU=lavapipe` admits a software ICD.
   let gpuMode ← Vulkan.resolveGpuMode .auto
   let paletteGpu ← IO.mkRef ({ disabled := gpuMode == .disabled, allowSoftware := gpuMode == .lavapipe } : PaletteGpu)
+  let paletteRaster ← IO.mkRef ({} : PaletteRasterCache)
   try
     FFI.sidebarHost modulePath fun request =>
       dispatchEmbeddedRequest request atlas framebuffer paletteFramebuffer sidebarCache (fun a sc node =>
         shape a rt.primaryFont rt.monoFont rt.boldFont rt.mediumFont rt.semiboldFont sc node) (some gpuSurface)
-        (some paletteGpu)
+        (some paletteGpu) (some paletteRaster)
   finally
     let (_, gctx) ← gpuSurface.modifyGet fun p => (p, (0, {}))
     if gctx.gpuSession.isSome then Vulkan.shutdownVulkan gctx
@@ -798,12 +1009,39 @@ def embeddedPaletteSelfTest : IO Unit := do
     let oobHits := (oobHitsStr.splitOn "\n").filterMap paletteParseHitLine
     unless paletteHasNonZeroPixel oobFb.framebuffer && oobHits.any (·.1 == 0) do
       throw (IO.userError s!"oob selectedIdx dropped visible item 0: {oobHitsStr}")
+
+    -- 4f. The cached-chrome CPU raster is byte-identical to a full raster across selection moves,
+    --     typing (result count and card height change), a theme switch, no results and a resize.
+    let rc ← IO.mkRef ({} : PaletteRasterCache)
+    let mut incFb := { rt.vulkan with previousPaint := none, framebuffer := ByteArray.empty }
+    let mut acI := acS
+    let seq : List (Nat × Nat × Bool × Nat × String) :=
+      [(800, 700, false, 0, "m"), (800, 700, false, 1, "m"), (800, 700, false, 2, "m"), (800, 700, false, 2, "mi"),
+       (800, 700, false, 0, "mis"), (800, 700, false, 1, "mi"), (800, 700, true, 0, "mis"), (800, 700, true, 3, "mis"),
+       (800, 700, true, 0, "zz"), (640, 620, true, 1, "m"), (640, 620, true, 1, "mis"), (640, 620, false, 1, "m")]
+    for (w, h, light, sel, q) in seq do
+      let n := if q == "zz" then 0 else 16 - q.length * 4
+      let reqStr := String.intercalate "\n" (s!"P\t{w}\t{h}\t1\t{if light then 1 else 0}\t{sel}\t{q}" ::
+        (manyLines.take n))
+      let some req := parsePaletteRequest? reqStr | throw (IO.userError "palette raster request")
+      let (_, acA, incNext) ← renderPaletteFrame req acI incFb paletteIdentityShape none (some rc)
+      acI := acA
+      incFb := incNext
+      let (theme, root) := buildPaletteChrome req
+      let box := layoutNode 120 none theme.palette.focusRing 0 0 (pxToSub w) (pxToSub h) root.toLayoutNode
+      let scene := buildSceneFromLayout 120 {} theme root box (recordNodes := false)
+      let (fullFb, _) := Vulkan.rasterizeScene w h 0 acI scene.prims
+      unless incNext.framebuffer == fullFb do
+        throw (IO.userError s!"cached palette raster diverged at {w}x{h} light={light} sel={sel} q={q}")
+    let st ← rc.get
+    unless st.contentRenders == seq.length && st.chromeRenders ≤ 5 && st.chromeResizes ≥ 2 do
+      throw (IO.userError s!"palette chrome cache unused: chrome={st.chromeRenders} resizes={st.chromeResizes} content={st.contentRenders}")
   finally
     Runtime.shutdownRuntime rt
 
 /-- A GTK-shaped sidebar row model: nav rows, `projects` projects with `missions` missions each
     (one running per project, so the spinner animates), and the Settings footer. -/
-def sampleSidebarRows (projects missions : Nat) (titleSuffix : String := "") : String := Id.run do
+def sampleSidebarRows (projects missions : Nat) (titleSuffix : String := "") (onlyMission : Option Nat := none) : String := Id.run do
   let mut lines : Array String := #[
     "1000\tnav:new-agent\tnav\tNew Agent\t0\t\t⌘N\t0\t1\t0\t",
     "1001\tnav:inbox\tnav\tInbox\t0\t\t⌘I\t4\t0\t0\t",
@@ -816,7 +1054,10 @@ def sampleSidebarRows (projects missions : Nat) (titleSuffix : String := "") : S
     id := id + 1
     for m in [:missions] do
       let status := if m == 0 then "running" else if m == 1 then "awaiting_user" else "completed"
-      lines := lines.push s!"{id}\tm:{p}-{m}\tmission\tMission {p}.{m} refactor the sidebar{titleSuffix}\t1\t{status}\t\t0\t0\t0\t"
+      let suffix := match onlyMission with
+        | some k => if k == p * missions + m then titleSuffix else ""
+        | none => titleSuffix
+      lines := lines.push s!"{id}\tm:{p}-{m}\tmission\tMission {p}.{m} refactor the sidebar{suffix}\t1\t{status}\t\t0\t0\t0\t"
       id := id + 1
   lines := lines.push s!"{id}\tnav:settings\tfooter\tSettings\t0\t\t\t0\t0\t0\t"
   return String.intercalate "\n" lines.toList ++ "\n"
@@ -865,6 +1106,9 @@ def embeddedSidebarCacheSelfTest : IO Unit := do
     -- 2. Parse once per distinct row model; scroll-only frames reuse the whole shaped tree.
     unless (c 3).parses == 1 && (c 6).parses == 2 && (c 2).treeReuses == 2 do
       throw (IO.userError s!"unexpected sidebar reuse: parses={(c 3).parses}/{(c 6).parses} tree={(c 2).treeReuses}")
+    -- 2b. A new row model at the same phase and geometry must never reuse a cached tree.
+    unless (c 6).treeReuses == (c 5).treeReuses do
+      throw (IO.userError "sidebar reused a shaped tree after the row model changed")
     -- 3. A spinner tick reshapes only the six running rows.
     unless (c 3).rowShapes - (c 2).rowShapes == 6 && (c 3).rowReuses > (c 2).rowReuses + 30 do
       throw (IO.userError s!"spinner frame reshaped {(c 3).rowShapes - (c 2).rowShapes} rows")
@@ -910,13 +1154,16 @@ def runEmbeddedSidebarBench (iters : Nat)
     for enabled in [false, true] do
       for scenario in ["scroll", "spinner", "row_edit"] do
         let cache ← IO.mkRef ({ enabled } : EmbeddedSidebarCache)
-        discard <| prepareSidebarFrame (sidebarRequest 280 900 2 false 0 0 rows) atlas cache shapeFn 0
+        -- Warm up over one spinner period (1.2 s at runtime) before measuring steady state.
+        for ph in [:12] do
+          discard <| prepareSidebarFrame (sidebarRequest 280 900 2 false 0 ph rows) atlas cache shapeFn 0
         let mut samples : Array Nat := #[]
         for i in [:iters] do
           let (offset, phase, body) := match scenario with
             | "scroll" => (i * 3 % 400, 0, rows)
             | "spinner" => (0, i % 12, rows)
-            | _ => (0, 0, sampleSidebarRows 8 6 s!" #{i}{if enabled then "c" else "u"}")
+            -- One mission's title or status changes, as a live update does.
+            | _ => (0, 0, sampleSidebarRows 8 6 s!" #{i}{if enabled then "c" else "u"}" (some (i % 48)))
           let req := sidebarRequest 280 900 2 false offset phase body
           let t0 ← IO.monoNanosNow
           let frame ← prepareSidebarFrame req atlas cache shapeFn (i * 16)
@@ -986,6 +1233,85 @@ def runEmbeddedSidebarBench (iters : Nat)
         else d := 256
         return d
       out := out.push s!"  \"palette_{if light then "light" else "dark"}_2x_gpu\": \{{benchStats gsamples}, \"gpu\": {!g.disabled}, \"max_channel_delta_vs_cpu\": {delta}}"
+    -- Steady state, as GTK drives it: the previous paint is kept, so only damage is redrawn.
+    for light in [false, true] do
+      for scenario in ["select", "type"] do
+        let reqAt (i : Nat) : Option PaletteRequest :=
+          let n := if scenario == "type" then 12 - i % 9 else 12
+          let q := if scenario == "type" then String.ofList (List.replicate (1 + i % 9) 'm') else "mis"
+          let sel := if scenario == "select" then i % 12 else 0
+          parsePaletteRequest? (String.intercalate "\n" (s!"P\t1200\t800\t2\t{if light then 1 else 0}\t{sel}\t{q}" ::
+            (List.range n).map fun k => s!"{k}\tm:{k}\tmission\tMission {k}\tproject · running\trunning\t\t"))
+        let some r0 := reqAt 0 | throw (IO.userError "palette steady request")
+        let (_, ac0, fb0) ← renderPaletteFrame r0 (← atlas.get) { rt.vulkan with previousPaint := none, framebuffer := ByteArray.empty } shapeFn
+        atlas.set ac0
+        let rc ← IO.mkRef ({} : PaletteRasterCache)
+        let to0 ← IO.monoNanosNow
+        let (_, ac1, fb1) ← renderPaletteFrame r0 (← atlas.get) fb0 shapeFn none (some rc)
+        let to1 ← IO.monoNanosNow
+        atlas.set ac1
+        if scenario == "select" then
+          -- Opening: the chrome is rendered once, by the CPU or (here, lavapipe) the GPU.
+          let gref ← IO.mkRef ({ allowSoftware := true } : PaletteGpu)
+          let rcG ← IO.mkRef ({} : PaletteRasterCache)
+          let tg0 ← IO.monoNanosNow
+          let (_, acG, fbG) ← renderPaletteFrame r0 (← atlas.get) { rt.vulkan with previousPaint := none, framebuffer := ByteArray.empty } shapeFn (some gref) (some rcG)
+          let tg1 ← IO.monoNanosNow
+          atlas.set acG
+          let g ← gref.get
+          if let some c := g.ctx then Vk.destroyOffscreenReadback c
+          let a := fbG.framebuffer
+          let b := fb1.framebuffer
+          let delta := Id.run do
+            let mut d := 0
+            if a.size != b.size then return 256
+            for i in [:a.size] do
+              let x := (a.get! i).toNat
+              let y := (b.get! i).toNat
+              d := max d (if x > y then x - y else y - x)
+            return d
+          out := out.push s!"  \"palette_{if light then "light" else "dark"}_2x_open\": \{\"cpu_chrome_ms\": {(to1 - to0) / 1000000}, \"gpu_chrome_ms\": {(tg1 - tg0) / 1000000}, \"gpu\": {!g.disabled}, \"gpu_device\": \"lavapipe\", \"max_channel_delta_vs_cpu\": {delta}}"
+        let mut fb := fb1
+        let mut samples : Array Nat := #[]
+        for i in [1:iters + 1] do
+          let some r := reqAt i | throw (IO.userError "palette steady request")
+          let t0 ← IO.monoNanosNow
+          let (_, ac, next) ← renderPaletteFrame r (← atlas.get) fb shapeFn none (some rc)
+          let t1 ← IO.monoNanosNow
+          atlas.set ac
+          fb := next
+          samples := samples.push (t1 - t0)
+        -- Exactness with real glyphs: the cached raster must equal a full raster of the same scene.
+        let some rl := reqAt iters | throw (IO.userError "palette steady request")
+        let (theme, root) := buildPaletteChrome rl
+        let (acE, treeE) ← shapeFn (← atlas.get).beginUploads 240 root
+        let acE := acE.finishUploads
+        let boxE := layoutNode 240 none theme.palette.focusRing 0 0 (pxToSub rl.width) (pxToSub rl.height) treeE.toLayoutNode
+        let sceneE := buildSceneFromLayout 240 {} theme treeE boxE (recordNodes := false)
+        let exact := fb.framebuffer == (Vulkan.rasterizeScene 2400 1600 0 acE sceneE.prims).1
+        -- Stage split of one more step.
+        let some rn := reqAt (iters + 1) | throw (IO.userError "palette steady request")
+        let t0 ← IO.monoNanosNow
+        let (themeN, rootN) := buildPaletteChrome rn
+        let (acN, treeN) ← shapeFn (← atlas.get).beginUploads 240 rootN
+        let acN := acN.finishUploads
+        let t1 ← IO.monoNanosNow
+        let boxN := layoutNode 240 none themeN.palette.focusRing 0 0 (pxToSub rn.width) (pxToSub rn.height) treeN.toLayoutNode
+        let sceneN := buildSceneFromLayout 240 {} themeN treeN boxN (recordNodes := false)
+        if sceneN.prims.isEmpty then throw (IO.userError "palette stage scene")
+        let t2 ← IO.monoNanosNow
+        let chromeTree := paletteChromeOnly treeN
+        let chromeBox := layoutNode 240 none themeN.palette.focusRing 0 0 (pxToSub rn.width) (pxToSub rn.height) chromeTree.toLayoutNode
+        let chrome := (buildSceneFromLayout 240 {} themeN chromeTree chromeBox (recordNodes := false)).prims
+        if chrome.isEmpty then throw (IO.userError "palette stage chrome")
+        let t3 ← IO.monoNanosNow
+        let px ← paletteCpuRaster rc 2400 1600 acN chrome sceneN.prims fb.framebuffer
+        if px.isEmpty then throw (IO.userError "palette stage raster")
+        let t4 ← IO.monoNanosNow
+        let us (a b : Nat) := (b - a) / 1000
+        let st ← rc.get
+        out := out.push s!"  \"palette_{if light then "light" else "dark"}_2x_{scenario}_stages_us\": \{\"shape\": {us t0 t1}, \"layout_scene\": {us t1 t2}, \"chrome_scene\": {us t2 t3}, \"raster\": {us t3 t4}, \"byte_exact_vs_full\": {exact}}"
+        out := out.push s!"  \"palette_{if light then "light" else "dark"}_2x_{scenario}_step\": \{{benchStats samples}, \"chrome_renders\": {st.chromeRenders}, \"chrome_resizes\": {st.chromeResizes}, \"content_renders\": {st.contentRenders}}"
     if (← IO.getEnv "ORB_BENCH_RASTER_SPLIT") == some "1" then
       let some req := parsePaletteRequest? (palette.replace "{L}" "0") | throw (IO.userError "palette")
       let (theme, root) := buildPaletteChrome req
