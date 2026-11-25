@@ -55,6 +55,7 @@ structure SidebarRow where
   target         : String := ""
   project        : String := ""
   folder         : String := ""
+  folders        : Array String := #[]
   status         : String := ""
   shortcut       : String := ""
   icon           : String := ""
@@ -69,7 +70,7 @@ structure SidebarRow where
   deriving Repr, Inhabited, BEq
 
 def SidebarRow.toJson (r : SidebarRow) : JVal :=
-  .obj #[
+  let base : Array (String × JVal) := #[
     ("row_id", .str r.rowId),
     ("kind", .str r.kind),
     ("depth", .nat r.depth),
@@ -90,6 +91,7 @@ def SidebarRow.toJson (r : SidebarRow) : JVal :=
     ("selected", .bool r.selected),
     ("attention", .bool r.attention)
   ]
+  .obj (if r.folders.isEmpty then base else base.push ("folders", .arr (r.folders.map .str)))
 
 structure PaletteItem where
   itemId   : String
@@ -1059,6 +1061,7 @@ def projectSidebarRows (st : ChromeScopeState) (filterQuery : String := "") : Ar
         title := proj.name
         target := s!"project:{proj.slug}"
         project := proj.slug
+        folders := sortedFolders
         icon := if projExpanded then "folder-open" else "folder"
         color := projIconColor
         expandable := true

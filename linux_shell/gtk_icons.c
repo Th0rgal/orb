@@ -6,10 +6,13 @@
 #include <math.h>
 #include <string.h>
 const char *orb_menu_icon_name(const char *action) {
-    return !strcmp(action, "rename") ? "document-edit-symbolic" :
+    return !strcmp(action, "rename") || !strcmp(action, "rename-file") ? "document-edit-symbolic" :
         !strcmp(action, "archive") ? "package-x-generic-symbolic" : !strcmp(action, "restore") ? "edit-undo-symbolic" :
         !strcmp(action, "settings") ? "preferences-system-symbolic" : !strcmp(action, "clear") ? "edit-clear-symbolic" :
-        !strcmp(action, "delete") ? "user-trash-symbolic" : !strcmp(action, "move") ? "folder-symbolic" : "edit-copy-symbolic";
+        !strcmp(action, "delete") || !strcmp(action, "delete-file") ? "user-trash-symbolic" :
+        !strcmp(action, "cut") || !strcmp(action, "cut-file") ? "edit-cut-symbolic" :
+        !strcmp(action, "paste") ? "edit-paste-symbolic" :
+        !strcmp(action, "move") || !strcmp(action, "move-picker") || !strcmp(action, "move-file") ? "folder-symbolic" : "edit-copy-symbolic";
 }
 int orb_status_badge_kind(const char *status) {
     if (!status || !*status) { return 0; }
@@ -25,11 +28,8 @@ int orb_status_badge_kind(const char *status) {
     return 0;
 }
 #if defined(ORB_HAS_WEBKITGTK)
-#include <cairo/cairo.h>
-static void rounded_rect(cairo_t *cr, double x, double y, double w, double h, double r) {
-    cairo_new_sub_path(cr); cairo_arc(cr, x + w - r, y + r, r, -1.5708, 0); cairo_arc(cr, x + w - r, y + h - r, r, 0, 1.5708);
-    cairo_arc(cr, x + r, y + h - r, r, 1.5708, 3.1416); cairo_arc(cr, x + r, y + r, r, 3.1416, 4.7124); cairo_close_path(cr);
-}
+#include "gtk_squircle.h"
+#define rounded_rect orb_cairo_squircle
 static gboolean on_spin_tick(gpointer ud) {
     OrbIconSpinner *sp = (OrbIconSpinner *)ud;
     if (!sp->spinning || sp->spinning->len == 0) { sp->src = 0; return FALSE; }
@@ -63,17 +63,17 @@ void orb_gtk_bind_keyboard_focus(GtkWidget *window) {
 void orb_gtk_apply_theme(GtkCssProvider *css, gboolean light) {
     static const char *m[][2] = { {"#181818", "#ffffff"}, {"#141414", "#fafaf9"}, {"#d8d8d7", "#242423"}, {"#e6e6e5", "#101010"}, {"#b1b1b1", "#535250"}, {"#8a8a8a", "#7b7a76"}, {"#6c6c6b", "#939290"}, {"#5c5c5c", "#a9a8a2"}, {"#5b5b5a", "#535250"}, {"#2c2c2c", "#e8e7e2"}, {"rgba(18,19,19,0.78)", "rgba(246,246,244,0.72)"}, {"216,216,215", "36,36,35"} };
     static const char menu_css[] =
-        "window.popup,window.popup decoration{background-color:transparent;background-image:none;border:none;box-shadow:none;}"
-        "menu.orb-ctx,menu.orb-ctx menu{background-color:#181818;background-image:none;color:#d8d8d7;border:1px solid rgba(216,216,215,0.14);border-radius:12px;padding:6px;font-size:13px;box-shadow:none;}"
-        "menu.orb-ctx menuitem{min-height:28px;padding:4px 12px;margin:0;border:none;border-radius:7px;background:transparent;background-image:none;color:#d8d8d7;outline:none;box-shadow:none;font-size:13px;}"
-        "menu.orb-ctx menuitem:hover{background-color:rgba(216,216,215,0.08);color:#e6e6e5;}"
+        "window.popup,window.popup decoration,window.popup.background{background-color:transparent;background-image:none;border:none;box-shadow:none;}"
+        "menu.orb-ctx,menu.orb-ctx menu{background-color:transparent;background-image:none;color:#d8d8d7;border:none;border-radius:10px;padding:4px;font-size:12.5px;box-shadow:none;}"
+        "menu.orb-ctx menuitem{min-height:20px;padding:3px 9px;margin:0;border:none;border-radius:6px;background:transparent;background-image:none;color:#d8d8d7;outline:none;box-shadow:none;font-size:12.5px;}"
+        "menu.orb-ctx menuitem:hover{background-color:transparent;color:#e6e6e5;}"
         "menu.orb-ctx menuitem:disabled{opacity:0.45;}"
         "menu.orb-ctx menuitem.orb-danger{color:#e05d5d;}"
         "menu.orb-ctx .orb-ico{color:#8a8a8a;}menu.orb-ctx menuitem:hover .orb-ico{color:#e6e6e5;}menu.orb-ctx menuitem.orb-danger .orb-ico{color:#e05d5d;}"
         "menu.orb-ctx menuitem arrow{min-width:10px;min-height:10px;color:#6c6c6b;}"
-        "menu.orb-ctx separator{background-color:rgba(216,216,215,0.10);min-height:1px;margin:5px 10px;}"
-        "popover.orb-rename,popover.orb-rename.background{background-color:#181818;background-image:none;border:1px solid rgba(216,216,215,0.12);border-radius:10px;padding:6px;box-shadow:0 8px 24px rgba(0,0,0,0.22);}"
-        "popover.orb-rename entry{min-height:28px;padding:0 10px;border-radius:6px;border:1px solid #5b5b5a;background:#141414;color:#e6e6e5;font-size:12.5px;outline:none;box-shadow:none;}";
+        "menu.orb-ctx separator{background-color:rgba(216,216,215,0.10);min-height:1px;margin:3px 8px;}"
+        "entry.orb-inline-rename{min-height:24px;padding:0 7px;margin:0;border:none;border-radius:6px;background:transparent;background-image:none;color:#e6e6e5;caret-color:#e6e6e5;font-size:13px;outline:none;box-shadow:none;}"
+        "entry.orb-inline-rename selection{background-color:rgba(216,216,215,0.18);color:#e6e6e5;}";
     char *s = g_strconcat(ORB_CHROME_CSS, menu_css, NULL); for (size_t i = 0; light && i < G_N_ELEMENTS(m); i++) { char **parts = g_strsplit(s, m[i][0], -1); g_free(s); s = g_strjoinv(m[i][1], parts); g_strfreev(parts); }
     gtk_css_provider_load_from_data(css, s, -1, NULL); g_free(s); orb_icons_light = light;
 }
@@ -116,6 +116,8 @@ static gboolean on_draw_icon(GtkWidget *w, cairo_t *cr, gpointer ud) {
     else if (strcmp(ic, "document-edit-symbolic") == 0) { cairo_move_to(cr, 10.8, 2.6); cairo_line_to(cr, 13.4, 5.2); cairo_line_to(cr, 5.6, 13.0); cairo_line_to(cr, 2.6, 13.4); cairo_line_to(cr, 3.0, 10.4); cairo_close_path(cr); }
     else if (strcmp(ic, "package-x-generic-symbolic") == 0) { rounded_rect(cr, 2.2, 2.8, 11.6, 3.0, 0.8); cairo_move_to(cr, 3.2, 5.8); cairo_line_to(cr, 3.2, 12.8); cairo_line_to(cr, 12.8, 12.8); cairo_line_to(cr, 12.8, 5.8); cairo_move_to(cr, 6.4, 8.8); cairo_line_to(cr, 9.6, 8.8); }
     else if (strcmp(ic, "edit-copy-symbolic") == 0) { rounded_rect(cr, 5.8, 5.8, 7.6, 7.6, 1.2); cairo_move_to(cr, 4.0, 10.2); cairo_line_to(cr, 3.2, 10.2); cairo_line_to(cr, 2.6, 9.6); cairo_line_to(cr, 2.6, 3.2); cairo_line_to(cr, 3.2, 2.6); cairo_line_to(cr, 9.6, 2.6); cairo_line_to(cr, 10.2, 3.2); cairo_line_to(cr, 10.2, 4.0); }
+    else if (strcmp(ic, "edit-cut-symbolic") == 0) { cairo_arc(cr, 4.6, 11.8, 2.0, 0, 6.29); cairo_new_sub_path(cr); cairo_arc(cr, 11.4, 11.8, 2.0, 0, 6.29); cairo_move_to(cr, 6.0, 10.3); cairo_line_to(cr, 12.6, 3.0); cairo_move_to(cr, 10.0, 10.3); cairo_line_to(cr, 3.4, 3.0); }
+    else if (strcmp(ic, "edit-paste-symbolic") == 0) { rounded_rect(cr, 3.2, 3.8, 9.6, 10.0, 1.3); rounded_rect(cr, 5.6, 2.2, 4.8, 2.6, 0.8); }
     else if (strcmp(ic, "edit-undo-symbolic") == 0) { cairo_move_to(cr, 5.6, 4.0); cairo_line_to(cr, 2.8, 6.6); cairo_line_to(cr, 5.6, 9.2); cairo_move_to(cr, 3.2, 6.6); cairo_line_to(cr, 10.4, 6.6); cairo_arc(cr, 10.4, 9.6, 3.0, -1.57, 1.57); cairo_line_to(cr, 6.2, 12.6); }
     else if (strcmp(ic, "user-trash-symbolic") == 0) { cairo_move_to(cr, 2.6, 4.4); cairo_line_to(cr, 13.4, 4.4); cairo_move_to(cr, 6.0, 4.4); cairo_line_to(cr, 6.4, 2.6); cairo_line_to(cr, 9.6, 2.6); cairo_line_to(cr, 10.0, 4.4); cairo_move_to(cr, 4.2, 4.4); cairo_line_to(cr, 4.8, 13.2); cairo_line_to(cr, 11.2, 13.2); cairo_line_to(cr, 11.8, 4.4); }
     else if (strcmp(ic, "edit-clear-symbolic") == 0) { cairo_move_to(cr, 4.2, 4.2); cairo_line_to(cr, 11.8, 11.8); cairo_move_to(cr, 11.8, 4.2); cairo_line_to(cr, 4.2, 11.8); }
@@ -137,7 +139,8 @@ gboolean orb_button_enter(GtkWidget *row, GdkEventKey *event, gpointer data) {
 }
 /* Compact Cursor-style GtkMenuItem with a 14px Cairo Lucide icon and mnemonic label. */
 GtkWidget *orb_menu_row(GtkWidget *menu, const char *label, const char *icon) {
-    GtkWidget *it = gtk_menu_item_new(), *hb = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 10), *lbl = gtk_label_new_with_mnemonic(label);
+    GtkWidget *it = gtk_menu_item_new(), *hb = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8), *lbl = gtk_label_new_with_mnemonic(label);
+    gtk_widget_set_app_paintable(it, TRUE); g_signal_connect(it, "draw", G_CALLBACK(orb_draw_squircle_item), NULL);
     gtk_label_set_xalign(GTK_LABEL(lbl), 0.0f);
     if (icon) {
         GtkWidget *ico = orb_make_icon_widget(NULL, icon, NULL, NULL);
@@ -167,29 +170,20 @@ GtkWidget *orb_make_icon_widget(OrbIconSpinner *sp, const char *icon, const char
     return g_signal_connect(da, "draw", G_CALLBACK(on_draw_icon), sp), da;
 }
 static gboolean on_ptr_enter(GtkWidget *w, GdkEventCrossing *ev, gpointer ud) {
-    (void)ud;
-    GdkWindow *gw = ev ? ev->window : gtk_widget_get_window(w);
-    if (gw && gtk_widget_get_sensitive(w)) {
-        GdkCursor *cur = gdk_cursor_new_from_name(gdk_window_get_display(gw), "pointer");
-        gdk_window_set_cursor(gw, cur);
-        if (cur) { g_object_unref(cur); }
-    }
+    (void)ud; GdkWindow *gw = ev ? ev->window : gtk_widget_get_window(w);
+    if (gw && gtk_widget_get_sensitive(w)) { GdkCursor *c = gdk_cursor_new_from_name(gdk_window_get_display(gw), "pointer"); gdk_window_set_cursor(gw, c); if (c) g_object_unref(c); }
     return FALSE;
 }
 static gboolean on_ptr_leave(GtkWidget *w, GdkEventCrossing *ev, gpointer ud) {
-    (void)ud;
-    GdkWindow *gw = ev ? ev->window : gtk_widget_get_window(w);
-    if (gw) { gdk_window_set_cursor(gw, NULL); }
-    return FALSE;
+    (void)ud; GdkWindow *gw = ev ? ev->window : gtk_widget_get_window(w); if (gw) gdk_window_set_cursor(gw, NULL); return FALSE;
 }
 void orb_gtk_begin_window_drag(GtkWidget *w) {
     GtkWidget *top = w ? gtk_widget_get_toplevel(w) : NULL; GdkSeat *seat = gdk_display_get_default_seat(gdk_display_get_default()); gint x = 0, y = 0;
-    if (!GTK_IS_WINDOW(top) || !seat) { return; }
-    gdk_device_get_position(gdk_seat_get_pointer(seat), NULL, &x, &y); gtk_window_begin_move_drag(GTK_WINDOW(top), GDK_BUTTON_PRIMARY, x, y, gtk_get_current_event_time());
+    if (GTK_IS_WINDOW(top) && seat) { gdk_device_get_position(gdk_seat_get_pointer(seat), NULL, &x, &y); gtk_window_begin_move_drag(GTK_WINDOW(top), GDK_BUTTON_PRIMARY, x, y, gtk_get_current_event_time()); }
 }
 static gboolean on_drag_press(GtkWidget *w, GdkEventButton *ev, gpointer ud) {
-    (void)ud; if (ev->type != GDK_BUTTON_PRESS || ev->button != GDK_BUTTON_PRIMARY) { return FALSE; }
-    GtkWidget *top = gtk_widget_get_toplevel(w); if (GTK_IS_WINDOW(top)) { gtk_window_begin_move_drag(GTK_WINDOW(top), ev->button, (gint)ev->x_root, (gint)ev->y_root, ev->time); }
+    (void)ud; if (ev->type != GDK_BUTTON_PRESS || ev->button != GDK_BUTTON_PRIMARY) return FALSE;
+    GtkWidget *top = gtk_widget_get_toplevel(w); if (GTK_IS_WINDOW(top)) gtk_window_begin_move_drag(GTK_WINDOW(top), ev->button, (gint)ev->x_root, (gint)ev->y_root, ev->time);
     return TRUE;
 }
 GtkWidget *orb_gtk_drag_area(GtkWidget *child) {
@@ -197,15 +191,11 @@ GtkWidget *orb_gtk_drag_area(GtkWidget *child) {
     gtk_widget_add_events(eb, GDK_BUTTON_PRESS_MASK); g_signal_connect(eb, "button-press-event", G_CALLBACK(on_drag_press), NULL);
     return gtk_container_add(GTK_CONTAINER(eb), child), eb;
 }
-static gboolean pointer_focus(GtkWidget *widget, GdkEventButton *event, gpointer data) {
-    (void)data;
-    GtkWidget *window = gtk_widget_get_toplevel(widget);
-    if (event->button == GDK_BUTTON_PRIMARY && GTK_IS_WINDOW(window))
-        gtk_window_set_focus_visible(GTK_WINDOW(window), FALSE);
-    return FALSE;
+static gboolean pointer_focus(GtkWidget *w, GdkEventButton *ev, gpointer d) {
+    (void)d; GtkWidget *win = gtk_widget_get_toplevel(w); if (ev->button == GDK_BUTTON_PRIMARY && GTK_IS_WINDOW(win)) gtk_window_set_focus_visible(GTK_WINDOW(win), FALSE); return FALSE;
 }
 void orb_gtk_bind_pointer_cursor(GtkWidget *w) {
-    if (!w) { return; }
+    if (!w) return;
     gtk_widget_add_events(w, GDK_ENTER_NOTIFY_MASK | GDK_LEAVE_NOTIFY_MASK);
     g_signal_connect(w, "button-press-event", G_CALLBACK(pointer_focus), NULL);
     g_signal_connect(w, "enter-notify-event", G_CALLBACK(on_ptr_enter), NULL);

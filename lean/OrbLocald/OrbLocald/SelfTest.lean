@@ -2067,10 +2067,13 @@ private def runPostParityTailChecks (validTok tmpStateDir : String) : IO (Nat ×
           let ids2 := ((t2.fieldArr? "rows").getD #[]).filterMap (·.fieldStr? "row_id")
           let hidden := ((colCase.fieldArr? "expected_hidden_ids").getD #[]).filterMap (·.asStr?)
           let visible := ((colCase.fieldArr? "expected_visible_ids").getD #[]).filterMap (·.asStr?)
+          let projCore? := ((t1.fieldArr? "rows").getD #[]).find? (fun r => r.fieldStr? "row_id" == some "proj:core")
+          let projFolders := (projCore?.bind (·.fieldArr? "folders")).getD #[] |>.filterMap (·.asStr?)
           (t1.fieldBool? "expanded") == some false &&
           (t2.fieldBool? "expanded") == some true &&
           hidden.all (fun id => !ids1.contains id && ids2.contains id) &&
-          visible.all (fun id => ids1.contains id)
+          visible.all (fun id => ids1.contains id) &&
+          projFolders.contains "ui" && projFolders.contains "ui/desktop"
         | _, _ => false
       if (← assertTrue "native_chrome_toggle_expand_hides_and_restores_subtree" togOk) then
         ncPassed := ncPassed + 1

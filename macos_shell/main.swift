@@ -255,6 +255,9 @@ struct OrbSidebarRowItem: Equatable {
     let depth: Int
     let title: String
     let subtitle: String
+    let project: String
+    let folder: String
+    let folders: [String]
     let status: String
     let target: String
     let shortcut: String
@@ -285,6 +288,9 @@ struct OrbSidebarRowItem: Equatable {
             depth == other.depth &&
             title == other.title &&
             subtitle == other.subtitle &&
+            project == other.project &&
+            folder == other.folder &&
+            folders == other.folders &&
             status == other.status &&
             target == other.target &&
             shortcut == other.shortcut &&
@@ -308,6 +314,9 @@ struct OrbSidebarRowItem: Equatable {
             depth: ((d["depth"] as? Int) ?? 0),
             title: title,
             subtitle: (d["subtitle"] as? String) ?? "",
+            project: (d["project"] as? String) ?? "",
+            folder: (d["folder"] as? String) ?? "",
+            folders: (d["folders"] as? [String]) ?? [],
             status: (d["status"] as? String) ?? "",
             target: (d["target"] as? String) ?? "",
             shortcut: (d["shortcut"] as? String) ?? "",
@@ -324,10 +333,15 @@ struct OrbSidebarRowItem: Equatable {
     }
 }
 
-final class OrbNativeChromeController: NSObject, NSSplitViewDelegate, NSTableViewDataSource, NSTableViewDelegate, URLSessionDataDelegate {
+final class OrbNativeChromeController: NSObject, NSSplitViewDelegate, NSTableViewDataSource, NSTableViewDelegate, URLSessionDataDelegate, NSMenuDelegate, NSTextFieldDelegate {
     let splitView = NSSplitView()
     let sidebarPane = NSView()
     let sidebarTable = NSTableView()
+    private let contextMenu = NSMenu()
+    private var activeTargetRowIndex: Int = -1
+    private var hasSidebarCut = false
+    private weak var inlineEditor: NSTextField?
+    private var inlineRenameContext: (mode: String, id: String, original: String, cancelled: Bool)?
     private let topBarPane = NSView()
     private let backHistoryButton = NSButton()
     private let forwardHistoryButton = NSButton()
@@ -417,6 +431,9 @@ final class OrbNativeChromeController: NSObject, NSSplitViewDelegate, NSTableVie
         sidebarTable.delegate = self
         sidebarTable.target = self
         sidebarTable.action = #selector(onSidebarTableClick(_:))
+        contextMenu.delegate = self
+        contextMenu.autoenablesItems = false
+        sidebarTable.menu = contextMenu
 
         let footerHeight: CGFloat = 45
         let topInset: CGFloat = 35
@@ -757,7 +774,10 @@ final class OrbNativeChromeController: NSObject, NSSplitViewDelegate, NSTableVie
             let lit = OrbAppDelegate.jsonStringLiteral(item.target)
             let fn = (item.kind == "mission") ? "__ORB_SELECT_MISSION__" : "__ORB_NATIVE_NAV__"
             webView?.evaluateJavaScript("window.\(fn)&&window.\(fn)(\(lit));", completionHandler: nil)
-            if let win = hostWindow, let wv = webView { win.makeFirstResponder(wv) }
+            if (item.target == "new-agent" || item.target.hasPrefix("new-agent:") || item.target == "new-project"),
+               let win = hostWindow, let wv = webView {
+                win.makeFirstResponder(wv)
+            }
         } else if item.expandable {
             toggleExpand(rowId: item.rowId)
         }
@@ -787,6 +807,8 @@ final class OrbNativeChromeController: NSObject, NSSplitViewDelegate, NSTableVie
     @objc private func onSidebarTableClick(_ sender: Any?) {
         let idx = sidebarTable.clickedRow
         guard idx >= 0, idx < rows.count else { return }
+        activeTargetRowIndex = idx
+        hostWindow?.makeFirstResponder(sidebarTable)
         let item = rows[idx]
         if lastSelectionDispatchedRowId == item.rowId {
             lastSelectionDispatchedRowId = nil
@@ -958,6 +980,7 @@ final class OrbNativeChromeController: NSObject, NSSplitViewDelegate, NSTableVie
               tv === sidebarTable else { return }
         let idx = sidebarTable.selectedRow
         guard idx >= 0, idx < rows.count else { return }
+        activeTargetRowIndex = idx
         let item = rows[idx]
         if item.kind != "section" && item.kind != "note" && item.kind != "project" && item.kind != "folder"
             && !item.target.isEmpty && !item.target.hasPrefix("folder:") {
@@ -976,6 +999,267 @@ final class OrbNativeChromeController: NSObject, NSSplitViewDelegate, NSTableVie
 
     func splitView(_ splitView: NSSplitView, shouldAdjustSizeOfSubview view: NSView) -> Bool {
         return view !== sidebarPane
+    }
+
+    private func evalMissionAction(_ action: String, id: String, arg: String = "") {
+        let a = OrbAppDelegate.jsonStringLiteral(action)
+        let i = OrbAppDelegate.jsonStringLiteral(id)
+        let g = OrbAppDelegate.jsonStringLiteral(arg)
+        webView?.evaluateJavaScript("window.__ORB_NATIVE_MISSION_ACTION__&&window.__ORB_NATIVE_MISSION_ACTION__(\(a),\(i),\(g));", completionHandler: nil)
+    }
+
+    private func evalProjectAction(_ action: String, target: String, arg: String? = nil) {
+        let a = OrbAppDelegate.jsonStringLiteral(action)
+        let t = OrbAppDelegate.jsonStringLiteral(target)
+        if let arg, !arg.isEmpty {
+            let g = OrbAppDelegate.jsonStringLiteral(arg)
+            webView?.evaluateJavaScript("window.__ORB_NATIVE_PROJECT_ACTION__&&window.__ORB_NATIVE_PROJECT_ACTION__(\(a),\(t),\(g));", completionHandler: nil)
+        } else {
+            webView?.evaluateJavaScript("window.__ORB_NATIVE_PROJECT_ACTION__&&window.__ORB_NATIVE_PROJECT_ACTION__(\(a),\(t));", completionHandler: nil)
+        }
+    }
+
+    func beginInlineRename(rowIndex: Int, mode: String, id: String, currentTitle: String) {
+        inlineEditor?.removeFromSuperview()
+        inlineEditor = nil
+        inlineRenameContext = nil
+        guard rowIndex >= 0, rowIndex < rows.count,
+              let cell = sidebarTable.view(atColumn: 0, row: rowIndex, makeIfNecessary: false) as? NSTableCellView,
+              let lbl = cell.textField else { return }
+        let editor = NSTextField(string: currentTitle)
+        editor.font = lbl.font ?? NSFont.systemFont(ofSize: 13)
+        editor.textColor = .labelColor
+        editor.isBordered = false
+        editor.drawsBackground = false
+        editor.focusRingType = .none
+        editor.wantsLayer = true
+        editor.layer?.cornerRadius = 6
+        if #available(macOS 10.15, *) { editor.layer?.cornerCurve = .continuous }
+        editor.layer?.borderWidth = 1
+        editor.layer?.borderColor = NSColor.tertiaryLabelColor.cgColor
+        editor.layer?.backgroundColor = NSColor.textBackgroundColor.cgColor
+        editor.frame = NSRect(x: max(4, lbl.frame.minX - 4), y: 3, width: max(80, cell.bounds.width - lbl.frame.minX), height: 24)
+        editor.autoresizingMask = [.width]
+        editor.delegate = self
+        inlineRenameContext = (mode: mode, id: id, original: currentTitle, cancelled: false)
+        cell.addSubview(editor)
+        inlineEditor = editor
+        hostWindow?.makeFirstResponder(editor)
+        editor.currentEditor()?.selectAll(nil)
+    }
+
+    private func finishInlineRename(commit: Bool) {
+        guard let ctx = inlineRenameContext, let ed = inlineEditor else { return }
+        inlineRenameContext = nil
+        inlineEditor = nil
+        let next = ed.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        ed.removeFromSuperview()
+        if commit && !ctx.cancelled && !next.isEmpty && next != ctx.original {
+            if ctx.mode == "mission" {
+                evalMissionAction("rename", id: ctx.id, arg: next)
+            } else {
+                evalProjectAction(ctx.mode, target: ctx.id, arg: next)
+            }
+        }
+        hostWindow?.makeFirstResponder(sidebarTable)
+    }
+
+    func controlTextDidEndEditing(_ obj: Notification) {
+        finishInlineRename(commit: true)
+    }
+
+    func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
+        if commandSelector == #selector(NSResponder.cancelOperation(_:)) {
+            if var ctx = inlineRenameContext {
+                ctx.cancelled = true
+                inlineRenameContext = ctx
+            }
+            finishInlineRename(commit: false)
+            return true
+        }
+        if commandSelector == #selector(NSResponder.insertNewline(_:)) {
+            finishInlineRename(commit: true)
+            return true
+        }
+        return false
+    }
+
+    func handleSidebarClipboard(action: String) -> Bool {
+        guard let win = hostWindow, win.firstResponder === sidebarTable else { return false }
+        let idx = (activeTargetRowIndex >= 0 && activeTargetRowIndex < rows.count) ? activeTargetRowIndex : sidebarTable.selectedRow
+        guard idx >= 0, idx < rows.count else { return false }
+        let item = rows[idx]
+        if action == "paste" {
+            guard !item.project.isEmpty else { return false }
+            let dst = item.folder.isEmpty ? item.project : "\(item.project):\(item.folder)"
+            evalProjectAction("paste", target: dst)
+            return true
+        }
+        let copy = (action == "copy")
+        if item.kind == "mission", item.target.hasPrefix("m:") {
+            let mid = String(item.target.dropFirst(2))
+            if copy {
+                evalMissionAction("copy-id", id: mid)
+            } else {
+                hasSidebarCut = true
+                evalMissionAction("cut", id: mid)
+            }
+            return true
+        }
+        if item.kind == "folder", !item.project.isEmpty, !item.folder.isEmpty {
+            hasSidebarCut = true
+            evalProjectAction(copy ? "copy" : "cut", target: "\(item.project):\(item.folder)")
+            return true
+        }
+        if item.kind == "file", item.rowId.hasPrefix("pf:") {
+            hasSidebarCut = true
+            evalProjectAction(copy ? "copy-file" : "cut-file", target: String(item.rowId.dropFirst(3)))
+            return true
+        }
+        return false
+    }
+
+    @objc private func onCtxMenuItem(_ sender: NSMenuItem) {
+        guard let info = sender.representedObject as? [String: Any],
+              let act = info["act"] as? String else { return }
+        let rowIdx = (info["row"] as? Int) ?? -1
+        let id = (info["id"] as? String) ?? ""
+        let arg = (info["arg"] as? String) ?? ""
+        if act == "inline-rename" {
+            let mode = (info["mode"] as? String) ?? "mission"
+            beginInlineRename(rowIndex: rowIdx, mode: mode, id: id, currentTitle: arg)
+        } else if act == "m" {
+            let mact = (info["mact"] as? String) ?? ""
+            if mact == "cut" { hasSidebarCut = true }
+            evalMissionAction(mact, id: id, arg: arg)
+        } else if act == "p" {
+            let pact = (info["pact"] as? String) ?? ""
+            if ["cut", "copy", "cut-file", "copy-file"].contains(pact) { hasSidebarCut = true }
+            evalProjectAction(pact, target: id)
+        }
+    }
+
+    private func makeCtxItem(_ title: String, info: [String: Any]) -> NSMenuItem {
+        let it = NSMenuItem(title: title, action: #selector(onCtxMenuItem(_:)), keyEquivalent: "")
+        it.target = self
+        it.representedObject = info
+        return it
+    }
+
+    private func buildMoveSubmenu(missionId: String, curProj: String, curFolder: String) -> NSMenu {
+        let sub = NSMenu(title: "Move to")
+        sub.autoenablesItems = false
+        var count = 0
+        if !curProj.isEmpty && !curFolder.isEmpty {
+            sub.addItem(makeCtxItem("Move to project root", info: ["act": "m", "mact": "move", "id": missionId, "arg": curProj]))
+            sub.addItem(.separator())
+            count += 1
+        }
+        for r in rows where r.kind == "project" && r.target.hasPrefix("project:") {
+            let slug = String(r.target.dropFirst(8))
+            guard !slug.isEmpty else { continue }
+            let label = r.title.isEmpty ? slug : r.title
+            if !r.folders.isEmpty {
+                let psub = NSMenu(title: label)
+                psub.autoenablesItems = false
+                var pn = 0
+                if slug != curProj || !curFolder.isEmpty {
+                    psub.addItem(makeCtxItem("\(label) (root)", info: ["act": "m", "mact": "move", "id": missionId, "arg": slug]))
+                    pn += 1
+                }
+                for fp in r.folders where !(slug == curProj && fp == curFolder) {
+                    if pn == 1 && (slug != curProj || !curFolder.isEmpty) { psub.addItem(.separator()) }
+                    psub.addItem(makeCtxItem(fp, info: ["act": "m", "mact": "move", "id": missionId, "arg": "\(slug):\(fp)"]))
+                    pn += 1
+                }
+                if pn > 0 {
+                    let parent = NSMenuItem(title: label, action: nil, keyEquivalent: "")
+                    parent.submenu = psub
+                    sub.addItem(parent)
+                    count += 1
+                }
+            } else if slug != curProj || !curFolder.isEmpty {
+                sub.addItem(makeCtxItem(label, info: ["act": "m", "mact": "move", "id": missionId, "arg": slug]))
+                count += 1
+            }
+        }
+        if count > 0 { sub.addItem(.separator()) }
+        sub.addItem(makeCtxItem("Move to folder…", info: ["act": "m", "mact": "move-picker", "id": missionId, "arg": ""]))
+        return sub
+    }
+
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        menu.removeAllItems()
+        let idx = sidebarTable.clickedRow
+        guard idx >= 0, idx < rows.count else { return }
+        activeTargetRowIndex = idx
+        let item = rows[idx]
+        if item.kind == "project", item.target.hasPrefix("project:") {
+            let slug = String(item.target.dropFirst(8))
+            menu.addItem(makeCtxItem("New agent", info: ["act": "p", "pact": "new-agent", "id": slug]))
+            menu.addItem(makeCtxItem("Cloud agent", info: ["act": "p", "pact": "new-cloud-agent", "id": slug]))
+            menu.addItem(.separator())
+            menu.addItem(makeCtxItem("New folder", info: ["act": "p", "pact": "new-folder", "id": slug]))
+            if hasSidebarCut {
+                menu.addItem(.separator())
+                menu.addItem(makeCtxItem("Paste", info: ["act": "p", "pact": "paste", "id": slug]))
+            }
+            menu.addItem(.separator())
+            menu.addItem(makeCtxItem("Project settings", info: ["act": "p", "pact": "settings", "id": slug]))
+            menu.addItem(makeCtxItem("Rename", info: ["act": "inline-rename", "mode": "rename", "row": idx, "id": slug, "arg": item.title]))
+            menu.addItem(makeCtxItem("Archive", info: ["act": "p", "pact": "archive", "id": slug]))
+            menu.addItem(makeCtxItem("Delete project…", info: ["act": "p", "pact": "delete", "id": slug]))
+        } else if item.kind == "folder", !item.project.isEmpty, !item.folder.isEmpty {
+            let tgt = "\(item.project):\(item.folder)"
+            menu.addItem(makeCtxItem("New agent", info: ["act": "p", "pact": "new-agent", "id": tgt]))
+            menu.addItem(makeCtxItem("Cloud agent", info: ["act": "p", "pact": "new-cloud-agent", "id": tgt]))
+            menu.addItem(.separator())
+            menu.addItem(makeCtxItem("New file", info: ["act": "p", "pact": "new-file", "id": tgt]))
+            menu.addItem(makeCtxItem("New folder", info: ["act": "p", "pact": "new-folder", "id": tgt]))
+            if hasSidebarCut {
+                menu.addItem(.separator())
+                menu.addItem(makeCtxItem("Paste", info: ["act": "p", "pact": "paste", "id": tgt]))
+            }
+            menu.addItem(.separator())
+            menu.addItem(makeCtxItem("Rename", info: ["act": "inline-rename", "mode": "rename", "row": idx, "id": tgt, "arg": item.title]))
+            menu.addItem(makeCtxItem("Move…", info: ["act": "p", "pact": "move-picker", "id": tgt]))
+            menu.addItem(makeCtxItem("Cut", info: ["act": "p", "pact": "cut", "id": tgt]))
+            menu.addItem(makeCtxItem("Copy", info: ["act": "p", "pact": "copy", "id": tgt]))
+            menu.addItem(.separator())
+            menu.addItem(makeCtxItem("Delete…", info: ["act": "p", "pact": "delete", "id": tgt]))
+        } else if item.kind == "file", item.rowId.hasPrefix("pf:") {
+            let tgt = String(item.rowId.dropFirst(3))
+            let ptgt = item.folder.isEmpty ? item.project : "\(item.project):\(item.folder)"
+            if hasSidebarCut && !item.project.isEmpty {
+                menu.addItem(makeCtxItem("Paste", info: ["act": "p", "pact": "paste", "id": ptgt]))
+                menu.addItem(.separator())
+            }
+            menu.addItem(makeCtxItem("Rename", info: ["act": "inline-rename", "mode": "rename-file", "row": idx, "id": tgt, "arg": item.title]))
+            menu.addItem(makeCtxItem("Move…", info: ["act": "p", "pact": "move-file", "id": tgt]))
+            menu.addItem(makeCtxItem("Cut", info: ["act": "p", "pact": "cut-file", "id": tgt]))
+            menu.addItem(makeCtxItem("Copy", info: ["act": "p", "pact": "copy-file", "id": tgt]))
+            menu.addItem(.separator())
+            menu.addItem(makeCtxItem("Delete…", info: ["act": "p", "pact": "delete-file", "id": tgt]))
+        } else if item.kind == "mission", item.target.hasPrefix("m:") {
+            let mid = String(item.target.dropFirst(2))
+            let archived = item.status == "acknowledged" || item.status == "archived"
+            if hasSidebarCut && !item.project.isEmpty && !archived {
+                let ptgt = item.folder.isEmpty ? item.project : "\(item.project):\(item.folder)"
+                menu.addItem(makeCtxItem("Paste", info: ["act": "p", "pact": "paste", "id": ptgt]))
+                menu.addItem(.separator())
+            }
+            menu.addItem(makeCtxItem("Rename", info: ["act": "inline-rename", "mode": "mission", "row": idx, "id": mid, "arg": item.title]))
+            menu.addItem(makeCtxItem("Cut", info: ["act": "m", "mact": "cut", "id": mid, "arg": ""]))
+            let moveItem = NSMenuItem(title: "Move to", action: nil, keyEquivalent: "")
+            moveItem.submenu = buildMoveSubmenu(missionId: mid, curProj: item.project, curFolder: item.folder)
+            menu.addItem(moveItem)
+            menu.addItem(.separator())
+            menu.addItem(makeCtxItem("Copy mission ID", info: ["act": "m", "mact": "copy-id", "id": mid, "arg": ""]))
+            menu.addItem(makeCtxItem("Mission settings", info: ["act": "m", "mact": "settings", "id": mid, "arg": ""]))
+            menu.addItem(.separator())
+            menu.addItem(makeCtxItem(archived ? "Restore" : "Archive", info: ["act": "m", "mact": archived ? "restore" : "archive", "id": mid, "arg": ""]))
+            menu.addItem(makeCtxItem("Delete…", info: ["act": "m", "mact": "delete", "id": mid, "arg": mid]))
+        }
     }
 }
 
@@ -1307,9 +1591,18 @@ final class OrbAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, W
 
     @objc private func editUndo(_ sender: Any?) { sendWebViewEditAction(Selector(("undo:")), from: sender) }
     @objc private func editRedo(_ sender: Any?) { sendWebViewEditAction(Selector(("redo:")), from: sender) }
-    @objc private func editCut(_ sender: Any?) { sendWebViewEditAction(#selector(NSText.cut(_:)), from: sender) }
-    @objc private func editCopy(_ sender: Any?) { sendWebViewEditAction(#selector(NSText.copy(_:)), from: sender) }
-    @objc private func editPaste(_ sender: Any?) { sendWebViewEditAction(#selector(NSText.paste(_:)), from: sender) }
+    @objc private func editCut(_ sender: Any?) {
+        if nativeChrome?.handleSidebarClipboard(action: "cut") == true { return }
+        sendWebViewEditAction(#selector(NSText.cut(_:)), from: sender)
+    }
+    @objc private func editCopy(_ sender: Any?) {
+        if nativeChrome?.handleSidebarClipboard(action: "copy") == true { return }
+        sendWebViewEditAction(#selector(NSText.copy(_:)), from: sender)
+    }
+    @objc private func editPaste(_ sender: Any?) {
+        if nativeChrome?.handleSidebarClipboard(action: "paste") == true { return }
+        sendWebViewEditAction(#selector(NSText.paste(_:)), from: sender)
+    }
     @objc private func editSelectAll(_ sender: Any?) { sendWebViewEditAction(#selector(NSText.selectAll(_:)), from: sender) }
 
     private func replyToWebView(id: Int, result: Any?, error: String? = nil) {
@@ -1933,6 +2226,7 @@ final class OrbAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, W
         // layer tiles volatile (`FailedToAcquireBufferSpan`), leaving non-isolated regions blank.
         Self.setBoolPreference(cfg.preferences, selector: "_setPageVisibilityBasedProcessSuppressionEnabled:", value: false)
         Self.setBoolPreference(cfg.preferences, selector: "_setHiddenPageDOMTimerThrottlingEnabled:", value: false)
+        Self.setBoolPreference(cfg.preferences, selector: "_setCSSCornerShapeEnabled:", value: true)
         if let distRoot = Bundle.main.resourceURL?.appendingPathComponent("dist") {
             let handler = OrbBundleSchemeHandler(rootURL: distRoot)
             self.schemeHandler = handler
