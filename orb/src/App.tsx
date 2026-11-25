@@ -1454,7 +1454,7 @@ export default function App() {
         window.location.reload();
         return;
       }
-      window.dispatchEvent(new Event("orb:refresh"));
+      window.dispatchEvent(new CustomEvent("orb:refresh", { detail: { manual: true } }));
       void refreshMissions();
       return;
     }

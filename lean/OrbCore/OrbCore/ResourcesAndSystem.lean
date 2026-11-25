@@ -2756,9 +2756,9 @@ def dispatchResourcesAndSystemRoute
           #[mid, title, stStr, backend, modelStr, effStr, cwd, proj, folder, createdIso, nowIso, tagsJson, renderCompact (.arr histItems), callerUserId] then
         return some (jsonErr 500 s!"local mission not stored: {e}")
 
-      if let .error e ← execParamStmt store.missionsDb
-          "INSERT OR REPLACE INTO mission_runs (id, mission_id, generation, execution_state, terminal_reason, remote_job_id, updated_at) VALUES (?1, ?2, 1, ?3, ?4, '', ?5);"
-          #[runId, mid, if isTerm then "terminal" else "running", if isTerm then "client_runner" else "", nowIso] then
+      if let .error e ← insertMissionRun store.missionsDb
+          runId mid "1" (if isTerm then "terminal" else "running")
+          (if isTerm then "client_runner" else "") "" nowIso true "orb-client" then
         return some (jsonErr 500 s!"local run not stored: {e}")
 
       return some (jsonResp 200 (.obj #[("ok", .bool true)]))
@@ -2941,9 +2941,8 @@ def dispatchResourcesAndSystemRoute
         let gen := (reqJv.fieldNat? "generation").getD 1
         let nowIso := formatEpochIso8601Utc (← nowEpoch)
         if op == "begin" then
-          let _ ← execParamStmt store.missionsDb
-            "INSERT OR REPLACE INTO mission_runs (id, mission_id, generation, execution_state, terminal_reason, remote_job_id, updated_at) VALUES (?1, ?2, ?3, 'running', '', '', ?4);"
-            #[runId, mid, toString gen, nowIso]
+          let _ ← insertMissionRun store.missionsDb
+            runId mid (toString gen) "running" "" "" nowIso true "orb-client"
           let prompt := (reqJv.fieldStr? "prompt").getD ""
           return some (jsonResp 200 (.obj #[("run_id", .str runId), ("generation", JVal.nat gen), ("prompt", .str prompt)]))
         return some (jsonResp 200 (.obj #[("run_id", .str runId), ("generation", JVal.nat gen)]))

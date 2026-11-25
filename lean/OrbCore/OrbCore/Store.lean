@@ -1042,6 +1042,15 @@ def insertMissionRunUnlocked
         s!"{verb} INTO mission_runs(id,mission_id,generation,execution_state,terminal_reason,remote_job_id,updated_at) VALUES(?1,?2,?3,?4,?5,?6,?7);"
         #[runId, missionId, generation, executionState, terminalReason, remoteJobId, updatedAt]
 
+/-- Thread-safe wrapper around `insertMissionRunUnlocked` acquiring `db.mu`. -/
+def insertMissionRun
+    (db : SqliteDb)
+    (runId missionId generation executionState terminalReason remoteJobId updatedAt : String)
+    (orReplace : Bool := false)
+    (ownerActorId : String := "orb-core")
+    (scopeUnit : String := "") : IO (Except String (Array (Array String))) :=
+  db.mu.atomically (insertMissionRunUnlocked db runId missionId generation executionState terminalReason remoteJobId updatedAt orReplace ownerActorId scopeUnit)
+
 /-- Normalize a legacy single-tenant `mission_runs` table (`run_id TEXT PRIMARY KEY NOT NULL`)
     by backfilling `id` and `updated_at` from `run_id` and `started_at`. -/
 private def migrateLegacyMissionRunsUnlocked (h : UInt64) : IO (Except String Unit) := do
