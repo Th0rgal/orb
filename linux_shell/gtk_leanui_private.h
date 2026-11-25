@@ -11,8 +11,9 @@ typedef struct {
     GString *rows;
     char *scope;
     cairo_surface_t *surface;
-    guint idle, animation;
+    guint idle, tick, animation;
     int width, height, scale, scroll, limit;
+    double scroll_pos;
     gboolean light, can_back, can_forward;
 } OrbSidebar;
 

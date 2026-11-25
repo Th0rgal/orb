@@ -20,16 +20,14 @@ int orb_sidebar_host(OrbSidebarPaint callback, void *context) {
     return orb_gtk_main(1, args);
 }
 
-static gboolean update(gpointer data) {
-    OrbSidebar *s = data;
-    s->idle = 0;
-    if (s->width < 2 || s->height < 2 || !gtk_widget_get_mapped(s->overlay)) return G_SOURCE_REMOVE;
+static void render_frame(OrbSidebar *s) {
+    if (s->width < 2 || s->height < 2 || !gtk_widget_get_mapped(s->overlay)) return;
     int w = s->width * s->scale, h = s->height * s->scale;
     if (!s->surface || cairo_image_surface_get_width(s->surface) != w || cairo_image_surface_get_height(s->surface) != h) {
         if (s->surface) cairo_surface_destroy(s->surface);
         s->surface = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, w, h);
     }
-    if (cairo_surface_status(s->surface) != CAIRO_STATUS_SUCCESS) return G_SOURCE_REMOVE;
+    if (cairo_surface_status(s->surface) != CAIRO_STATUS_SUCCESS) return;
     guint phase = (guint)(g_get_monotonic_time() / 100000 % 12);
     char *request = g_strdup_printf("%d\t%d\t%d\t%d\t%d\t%u\n%s",
         s->width, s->height, s->scale, s->light, s->scroll, phase, s->rows->str);
@@ -40,11 +38,29 @@ static gboolean update(gpointer data) {
         gtk_widget_queue_draw(s->canvas);
     }
     g_free(request);
+}
+
+static gboolean update(gpointer data) {
+    OrbSidebar *s = data;
+    s->idle = 0;
+    render_frame(s);
+    return G_SOURCE_REMOVE;
+}
+
+static gboolean on_tick(GtkWidget *widget, GdkFrameClock *clock, gpointer data) {
+    (void)widget; (void)clock;
+    OrbSidebar *s = data;
+    s->tick = 0;
+    render_frame(s);
     return G_SOURCE_REMOVE;
 }
 
 void orb_sidebar_invalidate(OrbSidebar *s) {
-    if (!s->idle) s->idle = g_idle_add_full(G_PRIORITY_HIGH_IDLE, update, s, NULL);
+    if (s->tick || s->idle) return;
+    if (gtk_widget_get_mapped(s->canvas) && gtk_widget_get_frame_clock(s->canvas))
+        s->tick = gtk_widget_add_tick_callback(s->canvas, on_tick, s, NULL);
+    else
+        s->idle = g_idle_add_full(G_PRIORITY_DEFAULT_IDLE, update, s, NULL);
 }
 static void mapped(GtkWidget *widget, OrbSidebar *s) {
     (void)widget;
@@ -82,10 +98,15 @@ static gboolean scroll(GtkWidget *widget, GdkEventScroll *event, OrbSidebar *s) 
     double dx, dy;
     if (!gdk_event_get_scroll_deltas((GdkEvent *)event, &dx, &dy))
         dy = event->direction == GDK_SCROLL_DOWN ? 1 : event->direction == GDK_SCROLL_UP ? -1 : 0;
-    int next = CLAMP(s->scroll + (int)round(dy * 34), 0, s->limit);
-    if (next == s->scroll) return FALSE;
-    s->scroll = next;
-    orb_sidebar_invalidate(s);
+    if (dy == 0.0 || s->limit <= 0) return FALSE;
+    double next_pos = CLAMP(s->scroll_pos + dy * 56.0, 0.0, (double)s->limit);
+    if (next_pos == s->scroll_pos) return FALSE;
+    s->scroll_pos = next_pos;
+    int next = CLAMP((int)llround(next_pos), 0, s->limit);
+    if (next != s->scroll) {
+        s->scroll = next;
+        orb_sidebar_invalidate(s);
+    }
     return TRUE;
 }
 static gboolean position(GtkOverlay *overlay, GtkWidget *child, GdkRectangle *rect, gpointer unused) {
@@ -98,6 +119,7 @@ static gboolean position(GtkOverlay *overlay, GtkWidget *child, GdkRectangle *re
 static void destroy(GtkWidget *widget, OrbSidebar *s) {
     (void)widget;
     if (s->idle) g_source_remove(s->idle);
+    if (s->tick) gtk_widget_remove_tick_callback(s->canvas, s->tick);
     if (s->animation) g_source_remove(s->animation);
     if (s->surface) cairo_surface_destroy(s->surface);
     orb_sidebar_model_free(s);

@@ -829,36 +829,42 @@ private def changedRects (vp : Rect) (old new : Scene) : Option (Array Rect) := 
     | some (.clipPush r) | some (.clipPushRounded r _) => clips := intersectRect (clips.head?.getD vp) r :: clips
     | some .clipPop => clips := match clips with | _ :: _ :: _ => clips.tail! | _ => [vp]
     | _ => pure ()
-  let clip := clips.head?.getD vp
   let mut rects : Array Rect := #[]
   for cmds in #[old, new] do
+    let mut localClips := clips
     for i in [pre:cmds.size-suf] do
       let some p := cmds[i]? | return none
-      let some r := p.bounds | return none
-      let b := intersectRect clip r
-      if b.w > 0 && b.h > 0 then
-        if rects.size == 0 then
-          rects := #[b]
-        else if rects.size == 1 then
-          let a := rects[0]!
-          if horizNear a b then
-            rects := #[unionRect a b]
-          else
-            rects := #[a, b]
-        else
-          let r0 := rects[0]!
-          let r1 := rects[1]!
-          let (n0, n1) :=
-            if horizNear r0 b then (unionRect r0 b, r1)
-            else if horizNear r1 b then (r0, unionRect r1 b)
+      match p with
+      | .clipPush r | .clipPushRounded r _ =>
+        localClips := intersectRect (localClips.head?.getD vp) r :: localClips
+      | .clipPop =>
+        localClips := match localClips with | _ :: _ :: _ => localClips.tail! | _ => [vp]
+      | _ =>
+        let some r := p.bounds | return none
+        let b := intersectRect (localClips.head?.getD vp) r
+        if b.w > 0 && b.h > 0 then
+          if rects.size == 0 then
+            rects := #[b]
+          else if rects.size == 1 then
+            let a := rects[0]!
+            if horizNear a b then
+              rects := #[unionRect a b]
             else
-              let gap0 := if b.x ≥ r0.right then b.x - r0.right else r0.x - b.right
-              let gap1 := if b.x ≥ r1.right then b.x - r1.right else r1.x - b.right
-              if gap0 ≤ gap1 then (unionRect r0 b, r1) else (r0, unionRect r1 b)
-          if horizNear n0 n1 0 then
-            rects := #[unionRect n0 n1]
+              rects := #[a, b]
           else
-            rects := #[n0, n1]
+            let r0 := rects[0]!
+            let r1 := rects[1]!
+            let (n0, n1) :=
+              if horizNear r0 b then (unionRect r0 b, r1)
+              else if horizNear r1 b then (r0, unionRect r1 b)
+              else
+                let gap0 := if b.x ≥ r0.right then b.x - r0.right else r0.x - b.right
+                let gap1 := if b.x ≥ r1.right then b.x - r1.right else r1.x - b.right
+                if gap0 ≤ gap1 then (unionRect r0 b, r1) else (r0, unionRect r1 b)
+            if horizNear n0 n1 0 then
+              rects := #[unionRect n0 n1]
+            else
+              rects := #[n0, n1]
   return some rects
 
 -- Express paints in coordinates relative to a horizontal band. Equality includes
