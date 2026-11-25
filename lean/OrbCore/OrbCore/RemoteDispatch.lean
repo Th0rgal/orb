@@ -20,6 +20,7 @@ import OrbCore.ProviderUsageAndLogin
 import OrbCore.RemoteFleetAndRelay
 import OrbCore.Skills
 import OrbCore.AutoPlacement
+import OrbCore.Proxy
 import OrbCore.TelemetryAndVoice
 
 namespace OrbCore.RemoteDispatch
@@ -1960,6 +1961,15 @@ partial def spawnRemoteJobPoller
                   interrupted      := jState != "succeeded"
                 }
                 observeControlTurnFinished tSink missionId turnUsage ownerUid? ownerUname? nowSec
+              if proxyTok.isEmpty then
+                let bLow := backend.trimAscii.toString.toLower
+                let normHarness := if bLow == "claude" then "claudecode" else bLow
+                let effModel :=
+                  (acc.model?.orElse fun _ =>
+                    (mRec?.map fun r => r.modelOverride.trimAscii.toString).filter (!·.isEmpty)).getD ""
+                OrbCore.Proxy.recordNativeHarnessUsage store nowSec normHarness effModel missionId
+                  ((mRec?.map MissionRecord.parentMissionId).getD "") ((mRec?.map MissionRecord.modelOverride).getD "")
+                  (acc.inputTokens?.getD 0).toNat (acc.outputTokens?.getD 0).toNat (acc.cacheReadTokens?.getD 0).toNat
 
               let nextQueued? ←
                 if jState == "cancelled" || curRunGen != capturedGen || (isGoal && jState == "succeeded" && !finalDrained) then pure none

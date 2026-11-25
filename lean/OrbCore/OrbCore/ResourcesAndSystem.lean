@@ -290,6 +290,7 @@ private def resourcesRangeSpec (raw : String) : String × Nat × Nat :=
 private def inferencePoolLabel (id : String) : String :=
   match id with
   | "anthropic" => "Anthropic"
+  | "antigravity" => "Antigravity"
   | "openai" => "OpenAI"
   | "google" => "Google"
   | "gemini" => "Google Gemini"

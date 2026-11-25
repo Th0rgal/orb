@@ -2490,4 +2490,24 @@ def recordProxyUsage (store : CoreStore) (nowEpochSec : UInt64) (model provider 
       toString (estimateUsageCostCents u), provider, accountId, apiKeyName, missionId, callerKind, toString u.reasoning,
       requestedModel]
 
+/-- Records turn-level token usage from a native harness that did not pass through Core's HTTP proxy
+    (such as direct Antigravity or Grok turns) so `GET /api/resources/overview` accounts for it without
+    double-counting proxied runs. -/
+def recordNativeHarnessUsage (store : CoreStore) (nowEpochSec : UInt64)
+    (harness model missionId parentMissionId requestedModel : String)
+    (inputTokens outputTokens cacheReadTokens : Nat) : IO Unit := do
+  let h := harness.trimAscii.toString.toLower
+  let provider := match h with
+    | "antigravity" | "agy" => "antigravity"
+    | "grok" => "xai"
+    | "claudecode" | "claude" => "anthropic"
+    | "codex" => "openai"
+    | "vibe" => "mistral"
+    | other => if other.isEmpty then "unknown" else other
+  let callerKind := if parentMissionId.trimAscii.toString.isEmpty then "mission" else "subagent"
+  let effModel := if model.trimAscii.toString.isEmpty then provider else model.trimAscii.toString
+  recordProxyUsage store nowEpochSec effModel provider s!"native:{provider}" "" missionId callerKind
+    { input := inputTokens, output := outputTokens, cacheRead := cacheReadTokens }
+    (requestedModel := requestedModel)
+
 end OrbCore.Proxy
