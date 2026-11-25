@@ -3,6 +3,7 @@ import { ChevronRight } from "./icons";
 import { connectionVersion, getRemoteNodes, listNodeAntigravityModels } from "./api";
 import { isManagedNode } from "./machines/nodes";
 import { getManagedSettings, managedError, putManagedSettings } from "./managedMachineModel";
+import { SettingsRow } from "./SettingsCard";
 
 /** "Available on Core, spark + managed machines". */
 export function availabilityLine(ready: string[], managed: boolean | null, checking: boolean): string {
@@ -77,29 +78,26 @@ export function AntigravityProvider() {
   const failed = () => machines().filter(m => m.phase === "error");
   const checking = () => machines().some(m => m.phase === "loading");
   return <section class="p-native" aria-label="Antigravity execution">
-      {/* Execution availability and settings follow the account quota details. */}
-      <div class="p-native-controls">
+      <Show when={managed() !== null}>
+        <SettingsRow title="Managed machines" desc="Install Antigravity and share this sign-in on new managed VMs.">
+          <button class={`toggle ${managed() ? "on" : ""}`} role="switch" aria-checked={!!managed()} aria-label="Antigravity on managed machines" disabled={saving()} onClick={() => void toggleManaged()} />
+        </SettingsRow>
+      </Show>
+      <Show when={settingError()}><p class="s-row-desc managed-error" role="alert">{settingError()}</p></Show>
+      <div class="p-native-footer">
         <span class="s-row-desc p-native-where" role="status" tabIndex={0}
           title={`${availabilityLine(ready().map(m => m.label), managed(), checking())}. Native runs use this Google sign-in on every machine.`}>
           {availabilitySummary(ready().map(m => m.label), managed(), checking())}
         </span>
         <Show when={checking() && ready().length}><span class="s-row-desc">Checking…</span></Show>
-        <button class="s-btn quiet" disabled={checking()} onClick={() => void refresh()}>Refresh</button>
-      </div>
-      <div class="p-native-row">
-        <Show when={managed() !== null}>
-          <label class="p-native-managed" title="Install Antigravity and hand it this sign-in on new boat.dev machines.">
-            <span>Managed machines</span>
-            <button class={`toggle ${managed() ? "on" : ""}`} role="switch" aria-checked={!!managed()} aria-label="Antigravity on managed machines" disabled={saving()} onClick={() => void toggleManaged()} />
-          </label>
-        </Show>
         <Show when={models().length}>
+          <span class="p-native-sep" aria-hidden="true">·</span>
           <button class="p-native-models-toggle" aria-expanded={showModels()} aria-controls={modelsId} onClick={() => setShowModels(!showModels())}>
             {showModels() ? "Hide models" : `${models().length} ${models().length === 1 ? "model" : "models"} available`}<span class={`chev p-acc-chev ${showModels() ? "open" : ""}`} aria-hidden="true"><ChevronRight size={13} /></span>
           </button>
         </Show>
+        <button class="s-btn quiet p-native-refresh" disabled={checking()} onClick={() => void refresh()}>Refresh</button>
       </div>
-      <Show when={settingError()}><p class="s-row-desc managed-error" role="alert">{settingError()}</p></Show>
       <Show when={failed().length}>
         <ul class="p-native-failed" aria-label="Unavailable machines">
           <For each={failed()}>{m => <li><span>{m.label} unavailable</span> <button class="p-native-retry" onClick={() => void refresh(m.id)}>Retry</button></li>}</For>

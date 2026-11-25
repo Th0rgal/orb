@@ -1,4 +1,4 @@
-import { For, Show, createResource, createSignal } from "solid-js";
+import { For, Show, Suspense, createResource, createSignal } from "solid-js";
 import { api, connectionVersion } from "./api";
 import { nativeLaunchWarning } from "./missionLaunch";
 import { SettingsRow } from "./SettingsCard";
@@ -29,21 +29,28 @@ function OwnerNode(p: { node: string; account: string }) {
       setBusy(false);
     }
   }
-  return <SettingsRow title={p.node} stack>
-    <Show when={record()}>{r => <>
-      <span>{bound() ? "This account is enrolled." : r().account_id ? "Another account is enrolled." : "No enrolled account."}</span>
-      <Show when={bound() && nativeLaunchWarning(r().launch_block)}>{reason => <span role="status">{reason()}</span>}</Show>
-      <button class="s-btn" disabled={busy()} onClick={() => void save()}>
-        {bound() ? "Remove enrollment" : r().account_id ? "Replace enrolled account" : "Enroll this account"}
-      </button>
-    </>}</Show>
-    <Show when={error() || record.error}><span role="alert">{error() || "Could not read enrollment."}</span></Show>
-  </SettingsRow>;
+  return <Suspense fallback={null}>
+    <SettingsRow title={p.node} desc={
+      <Show when={record()}>{r => <>
+        <span>{bound() ? "This account is enrolled." : r().account_id ? "Another account is enrolled." : "No enrolled account."}</span>
+        <Show when={bound() && nativeLaunchWarning(r().launch_block)}>{reason => <> · <span role="status">{reason()}</span></>}</Show>
+      </>}</Show>
+    }>
+      <Show when={record()}>{r =>
+        <button class="s-btn" disabled={busy()} onClick={() => void save()}>
+          {bound() ? "Remove enrollment" : r().account_id ? "Replace enrolled account" : "Enroll this account"}
+        </button>
+      }</Show>
+      <Show when={error() || record.error}><span role="alert">{error() || "Could not read enrollment."}</span></Show>
+    </SettingsRow>
+  </Suspense>;
 }
 
 export function NativeOwnerEnrollment(p: { account: string }) {
   const [nodes] = createResource(connectionVersion, () => api<string[]>(path));
-  return <Show when={!nodes.error}><For each={nodes()}>{node =>
-    <OwnerNode node={node} account={p.account} />
-  }</For></Show>;
+  return <Suspense fallback={null}>
+    <Show when={!nodes.error}><For each={nodes()}>{node =>
+      <OwnerNode node={node} account={p.account} />
+    }</For></Show>
+  </Suspense>;
 }

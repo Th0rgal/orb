@@ -17,7 +17,7 @@ import { ErrorNotice } from "./ErrorNotice";
 import { SubscriptionResetDialog } from "./SubscriptionResetDialog";
 import { SettingsCard, SettingsRow } from "./SettingsCard";
 import { Toggle } from "./Toggle";
-import { For, Show, type JSX, createEffect, createMemo, createSignal, on, onCleanup, onMount } from "solid-js";
+import { For, Show, Suspense, type JSX, createEffect, createMemo, createSignal, on, onCleanup, onMount } from "solid-js";
 import * as Ic from "./icons";
 import { ConfirmDialog, Dialog, DialogButton, Field } from "./Dialog";
 import { canManageProvider, isCustomBaseUrlAllowed, providerWriteError, unlinkedSubscriptionMessage } from "./providerPermissions";
@@ -1417,16 +1417,6 @@ function LiveRow(p: { a: AIProvider; open?: boolean; onOpenChange?: (open: boole
       <Show when={menu()}><Menu label="Actions" anchor={menuBtn} placement="bottom-end" width={196} class="popup-menu" onClose={() => setMenu(false)}><MenuList items={menuItems()} onPick={() => setMenu(false)} /></Menu></Show>
       <Show when={open()}>
         <div class="p-acc-body">
-          <AccountVpnSettings account={a.id} nativeAccount={a.provider_type === "antigravity"} />
-          <Show when={a.added_by_me && a.provider_type === "antigravity"}>
-            <NativeOwnerEnrollment account={a.id} />
-          </Show>
-
-            <Show when={manages() && a.provider_type === "antigravity"}><AlternativeRouterSettings account={a.id} /></Show>
-          <Show when={p.rank}>{r => <RankControls rank={r()} id={a.id} name={email() ?? a.name} title={title()} />}</Show>
-          <Show when={mistralSubscription()}>
-            <MistralUsageConnect a={a} usage={p.usage} onUsage={p.onUsage} />
-          </Show>
           <Show when={hasUsageDetails()}>
             <UsageDetail disabled={status() === "disabled"} usage={p.usage!} sharedOrg={!!p.usage?.organization_id && !!p.sharedOrgs?.has(p.usage.organization_id)} headerEmail={email()} planInHeader />
           </Show>
@@ -1457,6 +1447,21 @@ function LiveRow(p: { a: AIProvider; open?: boolean; onOpenChange?: (open: boole
               </button>
             </div>
           </Show>
+          <Show when={mistralSubscription()}>
+            <MistralUsageConnect a={a} usage={p.usage} onUsage={p.onUsage} />
+          </Show>
+          <Suspense>
+            <div class="p-acc-settings">
+              <AccountVpnSettings account={a.id} nativeAccount={a.provider_type === "antigravity"} />
+              <Show when={a.added_by_me && a.provider_type === "antigravity"}>
+                <NativeOwnerEnrollment account={a.id} />
+              </Show>
+              <Show when={manages() && a.provider_type === "antigravity"}>
+                <AlternativeRouterSettings account={a.id} />
+              </Show>
+            </div>
+          </Suspense>
+          <Show when={p.rank}>{r => <RankControls rank={r()} id={a.id} name={email() ?? a.name} title={title()} />}</Show>
           <Show when={resetSupported() || resetInfo()}>
             <section class="p-native" aria-label="Subscription reset">
               <Show when={resetInfo()}>
