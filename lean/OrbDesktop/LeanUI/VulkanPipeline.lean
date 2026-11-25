@@ -1155,8 +1155,9 @@ def destroyOffscreenReadback (ctx : VkOffscreenReadback) : IO Unit := do
   destroyFrameSync ctx.dev ctx.sync
   destroyDevice ctx.dev
 
-def createOffscreenReadback (enableValidation : Bool := false) : IO (Except String VkOffscreenReadback) := do
-  match ← createDevice 0 0 false true enableValidation with
+def createOffscreenReadback (enableValidation : Bool := false) (allowSoftwareIcd : Bool := true) :
+    IO (Except String VkOffscreenReadback) := do
+  match ← createDevice 0 0 false allowSoftwareIcd enableValidation with
   | .error e => return .error e
   | .ok dev =>
     match ← createFrameSync dev with

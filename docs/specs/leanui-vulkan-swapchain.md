@@ -448,18 +448,27 @@ All Vulkan structs packed in `LeanUI/VulkanStructs.lean` target LP64 little-endi
 
 ### 4.1 Strict Backend Isolation & Mode Selection
 
-The deterministic CPU reference rasterizer (`Vulkan.rasterizeSceneInto`) remains the **sole authority** for golden PNG generation, SolidJS parity checks (`scripts/leanui_parity.py`), `OrbDesktop.EmbeddedSidebar`, and `OrbDesktop.RepaintCheck` / `OrbDesktop.Spec.RasterParity`.
+The deterministic CPU reference rasterizer (`Vulkan.rasterizeSceneInto`) remains the **sole authority** for golden PNG generation, SolidJS parity checks (`scripts/leanui_parity.py`), and `OrbDesktop.RepaintCheck` / `OrbDesktop.Spec.RasterParity`. It is also the fallback for every `OrbDesktop.EmbeddedSidebar` surface.
 
 | CLI Flag / Env Var | Effective Backend | Allowed in `--headless-golden*`? |
 | --- | --- | --- |
-| `--headless`, `--headless-golden`, `--headless-golden-all`, `--self-test`, `--verify-repaint`, **`--gtk-sidebar-host`** (`OrbDesktop/EmbeddedSidebar.lean`) | **Always `cpuReference`** (ignores `ORB_LEANUI_GPU=1` / `--gpu`) | Yes (forced) |
+| `--headless`, `--headless-golden`, `--headless-golden-all`, `--self-test`, `--verify-repaint` | **Always `cpuReference`** (ignores `ORB_LEANUI_GPU=1` / `--gpu`) | Yes (forced) |
+| **`--gtk-sidebar-host`** (`OrbDesktop/EmbeddedSidebar.lean`, `--leanui-hybrid`) | Sidebar: `vkInstanced` on its `wl_subsurface`, `cpuReference` + `wl_shm`/cairo on `GPU_FALLBACK`. `Cmd+Shift+F` palette: headless `vkInstanced` offscreen + readback (`PaletteGpu`), `cpuReference` when no hardware device. Both honour `ORB_LEANUI_GPU=0` and `=lavapipe` | No |
 | `--no-gpu` or `ORB_LEANUI_GPU=0` | `cpuShm` (`wl_shm` double buffer) | N/A |
 | `--gpu=present` or `ORB_LEANUI_GPU=present` | Phase 1 `vkPresent` (auto-fallback to `cpuShm`) | N/A |
 | `--gpu` or `ORB_LEANUI_GPU=1` (or `=instanced`) | Phase 2 `vkInstanced` (auto-fallback `vkPresent` -> `cpuShm`) | N/A |
 | `ORB_LEANUI_GPU=lavapipe` | Enables `vkPresent`/`vkInstanced` on `VK_PHYSICAL_DEVICE_TYPE_CPU` | N/A |
 | `--gpu-readback <out_dir>` (CI differential test flag only) | Offscreen Vulkan `TRANSFER_SRC` readback -> PNG | Dedicated parity harness only (never overwrites canonical CPU goldens) |
 
-**CLI Flag Wiring Requirement:** Wire `--headless`, `--no-gpu`, `--gpu`, `--gpu=present`, `--gpu=instanced`, and `--gpu-readback <out_dir>` into **both** `Runtime.parseRuntimeArgs` (`LeanUI/Runtime.lean:54`) and `OrbDesktop.parseDesktopArgs` (`OrbDesktop/Main.lean:54`) (preferring shared delegation from `parseDesktopArgs` to `parseRuntimeArgs` so the two parsers cannot diverge). Pin `--gtk-sidebar-host` (`OrbDesktop/Main.lean:663-664` → `EmbeddedSidebar.lean:34-74`) unconditionally to `cpuReference` because `FFI.sidebarHost` consumes CPU `next.framebuffer` bytes directly.
+**CLI Flag Wiring Requirement:** Wire `--headless`, `--no-gpu`, `--gpu`, `--gpu=present`, `--gpu=instanced`, and `--gpu-readback <out_dir>` into **both** `Runtime.parseRuntimeArgs` (`LeanUI/Runtime.lean:54`) and `OrbDesktop.parseDesktopArgs` (`OrbDesktop/Main.lean:54`) (preferring shared delegation from `parseDesktopArgs` to `parseRuntimeArgs` so the two parsers cannot diverge). `FFI.sidebarHost` still receives the palette as RGBA bytes, so the GPU palette path reads its frame back; the instanced output stays within `max Δ ≤ 2` per channel of `cpuReference` in both themes (`--bench-embedded` reports the delta).
+
+### 4.1.1 Embedded sidebar frame cache and auto-hide scrollbar (`--leanui-hybrid`)
+
+GTK resends the whole row model on every sidebar paint. `EmbeddedSidebarCache` keeps the parsed rows (skipped when the row lines are unchanged), the shaped tree (reused for scroll-only frames, where only the roster `ScrollSpec` is patched by `withRosterScroll`), and a `widgetId → (unshaped, shaped)` row memo. A row is reused only when its unshaped subtree is `BEq`-equal, so a spinner tick reshapes just the running rows. The memo is dropped when the device scale changes or the glyph atlas `generation` moves, including a reset in the middle of a frame. `embeddedSidebarCacheSelfTest` (in `--self-test`) checks that cached frames have the same prims and hit payload as uncached ones.
+
+Scene lowering skips any subtree that `subtreeOutsideClipY` proves lies wholly above or below an ancestor clip. That covers layout boxes, shadow extent and a 48 logical px allowance per node. The subtree keeps its tab order. Every prim it would emit is scissored away, so all 36 `--headless-golden-all` PNGs are byte-identical with and without culling.
+
+The roster scrollbar is an auto-hide overlay: hidden at rest, fully visible while the offset changes and for `scrollbarHoldMs = 600` ms afterwards, then a linear `scrollbarFadeMs = 180` ms fade (`scrollbarFade`). The first hit-payload line is `<scroll limit px> <wake ms>`. GTK arms one `g_timeout` for a non-zero wake value, so the fade animates without a permanent tick.
 
 ### 4.2 Differential Parity Harness & Exact Channel Delta Bounds
 
