@@ -27,3 +27,6 @@ gboolean orb_wl_subsurface_ensure(OrbWlSubsurface *sub, GtkWidget *canvas, gbool
 
 /* Destroy the Wayland subsurface (call only after Vulkan has destroyed its swapchain/surface). */
 void orb_wl_subsurface_detach(OrbWlSubsurface *sub);
+
+/* Punch a transparent hole for the Vulkan subsurface while squaring off inner right corners. */
+void orb_wl_subsurface_draw_mask(cairo_t *cr, int width, int height, gboolean light);

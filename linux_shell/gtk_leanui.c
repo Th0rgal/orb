@@ -80,8 +80,10 @@ static gboolean update(gpointer data) {
 static gboolean on_tick(GtkWidget *widget, GdkFrameClock *clock, gpointer data) {
     (void)widget; (void)clock;
     OrbSidebar *s = data;
-    s->tick = 0;
+    gboolean more = orb_sidebar_kinetic_step(s);
     render_frame(s);
+    if (more) return G_SOURCE_CONTINUE;
+    s->tick = 0; s->kinetic_ts = 0;
     return G_SOURCE_REMOVE;
 }
 
@@ -116,39 +118,14 @@ static void unmapped(GtkWidget *widget, OrbSidebar *s) {
 }
 static gboolean draw(GtkWidget *widget, cairo_t *cr, OrbSidebar *s) {
     (void)widget;
-    if (s->gpu_active) {
-        cairo_save(cr);
-        cairo_set_operator(cr, CAIRO_OPERATOR_CLEAR);
-        cairo_paint(cr);
-        cairo_restore(cr);
-        return TRUE;
-    }
-    if (s->surface) {
-        cairo_set_source_surface(cr, s->surface, 0, 0);
-        cairo_paint(cr);
-    }
+    if (s->gpu_active) return orb_wl_subsurface_draw_mask(cr, s->width, s->height, s->light), TRUE;
+    if (s->surface) { cairo_set_source_surface(cr, s->surface, 0, 0); cairo_paint(cr); }
     return TRUE;
 }
 static gboolean canvas_press(GtkWidget *widget, GdkEventButton *event, gpointer data) {
     (void)data;
     if (event->button != GDK_BUTTON_PRIMARY || event->y >= 35) return FALSE;
     return orb_gtk_begin_window_drag(gtk_widget_get_toplevel(widget)), TRUE;
-}
-static gboolean scroll(GtkWidget *widget, GdkEventScroll *event, OrbSidebar *s) {
-    (void)widget;
-    double dx, dy;
-    if (!gdk_event_get_scroll_deltas((GdkEvent *)event, &dx, &dy))
-        dy = event->direction == GDK_SCROLL_DOWN ? 1 : event->direction == GDK_SCROLL_UP ? -1 : 0;
-    if (dy == 0.0 || s->limit <= 0) return FALSE;
-    double next_pos = CLAMP(s->scroll_pos + dy * 56.0, 0.0, (double)s->limit);
-    if (next_pos == s->scroll_pos) return FALSE;
-    s->scroll_pos = next_pos;
-    int next = CLAMP((int)llround(next_pos), 0, s->limit);
-    if (next != s->scroll) {
-        s->scroll = next;
-        orb_sidebar_invalidate(s);
-    }
-    return TRUE;
 }
 static gboolean position(GtkOverlay *overlay, GtkWidget *child, GdkRectangle *rect, gpointer unused) {
     (void)overlay; (void)unused;
@@ -192,7 +169,7 @@ GtkWidget *orb_leanui_new(GtkWidget *webview, OrbSidebarAction action, gpointer 
     gtk_widget_add_events(s->canvas, GDK_BUTTON_PRESS_MASK);
     g_signal_connect(s->canvas, "button-press-event", G_CALLBACK(canvas_press), NULL);
     gtk_widget_add_events(s->overlay, GDK_SCROLL_MASK | GDK_SMOOTH_SCROLL_MASK);
-    g_signal_connect(s->overlay, "scroll-event", G_CALLBACK(scroll), s);
+    g_signal_connect(s->overlay, "scroll-event", G_CALLBACK(orb_sidebar_scroll_event), s);
     g_signal_connect(s->overlay, "get-child-position", G_CALLBACK(position), NULL);
     g_signal_connect(s->overlay, "size-allocate", G_CALLBACK(allocate), s);
     g_signal_connect(s->overlay, "notify::scale-factor", G_CALLBACK(scale_changed), s);

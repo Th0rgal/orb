@@ -570,7 +570,8 @@ def lowerWidgetPair (scale120 : Nat) (focusState : FocusState) (theme : Theme)
       | none => []
     let scrollbarPrims : List Prim :=
       match payload, box.scrollLimitXY with
-      | .scrollClip _, some (_, limitY) =>
+      | .scrollClip sc, some (_, limitY) =>
+        if !sc.showScrollbar then [] else
         match scrollbarGeometry box.contentRectSub limitY (box.scrollOffset.getD (0, 0)).2 with
         | none => []
         | some geom =>

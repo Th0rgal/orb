@@ -145,7 +145,7 @@
    and active pills translucent rather than solid hex cutouts. */
 :root[data-platform="linux"] {
   --sidebar-opacity: 78%;
-  --surface-opacity: 94%;
+  --surface-opacity: 100%;
   --bg-hover: color-mix(in srgb, var(--fg) 4.5%, transparent);
   --bg-active: color-mix(in srgb, var(--fg) 7.5%, transparent);
   --tb-traffic-left: 8px;
@@ -153,7 +153,7 @@
 }
 :root[data-platform="linux"][data-theme="light"] {
   --sidebar-opacity: 72%;
-  --surface-opacity: 95.5%;
+  --surface-opacity: 100%;
   --bg-hover: color-mix(in srgb, var(--fg) 4%, transparent);
   --bg-active: color-mix(in srgb, var(--fg) 6.5%, transparent);
 }

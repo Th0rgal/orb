@@ -372,7 +372,7 @@ def buildSidebarChrome (st : DesktopState) (availH : SubPx) (useReferenceTree : 
     |>.withPadding (Edges.trbl 0 (pxToSub 6) (pxToSub 12) (pxToSub 6))
   let roster := if st.liveData then
       WidgetNode.scrollClip (BoxStyle.col 0 |>.withFixedSize innerW rosterH)
-        { offsetY := st.rosterTopSub } (WidgetNode.box rosterStyle (navRows ++ treeRows)) (some rosterViewportId) (hitTestable := false)
+        { offsetY := st.rosterTopSub, showScrollbar := !embedded } (WidgetNode.box rosterStyle (navRows ++ treeRows)) (some rosterViewportId) (hitTestable := false)
     else WidgetNode.box (rosterStyle.withFixedSize innerW rosterH) (navRows ++ treeRows)
   let searchToolId := if embedded then 118 else sidebarSearchId
   let backToolId := if embedded then 119 else sidebarBackId

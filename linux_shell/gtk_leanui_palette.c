@@ -82,8 +82,10 @@ gboolean orb_leanui_palette_key(GtkWidget *overlay, GdkEventKey *ev) {
     guint mod = ev->state & gtk_accelerator_get_default_mod_mask(), key = gdk_keyval_to_lower(ev->keyval);
     gboolean ctrl = (mod & GDK_CONTROL_MASK) != 0;
     gboolean super = ((mod & (GDK_SUPER_MASK | GDK_META_MASK)) != 0) || ((ev->state & GDK_MOD4_MASK) != 0);
-    gboolean exclusive_primary = (ctrl != super) && !(mod & (GDK_SHIFT_MASK | GDK_MOD1_MASK));
-    if (exclusive_primary && key == GDK_KEY_k) {
+    gboolean primary = (ctrl != super) && !(mod & GDK_MOD1_MASK);
+    gboolean exclusive_primary = primary && !(mod & GDK_SHIFT_MASK);
+    gboolean primary_shift = primary && ((mod & GDK_SHIFT_MASK) != 0);
+    if (primary_shift && key == GDK_KEY_f) {
         if (p->open) orb_pal_close(p, TRUE); else orb_leanui_palette_open(overlay);
         return TRUE;
     }
