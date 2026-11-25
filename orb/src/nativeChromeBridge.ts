@@ -72,7 +72,7 @@ type NativeChromeWindow = Window & {
   __ORB_NATIVE_EXPAND__?: (rowId: string) => boolean;
   __ORB_TOGGLE_NATIVE_SIDEBAR__?: (open?: boolean) => boolean;
   __ORB_NATIVE_MISSION_ACTION__?: (action: string, missionId: string, arg?: string) => boolean;
-  __ORB_NATIVE_PROJECT_ACTION__?: (action: string, slug: string) => boolean;
+  __ORB_NATIVE_PROJECT_ACTION__?: (action: string, slug: string, arg?: string) => boolean;
   webkit?: {
     messageHandlers?: {
       orbNative?: {
@@ -186,41 +186,113 @@ export type NativeChromeBridgeHandlers = {
   newProject?: () => void;
   getScope?: () => string;
   toggleFolderExpand?: (rowId: string) => void;
-  /** Native sidebar context menu: `rename` (arg = new title), `move` (arg = project slug),
-   *  `archive`, `restore`, `copy-id`, `settings`, `delete` (arg = space-separated ids or "current"). */
+  /** Native sidebar context menu: `rename` (arg = new title), `move` (arg = `<slug>` or `<slug>:<folder>`),
+   *  `move-picker`, `cut`, `archive`, `restore`, `copy-id`, `settings`, `delete` (arg = space-separated ids or "current"). */
   missionAction?: (action: NativeMissionAction, missionId: string, arg: string) => boolean;
-  /** Native sidebar project context menu: `new-agent`, `new-cloud-agent`, `new-folder`,
-   *  `settings`, `rename`, `archive`, `delete`. */
-  projectAction?: (action: NativeProjectAction, slug: string) => boolean;
+  /** Native sidebar project/folder/file context menu: `new-agent`, `new-cloud-agent`, `new-folder`,
+   *  `new-file`, `settings`, `rename`, `archive`, `delete`, `paste`, `cut`, `copy`, `move-picker`,
+   *  `cut-file`, `copy-file`, `rename-file`, `delete-file`, `move-file`. */
+  projectAction?: (action: NativeProjectAction, slug: string, arg?: string) => boolean;
 };
 
-/** Mission ids a native action applies to: `delete` lists them in `arg` ("current" = the open
- *  conversation), a bulk `move` lists them in `id`; every other action targets `id` alone. */
-export function nativeActionTargets(action: NativeMissionAction, id: string, arg: string, current: string | null): string[] {
-  const split = (s: string) => s.split(/\s+/).filter(Boolean);
-  if (action === "delete") return arg === "current" ? (current ? [current] : []) : split(arg);
-  return action === "move" ? split(id) : id ? [id] : [];
+/** Parse `<slug>` or `<slug>:<folder/path>` (stripping optional `project:`, `proj:`, `folder:`, `pf:` prefixes). */
+export function parseNativeDestination(raw: string): { slug: string; folder: string } {
+  const clean = (raw ?? "").trim().replace(/^(?:project:|proj:|folder:|pf:)/, "");
+  const sep = clean.indexOf(":");
+  const slug = (sep < 0 ? clean : clean.slice(0, sep)).trim();
+  const rawFolder = sep < 0 ? "" : clean.slice(sep + 1).trim();
+  const folder = rawFolder
+    .split("/")
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0 && s !== "." && s !== "..")
+    .join("/");
+  return { slug, folder };
 }
 
-export type NativeMissionAction = "rename" | "move" | "archive" | "restore" | "copy-id" | "settings" | "delete";
-const NATIVE_MISSION_ACTIONS: readonly string[] = ["rename", "move", "archive", "restore", "copy-id", "settings", "delete"];
+/** Expand a destination project and all of its ancestor folders in `orb-locald` so moved/pasted items stay visible. */
+export function expandNativeDestination(slug: string, folder: string, scope?: string): void {
+  const inv = nativeInvoke();
+  if (!inv || !slug) return;
+  const base = scope ? { scope } : {};
+  void inv("native_chrome_toggle_expand", { ...base, row_id: `proj:${slug}`, expanded: true }).catch(() => {});
+  if (!folder) return;
+  const parts = folder.split("/").filter(Boolean);
+  for (let i = 1; i <= parts.length; i++) {
+    const anc = parts.slice(0, i).join("/");
+    void inv("native_chrome_toggle_expand", { ...base, row_id: `folder:${slug}:${anc}`, expanded: true }).catch(() => {});
+  }
+}
+
+/** Mission ids a native action applies to: `delete` lists them in `arg` ("current" = the open
+ *  conversation), a bulk `move` / `move-picker` / `cut` lists them in `id`; every other action targets `id` alone. */
+export function nativeActionTargets(action: NativeMissionAction, id: string, arg: string, current: string | null): string[] {
+  const split = (s: string) =>
+    s
+      .split(/\s+/)
+      .map((t) => t.replace(/^m:/, "").trim())
+      .filter(Boolean);
+  if (action === "delete") return arg === "current" ? (current ? [current] : []) : split(arg);
+  return action === "move" || action === "move-picker" || action === "cut" ? split(id) : id ? [id.replace(/^m:/, "")] : [];
+}
+
+export type NativeMissionAction =
+  | "rename"
+  | "move"
+  | "move-picker"
+  | "cut"
+  | "archive"
+  | "restore"
+  | "copy-id"
+  | "settings"
+  | "delete";
+const NATIVE_MISSION_ACTIONS: readonly string[] = [
+  "rename",
+  "move",
+  "move-picker",
+  "cut",
+  "archive",
+  "restore",
+  "copy-id",
+  "settings",
+  "delete",
+];
 
 export type NativeProjectAction =
   | "new-agent"
   | "new-cloud-agent"
   | "new-folder"
+  | "new-file"
   | "settings"
   | "rename"
   | "archive"
-  | "delete";
+  | "delete"
+  | "paste"
+  | "cut"
+  | "copy"
+  | "move-picker"
+  | "cut-file"
+  | "copy-file"
+  | "rename-file"
+  | "delete-file"
+  | "move-file";
 const NATIVE_PROJECT_ACTIONS: readonly string[] = [
   "new-agent",
   "new-cloud-agent",
   "new-folder",
+  "new-file",
   "settings",
   "rename",
   "archive",
   "delete",
+  "paste",
+  "cut",
+  "copy",
+  "move-picker",
+  "cut-file",
+  "copy-file",
+  "rename-file",
+  "delete-file",
+  "move-file",
 ];
 
 /** Notify native macOS/Linux shell when the titlebar sidebar toggle, history state, or Cmd+K shortcut fires inside WebView. */
@@ -326,15 +398,23 @@ export function installNativeChromeWindowHandlers(
   nw.__ORB_NATIVE_EXPAND__ = nativeExpand;
   nw.__ORB_TOGGLE_NATIVE_SIDEBAR__ = toggleSidebar;
   const missionAction = (action: string, missionId: string, arg?: string): boolean => {
-    const id = (missionId ?? "").trim().replace(/^m:/, "");
+    const id = (missionId ?? "")
+      .trim()
+      .split(/\s+/)
+      .map((t) => t.replace(/^m:/, ""))
+      .filter(Boolean)
+      .join(" ");
     if (!id || !NATIVE_MISSION_ACTIONS.includes(action) || !handlers.missionAction) return false;
     return handlers.missionAction(action as NativeMissionAction, id, (arg ?? "").trim());
   };
   nw.__ORB_NATIVE_MISSION_ACTION__ = missionAction;
-  const projectAction = (action: string, slug: string): boolean => {
-    const clean = (slug ?? "").trim().replace(/^project:/, "");
+  const projectAction = (action: string, slug: string, arg?: string): boolean => {
+    const clean = (slug ?? "").trim().replace(/^(?:project:|proj:|folder:|pf:)/, "");
     if (!clean || !NATIVE_PROJECT_ACTIONS.includes(action) || !handlers.projectAction) return false;
-    return handlers.projectAction(action as NativeProjectAction, clean);
+    const trimmedArg = typeof arg === "string" ? arg.trim() : undefined;
+    return trimmedArg !== undefined && trimmedArg.length > 0
+      ? handlers.projectAction(action as NativeProjectAction, clean, trimmedArg)
+      : handlers.projectAction(action as NativeProjectAction, clean);
   };
   nw.__ORB_NATIVE_PROJECT_ACTION__ = projectAction;
   return () => {

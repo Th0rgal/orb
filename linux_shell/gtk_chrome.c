@@ -110,7 +110,7 @@ static GtkWidget *make_row_widget(OrbGtkChrome *c, JSCValue *it, int pal, char *
     }
     if (badge > 0) { char bs[24]; snprintf(bs, sizeof(bs), "%d", (int)badge); GtkWidget *bl = gtk_label_new(bs); gtk_widget_set_valign(bl, GTK_ALIGN_CENTER); gtk_style_context_add_class(gtk_widget_get_style_context(bl), "orb-badge"); gtk_box_pack_end(GTK_BOX(hb), bl, FALSE, FALSE, 0); }
     if (*sc || (pal && *sub) || attn) { GtkWidget *ml = gtk_label_new(*sc ? sc : ((pal && *sub) ? sub : "\xE2\x80\xA2")); gtk_style_context_add_class(gtk_widget_get_style_context(ml), attn && !*sc ? "orb-attn" : "orb-kbd"); gtk_box_pack_end(GTK_BOX(hb), ml, FALSE, FALSE, 0); }
-    g_object_set_data_full(G_OBJECT(row), "orb-row-id", rid, g_free); g_object_set_data_full(G_OBJECT(row), "orb-kind", kind, g_free); g_object_set_data_full(G_OBJECT(row), "orb-target", target, g_free); g_object_set_data_full(G_OBJECT(row), "orb-sig", sig, g_free); g_object_set_data(G_OBJECT(row), "orb-exp", GINT_TO_POINTER(exp ? 1 : 0)); if (!pal) { g_object_set_data_full(G_OBJECT(row), "orb-project", jv_str(it, "project"), g_free); }
+    g_object_set_data_full(G_OBJECT(row), "orb-row-id", rid, g_free); g_object_set_data_full(G_OBJECT(row), "orb-kind", kind, g_free); g_object_set_data_full(G_OBJECT(row), "orb-target", target, g_free); g_object_set_data_full(G_OBJECT(row), "orb-sig", sig, g_free); g_object_set_data(G_OBJECT(row), "orb-depth", GINT_TO_POINTER(depth)); g_object_set_data(G_OBJECT(row), "orb-exp", GINT_TO_POINTER(exp ? 1 : 0)); if (!pal) { g_object_set_data_full(G_OBJECT(row), "orb-project", jv_str(it, "project"), g_free); g_object_set_data_full(G_OBJECT(row), "orb-folder", jv_str(it, "folder"), g_free); if (!strcmp(kind, "project")) { g_object_set_data_full(G_OBJECT(row), "orb-folders", orb_jsc_join_strings(it, "folders"), g_free); } }
     return g_object_set_data_full(G_OBJECT(row), "orb-title", title, g_free), g_free(sub), g_object_set_data_full(G_OBJECT(row), "orb-status", st, g_free), g_free(sc), g_free(ic), g_free(co), gtk_container_add(GTK_CONTAINER(evb), hb), gtk_container_add(GTK_CONTAINER(row), evb), gtk_widget_show_all(row), row;
 }
 static void populate_from_array(OrbGtkChrome *c, GtkWidget *lb, JSCValue *arr, int pal) {
@@ -183,13 +183,13 @@ static void build_classic_sidebar(OrbGtkChrome *c) {
     c->sb_list = gtk_list_box_new(); gtk_list_box_set_selection_mode(GTK_LIST_BOX(c->sb_list), GTK_SELECTION_NONE); gtk_list_box_set_activate_on_single_click(GTK_LIST_BOX(c->sb_list), TRUE); g_signal_connect(c->sb_list, "row-activated", G_CALLBACK(on_sb_row_activated), c); g_signal_connect(c->sb_list, "button-press-event", G_CALLBACK(on_sb_button), c); gtk_container_add(GTK_CONTAINER(scw), c->sb_list);
     c->foot_btn = gtk_button_new(); gtk_button_set_relief(GTK_BUTTON(c->foot_btn), GTK_RELIEF_NONE); gtk_widget_set_focus_on_click(c->foot_btn, FALSE); orb_gtk_bind_pointer_cursor(c->foot_btn); gtk_label_set_xalign(GTK_LABEL(fl), 0.0f); c->foot_badge = gtk_label_new(""); gtk_style_context_add_class(gtk_widget_get_style_context(c->foot_badge), "orb-badge"); gtk_widget_set_valign(c->foot_badge, GTK_ALIGN_CENTER); gtk_widget_set_no_show_all(c->foot_badge, TRUE);
     gtk_box_pack_start(GTK_BOX(fhb), orb_make_icon_widget(&c->spin, "gear", NULL, NULL), FALSE, FALSE, 0); gtk_box_pack_start(GTK_BOX(fhb), fl, TRUE, TRUE, 0); gtk_box_pack_end(GTK_BOX(fhb), c->foot_badge, FALSE, FALSE, 0); gtk_container_add(GTK_CONTAINER(c->foot_btn), fhb); g_signal_connect(c->foot_btn, "clicked", G_CALLBACK(on_foot_clicked), c); gtk_box_pack_start(GTK_BOX(foot), c->foot_btn, TRUE, TRUE, 0);
-    gtk_box_pack_start(GTK_BOX(c->sb_box), orb_gtk_drag_area(top), FALSE, FALSE, 0); gtk_box_pack_start(GTK_BOX(c->sb_box), scw, TRUE, TRUE, 0); gtk_box_pack_end(GTK_BOX(c->sb_box), foot, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(c->sb_box), orb_gtk_drag_area(top), FALSE, FALSE, 0); gtk_box_pack_start(GTK_BOX(c->sb_box), orb_wrap_overlay(scw), TRUE, TRUE, 0); gtk_box_pack_end(GTK_BOX(c->sb_box), foot, FALSE, FALSE, 0);
 }
 #ifdef ORB_LEANUI_HOST
 static void embedded_action(gpointer data, const char *kind, const char *target) {
     OrbGtkChrome *c = data;
     if (!strcmp(kind, "expand")) { toggle_row_expand(c, target); return; }
-    gtk_widget_grab_focus(c->wv);
+    if (!strcmp(kind, "hide") || (target && (!strcmp(target, "new-agent") || !strncmp(target, "new-agent:", 10) || !strcmp(target, "new-project")))) gtk_widget_grab_focus(c->wv);
     if (!strcmp(kind, "hide")) on_tb_sb_clicked(NULL, c); else eval_wv_target(c, kind, target);
 }
 #endif

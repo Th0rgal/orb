@@ -7,6 +7,7 @@ import {
   serializeNativeChromeMission,
   withLiveExecution,
   nativeActionTargets,
+  parseNativeDestination,
   type NativeChromeSyncSnapshot,
 } from "../src/nativeChromeBridge";
 import type { Mission, ProjectSummary } from "../src/api";
@@ -295,6 +296,44 @@ describe("nativeChromeBridge", () => {
     ]);
     cleanup();
     expect(fakeWin.__ORB_NATIVE_PROJECT_ACTION__).toBeUndefined();
+  });
+
+  it("parses folder destinations and routes cut/paste, move-picker, and inline folder/project rename", () => {
+    expect(parseNativeDestination("perso")).toEqual({ slug: "perso", folder: "" });
+    expect(parseNativeDestination("proj:perso")).toEqual({ slug: "perso", folder: "" });
+    expect(parseNativeDestination("folder:perso:pareto/v2")).toEqual({ slug: "perso", folder: "pareto/v2" });
+    expect(parseNativeDestination("perso:/pareto//../v2/")).toEqual({ slug: "perso", folder: "pareto/v2" });
+    expect(nativeActionTargets("cut", "m:m-1 m:m-2", "", null)).toEqual(["m-1", "m-2"]);
+    expect(nativeActionTargets("move-picker", "m:m-3", "", null)).toEqual(["m-3"]);
+
+    const mCalls: Array<[string, string, string]> = [];
+    const pCalls: Array<[string, string, string | undefined]> = [];
+    const fakeWin = { dispatchEvent: () => true } as unknown as Window & {
+      __ORB_NATIVE_MISSION_ACTION__?: (a: string, id: string, arg?: string) => boolean;
+      __ORB_NATIVE_PROJECT_ACTION__?: (a: string, slug: string, arg?: string) => boolean;
+    };
+    const cleanup = installNativeChromeWindowHandlers({
+      open: () => true, leaveSettings: () => {}, getSidebarOpen: () => true, setSidebarOpen: () => {},
+      missionAction: (action, id, arg) => { mCalls.push([action, id, arg]); return true; },
+      projectAction: (action, slug, arg) => { pCalls.push([action, slug, arg]); return true; },
+    }, fakeWin);
+    expect(fakeWin.__ORB_NATIVE_MISSION_ACTION__?.("move", "m-1 m-2", "perso:pareto/v2")).toBe(true);
+    expect(fakeWin.__ORB_NATIVE_MISSION_ACTION__?.("cut", "m:m-1 m:m-2", "")).toBe(true);
+    expect(fakeWin.__ORB_NATIVE_MISSION_ACTION__?.("move-picker", "m:m-1", "")).toBe(true);
+    expect(fakeWin.__ORB_NATIVE_PROJECT_ACTION__?.("rename", "folder:perso:pareto", "  pareto-next ")).toBe(true);
+    expect(fakeWin.__ORB_NATIVE_PROJECT_ACTION__?.("paste", "folder:perso:pareto/v2")).toBe(true);
+    expect(fakeWin.__ORB_NATIVE_PROJECT_ACTION__?.("cut", "folder:perso:pareto")).toBe(true);
+    expect(mCalls).toEqual([
+      ["move", "m-1 m-2", "perso:pareto/v2"],
+      ["cut", "m-1 m-2", ""],
+      ["move-picker", "m-1", ""],
+    ]);
+    expect(pCalls).toEqual([
+      ["rename", "perso:pareto", "pareto-next"],
+      ["paste", "perso:pareto/v2", undefined],
+      ["cut", "perso:pareto", undefined],
+    ]);
+    cleanup();
   });
 
   it("coalesces rapid schedule calls with strictly monotonic revisions", async () => {

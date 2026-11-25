@@ -194,6 +194,8 @@ import {
   type NativeProjectAction,
   withLiveExecution,
   nativeActionTargets,
+  parseNativeDestination,
+  expandNativeDestination,
   isNativeChromeEnabled,
   shouldAutoCollapseSidebar,
   notifyNativeChromeShell,
@@ -1084,7 +1086,7 @@ export default function App() {
   // native Archived section is fed from here.
   const [nativeArchived, setNativeArchived] = createSignal<Mission[]>([]);
   const [archiveRequests, setArchiveRequests] = createSignal<{ mission: Mission; restore: boolean }[]>([]);
-  const [projectActionRequests, setProjectActionRequests] = createSignal<{ action: NativeProjectAction; slug: string }[]>([]);
+  const [projectActionRequests, setProjectActionRequests] = createSignal<{ action: NativeProjectAction | "cut-missions" | "move-missions-picker"; slug: string; path?: string; arg?: string }[]>([]);
   const [nativeApprovalPrompt, setNativeApprovalPrompt] = createSignal<ApprovalConfirmationPrompt | null>(null);
   createEffect(on(connectionVersion, () => setNativeApprovalPrompt(null), { defer: true }));
   const loadNativeArchived = () => {
@@ -1112,16 +1114,27 @@ export default function App() {
       setDeleteMissionRequest(ids);
       return true;
     }
+    if (action === "cut" || action === "move-picker") {
+      const ids = nativeActionTargets(action, id, arg, null);
+      if (!ids.length) return false;
+      setProjectActionRequests(q => [
+        ...q,
+        { action: action === "cut" ? "cut-missions" : "move-missions-picker", slug: "", arg: ids.join(" ") },
+      ]);
+      return true;
+    }
     if (action === "move") {
       // A selection moves as one batch through the shared family planner (as `tree/moves.ts`),
       // so callback-only children follow and one secret-transfer confirmation covers every id.
       const ids = nativeActionTargets(action, id, arg, null);
-      if (!ids.length || !arg) return false;
+      const { slug: dstSlug, folder: dstFolder } = parseNativeDestination(arg);
+      if (!ids.length || !dstSlug) return false;
+      expandNativeDestination(dstSlug, dstFolder, historyScope());
       const version = connectionVersion(); // fence the response and the confirmation (as tree/moves.ts)
       const move = async (policy: ApprovalTransferPolicy) => {
         if (version !== connectionVersion()) return;
         const known = [...missions(), ...completedMissions(), ...Object.values(projectMissions()).flat(), ...nativeArchived()];
-        const failures = await moveMissions(planMissionMoves(ids, arg, "", known), arg, { approvalPolicy: policy });
+        const failures = await moveMissions(planMissionMoves(ids, dstSlug, dstFolder, known), dstSlug, { approvalPolicy: policy });
         if (version !== connectionVersion()) return;
         const approval = failures.find(f => f.error instanceof ApprovalTransferConfirmationRequiredError)?.error as ApprovalTransferConfirmationRequiredError | undefined;
         if (approval) setNativeApprovalPrompt({ error: approval, confirm: chosen => void move(chosen), cancel: () => {} });
@@ -1160,24 +1173,22 @@ export default function App() {
     setNewProject(slug);
     open(null);
   };
-  const nativeProjectAction = (action: NativeProjectAction, slug: string): boolean => {
+  const nativeProjectAction = (action: NativeProjectAction, rawTarget: string, arg?: string): boolean => {
+    const { slug, folder: path } = parseNativeDestination(rawTarget);
     if (!slug) return false;
     switch (action) {
       case "new-agent":
-        newAgentIn(slug, "");
+        newAgentIn(slug, path);
         return true;
       case "new-cloud-agent":
         setNewProject(slug);
-        setNewFolder(null);
+        setNewFolder(path ? { project: slug, path } : null);
         open("cloud-agent");
         return true;
       case "settings":
         return open(`ps:${slug}`);
-      case "new-folder":
-      case "rename":
-      case "archive":
-      case "delete":
-        setProjectActionRequests(q => [...q, { action, slug }]);
+      default:
+        setProjectActionRequests(q => [...q, { action, slug, ...(path ? { path } : {}), ...(arg ? { arg } : {}) }]);
         return true;
     }
   };

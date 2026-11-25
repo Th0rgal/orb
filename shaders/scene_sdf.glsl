@@ -90,20 +90,48 @@ vec4 unpackRGBA(uint c) {
 
 float sdRoundedBox16(vec2 p, vec2 b, vec4 r) {
     vec2 rSel = (p.x >= 0.0) ? r.yz : r.xw; // (tr, br) vs (tl, bl)
-    float rad = (p.y >= 0.0) ? rSel.y : rSel.x;
-    rad = floor(min(rad, floor(min(b.x, b.y))));
+    float rawRad = floor((p.y >= 0.0) ? rSel.y : rSel.x);
+    float maxR = floor(min(b.x, b.y));
+    float rad = floor(min(rawRad, maxR));
     vec2 b16 = round(b * 16.0);
     vec2 p16 = round(abs(p * 16.0));
     float rad16 = rad * 16.0;
     vec2 q16 = p16 - b16 + vec2(rad16);
     vec2 m16 = max(q16, vec2(0.0));
-    float d2 = dot(m16, m16);
-    float outLen16 = floor(sqrt(d2));
-    if (outLen16 * outLen16 > d2) {
-        outLen16 -= 1.0;
-    }
-    if ((outLen16 + 1.0) * (outLen16 + 1.0) <= d2) {
-        outLen16 += 1.0;
+    float maxM = max(m16.x, m16.y);
+    float outLen16;
+    bool isCircleCap = (rad <= 1.0) || (rawRad > maxR) || (b16.x == b16.y && rawRad >= maxR);
+    if (maxM >= rad16 + 16.0) {
+        outLen16 = maxM;
+    } else if (isCircleCap) {
+        float d2 = dot(m16, m16);
+        outLen16 = floor(sqrt(d2));
+        if (outLen16 * outLen16 > d2) {
+            outLen16 -= 1.0;
+        }
+        if ((outLen16 + 1.0) * (outLen16 + 1.0) <= d2) {
+            outLen16 += 1.0;
+        }
+    } else {
+        uint ux = uint(m16.x), uy = uint(m16.y);
+        uint sx = ux * ux, sy = uy * uy;
+        uint hx, lx, hy, ly, carry;
+        umulExtended(sx, sx, hx, lx);
+        umulExtended(sy, sy, hy, ly);
+        uint lo = uaddCarry(lx, ly, carry);
+        uint hi = hx + hy + carry;
+        uint k = uint(floor(sqrt(sqrt(float(sx) * float(sx) + float(sy) * float(sy)))));
+        for (int adj = 0; adj < 2; ++adj) {
+            if (k > 0u) {
+                uint k2 = k * k, kh, kl;
+                umulExtended(k2, k2, kh, kl);
+                if (kh > hi || (kh == hi && kl > lo)) k -= 1u;
+            }
+            uint kp = k + 1u, kp2 = kp * kp, kph, kpl;
+            umulExtended(kp2, kp2, kph, kpl);
+            if (kph < hi || (kph == hi && kpl <= lo)) k = kp;
+        }
+        outLen16 = float(k);
     }
     return min(max(q16.x, q16.y), 0.0) + outLen16 - rad16;
 }

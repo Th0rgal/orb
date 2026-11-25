@@ -293,12 +293,22 @@ def sdfRoundedRect16 (r : Rect) (radii : CornerRadii) (px py : Int) : Int :=
     else
       if dy16 < 0 then tr else br
   let maxR : Nat := min (rw / 2) (rh / 2)
-  let rad16 : Int := (min rawRad maxR : Int) * 16
+  let rad : Nat := min rawRad maxR
+  let rad16 : Int := (rad : Int) * 16
   let qx16 : Int := (dx16.natAbs : Int) - hx16 + rad16
   let qy16 : Int := (dy16.natAbs : Int) - hy16 + rad16
   let mx16 : Nat := if qx16 > 0 then qx16.toNat else 0
   let my16 : Nat := if qy16 > 0 then qy16.toNat else 0
-  let outLen16 : Int := (isqrt (mx16 * mx16 + my16 * my16) : Int)
+  let isCircleCap : Bool := rad ≤ 1 || rawRad > maxR || (rw == rh && rawRad ≥ maxR)
+  let outLen16 : Int :=
+    if max mx16 my16 ≥ rad * 16 + 16 then
+      (max mx16 my16 : Int)
+    else if isCircleCap then
+      (isqrt (mx16 * mx16 + my16 * my16) : Int)
+    else
+      let sx := mx16 * mx16
+      let sy := my16 * my16
+      (isqrt (isqrt (sx * sx + sy * sy)) : Int)
   let inMax16 : Int := min (max qx16 qy16) 0
   inMax16 + outLen16 - rad16
 

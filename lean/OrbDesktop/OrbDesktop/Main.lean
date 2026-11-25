@@ -313,8 +313,8 @@ def renderDesktopView (rt : Runtime.RuntimeState DesktopState) :
   if profile then IO.eprintln s!"u7-view-ns {t1-t0} {t2-t1} {(← IO.monoNanosNow)-t2}"
   if let some menu := st.missionMenu then
     let w := min availW (pxToSub (if menu.page == .picker .model then 440 else 228))
-    let count := min (max 1 ((availH - pxToSub 14) / pxToSub 30)) (missionMenuRows st menu).length
-    let h := min availH (pxToSub (14 + 30 * count))
+    let count := min (max 1 ((availH - pxToSub 10) / pxToSub 26)) (missionMenuRows st menu).length
+    let h := min availH (pxToSub (10 + 26 * count))
     let left := max 0 (min menu.x (availW - w : Nat))
     let top := max 0 (min menu.y (availH - h : Nat))
     let raw := buildMissionMenu st menu w count

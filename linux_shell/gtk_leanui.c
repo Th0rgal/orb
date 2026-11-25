@@ -160,10 +160,10 @@ GtkWidget *orb_leanui_new(GtkWidget *webview, OrbSidebarAction action, gpointer 
     /* GTK supplies focus, ATK names and input. Only transient input feedback is painted here. */
     GtkCssProvider *css = gtk_css_provider_new();
     gtk_css_provider_load_from_data(css,
-        ".orb-leanui > button {background:transparent;border:1px solid transparent;border-radius:6px;"
+        ".orb-leanui > button {background:transparent;border:none;border-radius:6px;"
         "box-shadow:none;outline:none;min-width:0;min-height:0;margin:0;padding:0;}"
-        ".orb-leanui > button:hover,.orb-leanui > button.orb-multi {background:rgba(140,140,140,.12);}"
-        ".orb-keyboard-focus .orb-leanui > button:focus {border-color:rgba(120,120,116,.55);}", -1, NULL);
+        ".orb-leanui > button:hover,.orb-leanui > button.orb-multi {background:transparent;}"
+        ".orb-keyboard-focus .orb-leanui > button:focus {border-color:transparent;}", -1, NULL);
     gtk_style_context_add_provider_for_screen(gtk_widget_get_screen(webview), GTK_STYLE_PROVIDER(css),
                                               GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
     g_object_unref(css);

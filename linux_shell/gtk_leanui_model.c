@@ -1,6 +1,8 @@
 #include "gtk_leanui_private.h"
 #include "gtk_menu.h"
 #include "gtk_icons.h"
+#include "gtk_disclosure.h"
+#include "gtk_squircle.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -60,6 +62,8 @@ static GtkWidget *button(OrbSidebar *s, const char *action, const char *rid, con
     GtkWidget *b = g_hash_table_lookup(s->buttons, key);
     if (!b) {
         b = gtk_button_new();
+        gtk_widget_set_app_paintable(b, TRUE);
+        g_signal_connect(b, "draw", G_CALLBACK(orb_draw_squircle_btn), NULL);
         orb_gtk_bind_pointer_cursor(b);
         gtk_widget_set_no_show_all(b, TRUE);
         g_object_set_data_full(G_OBJECT(b), "orb-action", g_strdup(action), g_free);
@@ -84,7 +88,10 @@ static void add_row(OrbSidebar *s, JSCValue *row) {
     g_object_set_data_full(G_OBJECT(b), "orb-title", g_strdup(title), g_free);
     g_object_set_data_full(G_OBJECT(b), "orb-status", g_strdup(status), g_free);
     g_object_set_data_full(G_OBJECT(b), "orb-project", field(row, "project"), g_free);
+    g_object_set_data_full(G_OBJECT(b), "orb-folder", field(row, "folder"), g_free);
+    if (!strcmp(kind, "project")) g_object_set_data_full(G_OBJECT(b), "orb-folders", orb_jsc_join_strings(row, "folders"), g_free);
     g_object_set_data_full(G_OBJECT(b), "orb-target", field(row, "target"), g_free);
+    g_object_set_data(G_OBJECT(b), "orb-depth", GINT_TO_POINTER(number(row, "depth")));
     g_object_set_data(G_OBJECT(b), "orb-exp", GINT_TO_POINTER(number(row, "expandable")));
     guint id = 1000 + s->indices->len;
     int badge = !strcmp(kind, "mission") ? number(row, "child_count") : number(row, "badge");

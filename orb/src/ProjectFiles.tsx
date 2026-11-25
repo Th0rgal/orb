@@ -31,7 +31,7 @@ import { MissionGlyph, missionStatusPresentation } from "./MissionGlyph";
 import { isMissionUnread } from "./missionUnread";
 import { isMarkdownFile, MdSource, MdView, mdSource, setMdSource } from "./Markdown";
 import { missionDestination } from "./missionLaunch";
-import type { NativeProjectAction } from "./nativeChromeBridge";
+import { expandNativeDestination, type NativeProjectAction } from "./nativeChromeBridge";
 import {
   api,
   currentUser,
@@ -133,7 +133,7 @@ export function LiveProjectsSection(p: {
    *  (optimistic status, in-flight guard, rollback). Consumed then acknowledged. */
   archiveRequests?: readonly { mission: Mission; restore: boolean }[];
   onArchiveRequestsHandled?: (count: number) => void;
-  projectActionRequests?: readonly { action: NativeProjectAction; slug: string }[];
+  projectActionRequests?: readonly { action: NativeProjectAction | "cut-missions" | "move-missions-picker"; slug: string; path?: string; arg?: string }[];
   onProjectActionRequestsHandled?: (count: number) => void;
   onArchiveStatus?: (rows: Mission[]) => void;
   onArchiveError?: (id: string, restore: boolean, message: string) => void;
@@ -243,7 +243,7 @@ export function LiveProjectsSection(p: {
   const [missionMenu, setMissionMenu] = createSignal<{ x: number; y: number; mission: Mission; treeId: string; slug: string; folder: string } | null>(null);
   const [fileMenu, setFileMenu] = createSignal<{ slug: string; path: string; x: number; y: number } | null>(null);
   const [multiSelectMenu, setMultiSelectMenu] = createSignal<{ x: number; y: number; treeIds: string[] } | null>(null);
-  const [movePicker, setMovePicker] = createSignal<{ sources: DragSourceItem[]; anchor: HTMLElement; treeId: string } | null>(null);
+  const [movePicker, setMovePicker] = createSignal<{ sources: DragSourceItem[]; anchor?: HTMLElement; treeId: string } | null>(null);
   const [deleteTargets, setDeleteTargets] = createSignal<string[]>([]);
   const [deleteConfirmBusy, setDeleteConfirmBusy] = createSignal(false);
   const [batchBusy, setBatchBusy] = createSignal(false);
@@ -311,7 +311,11 @@ export function LiveProjectsSection(p: {
   const { cutId, setCutId, pendingMoves, setPendingMoves, beginMove, moveDirect, pasteMission, isMoving, hasCutClipboard, hasUnsyncedCutClipboard } = createMissionMoves({
     allKnownMissions: () => allKnownMissions(),
     leaveProjects: (id, keep) => leaveProjects(id, keep),
-    revealDestination: (slug, path) => { setExpanded(slug, true); if (path) setExpanded(`${slug}:${path}`, true); },
+    revealDestination: (slug, path) => {
+      setExpanded(slug, true);
+      if (path) setExpanded(`${slug}:${path}`, true);
+      if (p.headless) expandNativeDestination(slug, path);
+    },
     loadMissions: slug => loadMissions(slug),
     setActionError: error => setActionError(error),
     onApprovalConfirmationRequired: prompt => setApprovalTransferPrompt(prompt),
@@ -826,6 +830,7 @@ export function LiveProjectsSection(p: {
       try {
         await Promise.all([loadDir(item.slug, fileParent(item.path), true), loadDir(slug, path, true)]);
         setExpanded(path ? `${slug}:${path}` : slug, true);
+        if (p.headless) expandNativeDestination(slug, path);
         if (item.copy) return;
         if (item.directory) await folderMoved(item.slug, item.path, destination, slug, false, serverCascaded);
         else if (p.selected() === `pf:${item.slug}:${item.path}`) p.open(`pf:${slug}:${destination}`);
@@ -1266,6 +1271,9 @@ export function LiveProjectsSection(p: {
         loadMissions(slug, { transcripts: false, cached: true, background: true }),
         loadDir(slug, "", false, true),
       ]);
+      for (const entry of dirs[`${slug}:`] ?? []) {
+        if (entry.kind === "dir" && entry.name !== "attachments") void loadDir(slug, entry.name, false, true);
+      }
       return;
     }
     const isOpen = !!expanded[slug];
@@ -1624,6 +1632,7 @@ export function LiveProjectsSection(p: {
       }
       if (version !== connectionVersion()) return;
       setExpanded(targetPath ? `${targetSlug}:${targetPath}` : targetSlug, true);
+      if (p.headless) expandNativeDestination(targetSlug, targetPath);
       if (!bundle.copy && !failures.length) {
         consumedFileClipboard = text;
         retireClipboardReference(text);
@@ -1793,15 +1802,109 @@ export function LiveProjectsSection(p: {
   createEffect(on(() => p.projectActionRequests, reqs => {
     if (!reqs?.length) return;
     p.onProjectActionRequestsHandled?.(reqs.length);
+    const openNativeMovePicker = (sources: DragSourceItem[]) => {
+      if (!sources.length) return;
+      setActionMenu(null); setMissionMenu(null); setArchiveMenu(null);
+      setFileMenu(null); setMultiSelectMenu(null); setForkTarget(null);
+      setMovePicker({ sources, treeId: sources[0]!.treeId });
+      for (const proj of projects()) void warmProjectFolders(proj.slug);
+    };
     for (const r of reqs) {
+      const folder = r.path ?? "";
       switch (r.action) {
-        case "new-agent": p.onNewAgent(r.slug, ""); break;
-        case "new-cloud-agent": p.onNewCloudAgent?.(r.slug, ""); break;
-        case "new-folder": beginFolder(r.slug, ""); break;
+        case "new-agent": p.onNewAgent(r.slug, folder); break;
+        case "new-cloud-agent": p.onNewCloudAgent?.(r.slug, folder); break;
+        case "new-folder": beginFolder(r.slug, folder); break;
+        case "new-file": if (folder) beginFile(r.slug, folder); break;
         case "settings": setActionMenu(null); p.open(`ps:${r.slug}`); break;
-        case "rename": beginRename(r.slug); break;
+        case "rename":
+          if (folder) {
+            if (r.arg) {
+              setFileActionError(null);
+              setFileAction({ slug: r.slug, path: folder, kind: "rename", directory: true });
+              setFileActionValue(r.arg);
+              void saveFileAction();
+            } else {
+              beginFileAction(r.slug, folder, "rename", true);
+            }
+          } else if (r.arg) {
+            const proj = projects().find(x => x.slug === r.slug);
+            setRenameError(null);
+            setRename({ slug: r.slug, title: (proj?.title || r.slug).trim() });
+            setRenameValue(r.arg);
+            void saveRename();
+          } else {
+            beginRename(r.slug);
+          }
+          break;
+        case "rename-file":
+          if (folder) {
+            if (r.arg) {
+              setFileActionError(null);
+              setFileAction({ slug: r.slug, path: folder, kind: "rename", directory: false });
+              setFileActionValue(r.arg);
+              void saveFileAction();
+            } else {
+              beginFileAction(r.slug, folder, "rename", false);
+            }
+          }
+          break;
         case "archive": void removeProject(r.slug, "archive"); break;
-        case "delete": setActionError(null); setDeleteProjectSlug(r.slug); break;
+        case "delete":
+          if (folder) beginFileAction(r.slug, folder, "delete", true);
+          else { setActionError(null); setDeleteProjectSlug(r.slug); }
+          break;
+        case "delete-file":
+          if (folder) beginFileAction(r.slug, folder, "delete", false);
+          break;
+        case "cut":
+        case "copy":
+          if (folder) void copyFile(r.slug, folder, r.action === "copy", true);
+          break;
+        case "cut-file":
+        case "copy-file":
+          if (folder) void copyFile(r.slug, folder, r.action === "copy-file", false);
+          break;
+        case "cut-missions": {
+          const ids = (r.arg ?? "").split(/\s+/).filter(Boolean).map(id => `m:${id.replace(/^m:/, "")}`);
+          if (ids.length) void copySelectedItems(ids, false);
+          break;
+        }
+        case "move-missions-picker": {
+          const ids = (r.arg ?? "").split(/\s+/).map(id => id.replace(/^m:/, "").trim()).filter(Boolean);
+          const known = allKnownMissions();
+          const sources: DragSourceItem[] = ids.flatMap(id => {
+            const m = known.find(x => x.id === id);
+            if (!m || deletingIds().has(id)) return [];
+            return [{ treeId: `m:${id}`, kind: 0 as const, srcSlug: m.project ?? "", srcPath: missionFolder(m), srcParent: "", label: m.title || id.slice(0, 8) }];
+          });
+          openNativeMovePicker(sources);
+          break;
+        }
+        case "move-picker":
+          if (folder) {
+            openNativeMovePicker([{ treeId: `pf:${r.slug}:${folder}`, kind: 1, srcSlug: r.slug, srcPath: folder, srcParent: fileParent(folder), label: folderLabel(r.slug, folder) }]);
+          }
+          break;
+        case "move-file":
+          if (folder) {
+            openNativeMovePicker([{ treeId: `pf:${r.slug}:${folder}`, kind: 2, srcSlug: r.slug, srcPath: folder, srcParent: fileParent(folder), label: fileBaseName(folder) }]);
+          }
+          break;
+        case "paste": {
+          if (!r.slug) break;
+          if (pendingMoves().length > 1) { pasteMission(r.slug, folder); break; }
+          const version = connectionVersion();
+          void Promise.resolve().then(() => navigator.clipboard.readText()).then(text => {
+            if (version !== connectionVersion()) return;
+            const usable = isClipboardReferenceRetired(text) ? undefined : text;
+            if (!applyPastePayload(r.slug, folder, usable)) pasteMission(r.slug, folder, usable);
+          }, () => {
+            if (version !== connectionVersion()) return;
+            if (!applyPastePayload(r.slug, folder)) setActionError("Nothing cut or copied to paste here.");
+          });
+          break;
+        }
       }
     }
   }));

@@ -107,14 +107,14 @@ def buildMissionMenu (st : DesktopState) (menu : MissionMenu) (width : SubPx) (v
       (BoxStyle.row (pxToSub 9) |>.withRadius (pxToSub 6)
         |>.withBg (if menu.first + i == menu.highlighted then withAlpha pal.textPrimary 0x18 else pal.elevatedSurface)
         |>.withAlign .center |>.withPadding (Edges.xy (pxToSub 8) 0)
-        |>.withFixedSize (width - pxToSub 12) (pxToSub 30))
+        |>.withFixedSize (width - pxToSub 8) (pxToSub 26))
       ([chromeIcon item.icon pal.textSecondary 14, label] ++
         (if hasChevron then [chromeIcon "chevron-right" pal.textMuted 12] else []))
     if item.separatorBefore then
-      [WidgetNode.box (BoxStyle.row 0 |>.withFixedSize (width - pxToSub 12) (pxToSub 1) |>.withBg pal.border) [], row]
+      [WidgetNode.box (BoxStyle.row 0 |>.withFixedSize (width - pxToSub 8) (pxToSub 1) |>.withBg pal.border) [], row]
     else [row]
   WidgetNode.box
-    (BoxStyle.col 0 |>.withPadding (Edges.all (pxToSub 6)) |>.withRadius (pxToSub 10)
+    (BoxStyle.col 0 |>.withPadding (Edges.all (pxToSub 4)) |>.withRadius (pxToSub 10)
       |>.withBorder st.theme.borderWidth pal.border |>.withBg pal.elevatedSurface)
     rows.flatten
 

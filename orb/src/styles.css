@@ -680,7 +680,7 @@ html[data-window-focused="false"] :is(.shimmer, .spin, .mermaid-skeleton span, .
   align-items: end;
   gap: 8px;
   min-height: 42px; padding: 8px 9px 8px 11px;
-  background: var(--bg-elev); border: 1px solid var(--stroke); border-radius: 21px;
+  background: var(--bg-elev); border: 1px solid var(--stroke); border-radius: var(--radius-2xl);
   cursor: text;
 }
 .composer:focus-within { border-color: var(--stroke-strong); }
@@ -739,7 +739,7 @@ html[data-window-focused="false"] :is(.shimmer, .spin, .mermaid-skeleton span, .
   grid-template-rows: auto;
   align-items: center;
   min-height: 42px;
-  border-radius: 21px;
+  border-radius: var(--radius-2xl);
   padding: 7px 10px 7px 11px;
   gap: 8px;
 }
@@ -786,7 +786,7 @@ textarea::placeholder { color: var(--placeholder); }
    height is a floor and the padding is symmetric. */
 .menu-item {
   display: flex; align-items: center; gap: 8px;
-  width: 100%; min-height: 26px; text-align: left; padding: 3px 8px; border-radius: 5px;
+  width: 100%; min-height: 24px; text-align: left; padding: 2px 8px; border-radius: 6px;
   color: var(--fg); font-size: 12.5px; line-height: 16px;
 }
 .menu-item:hover, .menu-item.on[role="option"] { background: var(--bg-hover); color: var(--fg-strong); }
@@ -1748,7 +1748,7 @@ button.fork-trigger { color: inherit; cursor: pointer; }
 button.fork-trigger:hover { color: var(--fg); }
 
 /* Timeline/modal error cards share the exact card grammar of floating toasts (toast.tsx). */
-.error-notice { display: flex; align-items: flex-start; gap: 10px; min-width: 0; margin-top: 10px; padding: 10px 8px 10px 14px; border: 1px solid var(--overlay-border, var(--stroke)); border-radius: 8px; background: var(--overlay-surface, var(--bg-elev)); color: var(--fg-2); text-align: left; font-size: 12px; line-height: 1.4; }
+.error-notice { display: flex; align-items: flex-start; gap: 10px; min-width: 0; margin-top: 10px; padding: 10px 8px 10px 14px; border: 1px solid var(--overlay-border, var(--stroke)); border-radius: var(--radius-lg); background: var(--overlay-surface, var(--bg-elev)); color: var(--fg-2); text-align: left; font-size: 12px; line-height: 1.4; }
 .error-notice-icon { flex: none; color: var(--red); margin-top: 2px; }
 /* One vertical rhythm for the transcript, measured between what the reader sees.
    Each turn is its own flow-root box that starts with the user bubble. Placing the
@@ -4569,4 +4569,56 @@ select.orb-select-native:disabled { cursor: default; }
 }
 @media (max-width: 400px) {
   .ms-provider-grid { grid-template-columns: minmax(0, 1fr); }
+}
+
+/* Continuous superellipse ("squircle") corners across all rounded Orb surfaces and controls,
+   while preserving geometric circles (`border-radius: 50%`) on dots, knobs, spinners, and round icon buttons. */
+@supports (corner-shape: squircle) {
+  *, *::before, *::after {
+    corner-shape: squircle;
+  }
+  .dot,
+  .jump-latest,
+  .plus,
+  .send:not(.stop),
+  .pill.round,
+  .dock-sync-dot,
+  .under-link-pill > i,
+  .toggle::after,
+  .p-sub-option-radio,
+  .p-sub-option-dot,
+  .m-dot,
+  .voice-x,
+  .voice-ok,
+  .launch-pulse,
+  .mode-chip-x,
+  .mission-tasks li[data-status="stale"] .task-state,
+  .machine-state-dot,
+  .history-keys i,
+  .metrics-live,
+  .prompt-editor-actions .send,
+  .ut-dot,
+  .context-sync-dot,
+  .btw-panel form button,
+  .agent-task.is-running .agent-task-icon::after,
+  .agent-history-toggle.has-current .agent-task-icon::after,
+  .queue-collapse,
+  .ps-color,
+  .bw-dot,
+  .turn-recap-dot,
+  .queue-sending,
+  .row-dot,
+  .mission-status-mark,
+  .mission-unread-dot,
+  .folder-activity-mark,
+  .sd-icon-btn,
+  .sd-indexing-dot,
+  .inbox-unread-dot,
+  .inbox-project-dot,
+  .inbox-child-dot,
+  .inbox-sk-dot,
+  .lightbox-nav,
+  .st-pill::before {
+    corner-shape: round;
+  }
 }
