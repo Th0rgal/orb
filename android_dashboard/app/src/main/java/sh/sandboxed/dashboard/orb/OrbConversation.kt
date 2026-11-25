@@ -3095,9 +3095,11 @@ fun OrbConversationPage(
         }
 
         // Composer Area
+        val coverScreen = LocalOrbCoverScreen.current
         Column(
             modifier = Modifier
                 .fillMaxWidth()
+                .padding(end = coverScreen.bottomBarEndPadding(0.dp))
                 .padding(horizontal = 14.dp, vertical = 8.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
