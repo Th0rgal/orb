@@ -142,8 +142,10 @@ structure ScrollSpec where
   contentHeight : SubPx := 0
   /-- Scalar caret and displayed text length, when following an editor insertion point. -/
   revealCaret : Option (Nat × Nat) := none
-  /-- Whether to paint the static overlay scrollbar thumb when content overflows. -/
+  /-- Whether to paint the overlay scrollbar thumb when content overflows. -/
   showScrollbar : Bool := true
+  /-- Thumb opacity (`0..255`) applied on top of the theme tint; auto-hide hosts fade it. -/
+  scrollbarOpacity : Nat := 255
   deriving DecidableEq, Repr, Inhabited
 
 namespace ScrollSpec

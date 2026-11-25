@@ -139,6 +139,7 @@ static void destroy(GtkWidget *widget, OrbSidebar *s) {
     if (s->idle) g_source_remove(s->idle);
     if (s->tick) gtk_widget_remove_tick_callback(s->canvas, s->tick);
     if (s->animation) g_source_remove(s->animation);
+    if (s->fade) g_source_remove(s->fade);
     detach_gpu(s);
     if (s->surface) cairo_surface_destroy(s->surface);
     orb_sidebar_model_free(s);

@@ -13,7 +13,7 @@ typedef struct {
     char *scope;
     cairo_surface_t *surface;
     OrbWlSubsurface wl;
-    guint idle, tick, animation;
+    guint idle, tick, animation, fade;
     int width, height, scale, scroll, limit;
     double scroll_pos, scroll_vel;
     gint64 scroll_ts, kinetic_ts;

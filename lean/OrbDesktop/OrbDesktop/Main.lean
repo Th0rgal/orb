@@ -906,6 +906,11 @@ def runSelfTest (cfg : Runtime.RuntimeConfig) (initSt : DesktopState) : IO UInt3
   catch e =>
     IO.eprintln s!"orb-desktop self-test: embedded palette regression: {e}"
     return 1
+  try
+    embeddedSidebarCacheSelfTest
+  catch e =>
+    IO.eprintln s!"orb-desktop self-test: embedded sidebar cache regression: {e}"
+    return 1
   let rt0Raw ← Runtime.initRuntime { cfg with headless := true } initSt
   let rt0 := { rt0Raw with focus := initSt.initialFocusState }
   let mut rt ← Runtime.stepFrame rt0 (desktopReducer rt0) renderDesktopFrame
@@ -928,6 +933,8 @@ private def runningBadgeDamage (rt : Runtime.RuntimeState DesktopState) : Damage
 def main (args : List String) : IO UInt32 := do
   if let ["--gtk-sidebar-host", path] := args then
     return ← runEmbeddedSidebar path shapeWidgetTree
+  if let ["--bench-embedded", n] := args then
+    return ← runEmbeddedSidebarBench (n.toNat?.getD 200) shapeWidgetTree
   let dcfg := parseDesktopArgs args
   let rcfg := dcfg.runtimeCfg
   if let some iters := dcfg.benchIterations then

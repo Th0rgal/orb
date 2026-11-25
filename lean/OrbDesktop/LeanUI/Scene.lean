@@ -38,7 +38,7 @@ inductive WidgetPayload where
   | scrollClip (scroll : ScrollSpec)
   | roundedClip (radii : CornerRadii)
   | opacityLayer (opacity : Nat)
-  deriving Repr, Inhabited
+  deriving Repr, Inhabited, BEq
 
 /-- High-level declarative UI widget / scene node. -/
 inductive WidgetNode where
@@ -49,7 +49,7 @@ inductive WidgetNode where
     (style : BoxStyle)
     (payload : WidgetPayload)
     (children : List WidgetNode)
-  deriving Repr, Inhabited
+  deriving Repr, Inhabited, BEq
 
 /-- Alias for `WidgetNode` when used as a declarative scene graph node. -/
 abbrev SceneNode := WidgetNode
@@ -484,6 +484,34 @@ def pointerPress (g : ScrollbarGeometry) (currentOffsetY : SubPx) (px py : Int) 
 
 end ScrollbarGeometry
 
+/-- Device-pixel distance a node may paint above or below its layout box: shadows (offset,
+spread and blur support), plus a scale-aware allowance for focus rings, glyph overhang and
+tree rails, which all stay within a few logical pixels of the box. -/
+def nodeInkOverhangY (scale120 : Nat) (style : BoxStyle) (payload : WidgetPayload) : Int :=
+  let shadowExt (sh : ShadowStyle) : Int :=
+    (if sh.offsetY < 0 then -sh.offsetY else sh.offsetY) + max 0 sh.spread + 2 * (sh.blur : Int)
+  let sub : Int :=
+    (if style.shadow.isVisible then shadowExt style.shadow else 0) +
+    (match payload with | .shadow sh _ => shadowExt sh | _ => 0)
+  Int.ofNat (scaleSubPx scale120 (pxToSub 48)) + (roundDev scale120 sub)
+
+/-- True when neither `box` nor any descendant can paint or hit-test inside the vertical span
+of `clipDev`: every prim they emit would be scissored away by an ancestor clip. -/
+partial def subtreeOutsideClipY (scale120 : Nat) (clipDev : Rect) : WidgetNode → ComputedBox → Bool
+  | .mk _ _ _ style payload children, box =>
+    let m := nodeInkOverhangY scale120 style payload
+    let r := box.rectDev
+    (r.y + r.h + m ≤ clipDev.y || r.y - m ≥ clipDev.y + clipDev.h) &&
+      (children.zip box.children).all fun (w, b) => subtreeOutsideClipY scale120 clipDev w b
+
+/-- Tab order of a subtree, identical to what lowering it would produce. -/
+partial def subtreeFocusOrder (focusState : FocusState) : WidgetNode → ComputedBox → List WidgetId
+  | .mk id focusable _ _ _ children, box =>
+    let self := match id with
+      | some wid => if focusable && focusState.admits wid then [wid] else []
+      | none => []
+    self ++ (children.zip box.children).flatMap fun (w, b) => subtreeFocusOrder focusState w b
+
 /-- Lower a widget node and its paired `ComputedBox` into balanced `Prim` list, focusable tab order, and hit regions. -/
 def lowerWidgetPair (scale120 : Nat) (focusState : FocusState) (theme : Theme)
     (clipSub : Option Rect) (clipDev : Option Rect) (focusVisible : Bool := true) :
@@ -576,7 +604,9 @@ def lowerWidgetPair (scale120 : Nat) (focusState : FocusState) (theme : Theme)
         | none => []
         | some geom =>
           let thumbDev := roundRect scale120 geom.thumbRectSub
-          let thumbCol : Color := if theme.isDark then 0xFFFFFF38 else 0x00000030
+          let alpha : Nat := (if theme.isDark then 0x38 else 0x30) * min 255 sc.scrollbarOpacity / 255
+          let thumbCol : Color := (if theme.isDark then 0xFFFFFF00 else 0x00000000) ||| alpha.toUInt32
+          if alpha == 0 then [] else
           [Prim.quad thumbDev thumbCol (scaleSubPx scale120 (pxToSub 3)) 0 0]
       | _, _ => []
     let allPrims :=
@@ -602,7 +632,14 @@ where
     | [], _ => ([], [], [], [])
     | _, [] => ([], [], [], [])
     | w :: ws, b :: bs =>
-      let (p1, f1, hs1, hd1) := lowerWidgetPair scale120 focusState theme clipSub clipDev focusVisible w b
+      -- Rows scrolled out of a clipped viewport emit nothing visible and no hit regions:
+      -- skip lowering them (keeping their tab order) instead of emitting prims to scissor away.
+      let culled := match clipDev with
+        | some c => subtreeOutsideClipY scale120 c w b
+        | none => false
+      let (p1, f1, hs1, hd1) :=
+        if culled then ([], subtreeFocusOrder focusState w b, [], [])
+        else lowerWidgetPair scale120 focusState theme clipSub clipDev focusVisible w b
       let (p2, f2, hs2, hd2) := lowerWidgetChildren scale120 focusState theme clipSub clipDev focusVisible ws bs
       (p1 ++ p2, f1 ++ f2, hs1 ++ hs2, hd1 ++ hd2)
 

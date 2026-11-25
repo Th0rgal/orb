@@ -2,6 +2,7 @@
 #include "gtk_menu.h"
 #include "gtk_icons.h"
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 static char *field(JSCValue *row, const char *name) {
@@ -154,10 +155,20 @@ static GtkWidget *hit_button(OrbSidebar *s, unsigned id) {
     return b;
 }
 
+static gboolean fade_wake(gpointer data) {
+    OrbSidebar *s = data;
+    s->fade = 0;
+    orb_sidebar_invalidate(s);
+    return G_SOURCE_REMOVE;
+}
 void orb_sidebar_hits(void *view, const char *regions) {
     OrbSidebar *s = view;
     g_auto(GStrv) lines = g_strsplit(regions, "\n", -1);
-    s->limit = atoi(lines[0]);
+    char *wake = NULL;
+    s->limit = (int)strtol(lines[0], &wake, 10);
+    /* "<limit> <ms>": the renderer asks for one more paint to fade the overlay scrollbar. */
+    long ms = wake ? strtol(wake, NULL, 10) : 0;
+    if (ms > 0 && !s->fade) s->fade = g_timeout_add((guint)ms, fade_wake, s);
     if (s->scroll > s->limit) { s->scroll = s->limit; s->scroll_pos = (double)s->limit; orb_sidebar_invalidate(s); }
     GHashTableIter iter;
     gpointer child;
