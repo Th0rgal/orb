@@ -2458,9 +2458,9 @@ fun OrbAirVpnSettingsPage(core: OrbCore, onBack: () -> Unit) {
                         } else {
                             providers.forEachIndexed { idx, row ->
                                 if (idx > 0) HorizontalDivider(color = OrbStyle.border)
-                                val id = OrbJSON.str(row.dict, "id").orEmpty()
-                                val name = OrbJSON.str(row.dict, "name").orEmpty().ifEmpty { id }
-                                val ptype = OrbJSON.str(row.dict, "provider_type").orEmpty()
+                                val id = row.str("id").orEmpty()
+                                val name = row.str("name").orEmpty().ifEmpty { id }
+                                val ptype = row.str("provider_type").orEmpty()
                                 Column(
                                     modifier = Modifier
                                         .fillMaxWidth()
