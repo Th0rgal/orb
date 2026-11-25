@@ -22,6 +22,8 @@ import OrbCore.Skills
 import OrbCore.AutoPlacement
 import OrbCore.Proxy
 import OrbCore.TelemetryAndVoice
+import OrbCore.AccountVpnPool
+import OrbCore.AccountVpnRelay
 
 namespace OrbCore.RemoteDispatch
 
@@ -42,12 +44,15 @@ open OrbCore.TelemetryAndVoice
 /-! ## Remote Job Supervisor Handle -/
 
 structure RemoteJobSupervisor where
-  mu             : Std.Mutex (Array String)
-  boundPortRef   : IO.Ref UInt16
-  jwtSecret      : String
-  devMode        : Bool
-  telemetrySink? : Option TelemetrySink := none
-  providerHub?   : Option ProviderRuntimeHub := none
+  mu                : Std.Mutex (Array String)
+  boundPortRef      : IO.Ref UInt16
+  jwtSecret         : String
+  devMode           : Bool
+  telemetrySink?    : Option TelemetrySink := none
+  providerHub?      : Option ProviderRuntimeHub := none
+  vpnPool?          : Option AccountVpnPool.Pool := none
+  vpnCoordinatorDir : String := ""
+  vpnMeshRelayUrl?  : Option (String → String → Option String) := none
 
 def newRemoteJobSupervisor (jwtSecret : String := "") (devMode : Bool := false) (telemetrySink? : Option TelemetrySink := none) : IO RemoteJobSupervisor := do
   let mu ← Std.Mutex.new (#[] : Array String)
@@ -516,8 +521,44 @@ def harnessProxySetup (harness rawModel proxyBase proxyToken : String) : Harness
                 "-c", "model_providers.sandboxed.wire_api=\"responses\"",
                 "-c", "model_providers.sandboxed.env_key=\"SANDBOXED_PROXY_API_KEY\""]
       model := if bare.isEmpty then none else some bare }
+  else if harness == "grok" then
+    let bare := if raw.startsWith "xai/" then (raw.drop 4).toString else raw
+    { env := #[("GROK_XAI_API_BASE_URL", proxyBase), ("XAI_API_KEY", proxyToken)]
+      model := if bare.isEmpty then none else some bare }
   else
     { model := if raw.isEmpty then none else some raw }
+
+/-- Resolve AirVPN SOCKS5 proxy environment variables for a native Antigravity turn.
+    Returns `#[]` when the account uses Direct routing, and fails closed if an AirVPN
+    preference is configured but the tunnel or mesh relay is unavailable. -/
+def resolveAntigravityVpnProxyEnvs
+    (store : CoreStore)
+    (sup : RemoteJobSupervisor)
+    (accountId? : Option String)
+    (apiBase : String) : IO (Except String (Array (String × String))) := do
+  let some acct := accountId?.map (·.trimAscii.toString) |>.filter (!·.isEmpty) | return .ok #[]
+  let .ok pref? ← OrbCore.AccountVpnRoutes.read store.missionsDb acct
+    | return .error "antigravity_vpn_route_store_unavailable"
+  let some pref := pref? | return .ok #[]
+  let some pool := sup.vpnPool? | return .error "antigravity_vpn_coordinator_unavailable"
+  if let .error e ← OrbCore.AccountVpnPool.allocate pool store.rootDir sup.vpnCoordinatorDir
+      store.missionsDb acct "antigravity" pref then
+    return .error s!"antigravity_vpn_unavailable:{e}"
+  let some buildUrl := sup.vpnMeshRelayUrl? | return .error "antigravity_vpn_relay_unconfigured"
+  let some proxyUrl := buildUrl "antigravity" acct | return .error "antigravity_vpn_relay_unconfigured"
+  let apiHost := match parseUrl apiBase with
+    | .ok u => u.host.trimAscii.toString
+    | .error _ => ""
+  let noProxy := if apiHost.isEmpty then "127.0.0.1,localhost,::1"
+    else s!"127.0.0.1,localhost,::1,{apiHost}"
+  return .ok #[
+    ("HTTPS_PROXY", proxyUrl),
+    ("https_proxy", proxyUrl),
+    ("ALL_PROXY", proxyUrl),
+    ("all_proxy", proxyUrl),
+    ("NO_PROXY", noProxy),
+    ("no_proxy", noProxy)
+  ]
 
 private def wrapWithRemoteMcp (harness innerCmd : String) : String :=
   s!"if [ -x /usr/local/bin/sandboxed-mcp ]; then /usr/local/bin/sandboxed-mcp launch --harness {harness} -- {innerCmd}; else {innerCmd}; fi"
@@ -884,6 +925,16 @@ private def prepareRemoteHarnessCommand
       wsPrefix ++ skillPrelude ++ fd3Prelude ++
       "command -v grok >/dev/null 2>&1 || { echo 'grok is not installed on this node' >&2; exit 127; }; " ++
       wrapWithRemoteMcp "grok" inner
+    if !proxyBase.isEmpty then
+      let pTok ← match ← mintMissionProxyToken store spec.missionId spec.ownerUserId (nowSec + 86400) with
+        | .ok t => pure t
+        | .error e => return .error s!"failed to mint mission proxy token: {e}"
+      let envs := skillEnvs ++ promptEnvs ++ mcpEnvs ++ #[
+        ("GROK_XAI_API_BASE_URL", proxyBase),
+        ("XAI_API_KEY", pTok),
+        ("NO_COLOR", "1")
+      ]
+      return .ok { command := cmd, envPairs := envs, managedAuth := #[], proxyToken := pTok }
     let envs := skillEnvs ++ promptEnvs ++ mcpEnvs ++ #[("NO_COLOR", "1")]
     return .ok { command := cmd, envPairs := envs, managedAuth := #["grok"], proxyToken := "" }
 
@@ -942,10 +993,18 @@ private def prepareRemoteHarnessCommand
       let cmd := wsPrefix ++ skillPrelude ++ fd3Prelude ++ "exec python3 -I -c " ++ shellSingleQuote worker ++ " " ++ args
       return .ok { command := cmd, envPairs := skillEnvs ++ promptEnvs ++ #[
         ("ORB_NATIVE_CORE", apiBase), ("ORB_NATIVE_ANTIGRAVITY_TOKEN", bearer)], managedAuth := #[], proxyToken := bearer }
+    let agyAcctId? ← match bound? with
+      | some a => pure (some a)
+      | none =>
+        let hydrated ← loadHydratedProviders store coreWorkDir
+        pure ((hydrated.find? (fun hp => hp.providerType == "antigravity" && hp.enabled)).map (·.id))
+    let vpnEnvs ← match ← resolveAntigravityVpnProxyEnvs store sup agyAcctId? apiBase with
+      | .ok es => pure es
+      | .error e => return .error e
     let cmd := wsPrefix ++ skillPrelude ++ fd3Prelude ++
       "command -v agy >/dev/null 2>&1 || { echo 'agy is not installed on this node' >&2; exit 127; }; " ++
       readPrompt ++ invocation spec.modelOverride
-    let envs := skillEnvs ++ promptEnvs ++ mcpEnvs ++ #[("NO_COLOR", "1")]
+    let envs := skillEnvs ++ promptEnvs ++ mcpEnvs ++ vpnEnvs ++ #[("NO_COLOR", "1")]
     return .ok { command := cmd, envPairs := envs, managedAuth := #["antigravity"], proxyToken := "" }
 
   else

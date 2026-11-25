@@ -8827,8 +8827,9 @@ def runCoreServer (cfg : CoreConfig) (maxRequests? : Option Nat := none) : IO UI
       closeCoreStore store
       IO.eprintln s!"[sandboxed-sh] FATAL: remote submission startup fence failed: {e}"
       return 1
+    let vpnRelayBind := ((← IO.getEnv "ORB_AIRVPN_RELAY_BIND").getD "127.0.0.1").trimAscii.toString
     let vpnRelay? ← match ← AccountVpnRelay.configured (← IO.getEnv "ORB_AIRVPN_RELAY_PORT")
-        (effectiveJwtSecret cfg) vpnCoordinatorDir (!cfg.devMode) vpnPool store with
+        (effectiveJwtSecret cfg) vpnCoordinatorDir (!cfg.devMode) vpnPool store vpnRelayBind with
       | .ok listener => pure listener
       | .error e =>
         discard <| closeFd listenFd
@@ -8838,8 +8839,25 @@ def runCoreServer (cfg : CoreConfig) (maxRequests? : Option Nat := none) : IO UI
         IO.eprintln s!"[sandboxed-sh] Failed to initialize the AirVPN account relay: {e}"
         return 1
     let relayUrl? := vpnRelay?.map fun listener => AccountVpnRelay.proxyUrl (effectiveJwtSecret cfg) listener.port
+    let meshRelayHost := ((← IO.getEnv "ORB_AIRVPN_MESH_RELAY_HOST").getD "").trimAscii.toString
+    let effMeshHost :=
+      if !meshRelayHost.isEmpty then meshRelayHost
+      else if vpnRelayBind != "127.0.0.1" && vpnRelayBind != "0.0.0.0" && !vpnRelayBind.isEmpty then vpnRelayBind
+      else ""
+    let meshRelayUrl? := vpnRelay?.bind fun listener =>
+      if effMeshHost.isEmpty then none
+      else some fun provider account =>
+        AccountVpnRelay.proxyUrl (effectiveJwtSecret cfg) listener.port provider account effMeshHost "socks5h"
     let providerHub := { providerHub with accountRelayUrl? := relayUrl? }
-    let appState := { appState with vpnRelayPort? := vpnRelay?.map (·.port), providerHub? := some providerHub }
+    let remoteSup := { remoteSup with
+      providerHub? := some providerHub
+      vpnPool? := some vpnPool
+      vpnCoordinatorDir := vpnCoordinatorDir
+      vpnMeshRelayUrl? := meshRelayUrl? }
+    let appState := { appState with
+      vpnRelayPort? := vpnRelay?.map (·.port)
+      providerHub? := some providerHub
+      remoteSup? := some remoteSup }
     let lostTurns ← interruptTurnsLostToRestart store.missionsDb
     if lostTurns > 0 then
       IO.eprintln s!"[sandboxed-sh] {lostTurns} mission turn(s) lost to the restart marked interrupted"
