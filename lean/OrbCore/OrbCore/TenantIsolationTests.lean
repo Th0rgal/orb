@@ -1269,7 +1269,7 @@ def run (root : String) : IO Unit := do
       title := "member-grandchild", status := "active", backend := "opencode", modelOverride := "",
       workingDirectory := path, project := "member-project", updatedAt := "2026-11-13T10:02:00Z" }
       | throw (IO.userError "isolation grandchild")
-    let (btwSt, btwSess) ← send "POST" "/api/mcp/sessions" member (.obj #[
+    let (btwSt, btwSess) ← send "POST" "/api/mcp/session" member (.obj #[
       ("mission_id", .str "member-btw"), ("role", .str "executor"), ("project", .str "member-project")])
     let btwToken := (btwSess.fieldStr? "token").getD ""
     check (btwSt == 200 && !btwToken.isEmpty) "mint btw child session"
