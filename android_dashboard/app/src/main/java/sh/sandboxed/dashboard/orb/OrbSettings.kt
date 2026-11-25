@@ -102,6 +102,7 @@ enum class OrbSettingsRoute {
     Users,
     FallbackChains,
     Providers,
+    AirVpn,
     ProxyKeys,
     Skills,
     Assistant,
@@ -339,6 +340,9 @@ fun OrbSettingsSheet(
                         onBack = back
                     )
                 }
+                OrbSettingsRoute.AirVpn -> {
+                    OrbAirVpnSettingsPage(core = core, onBack = back)
+                }
                 OrbSettingsRoute.ProxyKeys -> {
                     OrbProxyKeysSettingsPage(core = core, onBack = back)
                 }
@@ -434,6 +438,7 @@ private fun pageSubtitle(route: OrbSettingsRoute, baseURL: String, providers: In
     OrbSettingsRoute.Users -> "Accounts, Linux confinement & spend caps"
     OrbSettingsRoute.FallbackChains -> "Ordered fallback chains and provider health"
     OrbSettingsRoute.Providers -> "$providers configured"
+    OrbSettingsRoute.AirVpn -> "WireGuard profiles, session budget & account routes"
     OrbSettingsRoute.ProxyKeys -> "OpenAI-compatible router keys"
     OrbSettingsRoute.Skills -> "Your private Library skills"
     OrbSettingsRoute.Assistant -> "Hermes coordinator model, memory & persona"

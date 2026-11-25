@@ -7,6 +7,14 @@ namespace OrbCore.AirVpnObservation
 
 open Orb.AccountVpn OrbBin.Json OrbNetLeaf.TlsHttp
 
+/-- Canonical text spelling for a verified public exit address. -/
+def formatExit : ExitAddress → String
+  | .v4 n => String.intercalate "." ([24, 16, 8, 0].map fun k : UInt32 => toString ((n >>> k).toUInt8))
+  | .v6 hi lo =>
+    let parts := fun (n : UInt64) => [48, 32, 16, 0].map fun k : UInt64 => ((n >>> k).toUInt16)
+    let words := parts hi ++ parts lo
+    String.intercalate ":" (words.map fun w => String.ofList (Nat.toDigits 16 w.toNat))
+
 /-- Collapse mapped IPv4 and alternate IPv6 spellings before checking isolation. -/
 def parseExit? (raw : String) : Option ExitAddress := do
   let s := raw.trimAscii.toString

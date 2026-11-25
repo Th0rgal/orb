@@ -4,13 +4,6 @@ namespace OrbCore.AccountVpnApi
 
 open OrbCore.Store OrbBin.Json Orb.AccountVpn OrbCore.AccountVpnRoutes
 
-private def formatExit : ExitAddress → String
-  | .v4 n => String.intercalate "." ([24, 16, 8, 0].map fun k : UInt32 => toString ((n >>> k).toUInt8))
-  | .v6 hi lo =>
-    let parts := fun (n : UInt64) => [48, 32, 16, 0].map fun k : UInt64 => ((n >>> k).toUInt16)
-    let words := parts hi ++ parts lo
-    String.intercalate ":" (words.map fun w => String.ofList (Nat.toDigits 16 w.toNat))
-
 private def reasonMessage : String → String
   | "airvpn_session_limit" => "All five AirVPN sessions are in use."
   | "vpn_exit_in_use" => "This exit is already reserved for another account in this category."
@@ -78,7 +71,7 @@ def route (store : CoreStore) (pool? : Option AccountVpnPool.Pool) (dir account 
     | some (.error e) => return blocked e
     | none => pure ()
     | some (.ok t) => return (200, .obj (fields ++ #[("status", .str "verified"), ("server", .str t.server),
-        ("exits", .arr (t.exits.toArray.map (fun ip => .str (formatExit ip))))]))
+        ("exits", .arr (t.exits.toArray.map (fun ip => .str (OrbCore.AirVpnObservation.formatExit ip))))]))
   return blocked reason
 
 end OrbCore.AccountVpnApi

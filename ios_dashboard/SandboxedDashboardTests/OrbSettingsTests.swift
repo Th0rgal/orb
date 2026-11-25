@@ -538,4 +538,52 @@ final class OrbSettingsTests: XCTestCase {
         XCTAssertEqual(OrbProvidersSettings.providerWriteError(OrbHTTPError(status: 500, detail: "boom"), fallback: "fallback"), "fallback")
     }
 
+    func testAirVpnSettingsModelMatchesSharedSpec() throws {
+        let spec = try OrbSpec.json("fixtures/airvpn-settings.json")
+        for c in try XCTUnwrap(spec["status"] as? [[String: Any]]) {
+            let name = try XCTUnwrap(c["name"] as? String)
+            let got = OrbAirVpnModel.parseStatus(try orbJSON(c["input"]))
+            if c["expected"] is NSNull || c["expected"] == nil {
+                XCTAssertNil(got, name)
+            } else {
+                let exp = try XCTUnwrap(c["expected"] as? [String: Any], name)
+                let unwrapped = try XCTUnwrap(got, name)
+                XCTAssertEqual(unwrapped.apiKeyConfigured, exp["apiKeyConfigured"] as? Bool, name)
+                XCTAssertEqual(unwrapped.sessionLimit, (exp["sessionLimit"] as? NSNumber)?.intValue, name)
+                XCTAssertEqual(unwrapped.activeTunnels.count, (exp["activeTunnelsCount"] as? NSNumber)?.intValue, name)
+                let expProfiles = try XCTUnwrap(exp["profiles"] as? [[String: Any]], name).map { p in
+                    OrbAirVpnModel.ProfileView(
+                        device: p["device"] as? String ?? "",
+                        country: p["country"] as? String ?? "",
+                        server: p["server"] as? String ?? "",
+                        active: p["active"] as? Bool ?? false,
+                        exits: p["exits"] as? [String] ?? [],
+                        accounts: (p["accounts"] as? NSNumber)?.intValue ?? 0
+                    )
+                }
+                XCTAssertEqual(unwrapped.profiles, expProfiles, name)
+            }
+        }
+        for c in try XCTUnwrap(spec["filename_hints"] as? [[String: Any]]) {
+            let filename = try XCTUnwrap(c["filename"] as? String)
+            let exp = try XCTUnwrap(c["expected"] as? [String: String])
+            XCTAssertEqual(
+                OrbAirVpnModel.parseFilenameHint(filename),
+                OrbAirVpnModel.FilenameHint(country: exp["country"] ?? "", server: exp["server"] ?? "", device: exp["device"] ?? ""),
+                filename
+            )
+        }
+        for c in try XCTUnwrap(spec["session_summaries"] as? [[String: Any]]) {
+            let name = try XCTUnwrap(c["name"] as? String)
+            let active = (c["activeSessions"] as? NSNumber)?.intValue
+            let orb = try XCTUnwrap((c["orbTunnels"] as? NSNumber)?.intValue)
+            let limit = try XCTUnwrap((c["sessionLimit"] as? NSNumber)?.intValue)
+            XCTAssertEqual(
+                OrbAirVpnModel.sessionSummary(activeSessions: active, orbTunnels: orb, sessionLimit: limit),
+                c["expected"] as? String,
+                name
+            )
+        }
+    }
+
 }

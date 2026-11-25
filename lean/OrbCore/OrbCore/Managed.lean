@@ -794,6 +794,20 @@ def airVpnSecretConfigured (rootDir : String) (secret : AirVpnSecret) : IO Bool 
   let some slot := secret.slot? | return false
   (managedSecretPath rootDir slot).pathExists
 
+def deleteAirVpnSecret (rootDir : String) (secret : AirVpnSecret) : IO (Except String Unit) := do
+  let some slot := secret.slot? | return .error "invalid_airvpn_device"
+  let dir := managedSecretDir rootDir
+  if !(← dir.pathExists) then return .ok ()
+  let lock ← flockExclusiveNb (dir / "seal.lock").toString
+  if lock == 0xFFFFFFFF || lock == 0xFFFFFFFE then return .error "managed_secret_seal_busy"
+  try
+    let path := managedSecretPath rootDir slot
+    if ← path.pathExists then
+      try IO.FS.removeFile path catch _ => return .error "secret_delete_failed"
+    return .ok ()
+  finally
+    closeFdRaw lock.toInt32
+
 def observeManagedProviderCatalog (dataRoot : String) (catalog : JVal)
     (transport? : Option ManagedProvider.Transport := none)
     (cache : ManagedProvider.LeanciCapabilityCache := ManagedProvider.leanciCapabilityCache) : IO JVal := do

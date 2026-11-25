@@ -70,6 +70,34 @@ def saveSecret (pool : Pool) : SaveSecret := fun root secret value => pool.atomi
   modify fun state => { state with active := keep }
   return .ok ()
 
+/-- Delete an admin credential under the admission lock and drain any running
+tunnels using it before releasing the pool lock. -/
+def deleteSecret (pool : Pool) : DeleteSecret := fun root secret => pool.atomically do
+  let active := (← get).active
+  let (affected, keep) := active.partition fun t => match secret with
+    | .apiKey => true
+    | .device device => t.endpoint.device == device
+  if let .error e ← OrbCore.Managed.deleteAirVpnSecret root secret then return .error e
+  for t in affected do drain t
+  modify fun state => { state with active := keep }
+  return .ok ()
+
+/-- Non-secret summary of currently verified Orb WireGuard tunnels and occupant counts. -/
+def activeTunnels (pool : Pool) : IO (Array OrbBin.Json.JVal) := pool.atomically do
+  let mut out := #[]
+  for t in (← get).active do
+    if (← t.tunnel.child.tryWait).isNone && !t.occupants.isEmpty then
+      let accounts := (t.occupants.map (·.binding.account)).eraseDups.length
+      let exits := t.evidence.exits.toArray.map fun ip => OrbBin.Json.JVal.str (OrbCore.AirVpnObservation.formatExit ip)
+      out := out.push (.obj #[
+        ("device", .str t.endpoint.device),
+        ("country", .str t.evidence.country),
+        ("server", .str t.evidence.server),
+        ("exits", .arr exits),
+        ("accounts", .num (toString accounts))
+      ])
+  return out
+
 /-- On a shared transport, existing streams can outlive a preference change.
 Hold the old exit leases until the last occupant drains the transport. -/
 private def detach (active : List Active) (account : String) : IO (List Active) := do
