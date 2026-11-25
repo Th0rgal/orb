@@ -2383,12 +2383,35 @@ def dispatchResourcesAndSystemRoute
     let targetNode := ((qParam? qMap "node").getD "local").trimAscii.toString
     let localNode := targetNode.isEmpty || targetNode == "local" || targetNode == "core" || targetNode == "orb-core" || targetNode == "agent-core"
     if !effAdmin then
-      -- Members: local inventory only, without host paths or install job history.
-      if !(method == "GET" && segs.length == 2 && localNode) then return some (jsonErr 403 "admin_required")
-      let inv ← buildSoftwareInventoryJson hub false
-      let comps := ((inv.fieldArr? "components").getD #[]).map fun c =>
-        (c.setField "binary_path" .null).setField "can_update" (.bool false)
-      return some (jsonResp 200 (((inv.setField "components" (.arr comps)).setField "jobs" (.arr #[])).setField "active_job" .null))
+      -- Members: read-only inventory without host paths, running PIDs, or install job history.
+      if !(method == "GET" && segs.length == 2) then return some (jsonErr 403 "admin_required")
+      let redactMemberInventory (inv : JVal) : JVal :=
+        let comps := ((inv.fieldArr? "components").getD #[]).map fun c =>
+          ((((c.setField "binary_path" .null).setField "path" .null).setField "can_update" (.bool false)).setField "update_supported" (.bool false)).setField "running" (.arr #[])
+        let rt := match inv.field? "runtime" with
+          | some (.obj kvs) => ((JVal.obj kvs).setField "path" .null).setField "running" (.arr #[])
+          | some other => other
+          | none => .null
+        ((((inv.setField "components" (.arr comps)).setField "runtime" rt).setField "jobs" (.arr #[])).setField "active_job" .null)
+      if localNode then
+        let inv ← buildSoftwareInventoryJson hub false
+        return some (jsonResp 200 (redactMemberInventory inv))
+      let (_, staticNodes) ← loadStaticRemoteNodes
+      let isAdminOnlyNode := (staticNodes.find? (·.id == targetNode)).any fun n =>
+        n.id == "sepolia" || n.id == "agent-core" || n.id == "orb-core" || n.id == "dgx-spark-admin" ||
+        n.labels.contains "control-plane" || n.labels.contains "administration" || n.labels.contains "admin-only"
+      if isAdminOnlyNode then
+        let inv ← buildSoftwareInventoryJson hub false
+        return some (jsonResp 200 (redactMemberInventory (inv.setField "components" (.arr #[]))))
+      if let some mc := managedStore? then
+        match ← callRemoteNodeHttp relayHub? mc targetNode "GET" "/software?force=false" none #[] 20000 with
+        | .ok (code, rawTxt, _, _, _) =>
+          if 200 ≤ code && code < 300 then
+            if let .ok rJv := OrbBin.Json.parse rawTxt then
+              return some (jsonResp 200 (redactMemberInventory rJv))
+          return some (code, "application/json", rawTxt.toUTF8)
+        | .error e => return some (jsonErr 502 e)
+      return some (jsonErr 404 "Remote node not configured")
     if !targetNode.isEmpty && targetNode != "local" && targetNode != "core" && targetNode != "orb-core" && targetNode != "agent-core" then
       if let some mc := managedStore? then
         let subPath := "/" ++ String.intercalate "/" (segs.drop 1)

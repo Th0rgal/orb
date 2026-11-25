@@ -755,8 +755,7 @@ def adminDirectAntigravityStaticTarget?
   let hydrated ← loadHydratedProviders store coreWorkDir
   let prefs ← getUserProviderPrefs store ownerUserId
   let allAdminAg := hydrated.filter fun hp =>
-    hp.providerType == "antigravity" &&
-      (hp.createdByUserId.isEmpty || hp.createdByUserId == bootstrapAdminId)
+    hp.providerType == "antigravity"
   for hp in allAdminAg do
     match ← OrbCore.AccountVpnRoutes.snapshot store.missionsDb hp.id with
     | .ok (.direct _) => pure ()

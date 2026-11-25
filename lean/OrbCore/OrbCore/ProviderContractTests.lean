@@ -309,10 +309,31 @@ private def antigravityReconnectClearsPerModelKeys
       if keys != #[anthKey] then
         failures := failures.push s!"antigravity reconnect must remove {agModelKey} auth-health row and keep {anthKey}, got {keys}"
     | .error e => failures := failures.push s!"antigravity auth-health query failed: {e}"
+    -- Member new subscription login (`targetProvId? = none`) registers a durable `ai_providers` row owned by that member
+    discard <| execParamQuery store.missionsDb
+      "INSERT OR IGNORE INTO users(id,username,password_hash,role,unix_username,disabled) VALUES('u-ben','Ben','x','member','orb-ben',0);" #[]
+    let memBase := (← scanCliProxyAuthFiles).map (fun f => (f.fileName, f.fingerprint))
+    let memSess : CliLoginSession := {
+      sessionId := "ag-member-new", providerSlug := "antigravity", authFileType := "antigravity",
+      targetProvId? := none, stateToken := "ag-mem-state", authUrl := "fixture", flow := "redirect",
+      createdSec := wallNow, beforeFiles := memBase, userId := "u-ben"
+    }
+    IO.FS.writeFile s!"{root}/auth-empty/antigravity-ben-shared.json"
+      "{\"type\":\"antigravity\",\"email\":\"ben@fixture.invalid\",\"access_token\":\"fixture-only-no-live-access\"}"
+    let memDone ← reconcileCliLoginCompletion hub store root cooldowns none memSess wallNow
+    let expectedMemId := fileAccountId "antigravity" "antigravity-ben-shared.json"
+    let memRow? ← getAIProvider? store expectedMemId
+    let memHps ← loadHydratedProviders store root
+    let memHp? := memHps.find? (·.id == expectedMemId)
+    if memDone.status != "completed" || memRow?.map (·.createdByUserId) != some "u-ben" ||
+       memHp?.map (·.hasOAuth) != some true || memHp?.map (·.boundOauthFile) != some "antigravity-ben-shared.json" then
+      failures := failures.push s!"member subscription login must create bound owned provider row {expectedMemId}"
+    discard <| deleteAIProvider store expectedMemId
   finally
     cooldowns.set #[]
     discard <| execParamQuery store.missionsDb "DELETE FROM provider_auth_health;" #[]
     try IO.FS.removeFile s!"{root}/auth-empty/antigravity-reconnected.json" catch _ => pure ()
+    try IO.FS.removeFile s!"{root}/auth-empty/antigravity-ben-shared.json" catch _ => pure ()
   return failures
 
 /-- The routing health view merges the two cooldown owners, and clearing a login resets

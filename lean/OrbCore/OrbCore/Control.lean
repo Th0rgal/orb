@@ -6187,9 +6187,9 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
         let some existing := existing?
           | return .ok (mkJson 404 "{\"error\":\"provider_not_found\"}")
         let own := !existing.createdByUserId.isEmpty && existing.createdByUserId == caller.userId
-        -- Members edit settings of any shared account; credentials and endpoint only on their own.
+        -- Members edit settings of any shared account; credentials, global enablement, and endpoint only on their own.
         if !isAdm then
-          if (jv.fieldBool? "enabled").any (· != existing.enabled) then
+          if !own && (jv.fieldBool? "enabled").any (· != existing.enabled) then
             return .ok (mkJson 403 "{\"error\":\"admin_required\",\"field\":\"enabled\"}")
           let newKey := ((jv.fieldStr? "api_key").getD "").trimAscii.toString
           if !newKey.isEmpty && (!own || newKey == "cli-proxy-managed") then
@@ -6277,7 +6277,7 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
               return .ok (mkJson 403 "{\"error\":\"not_account_owner\"}")
         -- Disable any matched CLIProxyAPI sidecar login before deleting the Core row so a
         -- removed OAuth provider cannot respawn as an active (`enabled: true`) synthetic row.
-        if isAdm then
+        if isAdm || existing?.isSome then
           if let some (code, ctype, body) ← syncSidecarAuthFileDisabledForProvider st.store st.cfg.workingDir pid true then
             return .ok { status := code, contentType := ctype, corsOrigin? := reqOrigin?, body := body }
         match ← deleteAIProvider st.store pid with
