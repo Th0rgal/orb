@@ -116,19 +116,48 @@ def endpoints (root : String) : IO (List Endpoint) := do
     if let some (endpoint, _) ← readEndpoint root device then all := endpoint :: all
   return all.reverse
 
+def profileSummaries (root : String) : IO (Array JVal) := do
+  let mut items := #[]
+  for id in ← deviceNames root do
+    match ← readEndpoint root id with
+    | some (ep, _) =>
+      items := items.push (.obj #[("device", .str id), ("country", .str ep.country), ("server", .str ep.server)])
+    | none =>
+      items := items.push (.obj #[("device", .str id)])
+  return items
+
 abbrev SaveSecret := String → AirVpnSecret → String → IO (Except String Unit)
+abbrev DeleteSecret := String → AirVpnSecret → IO (Except String Unit)
 
 def settings (root method : String) (payload : ByteArray)
-    (save : SaveSecret := sealAirVpnSecret) : IO (Nat × JVal) := do
+    (save : SaveSecret := sealAirVpnSecret)
+    (delete : DeleteSecret := deleteAirVpnSecret)
+    (tunnels : Array JVal := #[]) : IO (Nat × JVal) := do
   let err := fun (status : Nat) (code : String) => (status, JVal.obj #[("error", .str code)])
   if method == "GET" then
-    let profiles ← deviceNames root
-    return (200, .obj #[("api_key_configured", .bool (← airVpnSecretConfigured root .apiKey)),
-      ("devices", .arr (profiles.map JVal.str))])
+    let devices ← deviceNames root
+    let profiles ← profileSummaries root
+    return (200, .obj #[
+      ("api_key_configured", .bool (← airVpnSecretConfigured root .apiKey)),
+      ("session_limit", .num "5"),
+      ("devices", .arr (devices.map JVal.str)),
+      ("profiles", .arr profiles),
+      ("active_tunnels", .arr tunnels)
+    ])
   if method == "POST" then
     match ← activeSessions root with
-    | .ok sessions => return (200, .obj #[("active_sessions", .num (toString sessions.size))])
+    | .ok sessions =>
+      return (200, .obj #[("active_sessions", .num (toString sessions.size)), ("session_limit", .num "5")])
     | .error (status, code) => return err status code
+  if method == "DELETE" then
+    if payload.size > 1024 then return err 413 "settings_too_large"
+    let .ok j := parseBytes payload | return err 400 "invalid_json"
+    let some id := j.fieldStr? "device_id" | return err 400 "expected_device_id"
+    match ← delete root (.device id) with
+    | .ok () => return (200, .obj #[("deleted", .bool true)])
+    | .error "invalid_airvpn_device" => return err 400 "invalid_airvpn_device"
+    | .error "managed_secret_seal_busy" => return err 409 "secret_store_busy"
+    | .error _ => return err 503 "secret_store_unavailable"
   if method != "PUT" then return err 405 "method_not_allowed"
   if payload.size > 32768 then return err 413 "settings_too_large"
   let .ok j := parseBytes payload | return err 400 "invalid_json"

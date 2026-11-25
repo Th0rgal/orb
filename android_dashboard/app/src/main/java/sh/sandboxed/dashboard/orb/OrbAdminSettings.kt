@@ -3,7 +3,10 @@ package sh.sandboxed.dashboard.orb
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import android.provider.OpenableColumns
 import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -51,6 +54,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableDoubleStateOf
@@ -68,6 +72,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -2054,6 +2059,597 @@ fun OrbHermesSettingsPage(core: OrbCore, onBack: () -> Unit) {
             },
             confirmButton = {
                 TextButton(onClick = { showSoulDialog = false }) { Text("Done") }
+            }
+        )
+    }
+}
+
+// MARK: - 5. AirVPN Settings & Account Routes (/api/settings/airvpn)
+
+object OrbAirVpnModel {
+    data class TunnelSummary(
+        val device: String,
+        val country: String,
+        val server: String,
+        val exits: List<String>,
+        val accounts: Int,
+    )
+
+    data class ProfileView(
+        val device: String,
+        val country: String,
+        val server: String,
+        val active: Boolean,
+        val exits: List<String>,
+        val accounts: Int,
+    )
+
+    data class StatusView(
+        val apiKeyConfigured: Boolean,
+        val sessionLimit: Int,
+        val profiles: List<ProfileView>,
+        val activeTunnels: List<TunnelSummary>,
+    )
+
+    data class FilenameHint(
+        val country: String,
+        val server: String,
+        val device: String,
+    )
+
+    private val AIRVPN_FILENAME_RE = Regex(
+        "^AirVPN_([A-Za-z]{2})(?:-[A-Za-z0-9-]+)?_([A-Za-z0-9-]+?)(?:_(?:UDP|TCP|Entry|TLS|IPv4|IPv6).*)?$",
+        RegexOption.IGNORE_CASE,
+    )
+    private val SIMPLE_SERVER_RE = Regex("^[A-Za-z0-9-]{1,56}$")
+
+    private fun asInt(value: Any?, fallback: Int): Int = when (value) {
+        is Number -> maxOf(0, value.toInt())
+        is String -> value.toIntOrNull()?.takeIf { it >= 0 } ?: fallback
+        else -> fallback
+    }
+
+    private fun slugify(raw: String): String {
+        val sb = StringBuilder()
+        var prevDash = false
+        for (ch in raw.lowercase()) {
+            if (ch in 'a'..'z' || ch in '0'..'9') {
+                sb.append(ch)
+                prevDash = false
+            } else if (!prevDash && sb.isNotEmpty()) {
+                sb.append('-')
+                prevDash = true
+            }
+        }
+        while (sb.isNotEmpty() && sb.last() == '-') sb.deleteCharAt(sb.length - 1)
+        return sb.toString().take(64)
+    }
+
+    fun parseStatus(payload: Any?): StatusView? {
+        val raw = OrbJSON.dict(payload) ?: return null
+        val configured = raw["api_key_configured"] as? Boolean ?: return null
+        val rawDevices = raw["devices"] as? List<*> ?: return null
+        val devices = rawDevices.filterIsInstance<String>().filter { it.isNotEmpty() }.toMutableList()
+        val sessionLimit = maxOf(1, asInt(raw["session_limit"], 5))
+
+        val activeTunnels = OrbJSON.dictList(raw["active_tunnels"]).mapNotNull { t ->
+            val dev = (t["device"] as? String).orEmpty()
+            if (dev.isEmpty()) null else TunnelSummary(
+                device = dev,
+                country = (t["country"] as? String).orEmpty(),
+                server = (t["server"] as? String).orEmpty(),
+                exits = (t["exits"] as? List<*>)?.filterIsInstance<String>().orEmpty().filter { it.isNotEmpty() },
+                accounts = asInt(t["accounts"], 0),
+            )
+        }
+        val tunnelByDevice = activeTunnels.associateBy { it.device }
+
+        val metaByDevice = mutableMapOf<String, Pair<String, String>>()
+        for (p in OrbJSON.dictList(raw["profiles"])) {
+            val dev = (p["device"] as? String).orEmpty()
+            if (dev.isEmpty()) continue
+            metaByDevice[dev] = ((p["country"] as? String).orEmpty()) to ((p["server"] as? String).orEmpty())
+            if (dev !in devices) devices.add(dev)
+        }
+
+        val profiles = devices.map { dev ->
+            val meta = metaByDevice[dev]
+            val live = tunnelByDevice[dev]
+            val country = meta?.first?.takeIf { it.isNotEmpty() } ?: live?.country.orEmpty()
+            val server = meta?.second?.takeIf { it.isNotEmpty() } ?: live?.server.orEmpty()
+            ProfileView(
+                device = dev,
+                country = country,
+                server = server,
+                active = live != null,
+                exits = live?.exits.orEmpty(),
+                accounts = live?.accounts ?: 0,
+            )
+        }
+        return StatusView(
+            apiKeyConfigured = configured,
+            sessionLimit = sessionLimit,
+            profiles = profiles,
+            activeTunnels = activeTunnels,
+        )
+    }
+
+    fun parseFilenameHint(filename: String): FilenameHint {
+        val leaf = filename.substringAfterLast('/').substringAfterLast('\\')
+        val base = (if (leaf.endsWith(".conf", ignoreCase = true)) leaf.dropLast(5) else leaf).trim()
+        if (base.isEmpty()) return FilenameHint("", "", "")
+
+        AIRVPN_FILENAME_RE.matchEntire(base)?.let { m ->
+            val cc = m.groupValues[1].uppercase()
+            val srv = m.groupValues[2]
+            return FilenameHint(cc, srv, slugify("orb-$cc-$srv"))
+        }
+        if (SIMPLE_SERVER_RE.matches(base)) {
+            return FilenameHint("", base, slugify("orb-$base"))
+        }
+        return FilenameHint("", "", "")
+    }
+
+    fun sessionSummary(activeSessions: Int?, orbTunnels: Int, sessionLimit: Int = 5): String {
+        val limit = if (sessionLimit > 0) sessionLimit else 5
+        val orb = maxOf(0, orbTunnels)
+        if (activeSessions == null) {
+            return if (orb == 0) "Up to $limit concurrent sessions across AirVPN"
+            else "$orb Orb tunnel${if (orb == 1) "" else "s"} active · up to $limit concurrent sessions"
+        }
+        val active = maxOf(0, activeSessions)
+        val external = maxOf(0, active - orb)
+        val free = maxOf(0, limit - active)
+        return "$active / $limit active sessions · $orb Orb tunnel${if (orb == 1) "" else "s"} · $external external · $free free"
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun OrbAirVpnSettingsPage(core: OrbCore, onBack: () -> Unit) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val currentUser by core.currentUserFlow.collectAsState()
+    val authMode by core.authModeFlow.collectAsState()
+    val isAdmin = OrbCore.computeIsAdmin(authMode, currentUser)
+
+    var status by remember { mutableStateOf<OrbAirVpnModel.StatusView?>(null) }
+    var providers by remember { mutableStateOf<List<OrbRow>>(emptyList()) }
+    var activeSessions by remember { mutableStateOf<Int?>(null) }
+    var isRefreshing by remember { mutableStateOf(false) }
+    var busy by remember { mutableStateOf(false) }
+    var error by remember { mutableStateOf<String?>(null) }
+    var notice by remember { mutableStateOf<String?>(null) }
+
+    var editingKey by remember { mutableStateOf(false) }
+    var keyDraft by remember { mutableStateOf("") }
+
+    var importingProfile by remember { mutableStateOf(false) }
+    var replacingDevice by remember { mutableStateOf<String?>(null) }
+    var deviceDraft by remember { mutableStateOf("") }
+    var countryDraft by remember { mutableStateOf("") }
+    var serverDraft by remember { mutableStateOf("") }
+    var profileDraft by remember { mutableStateOf("") }
+    var deletingDevice by remember { mutableStateOf<String?>(null) }
+
+    val pickConfLauncher = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        runCatching {
+            var displayName = ""
+            context.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
+                if (cursor.moveToFirst()) displayName = cursor.getString(0).orEmpty()
+            }
+            val bytes = context.contentResolver.openInputStream(uri)?.use { it.readBytes() } ?: return@runCatching
+            if (bytes.size > 30_000) {
+                error = "Choose a WireGuard profile under 30 KB."
+                return@runCatching
+            }
+            val hint = OrbAirVpnModel.parseFilenameHint(displayName)
+            if (countryDraft.isBlank() && hint.country.isNotEmpty()) countryDraft = hint.country
+            if (serverDraft.isBlank() && hint.server.isNotEmpty()) serverDraft = hint.server
+            if (replacingDevice == null && deviceDraft.isBlank() && hint.device.isNotEmpty()) deviceDraft = hint.device
+            profileDraft = bytes.toString(Charsets.UTF_8)
+        }.onFailure { e ->
+            error = e.localizedMessage ?: "Couldn’t read selected file."
+        }
+    }
+
+    suspend fun load() {
+        try {
+            if (isAdmin) {
+                status = OrbAirVpnModel.parseStatus(core.request("/api/settings/airvpn"))
+            }
+            val rawProvs = core.request("/api/ai/providers")
+            val list = OrbJSON.dictList(rawProvs).ifEmpty { OrbJSON.dictList(OrbJSON.dict(rawProvs)?.get("providers")) }
+            providers = list.filter { it["has_credentials"] != false && (it["id"] as? String).orEmpty().isNotEmpty() }.map { OrbRow(it) }
+            error = null
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Throwable) {
+            error = e.message
+        }
+    }
+
+    LaunchedEffect(isAdmin) {
+        isRefreshing = true
+        try { load() } finally { isRefreshing = false }
+    }
+
+    fun openImportDialog(existing: OrbAirVpnModel.ProfileView? = null) {
+        replacingDevice = existing?.device
+        deviceDraft = existing?.device.orEmpty()
+        countryDraft = existing?.country.orEmpty()
+        serverDraft = existing?.server.orEmpty()
+        profileDraft = ""
+        importingProfile = true
+    }
+
+    Column(modifier = Modifier.fillMaxSize().background(OrbStyle.background)) {
+        OrbAdminHeader(
+            title = "AirVPN",
+            onBack = onBack,
+            trailing = {
+                if (isAdmin) {
+                    OrbAdminCircleAction(Icons.Default.Add, "Import WireGuard profile") {
+                        openImportDialog(null)
+                    }
+                }
+            }
+        )
+
+        PullToRefreshBox(
+            isRefreshing = isRefreshing,
+            onRefresh = {
+                scope.launch {
+                    isRefreshing = true
+                    try { load() } finally { isRefreshing = false }
+                }
+            },
+            modifier = Modifier.fillMaxSize()
+        ) {
+            LazyColumn(
+                modifier = Modifier.fillMaxSize(),
+                contentPadding = PaddingValues(horizontal = 20.dp, vertical = 10.dp),
+                verticalArrangement = Arrangement.spacedBy(14.dp)
+            ) {
+                error?.let { err -> item { Text(err, color = OrbStyle.error, fontSize = 13.sp) } }
+                notice?.let { msg -> item { Text(msg, color = OrbStyle.success, fontSize = 13.sp) } }
+
+                if (isAdmin) {
+                    item {
+                        Text("SUBSCRIPTION & SESSIONS", color = OrbStyle.textMuted, fontSize = 11.sp, fontWeight = FontWeight.Bold, letterSpacing = 0.7.sp)
+                    }
+                    item {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(16.dp))
+                                .background(OrbStyle.surface)
+                                .border(1.dp, OrbStyle.border, RoundedCornerShape(16.dp))
+                                .padding(16.dp),
+                            verticalArrangement = Arrangement.spacedBy(12.dp)
+                        ) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text("API key", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Medium)
+                                    Text(
+                                        if (status?.apiKeyConfigured == true) "Configured · Stored encrypted on Core" else "Not configured",
+                                        color = OrbStyle.textMuted,
+                                        fontSize = 12.sp
+                                    )
+                                }
+                                TextButton(enabled = !busy, onClick = { keyDraft = ""; editingKey = true }) {
+                                    Text(if (status?.apiKeyConfigured == true) "Update" else "Set key")
+                                }
+                            }
+                            HorizontalDivider(color = OrbStyle.border)
+                            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                Text("Session budget", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Medium)
+                                Text(
+                                    OrbAirVpnModel.sessionSummary(
+                                        activeSessions = activeSessions,
+                                        orbTunnels = status?.activeTunnels?.size ?: 0,
+                                        sessionLimit = status?.sessionLimit ?: 5,
+                                    ),
+                                    color = OrbStyle.textMuted,
+                                    fontSize = 12.sp
+                                )
+                                if (status?.apiKeyConfigured == true) {
+                                    TextButton(enabled = !busy, onClick = {
+                                        scope.launch {
+                                            busy = true
+                                            try {
+                                                val res = OrbJSON.dict(core.request("/api/settings/airvpn", "POST"))
+                                                val count = (res?.get("active_sessions") as? Number)?.toInt()
+                                                    ?: (res?.get("active_sessions") as? String)?.toIntOrNull() ?: 0
+                                                activeSessions = count
+                                                notice = "AirVPN reports $count active session${if (count == 1) "" else "s"}."
+                                                load()
+                                            } catch (e: CancellationException) {
+                                                throw e
+                                            } catch (e: Throwable) {
+                                                error = e.message
+                                            } finally {
+                                                busy = false
+                                            }
+                                        }
+                                    }) { Text("Check active sessions") }
+                                }
+                            }
+                        }
+                    }
+
+                    item {
+                        Text("WIREGUARD PROFILES (${status?.profiles?.size ?: 0})", color = OrbStyle.textMuted, fontSize = 11.sp, fontWeight = FontWeight.Bold, letterSpacing = 0.7.sp)
+                    }
+                    item {
+                        val profiles = status?.profiles.orEmpty()
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(16.dp))
+                                .background(OrbStyle.surface)
+                                .border(1.dp, OrbStyle.border, RoundedCornerShape(16.dp))
+                        ) {
+                            if (profiles.isEmpty()) {
+                                Text(
+                                    "No WireGuard profiles imported.",
+                                    color = OrbStyle.textMuted,
+                                    fontSize = 13.sp,
+                                    modifier = Modifier.padding(16.dp)
+                                )
+                            } else {
+                                profiles.forEachIndexed { idx, prof ->
+                                    if (idx > 0) HorizontalDivider(color = OrbStyle.border)
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(horizontal = 16.dp, vertical = 12.dp),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                                            Text(
+                                                if (prof.country.isEmpty()) prof.device else "${prof.country} · ${prof.server.ifEmpty { prof.device }}",
+                                                color = Color.White,
+                                                fontSize = 14.sp,
+                                                fontWeight = FontWeight.Medium
+                                            )
+                                            val exitInfo = if (prof.active) {
+                                                val ips = if (prof.exits.isEmpty()) "" else " · ${prof.exits.joinToString(", ")}"
+                                                "${prof.device} · Active$ips · ${prof.accounts} account${if (prof.accounts == 1) "" else "s"}"
+                                            } else {
+                                                "${prof.device} · Idle"
+                                            }
+                                            Text(exitInfo, color = OrbStyle.textMuted, fontSize = 12.sp, fontFamily = FontFamily.Monospace)
+                                        }
+                                        TextButton(enabled = !busy, onClick = { openImportDialog(prof) }) { Text("Replace") }
+                                        TextButton(enabled = !busy, onClick = { deletingDevice = prof.device }) {
+                                            Text("Remove", color = OrbStyle.error)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                item {
+                    Text("ACCOUNT ROUTES", color = OrbStyle.textMuted, fontSize = 11.sp, fontWeight = FontWeight.Bold, letterSpacing = 0.7.sp)
+                }
+                item {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(16.dp))
+                            .background(OrbStyle.surface)
+                            .border(1.dp, OrbStyle.border, RoundedCornerShape(16.dp))
+                    ) {
+                        if (providers.isEmpty()) {
+                            Text(
+                                "No connected provider accounts.",
+                                color = OrbStyle.textMuted,
+                                fontSize = 13.sp,
+                                modifier = Modifier.padding(16.dp)
+                            )
+                        } else {
+                            providers.forEachIndexed { idx, row ->
+                                if (idx > 0) HorizontalDivider(color = OrbStyle.border)
+                                val id = row.str("id").orEmpty()
+                                val name = row.str("name").orEmpty().ifEmpty { id }
+                                val ptype = row.str("provider_type").orEmpty()
+                                Column(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(horizontal = 16.dp, vertical = 12.dp),
+                                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                                ) {
+                                    Text(name, color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Medium)
+                                    AccountVpnSettings(core = core, account = id, nativeAccount = ptype == "antigravity")
+                                }
+                            }
+                        }
+                    }
+                }
+                item { Spacer(Modifier.height(20.dp)) }
+            }
+        }
+    }
+
+    if (editingKey) {
+        AlertDialog(
+            onDismissRequest = { if (!busy) { keyDraft = ""; editingKey = false } },
+            containerColor = OrbStyle.elevated,
+            title = { Text("AirVPN API key", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.SemiBold) },
+            text = {
+                OutlinedTextField(
+                    value = keyDraft,
+                    onValueChange = { keyDraft = it },
+                    enabled = !busy,
+                    singleLine = true,
+                    visualTransformation = PasswordVisualTransformation(),
+                    placeholder = { Text("Paste AirVPN API key") },
+                    modifier = Modifier.fillMaxWidth()
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    enabled = !busy && keyDraft.trim().isNotEmpty(),
+                    onClick = {
+                        scope.launch {
+                            busy = true
+                            try {
+                                core.request("/api/settings/airvpn", "PUT", body = mapOf("api_key" to keyDraft.trim()))
+                                keyDraft = ""
+                                editingKey = false
+                                notice = "API key saved."
+                                load()
+                            } catch (e: CancellationException) {
+                                throw e
+                            } catch (e: Throwable) {
+                                error = e.message
+                            } finally {
+                                busy = false
+                            }
+                        }
+                    }
+                ) { Text("Save key") }
+            },
+            dismissButton = {
+                TextButton(enabled = !busy, onClick = { keyDraft = ""; editingKey = false }) { Text("Cancel") }
+            }
+        )
+    }
+
+    if (importingProfile) {
+        AlertDialog(
+            onDismissRequest = { if (!busy) { profileDraft = ""; importingProfile = false } },
+            containerColor = OrbStyle.elevated,
+            title = {
+                Text(
+                    replacingDevice?.let { "Replace $it" } ?: "Import WireGuard profile",
+                    color = Color.White,
+                    fontSize = 16.sp,
+                    fontWeight = FontWeight.SemiBold
+                )
+            },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    TextButton(enabled = !busy, onClick = { pickConfLauncher.launch("*/*") }) {
+                        Text("Choose .conf file…")
+                    }
+                    OutlinedTextField(
+                        value = countryDraft,
+                        onValueChange = { countryDraft = it.uppercase().take(2) },
+                        enabled = !busy,
+                        singleLine = true,
+                        label = { Text("Country code (e.g. CH, NL)") },
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    OutlinedTextField(
+                        value = serverDraft,
+                        onValueChange = { serverDraft = it.take(64) },
+                        enabled = !busy,
+                        singleLine = true,
+                        label = { Text("AirVPN server name") },
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    OutlinedTextField(
+                        value = deviceDraft,
+                        onValueChange = { deviceDraft = it.lowercase().take(64) },
+                        enabled = !busy && replacingDevice == null,
+                        singleLine = true,
+                        label = { Text("Device name (e.g. orb-ch)") },
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    OutlinedTextField(
+                        value = profileDraft,
+                        onValueChange = { profileDraft = it },
+                        enabled = !busy,
+                        label = { Text("WireGuard .conf contents") },
+                        textStyle = androidx.compose.ui.text.TextStyle(color = Color.White, fontSize = 11.sp, fontFamily = FontFamily.Monospace),
+                        modifier = Modifier.fillMaxWidth().heightIn(min = 100.dp, max = 180.dp)
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    enabled = !busy && profileDraft.isNotBlank(),
+                    onClick = {
+                        val dev = deviceDraft.trim().lowercase()
+                        val cc = countryDraft.trim().uppercase()
+                        val srv = serverDraft.trim()
+                        if (dev.isEmpty() || cc.length != 2 || srv.isEmpty()) {
+                            error = "Fill in country code, AirVPN server name, and device name."
+                            return@TextButton
+                        }
+                        scope.launch {
+                            busy = true
+                            try {
+                                core.request(
+                                    "/api/settings/airvpn",
+                                    "PUT",
+                                    body = mapOf(
+                                        "device_id" to dev,
+                                        "country" to cc,
+                                        "server" to srv,
+                                        "profile" to profileDraft,
+                                    )
+                                )
+                                profileDraft = ""
+                                importingProfile = false
+                                notice = "Device profile saved."
+                                load()
+                            } catch (e: CancellationException) {
+                                throw e
+                            } catch (e: Throwable) {
+                                error = e.message
+                            } finally {
+                                busy = false
+                            }
+                        }
+                    }
+                ) { Text("Import") }
+            },
+            dismissButton = {
+                TextButton(enabled = !busy, onClick = { profileDraft = ""; importingProfile = false }) { Text("Cancel") }
+            }
+        )
+    }
+
+    deletingDevice?.let { dev ->
+        AlertDialog(
+            onDismissRequest = { if (!busy) deletingDevice = null },
+            containerColor = OrbStyle.elevated,
+            title = { Text("Remove $dev?", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.SemiBold) },
+            text = { Text("Any active Orb tunnel using this WireGuard device profile will be drained and disconnected.", color = OrbStyle.textMuted, fontSize = 13.sp) },
+            confirmButton = {
+                TextButton(
+                    enabled = !busy,
+                    onClick = {
+                        scope.launch {
+                            busy = true
+                            try {
+                                core.request("/api/settings/airvpn", "DELETE", body = mapOf("device_id" to dev))
+                                deletingDevice = null
+                                notice = "Removed profile $dev."
+                                load()
+                            } catch (e: CancellationException) {
+                                throw e
+                            } catch (e: Throwable) {
+                                error = e.message
+                            } finally {
+                                busy = false
+                            }
+                        }
+                    }
+                ) { Text("Remove", color = OrbStyle.error) }
+            },
+            dismissButton = {
+                TextButton(enabled = !busy, onClick = { deletingDevice = null }) { Text("Cancel") }
             }
         )
     }

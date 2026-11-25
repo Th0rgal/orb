@@ -71,6 +71,7 @@ import { requestSearchTarget } from "./searchTarget";
 import * as Ic from "./icons";
 const SearchDialog = lazy(() => import("./SearchDialog"));
 const Settings=lazy(()=>import("./Settings").then(module=>({default:module.Settings})));
+const AirVpnSettings=lazy(()=>import("./AirVpnSettings").then(module=>({default:module.AirVpnSettings})));
 const LocalAgentsSettings=lazy(()=>import("./Settings").then(module=>({default:module.LocalAgentsSettings})));
 const SecuritySettings=lazy(()=>import("./SettingsShell").then(module=>({default:module.SecuritySettings})));
 const SettingsShell=lazy(()=>import("./SettingsShell").then(module=>({default:module.SettingsShell})));
@@ -2466,6 +2467,7 @@ export default function App() {
                   <Match when={selected() === "routing" || selected() === "routing-providers" || selected() === "routing-keys"}>
                     <RoutingSettings onOpenClient={() => open("settings")} tab={selected() === "routing-providers" ? "health" : selected() === "routing-keys" ? "keys" : "chains"} />
                   </Match>
+                  <Match when={selected() === "airvpn-settings"}><AirVpnSettings onOpenPage={open} /></Match>
                   <Match when={selected() === "usage-settings"}><UsageSettings /></Match>
                   <Match when={selected() === "skills-settings"}><SkillsSettings onOpenPage={open} /></Match>
                   <Match when={selected() === "hermes-settings"}><HermesSettings /></Match>

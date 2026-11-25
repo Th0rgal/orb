@@ -2268,7 +2268,7 @@ private fun AlternativeRouterSettings(core: OrbCore, account: String) {
 }
 
 @Composable
-private fun AccountVpnSettings(core: OrbCore, account: String, nativeAccount: Boolean) {
+internal fun AccountVpnSettings(core: OrbCore, account: String, nativeAccount: Boolean) {
     val scope = rememberCoroutineScope()
     var route by remember(core, account) { mutableStateOf<OrbDict?>(null) }
     var requests by remember(core, account) { mutableStateOf(OrbAccountVpn.Requests()) }

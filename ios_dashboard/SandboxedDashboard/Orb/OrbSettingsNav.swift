@@ -21,7 +21,7 @@ enum OrbSettingsSection: String, CaseIterable, Identifiable {
     var subtitle: String {
         switch self {
         case .account: "Your server connection, connected accounts, how Orb looks and usage telemetry."
-        case .models: "Fallback order, provider health, usage over time and API keys."
+        case .models: "Fallback order, provider health, AirVPN routing, usage over time and API keys."
         case .agents: "What agents know and can do, the Assistant, and the agents on this computer."
         case .security: "Who can approve risky actions, Fleet Bunker Mode, privileged access and secrets."
         case .notifications: "What reaches your Inbox and when Orb tells you."
@@ -30,7 +30,7 @@ enum OrbSettingsSection: String, CaseIterable, Identifiable {
     var mobileSummary: String {
         switch self {
         case .account: "Server, telemetry, dictation & diagnostics"
-        case .models: "Fallback chains, providers, usage & API keys"
+        case .models: "Fallback chains, providers, AirVPN, usage & API keys"
         case .agents: "Skills, Assistant, /btw, Inbox & compute fleet"
         case .security: "Approvals, Bunker Mode, grants & secrets"
         case .notifications: "Inbox summaries & alert preferences"
@@ -49,7 +49,7 @@ enum OrbSettingsSection: String, CaseIterable, Identifiable {
     var pages: [(id: String, label: String)] {
         switch self {
         case .account: [("settings", "Account"), ("users-settings", "Users"), ("usage-telemetry", "Usage telemetry"), ("dictation", "Dictation"), ("debug", "Advanced")]
-        case .models: [("routing", "Fallback Chains"), ("providers", "Providers"), ("usage-settings", "Usage"), ("routing-keys", "API Keys")]
+        case .models: [("routing", "Fallback Chains"), ("providers", "Providers"), ("airvpn-settings", "AirVPN"), ("usage-settings", "Usage"), ("routing-keys", "API Keys")]
         case .agents: [("skills-settings", "Skills"), ("hermes-settings", "Assistant"), ("btw-settings", "Quick questions (/btw)"), ("inbox-summaries", "Inbox & summaries"), ("machines", "Machines"), ("resources", "Resources")]
         case .security: [("security-settings", "Access"), ("bitwarden-settings", "Secrets vault")]
         case .notifications: [("inbox-settings", "Notifications")]
@@ -136,6 +136,7 @@ struct OrbSettingsHome: View {
         case "debug": OrbDebugInfoView()
         case "routing": OrbRoutingSettings()
         case "providers": OrbProvidersSettings()
+        case "airvpn-settings": OrbAirVpnSettings()
         case "routing-keys": OrbProxyKeysSettings()
         case "usage-settings": OrbUsageSettings()
         case "skills-settings": OrbSkillsSettings()

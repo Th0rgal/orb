@@ -632,7 +632,7 @@ private def matchesFilterNeedle (m : ChromeMissionInput) (needleLower : ByteArra
 /-- Map a selected page id to its owning Settings section id (matching `orb/src/settingsNav.ts` and `shared/orb-spec/fixtures/settings-nav.json`). -/
 def settingsSectionIdForSelected (sel : String) : Option String :=
   if sel == "settings" || sel == "users-settings" || sel == "usage-telemetry" then some "account"
-  else if sel == "routing" || sel == "routing-providers" || sel == "usage-settings" || sel == "routing-keys" then some "models"
+  else if sel == "routing" || sel == "routing-providers" || sel == "airvpn-settings" || sel == "usage-settings" || sel == "routing-keys" then some "models"
   else if sel == "skills-settings" || sel == "hermes-settings" || sel == "btw-settings" || sel == "inbox-summaries" || sel == "local-agents" || sel == "execution" then some "agents"
   else if sel.startsWith "sk:" then some "agents"
   else if sel == "security-settings" || sel == "bitwarden-settings" then some "security"

@@ -1311,7 +1311,7 @@ private struct AlternativeRouterSettings: View {
     }
 }
 
-private struct OrbAccountVpnSettings: View {
+struct OrbAccountVpnSettings: View {
     @Environment(\.scenePhase) private var scenePhase
     let client: OrbSettingsClient
     let account: String

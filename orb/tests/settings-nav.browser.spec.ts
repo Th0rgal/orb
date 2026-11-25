@@ -41,7 +41,7 @@ test("settings has five sections with subtitles, tabs and attention dots", async
   await expect(title(page)).toHaveText("Models");
   // Quotas live in Providers only; Models has no quota strip.
   await expect(page.locator(".quota-strip")).toHaveCount(0);
-  await expect(page.getByRole("tab")).toHaveText(["Fallback Chains", "Providers", "Usage", "API Keys"]);
+  await expect(page.getByRole("tab")).toHaveText(["Fallback Chains", "Providers", "AirVPN", "Usage", "API Keys"]);
 
   // Agents tabs move with the arrow keys and keep focus.
   await rows.filter({ hasText: "Agents" }).click();
@@ -60,6 +60,7 @@ test("settings has five sections with subtitles, tabs and attention dots", async
 
 for (const [id, section, tab] of [
   ["routing", "Models", "Fallback Chains"],
+  ["airvpn-settings", "Models", "AirVPN"],
   ["usage-settings", "Models", "Usage"],
   ["routing-keys", "Models", "API Keys"],
   ["hermes-settings", "Agents", "Assistant"],
