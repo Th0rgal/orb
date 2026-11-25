@@ -67,8 +67,8 @@ private def checkProjectScope (claims : McpSessionClaims) (targetProj : String) 
   else
     .ok eff
 
-/-- Check whether `claims` may read `targetMissionId` (self, child/descendant, operator/coordinator in same project,
-    or approved `mission_access.json` grant). -/
+/-- Check whether `claims` may read `targetMissionId` (self, own parent for child/`/btw`,
+    transitive descendant, operator/coordinator in same project, or approved `mission_access.json` grant). -/
 private def checkMissionReadAccess
     (store : CoreStore)
     (claims : McpSessionClaims)
@@ -91,8 +91,22 @@ private def checkMissionReadAccess
     return .error s!"mission `{targetMissionId}` is outside confined project `{claims.project}`"
   if claims.role == "operator" || claims.role == "coordinator" then
     return .ok ()
-  if !claims.missionId.isEmpty && parentMid == claims.missionId then
-    return .ok ()
+  if !claims.missionId.isEmpty then
+    if parentMid == claims.missionId then
+      return .ok ()
+    -- Allow child / `/btw` missions to read their own direct parent mission.
+    if let .ok callerRows ← execParamQuery store.missionsDb
+        "SELECT COALESCE(parent_mission_id,'') FROM missions WHERE id=?1;" #[claims.missionId] then
+      if callerRows.size > 1 && cell callerRows[1]! 0 == targetMissionId then
+        return .ok ()
+    -- Allow reading any transitive descendant in the caller's mission tree.
+    if let .ok descRows ← execParamQuery store.missionsDb
+        ("WITH RECURSIVE lineage(id) AS (SELECT id FROM missions WHERE id=?1 " ++
+         "UNION SELECT m.id FROM missions m JOIN lineage l ON m.parent_mission_id=l.id) " ++
+         "SELECT id FROM lineage WHERE id=?2 LIMIT 1;")
+        #[claims.missionId, targetMissionId] then
+      if descRows.size > 1 then
+        return .ok ()
   let callerSubject := if claims.isExternal then "session:" ++ claims.sessionId
     else if !claims.missionId.isEmpty then "mission:" ++ claims.missionId else ""
   if ← hasApprovedMissionReadAccess store.rootDir claims.missionId targetMissionId nowEpochSec callerSubject then
