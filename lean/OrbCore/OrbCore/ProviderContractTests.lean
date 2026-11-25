@@ -1432,6 +1432,62 @@ private def providerUsageFetchersContract : IO (Array String) := do
         namedObj.fieldStr? "codex_secondary_window_label" == some "Codex")
     s!"codex named window labels expected ('General', 'Codex'), got ({namedObj.fieldStr? "codex_primary_window_label"}, {namedObj.fieldStr? "codex_secondary_window_label"})"
 
+  -- 7b. Codex `wham/usage` with `"secondary_window": null` (live Pro Max shape) must NOT fabricate a fake 0% secondary window:
+  let .ok codexNullSecondaryRaw := OrbBin.Json.parse
+      ("{\"plan_type\":\"promax\",\"rate_limit\":{" ++
+       "\"primary_window\":{\"used_percent\":100,\"reset_at\":1795932433,\"limit_window_seconds\":604800}," ++
+       "\"secondary_window\":null}}")
+    | throw (IO.userError "codexNullSecondaryRaw parse failed")
+  let (nullSecFields, nullSecWins, nullSecPrimary) := projectCodexUsage codexNullSecondaryRaw
+  let nullSecObj := JVal.obj nullSecFields
+  must (nullSecObj.fieldNat? "codex_primary_used_percent" == some 100 &&
+        (nullSecObj.field? "codex_secondary_used_percent").isNone &&
+        (nullSecObj.field? "codex_secondary_window_minutes").isNone &&
+        nullSecWins.size == 1 &&
+        nullSecPrimary == .str "7d" &&
+        nullSecWins[0]!.fieldNat? "pct_remaining" == some 0)
+    s!"codex secondary_window:null must omit secondary fields and optimize window, got fields={renderCompact nullSecObj} wins={renderCompact (.arr nullSecWins)}"
+
+  -- 8. Antigravity AICode `v1alpha:fetchQuotaStatus` (`quotaSummary` + `refreshWindowLabel`) & optimize windows:
+  let .ok aicodeQuotaRaw := OrbBin.Json.parse
+      ("{\"quotaSummary\":{\"groups\":[" ++
+       "{\"displayName\":\"Gemini Models\",\"buckets\":[" ++
+       "{\"bucketId\":\"gemini-weekly\",\"refreshWindowLabel\":\"weekly\",\"remainingFraction\":0.079904824,\"resetTime\":\"2026-11-30T20:03:07Z\"}," ++
+       "{\"bucketId\":\"gemini-5h\",\"refreshWindowLabel\":\"5h\",\"remainingFraction\":0.646839,\"resetTime\":\"2026-11-25T22:03:07Z\"}]}," ++
+       "{\"displayName\":\"Claude and GPT models\",\"buckets\":[" ++
+       "{\"bucketId\":\"3p-weekly\",\"refreshWindowLabel\":\"weekly\",\"remainingFraction\":1,\"resetTime\":\"2026-12-02T21:42:22Z\"}," ++
+       "{\"bucketId\":\"3p-5h\",\"refreshWindowLabel\":\"5h\",\"remainingFraction\":1,\"resetTime\":\"2026-11-26T02:42:22Z\"}]}]}}")
+    | throw (IO.userError "aicodeQuotaRaw parse failed")
+  let agSummaryWins := parseAntigravitySummary aicodeQuotaRaw
+  must (agSummaryWins.size == 4 &&
+        agSummaryWins[0]!.fieldStr? "label" == some "Gemini · 5h" &&
+        agSummaryWins[0]!.field? "used_percent" == some (.num "35.3") &&
+        agSummaryWins[1]!.fieldStr? "label" == some "Gemini · Weekly" &&
+        agSummaryWins[1]!.field? "used_percent" == some (.num "92.0") &&
+        agSummaryWins[2]!.fieldStr? "label" == some "Claude & GPT · 5h" &&
+        agSummaryWins[2]!.field? "used_percent" == some (.num "0.0") &&
+        agSummaryWins[3]!.fieldStr? "label" == some "Claude & GPT · Weekly" &&
+        agSummaryWins[3]!.field? "used_percent" == some (.num "0.0"))
+    s!"antigravity aicode summary expected [Gemini 5h 35.3, Gemini Weekly 92.0, Claude & GPT 5h 0.0, Weekly 0.0], got {renderCompact (.arr agSummaryWins)}"
+  let (agOptWins, agOptPrimary) := antigravityOptimizeWindows agSummaryWins
+  let agOptWeekly := (agOptWins.find? (·.fieldStr? "key" == some "gemini_weekly")).getD .null
+  must (agOptWins.size == 4 && agOptPrimary == .str "gemini_weekly" && agOptWeekly.fieldNat? "pct_remaining" == some 8)
+    s!"antigravity optimize expected primary gemini_weekly with pct_remaining=8, got primary={renderCompact agOptPrimary} wins={renderCompact (.arr agOptWins)}"
+
+  -- 9. Anthropic unified fraction scaling (`0.12` -> `12%` used, `88%` remaining) + xAI decimal tenths (`12.5 / 50` -> `25%`):
+  must (utilizationFractionToPercent "0.12" == "12" &&
+        utilizationFractionToPercent "0.125" == "12.5" &&
+        utilizationFractionToPercent "1.0" == "100" &&
+        utilizationFractionToPercent "0" == "0")
+    s!"utilizationFractionToPercent scaling mismatch: {utilizationFractionToPercent "0.12"}"
+  let .ok xaiDecimalOnlyRaw := OrbBin.Json.parse "{\"config\":{\"onDemandUsed\":12.5,\"onDemandCap\":50}}"
+    | throw (IO.userError "xaiDecimalOnlyRaw parse failed")
+  let (xaiDecFields, xaiDecWins, _) := projectXaiBillingUsage xaiDecimalOnlyRaw none
+  let xaiDecObj := JVal.obj xaiDecFields
+  must (xaiDecObj.field? "xai_credit_used_percent" == some (.num "25") &&
+        xaiDecWins.size == 1 && xaiDecWins[0]!.fieldNat? "pct_remaining" == some 75)
+    s!"xai decimal onDemandUsed 12.5/50 expected 25% used (75% rem), got {renderCompact xaiDecObj}"
+
   return (← failuresRef.get)
 private def customDiscoveryContract (app : CoreAppState) (jwt : String) (now : UInt64) : IO (Array String) := do
   let mut failures := #[]
@@ -1676,6 +1732,40 @@ private def r21aAdapterReplays (store : CoreStore) (root : String) : IO Unit := 
   unless windows.size == 1 && windows[0]!.fieldStr? "label" == some "Gemini · Weekly" &&
       windows[0]!.field? "used_percent" == some (.num "75.0") do
     throw (IO.userError "r21aGoogleQuota: missing weekly quota")
+  -- Antigravity 2.0 (`aicode-consumers`): when `retrieveUserQuotaSummary` omits Gemini, Core reads `aicode.googleapis.com/v1alpha:fetchQuotaStatus`.
+  let googleAicode : UsageHttp := fun method url bearer _ _ _ _ => do
+    unless bearer == some "fixture-google" do throw (IO.userError "r21aGoogleAicode: wrong credential")
+    if method == "POST" && url.endsWith ":loadCodeAssist" then
+      return reply "{\"cloudaicompanionProject\":\"aicode-consumers\",\"paidTier\":{\"name\":\"Google AI Ultra\"}}"
+    if method == "POST" && url.endsWith ":retrieveUserQuotaSummary" then
+      return reply "{\"groups\":[{\"displayName\":\"Claude and GPT models\",\"buckets\":[{\"bucketId\":\"3p-5h\",\"window\":\"5h\",\"remainingFraction\":1,\"resetTime\":\"2026-11-26T02:42:22Z\"}]}]}"
+    if method == "GET" && url == "https://aicode.googleapis.com/v1alpha:fetchQuotaStatus" then
+      return reply "{\"quotaSummary\":{\"groups\":[{\"displayName\":\"Gemini Models\",\"buckets\":[{\"bucketId\":\"gemini-5h\",\"refreshWindowLabel\":\"5h\",\"remainingFraction\":0.843351,\"resetTime\":\"2026-11-26T00:32:13Z\"},{\"bucketId\":\"gemini-weekly\",\"refreshWindowLabel\":\"weekly\",\"remainingFraction\":0.8537747,\"resetTime\":\"2026-12-01T16:44:31Z\"}]},{\"displayName\":\"Claude and GPT models\",\"buckets\":[{\"bucketId\":\"3p-5h\",\"refreshWindowLabel\":\"5h\",\"remainingFraction\":1,\"resetTime\":\"2026-11-26T02:42:22Z\"},{\"bucketId\":\"3p-weekly\",\"refreshWindowLabel\":\"weekly\",\"remainingFraction\":1,\"resetTime\":\"2026-12-02T21:42:22Z\"}]}]}}"
+    throw (IO.userError s!"r21aGoogleAicode: unexpected request {method} {url}")
+  let quotaAi ← fetchLiveProviderUsage hp googleAicode
+  let winsAi := (quotaAi.fieldArr? "antigravity_windows").getD #[]
+  unless winsAi.size == 4 &&
+      winsAi[0]!.fieldStr? "label" == some "Gemini · 5h" &&
+      winsAi[0]!.field? "used_percent" == some (.num "15.7") &&
+      winsAi[1]!.fieldStr? "label" == some "Gemini · Weekly" &&
+      winsAi[1]!.field? "used_percent" == some (.num "14.6") &&
+      (quotaAi.fieldOrNull "optimize").fieldStr? "primary_window" == some "gemini_5h" do
+    throw (IO.userError s!"r21aGoogleAicode: expected real AICode Gemini 5h/Weekly quotas, got {renderCompact quotaAi}")
+  -- When AICode returns 403 (`ACCESS_TOKEN_SCOPE_INSUFFICIENT`), unused legacy `gemini-2.5` buckets must NOT fabricate `Gemini · 5h: 0.0%`.
+  let googleScopeMissing : UsageHttp := fun method url _ _ _ _ _ => do
+    if method == "POST" && url.endsWith ":loadCodeAssist" then
+      return reply "{\"cloudaicompanionProject\":\"aicode-consumers\"}"
+    if method == "POST" && url.endsWith ":retrieveUserQuotaSummary" then
+      return reply "{\"groups\":[{\"displayName\":\"Claude and GPT models\",\"buckets\":[{\"bucketId\":\"3p-5h\",\"window\":\"5h\",\"remainingFraction\":1,\"resetTime\":\"2026-11-26T02:42:22Z\"}]}]}"
+    if method == "GET" && url == "https://aicode.googleapis.com/v1alpha:fetchQuotaStatus" then
+      return .ok (403, "", none)
+    if method == "POST" && url.endsWith ":retrieveUserQuota" then
+      return reply "{\"buckets\":[{\"modelId\":\"gemini-2.5-pro\",\"remainingFraction\":1,\"resetTime\":\"2026-11-26T02:42:22Z\"}]}"
+    throw (IO.userError s!"r21aGoogleScopeMissing: unexpected request {method} {url}")
+  let quotaScopeMissing ← fetchLiveProviderUsage hp googleScopeMissing
+  let winsScopeMissing := (quotaScopeMissing.fieldArr? "antigravity_windows").getD #[]
+  unless winsScopeMissing.size == 1 && winsScopeMissing[0]!.fieldStr? "label" == some "Claude & GPT · 5h" do
+    throw (IO.userError s!"r21aGoogleScopeMissing: must omit fake 0% Gemini window when AICode returned 403, got {renderCompact (.arr winsScopeMissing)}")
   let denied ← fetchLiveProviderUsage hp fun _ url _ _ _ _ _ => do
     unless url.endsWith ":loadCodeAssist" do throw (IO.userError "r21aGoogleEligibility: quota read after refusal")
     return reply "{\"ineligibleTiers\":[{\"reasonCode\":\"VALIDATION_REQUIRED\",\"validationUrl\":\"https://fixture.invalid/verify\"}]}"
