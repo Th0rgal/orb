@@ -179,8 +179,8 @@ int main(int argc, char **argv) {
     GtkWidget *wv = g_object_new(WEBKIT_TYPE_WEB_VIEW, "web-context", ctx, "user-content-manager", ucm, NULL); g_object_unref(ctx);
     WebKitSettings *wks = webkit_web_view_get_settings(WEBKIT_WEB_VIEW(wv)); webkit_settings_set_hardware_acceleration_policy(wks, WEBKIT_HARDWARE_ACCELERATION_POLICY_ALWAYS); g_object_set(wks, "enable-media-stream", TRUE, "enable-webaudio", TRUE, "media-playback-requires-user-gesture", FALSE, NULL);
 #if WEBKIT_CHECK_VERSION(2, 42, 0)
-    WebKitFeatureList *fl = webkit_settings_get_all_features(); WebKitFeature *csf = fl ? webkit_feature_list_find(fl, "CSSCornerShape") : NULL;
-    if (csf) webkit_settings_set_feature_enabled(wks, csf, TRUE);
+    WebKitFeatureList *fl = webkit_settings_get_all_features();
+    for (gsize i = 0, fn = fl ? webkit_feature_list_get_length(fl) : 0; i < fn; ++i) { WebKitFeature *f = webkit_feature_list_get(fl, i); if (f && strcmp(webkit_feature_get_identifier(f), "CSSCornerShape") == 0) webkit_settings_set_feature_enabled(wks, f, TRUE); }
     if (fl) webkit_feature_list_unref(fl);
 #endif
     const GdkRGBA bg = rgba ? (GdkRGBA){ 0, 0, 0, 0 } : (GdkRGBA){ 0.078, 0.078, 0.078, 1 }; webkit_web_view_set_background_color(WEBKIT_WEB_VIEW(wv), &bg);
