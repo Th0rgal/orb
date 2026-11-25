@@ -1,10 +1,21 @@
 #include "gtk_leanui_private.h"
 #include "gtk_icons.h"
+#include <inttypes.h>
 #include <math.h>
 #include <stdlib.h>
 
 static OrbSidebarPaint paint;
 static void *renderer;
+
+static void detach_gpu(OrbSidebar *s) {
+    if (s->wl.surface && paint) {
+        char req[64];
+        snprintf(req, sizeof(req), "D\t%" PRIuPTR, (uintptr_t)s->wl.surface);
+        paint(renderer, req, NULL, 0, NULL, NULL);
+    }
+    orb_wl_subsurface_detach(&s->wl);
+    s->gpu_active = FALSE;
+}
 
 int orb_leanui_paint(const char *request, uint8_t *argb, size_t capacity,
                      OrbSidebarHits hits, void *view) {
@@ -22,17 +33,36 @@ int orb_sidebar_host(OrbSidebarPaint callback, void *context) {
 
 static void render_frame(OrbSidebar *s) {
     if (s->width < 2 || s->height < 2 || !gtk_widget_get_mapped(s->overlay)) return;
+    guint phase = (guint)(g_get_monotonic_time() / 100000 % 12);
+    gboolean moved = FALSE;
+    if (!s->gpu_disabled && orb_wl_subsurface_ensure(&s->wl, s->canvas, &moved)) {
+        char *req = g_strdup_printf("%d\t%d\t%d\t%d\t%d\t%u\t%" PRIuPTR "\t%" PRIuPTR "\n%s",
+            s->width, s->height, s->scale, s->light, s->scroll, phase,
+            (uintptr_t)s->wl.display, (uintptr_t)s->wl.surface, s->rows->str);
+        int rc = paint(renderer, req, NULL, 0, orb_sidebar_hits, s);
+        g_free(req);
+        if (rc == 2) {
+            if (!s->gpu_active || moved) {
+                s->gpu_active = TRUE;
+                if (s->surface) { cairo_surface_destroy(s->surface); s->surface = NULL; }
+                gtk_widget_queue_draw(s->canvas);
+            }
+            return;
+        }
+        if (rc == 0) { orb_sidebar_invalidate(s); return; }
+        s->gpu_disabled = TRUE;
+        detach_gpu(s);
+    }
     int w = s->width * s->scale, h = s->height * s->scale;
     if (!s->surface || cairo_image_surface_get_width(s->surface) != w || cairo_image_surface_get_height(s->surface) != h) {
         if (s->surface) cairo_surface_destroy(s->surface);
         s->surface = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, w, h);
     }
     if (cairo_surface_status(s->surface) != CAIRO_STATUS_SUCCESS) return;
-    guint phase = (guint)(g_get_monotonic_time() / 100000 % 12);
     char *request = g_strdup_printf("%d\t%d\t%d\t%d\t%d\t%u\n%s",
         s->width, s->height, s->scale, s->light, s->scroll, phase, s->rows->str);
     cairo_surface_flush(s->surface);
-    if (paint(renderer, request, cairo_image_surface_get_data(s->surface), (size_t)w*h*4, orb_sidebar_hits, s)) {
+    if (paint(renderer, request, cairo_image_surface_get_data(s->surface), (size_t)w*h*4, orb_sidebar_hits, s) > 0) {
         cairo_surface_set_device_scale(s->surface, s->scale, s->scale);
         cairo_surface_mark_dirty(s->surface);
         gtk_widget_queue_draw(s->canvas);
@@ -80,8 +110,19 @@ static void scale_changed(GtkWidget *widget, GParamSpec *spec, OrbSidebar *s) {
     gtk_widget_get_allocation(widget, &a);
     allocate(widget, &a, s);
 }
+static void unmapped(GtkWidget *widget, OrbSidebar *s) {
+    (void)widget;
+    detach_gpu(s);
+}
 static gboolean draw(GtkWidget *widget, cairo_t *cr, OrbSidebar *s) {
     (void)widget;
+    if (s->gpu_active) {
+        cairo_save(cr);
+        cairo_set_operator(cr, CAIRO_OPERATOR_CLEAR);
+        cairo_paint(cr);
+        cairo_restore(cr);
+        return TRUE;
+    }
     if (s->surface) {
         cairo_set_source_surface(cr, s->surface, 0, 0);
         cairo_paint(cr);
@@ -121,6 +162,7 @@ static void destroy(GtkWidget *widget, OrbSidebar *s) {
     if (s->idle) g_source_remove(s->idle);
     if (s->tick) gtk_widget_remove_tick_callback(s->canvas, s->tick);
     if (s->animation) g_source_remove(s->animation);
+    detach_gpu(s);
     if (s->surface) cairo_surface_destroy(s->surface);
     orb_sidebar_model_free(s);
     g_free(s);
@@ -155,6 +197,7 @@ GtkWidget *orb_leanui_new(GtkWidget *webview, OrbSidebarAction action, gpointer 
     g_signal_connect(s->overlay, "size-allocate", G_CALLBACK(allocate), s);
     g_signal_connect(s->overlay, "notify::scale-factor", G_CALLBACK(scale_changed), s);
     g_signal_connect(s->overlay, "map", G_CALLBACK(mapped), s);
+    g_signal_connect(s->overlay, "unmap", G_CALLBACK(unmapped), s);
     g_signal_connect(s->overlay, "destroy", G_CALLBACK(destroy), s);
     g_signal_connect(s->canvas, "draw", G_CALLBACK(draw), s);
     gtk_widget_set_size_request(s->overlay, 160, -1);

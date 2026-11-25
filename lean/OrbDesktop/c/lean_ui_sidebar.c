@@ -2,6 +2,7 @@
 #include <lean/lean.h>
 #include <dlfcn.h>
 #include <stdio.h>
+#include <string.h>
 
 static int paint(void *renderer, const char *request, uint8_t *argb, size_t capacity,
                  OrbSidebarHits hits, void *view) {
@@ -14,18 +15,32 @@ static int paint(void *renderer, const char *request, uint8_t *argb, size_t capa
         return 0;
     }
     lean_object *frame = lean_io_result_get_value(res);
+    const char *hit_str = lean_string_cstr(lean_ctor_get(frame, 0));
+    if (capacity == 0 && argb == NULL) {
+        int rc = -1;
+        if (strncmp(hit_str, "GPU_OK\n", 7) == 0) {
+            if (hits) hits(view, hit_str + 7);
+            rc = 2;
+        } else if (strcmp(hit_str, "GPU_SKIP") == 0) {
+            rc = 0;
+        } else if (strcmp(hit_str, "GPU_DETACHED") == 0) {
+            rc = 1;
+        }
+        lean_dec(res);
+        return rc;
+    }
     lean_object *pixels = lean_ctor_get(frame, 1);
     size_t n = lean_sarray_size(pixels);
-    if (n == capacity) {
+    if (n == capacity && argb) {
         const uint8_t *rgba = lean_sarray_cptr(pixels);
         for (size_t i = 0; i < n; i += 4) {
             argb[i] = rgba[i+2]; argb[i+1] = rgba[i+1];
             argb[i+2] = rgba[i]; argb[i+3] = rgba[i+3];
         }
-        hits(view, lean_string_cstr(lean_ctor_get(frame, 0)));
+        if (hits) hits(view, hit_str);
     }
     lean_dec(res);
-    return n == capacity;
+    return n == capacity && argb != NULL;
 }
 
 lean_obj_res lean_ui_sidebar_host(b_lean_obj_arg path, b_lean_obj_arg renderer) {

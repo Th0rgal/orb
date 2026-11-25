@@ -1,4 +1,4 @@
-{lib, stdenv, callPackage, clang, pkg-config, nodejs, pnpm, fetchPnpmDeps, pnpmConfigHook, gtk3, webkitgtk_4_1, vulkan-loader ? null, makeBinaryWrapper, python3, pulseaudio, wl-clipboard, zenity, revision ? "local checkout", turbo-lean ? null}:
+{lib, stdenv, callPackage, clang, pkg-config, nodejs, pnpm, fetchPnpmDeps, pnpmConfigHook, gtk3, webkitgtk_4_1, wayland ? null, vulkan-loader ? null, makeBinaryWrapper, python3, pulseaudio, wl-clipboard, zenity, revision ? "local checkout", turbo-lean ? null}:
 
 let
   core = callPackage ./package.nix {inherit turbo-lean; buildDesktop = true;};
@@ -26,7 +26,7 @@ stdenv.mkDerivation {
   passthru = {inherit core webUi;};
   dontConfigure = true;
   nativeBuildInputs = [clang pkg-config makeBinaryWrapper];
-  buildInputs = [gtk3 webkitgtk_4_1];
+  buildInputs = [gtk3 webkitgtk_4_1] ++ lib.optional (wayland != null) wayland;
   buildPhase = ''
     runHook preBuild
     ${clang}/bin/clang -std=gnu11 -O2 -Wall -Wextra -Werror -fstack-protector-strong -D_FORTIFY_SOURCE=2 -fPIE \

@@ -1,0 +1,29 @@
+#pragma once
+#include <gtk/gtk.h>
+#include <stdint.h>
+
+struct wl_display;
+struct wl_registry;
+struct wl_compositor;
+struct wl_subcompositor;
+struct wl_surface;
+struct wl_subsurface;
+
+typedef struct {
+    struct wl_display *display;
+    struct wl_registry *registry;
+    struct wl_compositor *compositor;
+    struct wl_subcompositor *subcompositor;
+    struct wl_surface *surface;
+    struct wl_subsurface *subsurface;
+    struct wl_surface *parent;
+    int x, y, scale;
+    gboolean positioned;
+} OrbWlSubsurface;
+
+/* Ensure a Wayland subsurface positioned below the GTK window for Vulkan WSI presentation.
+ * Sets *moved to TRUE when position/creation requires a parent surface commit. */
+gboolean orb_wl_subsurface_ensure(OrbWlSubsurface *sub, GtkWidget *canvas, gboolean *moved);
+
+/* Destroy the Wayland subsurface (call only after Vulkan has destroyed its swapchain/surface). */
+void orb_wl_subsurface_detach(OrbWlSubsurface *sub);

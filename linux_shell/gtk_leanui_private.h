@@ -1,5 +1,6 @@
 #pragma once
 #include "gtk_leanui.h"
+#include "gtk_wayland_subsurface.h"
 #include "../lean/OrbDesktop/c/sidebar_host.h"
 
 typedef struct {
@@ -11,10 +12,11 @@ typedef struct {
     GString *rows;
     char *scope;
     cairo_surface_t *surface;
+    OrbWlSubsurface wl;
     guint idle, tick, animation;
     int width, height, scale, scroll, limit;
     double scroll_pos;
-    gboolean light, can_back, can_forward;
+    gboolean light, can_back, can_forward, gpu_active, gpu_disabled;
 } OrbSidebar;
 
 void orb_sidebar_invalidate(OrbSidebar *s);
