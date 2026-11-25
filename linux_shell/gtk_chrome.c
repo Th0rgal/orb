@@ -196,7 +196,7 @@ static void embedded_action(gpointer data, const char *kind, const char *target)
 GtkWidget *orb_gtk_chrome_wrap(GtkWidget *win, GtkWidget *wv, WebKitUserContentManager *ucm, unsigned port, const char *token) {
     OrbGtkChrome *c = g_new0(OrbGtkChrome, 1); c->win = win; c->wv = wv; c->port = port; c->jsc = jsc_context_new(); c->sse_buf = g_string_sized_new(1024); snprintf(c->token, sizeof(c->token), "%s", token ? token : "");
     orb_gtk_bind_keyboard_focus(win); c->css = gtk_css_provider_new(); orb_gtk_apply_theme(c->css, FALSE);
-    gtk_style_context_add_provider_for_screen(gtk_widget_get_screen(win), GTK_STYLE_PROVIDER(c->css), GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
+    gtk_style_context_add_provider_for_screen(gtk_widget_get_screen(win), GTK_STYLE_PROVIDER(c->css), GTK_STYLE_PROVIDER_PRIORITY_USER + 1);
     if (ORB_EMBEDDED) c->sb_list = c->sb_box = orb_leanui_new(wv, embedded_action, c); else build_classic_sidebar(c);
     c->paned = gtk_paned_new(GTK_ORIENTATION_HORIZONTAL); gtk_style_context_add_class(gtk_widget_get_style_context(c->paned), "orb-paned"); gtk_paned_pack1(GTK_PANED(c->paned), c->sb_box, FALSE, FALSE); gtk_paned_pack2(GTK_PANED(c->paned), wv, TRUE, FALSE); gtk_paned_set_position(GTK_PANED(c->paned), 220);
     c->palette = ORB_EMBEDDED ? orb_leanui_palette_new(c->paned, wv, port, c->token, embedded_action, c) : c->paned;

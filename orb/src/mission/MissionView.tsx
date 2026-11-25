@@ -816,7 +816,7 @@ export function NativeMissionView(p: { id: string; active?: boolean; launch?:Lau
     });
   };
   const applyLive = (ev: StreamEvent) => applyLiveBatch([ev]);
-  const resync = async (fresh = false) => {
+  const resync = async (fresh = false, forceFull = false) => {
     if(disposed||!p.id)return;
     if (replaying) { refreshAgain ||= fresh; return; }
     replaying = true;
@@ -837,7 +837,7 @@ export function NativeMissionView(p: { id: string; active?: boolean; launch?:Lau
         }
         setMission(prev => (prev ? { ...prev, local_sync_pending: false, local_sync_error: null } : prev));
       }
-      const snap = await (fresh ? refreshTranscript(p.id) : loadTranscript(p.id));
+      const snap = await (fresh ? refreshTranscript(p.id, forceFull) : loadTranscript(p.id));
       if(disposed)return;
       history = snap.stream;
       liveEvents=heldAfterHistory(history,liveEvents);
@@ -930,7 +930,7 @@ export function NativeMissionView(p: { id: string; active?: boolean; launch?:Lau
       const manual = Boolean((ev as CustomEvent<{ manual?: boolean }> | undefined)?.detail?.manual);
       reloadInFlight = true;
       if (manual) setRefreshing(true);
-      try { await Promise.all([refresh(), resync(true)]); }
+      try { await Promise.all([refresh(), resync(true, manual)]); }
       finally {
         reloadInFlight = false;
         if (manual) setRefreshing(false);
