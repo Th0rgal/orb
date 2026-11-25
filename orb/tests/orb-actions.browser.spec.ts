@@ -420,6 +420,67 @@ test("Concurrency limits expand inside Agents settings and preserve the draft", 
   await page.screenshot({ path: "artifacts/orb-execution-settings.png" });
 });
 
+test("Local agents summarizes large OpenCode model catalogs compactly without row blowup", async ({ page }) => {
+  await page.addInitScript(() => {
+    const routedModels: [string, string][] = [
+      ["orbrouter/builtin/smart", "Routing — Smart"],
+      ["orbrouter/builtin/fast", "Routing — Fast"],
+      ...Array.from({ length: 60 }, (_, i) => [
+        `orbrouter/claude-model-${i}`,
+        `Orb Router — claude-model-${i}`,
+      ] as [string, string]),
+    ];
+    let overrides: Record<string, string> = {};
+    (window as any).__TAURI__ = {
+      core: {
+        invoke: async (name: string, args?: any) => {
+          if (name === "local_agents_scan") {
+            overrides = args?.request?.overrides ?? {};
+            return [
+              { id: "claudecode", bin: "claude", path: "/etc/profiles/per-user/thomas/bin/claude", version: "2.1.12 (Claude Code)", installed: true, plan_supported: true, models: [["claude-sonnet-5-5", "Claude Sonnet 5.5"], ["claude-opus-5-5", "Claude Opus 5.5"]] },
+              { id: "codex", bin: "codex", path: "/etc/profiles/per-user/thomas/bin/codex", version: "codex-cli 0.46.0", installed: true, plan_supported: true, models: [] },
+              { id: "grok", bin: "grok", path: null, version: null, installed: false, plan_supported: false, models: [] },
+              { id: "opencode", bin: "opencode", path: overrides.opencode || "/etc/profiles/per-user/thomas/bin/opencode", version: "opencode v2.2.7", installed: true, plan_supported: true, models: routedModels },
+              { id: "antigravity", bin: "agy", path: "/etc/profiles/per-user/thomas/bin/agy", version: "agy 1.4.2", installed: true, plan_supported: false, models: Array.from({ length: 6 }, (_, i) => [`g-${i}`, `Gemini ${i}`]) },
+              { id: "vibe", bin: "vibe-acp", path: null, version: null, installed: false, plan_supported: false, models: [], auth_error: null },
+            ];
+          }
+          if (name === "local_opencode_models") return routedModels;
+          if (name === "local_claude_models") return [["claude-sonnet-5-5", "Claude Sonnet 5.5"], ["claude-opus-5-5", "Claude Opus 5.5"]];
+          if (name === "local_antigravity_models") return Array.from({ length: 6 }, (_, i) => [`g-${i}`, `Gemini ${i}`]);
+          return null;
+        },
+      },
+    };
+  });
+  await setup(page);
+  await page.getByRole("button", { name: /Settings/ }).click();
+  await page.locator('[data-settings-section="agents"]').click();
+  await page.getByRole("tab", { name: "Local agents" }).click();
+
+  const card = page.locator(".local-agents-card");
+  const openCodeRow = card.locator(".s-row").filter({ hasText: "OpenCode" });
+  await expect(openCodeRow).toContainText("v2.2.7 · 62 models");
+  await expect(openCodeRow).toContainText("/etc/profiles/per-user/thomas/bin/opencode");
+  await expect(openCodeRow).not.toContainText("Orb Router — claude-model-0");
+  await expect(openCodeRow).not.toContainText("opencode v2.2.7");
+
+  const box = await openCodeRow.boundingBox();
+  expect(box).not.toBeNull();
+  expect(box!.height).toBeLessThan(80);
+
+  // Clean rows stay quiet without redundant Save buttons; typing reveals Save, and saved overrides offer Reset.
+  await expect(openCodeRow.getByRole("button", { name: "Save" })).toHaveCount(0);
+  const pathInput = openCodeRow.getByLabel("OpenCode path");
+  await pathInput.fill("/custom/bin/opencode");
+  await expect(openCodeRow.getByRole("button", { name: "Save" })).toBeVisible();
+  await openCodeRow.getByRole("button", { name: "Save" }).click();
+  await expect(openCodeRow).toContainText("/custom/bin/opencode");
+  await expect(openCodeRow.getByRole("button", { name: "Reset OpenCode path" })).toBeVisible();
+  await openCodeRow.getByRole("button", { name: "Reset OpenCode path" }).click();
+  await expect(openCodeRow).toContainText("/etc/profiles/per-user/thomas/bin/opencode");
+});
+
 
 test("folder rename changes the real path, carries its agents via server cascade, and supports cancellation", async ({ page }) => {
   await setup(page);

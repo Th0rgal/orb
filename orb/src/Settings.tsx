@@ -554,8 +554,31 @@ function BackupRestoreCard() {
   );
 }
 
+export function formatLocalAgentVersion(version?: string | null): string | null {
+  const clean = version
+    ?.trim()
+    .replace(/^(?:claude(?:\s+code)?|codex(?:-cli)?|opencode|antigravity(?:\s+cli)?|agy|grok|mistral\s+vibe|vibe(?:-acp)?)\s+/i, "")
+    .replace(/\s*\((?:claude\s+code|antigravity|opencode|codex)\)\s*$/i, "")
+    .trim();
+  return clean || null;
+}
+
+export function formatLocalAgentModelSummary(
+  id: string,
+  installed?: boolean,
+  models?: ReadonlyArray<readonly [string, string]>,
+  authError?: string | null,
+): string | null {
+  if (!installed || authError) return null;
+  const count = models?.length ?? 0;
+  if (id === "antigravity") return `${count} account ${count === 1 ? "model" : "models"}`;
+  if (!count) return null;
+  return `${count} ${count === 1 ? "model" : "models"}`;
+}
+
 function LocalAgentsCard() {
   const [busy, setBusy] = createSignal(false);
+  const [saved, setSaved] = createSignal<Record<string, string>>(pathOverrides());
   const [drafts, setDrafts] = createSignal<Record<string, string>>(pathOverrides());
   const scan = async () => {
     setBusy(true);
@@ -567,36 +590,110 @@ function LocalAgentsCard() {
   };
   if (!localInstalled().length) void scan();
   const row = (id: string) => localInstalled().find((item) => item.id === id);
-  const save = (id: string) => {
-    setPathOverride(id, drafts()[id] ?? "");
+  const save = (id: string, nextValue = drafts()[id] ?? "") => {
+    const trimmed = nextValue.trim();
+    setPathOverride(id, trimmed);
+    setSaved(pathOverrides());
+    setDrafts((prev) => ({ ...prev, [id]: trimmed }));
     void scan();
   };
   return (
-    <Card title="Local agents">
+    <Card title="Local agents" class="local-agents-card">
       <Row title="This computer" desc="CLIs Orb can launch here. A blank path uses whatever is on PATH.">
-        <button class="s-btn" disabled={busy()} onClick={() => void scan()}>
+        <button type="button" class="s-btn" disabled={busy()} onClick={() => void scan()}>
           {busy() ? "Scanning…" : "Scan"}
         </button>
       </Row>
       <For each={HARNESS_IDS}>
         {(id) => {
           const found = () => row(id);
+          const name = harnessName(id);
+          const subhead = () =>
+            [
+              found()?.installed ? formatLocalAgentVersion(found()?.version) : null,
+              formatLocalAgentModelSummary(id, found()?.installed, found()?.models, found()?.auth_error),
+            ]
+              .filter(Boolean)
+              .join(" · ");
+          const modelHint = () => {
+            const list = found()?.models;
+            return list && list.length > 0 && list.length <= 8
+              ? list.map(([, label]) => label).join(", ")
+              : undefined;
+          };
+          const dirty = () => (drafts()[id] ?? "").trim() !== (saved()[id] ?? "").trim();
+          const hasSavedOverride = () => Boolean((saved()[id] ?? "").trim());
           return (
-            <Row title={harnessName(id)} desc={found()?.installed ? `${found()?.version ?? "installed"} · ${found()?.path}${found()?.auth_error ? ` · ${found()?.auth_error}` : id === "antigravity" ? ` · ${found()?.models?.length ?? 0} account models` : found()?.models?.length ? ` · ${found()!.models!.map(([, label]) => label.replace(/^Claude\s+/, "")).join(", ")}` : ""}` : found()?.auth_error ? [found()?.path, found()?.auth_error].filter(Boolean).join(" · ") : "Not found"}>
+            <Row
+              title={
+                <span class="ut-status la-head">
+                  <span
+                    class={`ut-dot ${found()?.installed && !found()?.auth_error ? "active" : found()?.auth_error ? "pending" : ""}`}
+                    aria-hidden="true"
+                  />
+                  <span class="la-name">{name}</span>
+                  <Show when={subhead()}>
+                    <span class="la-meta" title={modelHint()}>{subhead()}</span>
+                  </Show>
+                </span>
+              }
+              desc={
+                found()?.installed ? (
+                  <>
+                    <code class="la-path" title={found()?.path ?? undefined}>
+                      {found()?.path ?? "Installed"}
+                    </code>
+                    <Show when={found()?.auth_error}>
+                      <span class="la-err">{found()?.auth_error}</span>
+                    </Show>
+                  </>
+                ) : found()?.auth_error ? (
+                  <>
+                    <Show when={found()?.path}>
+                      <code class="la-path" title={found()?.path ?? undefined}>
+                        {found()?.path}
+                      </code>
+                    </Show>
+                    <span class="la-err">{found()?.auth_error}</span>
+                  </>
+                ) : busy() && !localInstalled().length ? (
+                  "Checking PATH…"
+                ) : (
+                  "Not found"
+                )
+              }
+            >
               <input
                 class="s-input"
                 autocapitalize="off"
                 autocorrect="off"
                 spellcheck={false}
-                aria-label={`${harnessName(id)} path`}
+                aria-label={`${name} path`}
                 placeholder="Path override"
                 value={drafts()[id] ?? ""}
                 onInput={(e) => setDrafts({ ...drafts(), [id]: e.currentTarget.value })}
-                onKeyDown={(e) => e.key === "Enter" && save(id)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") save(id);
+                  else if (e.key === "Escape" && dirty()) {
+                    setDrafts((prev) => ({ ...prev, [id]: saved()[id] ?? "" }));
+                  }
+                }}
               />
-              <button class="s-btn" onClick={() => save(id)}>
-                Save
-              </button>
+              <Show when={dirty()}>
+                <button type="button" class="s-btn primary" onClick={() => save(id)}>
+                  Save
+                </button>
+              </Show>
+              <Show when={!dirty() && hasSavedOverride()}>
+                <button
+                  type="button"
+                  class="s-btn"
+                  aria-label={`Reset ${name} path`}
+                  onClick={() => save(id, "")}
+                >
+                  Reset
+                </button>
+              </Show>
             </Row>
           );
         }}

@@ -368,3 +368,21 @@ it('does not mark a local run settled when native recovery is blocked by a runni
   }
 });
 
+describe('Local agents settings formatting', () => {
+  it('strips redundant binary prefixes from CLI version strings and summarizes large OpenCode catalogs cleanly', async () => {
+    const { formatLocalAgentVersion, formatLocalAgentModelSummary } = await import('../src/Settings');
+    expect(formatLocalAgentVersion('opencode v2.2.7')).toBe('v2.2.7');
+    expect(formatLocalAgentVersion('2.1.12 (Claude Code)')).toBe('2.1.12');
+    expect(formatLocalAgentVersion('codex-cli 0.46.0')).toBe('0.46.0');
+    expect(formatLocalAgentVersion('agy 1.4.2')).toBe('1.4.2');
+    expect(formatLocalAgentVersion('')).toBeNull();
+
+    const manyOpenCode = Array.from({ length: 64 }, (_, i) => [`orbrouter/model-${i}`, `Orb Router — model-${i}`] as const);
+    expect(formatLocalAgentModelSummary('opencode', true, manyOpenCode, null)).toBe('64 models');
+    expect(formatLocalAgentModelSummary('opencode', true, [['orbrouter/builtin/smart', 'Routing — Smart']], null)).toBe('1 model');
+    expect(formatLocalAgentModelSummary('antigravity', true, [], null)).toBe('0 account models');
+    expect(formatLocalAgentModelSummary('antigravity', true, [['g-1', 'Gemini']], null)).toBe('1 account model');
+    expect(formatLocalAgentModelSummary('antigravity', true, [['g-1', 'Gemini']], 'Login required')).toBeNull();
+    expect(formatLocalAgentModelSummary('codex', true, [], null)).toBeNull();
+  });
+});
