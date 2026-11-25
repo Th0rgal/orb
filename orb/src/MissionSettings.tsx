@@ -2,6 +2,7 @@ import { For, Show, createMemo, createSignal, onCleanup, onMount } from "solid-j
 import { getMissionResources, isConnected, type MissionResourcesResponse } from "./api";
 import { ErrorToast } from "./toast";
 import * as Ic from "./icons";
+import { MissionPermissionsCard } from "./MissionPermissionsCard";
 import { MissionStatsSection } from "./MissionStatsSection";
 import { pollWhileVisible } from "./poll";
 import { SettingsCard, SettingsRow } from "./SettingsCard";
@@ -1087,6 +1088,7 @@ export function MissionSettings(p: {
           )}
         </Show>
 
+        <MissionPermissionsCard missionId={p.missionId} />
         <MissionStatsSection missionId={p.missionId} titleOf={p.titleOf} load={p.loadStats} />
       </div>
     </div>

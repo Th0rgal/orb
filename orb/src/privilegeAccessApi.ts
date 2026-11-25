@@ -276,6 +276,47 @@ export const revokePrivilegeAccess = (id: string) => {
   );
 };
 
+/** Pre-authorize a time-bounded privileged lease scoped strictly to one mission (1 hardware tap). */
+export const grantMissionPrivilegeAccess = async (opts: {
+  missionId: string;
+  scope: PrivilegeScope;
+  targetHost: string;
+  ttlMinutes: number;
+  allowedUnit?: string;
+  reason?: string;
+}): Promise<PrivilegeRequest> => {
+  const targetHost = opts.targetHost.trim() || "self";
+  const unit = opts.allowedUnit?.trim();
+  const created = await api<RawPrivilegeRequest & { request_id?: string }>("/api/privilege-access/request", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      requester_mission_id: opts.missionId,
+      scope: opts.scope,
+      target_host: targetHost,
+      ttl_minutes: opts.ttlMinutes,
+      session_scoped: false,
+      allowed_units: unit ? [unit] : [],
+      reason: opts.reason?.trim() || "Pre-authorized from Mission Settings",
+    }),
+  });
+  const reqId = String(created?.id || created?.request_id || "");
+  if (!reqId) throw new Error("Core did not return a privilege request ID.");
+  const req: PrivilegeRequest = {
+    id: reqId,
+    requester_mission_id: opts.missionId,
+    target_host: targetHost,
+    scope: opts.scope,
+    allowed_unit: unit || null,
+    reason: opts.reason?.trim() || "Pre-authorized from Mission Settings",
+    session_scoped: false,
+    ttl_minutes: opts.ttlMinutes,
+    state: "pending",
+    created_at: created?.created_at || new Date().toISOString(),
+  };
+  return approvePrivilegeAccess(req);
+};
+
 export const triggerBunker = (
   level: 1 | 2 = 2,
   reason = "Operator manual Fleet Bunker lockdown",
