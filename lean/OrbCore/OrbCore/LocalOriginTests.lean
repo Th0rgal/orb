@@ -16,17 +16,25 @@ private def legacyMissionsDdl : String :=
   "placement_revision INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, origin TEXT, " ++
   "resumable INTEGER NOT NULL DEFAULT 0, tags TEXT, history_json TEXT NOT NULL DEFAULT '[]', " ++
   "authority_mode TEXT NOT NULL DEFAULT 'writer', placement_kind TEXT NOT NULL DEFAULT 'managed', " ++
-  "owner_user_id TEXT NOT NULL DEFAULT '', state_revision INTEGER NOT NULL DEFAULT 1);"
+  "owner_user_id TEXT NOT NULL DEFAULT '', state_revision INTEGER NOT NULL DEFAULT 1);" ++
+  "CREATE TABLE IF NOT EXISTS mission_runs (run_id TEXT PRIMARY KEY NOT NULL, id TEXT, " ++
+  "mission_id TEXT NOT NULL, generation INTEGER NOT NULL, execution_state TEXT NOT NULL, " ++
+  "owner_actor_id TEXT NOT NULL, scope_unit TEXT, terminal_reason TEXT, remote_job_id TEXT, " ++
+  "started_at TEXT NOT NULL, heartbeat_at TEXT NOT NULL, updated_at TEXT, " ++
+  "UNIQUE(mission_id, generation));"
 
 def run (root : String) : IO Unit := do
   IO.FS.createDirAll root
   let .ok db ← openSqliteDb s!"{root}/local-origin-legacy.db" legacyMissionsDdl
     | throw (IO.userError "local origin: legacy db open failed")
   let mid := "624d42f0-3f2f-47ab-8c56-58d252049855"
+  let runId := "a1b2c3d4-3f2f-47ab-8c56-58d252049855"
   let params := #[mid, "Local mission", "active", "opencode", "orbrouter/builtin/smart", "", "/home/u/.orb/workspaces/now",
     "now", "", "2026-11-16T16:10:00Z", "2026-11-16T16:10:00Z", "[\"pr-writer\",\"placement:client\"]", "[]", "admin"]
   let r ← execParamQuery db OrbCore.ResourcesAndSystem.localOriginMissionUpsertSql params
   check r.isOk s!"upsert into the legacy mission table fails: {match r with | .error e => e | .ok _ => ""}"
+  let runRes ← insertMissionRun db runId mid "1" "running" "" "" "2026-11-16T16:10:00Z" true "orb-client"
+  check runRes.isOk s!"insert into legacy mission_runs fails: {match runRes with | .error e => e | .ok _ => ""}"
   let .ok rows ← execParamQuery db "SELECT project, placement_kind, workspace_id FROM missions WHERE id=?1;" #[mid]
     | throw (IO.userError "local origin: read back failed")
   check (rows.size == 2) "a local mission is stored as a mission row"
@@ -34,9 +42,15 @@ def run (root : String) : IO Unit := do
   -- A second sync of the same mission updates, never duplicates.
   let r2 ← execParamQuery db OrbCore.ResourcesAndSystem.localOriginMissionUpsertSql (params.set! 2 "completed")
   check r2.isOk "a repeated sync of the same mission succeeds"
+  let runRes2 ← insertMissionRun db runId mid "1" "terminal" "client_runner" "" "2026-11-16T16:11:00Z" true "orb-client"
+  check runRes2.isOk s!"repeated insert into legacy mission_runs fails: {match runRes2 with | .error e => e | .ok _ => ""}"
   let .ok rows2 ← execParamQuery db "SELECT status FROM missions WHERE id=?1;" #[mid]
     | throw (IO.userError "local origin: second read back failed")
   check (rows2.size == 2 && (rows2[1]!)[0]? == some "completed") "a repeated sync updates the status"
+  let .ok runRows ← execParamQuery db "SELECT run_id, id, execution_state, terminal_reason FROM mission_runs WHERE mission_id=?1;" #[mid]
+    | throw (IO.userError "local origin: mission_runs read back failed")
+  check (runRows.size == 2 && (runRows[1]!)[0]? == some runId && (runRows[1]!)[1]? == some runId && (runRows[1]!)[2]? == some "terminal" && (runRows[1]!)[3]? == some "client_runner")
+    "legacy mission_runs keeps run_id/id in sync and updates terminal state"
   IO.println "PASS local_origin_upsert_on_legacy_schema"
 
 end OrbCore.LocalOriginTests

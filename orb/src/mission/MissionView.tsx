@@ -924,11 +924,17 @@ export function NativeMissionView(p: { id: string; active?: boolean; launch?:Lau
       setRemoteLiveEdits([]);
     }
     if(!id || !isActive)return;
-    const reload = async () => {
-      if (p.active === false || refreshing()) return;
-      setRefreshing(true);
+    let reloadInFlight = false;
+    const reload = async (ev?: Event) => {
+      if (p.active === false || reloadInFlight) return;
+      const manual = Boolean((ev as CustomEvent<{ manual?: boolean }> | undefined)?.detail?.manual);
+      reloadInFlight = true;
+      if (manual) setRefreshing(true);
       try { await Promise.all([refresh(), resync(true)]); }
-      finally { setRefreshing(false); }
+      finally {
+        reloadInFlight = false;
+        if (manual) setRefreshing(false);
+      }
     };
     window.addEventListener("orb:refresh", reload);
     onCleanup(() => window.removeEventListener("orb:refresh", reload));
