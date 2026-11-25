@@ -30,7 +30,15 @@ def run : IO Unit := do
   check (cx.model == some "gpt-6-astra") "codex model is bare"
   check (cx.args.contains s!"model_providers.sandboxed.base_url=\"{base}/v1\"") "codex provider points at Core's router"
   check (envOf cx "SANDBOXED_PROXY_API_KEY" == some "tok") "codex gets the mission proxy token"
-  let other := harnessProxySetup "grok" "grok-5" base "tok"
-  check (other.env.isEmpty && other.args.isEmpty && other.model == some "grok-5") "other harnesses are unchanged"
+  let gk := harnessProxySetup "grok" "xai/grok-5" base "tok"
+  check (gk.model == some "grok-5") "grok model strips xai/ prefix"
+  check (envOf gk "GROK_XAI_API_BASE_URL" == some base && envOf gk "XAI_API_KEY" == some "tok")
+    "grok talks to Core's router with the mission token"
+  let other := harnessProxySetup "custom" "custom-1" base "tok"
+  check (other.env.isEmpty && other.args.isEmpty && other.model == some "custom-1") "other harnesses are unchanged"
+  let relayUrl := OrbCore.AccountVpnRelay.proxyUrl "secret-key" 10855 "antigravity" "acct-1" "10.88.0.1" "socks5h"
+  check (relayUrl.isSome && ((relayUrl.getD "").startsWith "socks5h://") &&
+    ((relayUrl.getD "").splitOn "@10.88.0.1:10855").length == 2)
+    "mesh AirVPN relay URL uses socks5h and configured mesh host"
 
 end OrbCore.HarnessProxyTests

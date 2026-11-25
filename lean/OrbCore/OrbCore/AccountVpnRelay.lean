@@ -10,11 +10,13 @@ domain-separated MAC that remains usable when Core restarts on its fixed port. -
 def password (operatorKey user : String) : String :=
   hmacSha256Hex operatorKey ("orb-airvpn-socks-v1\x00" ++ user)
 
-def proxyUrl (operatorKey : String) (port : UInt16) (provider account : String) : Option String := do
+def proxyUrl (operatorKey : String) (port : UInt16) (provider account : String)
+    (host : String := "127.0.0.1") (scheme : String := "socks5") : Option String := do
   let user := provider ++ "/" ++ account
+  let effHost := host.trimAscii.toString
   guard (!operatorKey.isEmpty && port != 0 && !provider.isEmpty && !provider.contains '/' &&
-    !account.isEmpty && user.utf8ByteSize ≤ 255)
-  return s!"socks5://{OrbBin.HttpClient.urlEncodeComponent user}:{password operatorKey user}@127.0.0.1:{port}"
+    !account.isEmpty && !effHost.isEmpty && user.utf8ByteSize ≤ 255)
+  return s!"{scheme}://{OrbBin.HttpClient.urlEncodeComponent user}:{password operatorKey user}@{effHost}:{port}"
 
 private def auth? (fd : Fd) (key : String) (deadline : Nat) : IO (Option (String × String)) := do
   let some hello ← readSocksBytes fd 2 deadline | return none
@@ -89,10 +91,12 @@ structure Listener where
   stopping : IO.Ref Bool
   work : Task (Except IO.Error Unit)
 
-def start (port : UInt16) (key : String) (resolve : String → String → IO (Except String AccountVpnPool.Gateway)) :
+def start (port : UInt16) (key : String) (resolve : String → String → IO (Except String AccountVpnPool.Gateway))
+    (bindHost : String := "127.0.0.1") :
     IO (Except String Listener) := do
   if key.isEmpty then return .error "vpn_relay_key_unavailable"
-  let .ok (fd, bound) ← tcpListen "127.0.0.1" port 64 | return .error "vpn_relay_bind_failed"
+  let effBind := let b := bindHost.trimAscii.toString; if b.isEmpty then "127.0.0.1" else b
+  let .ok (fd, bound) ← tcpListen effBind port 64 | return .error "vpn_relay_bind_failed"
   let stopping ← IO.mkRef false
   let work ← IO.asTask (prio := .dedicated) do
     let workers ← IO.mkRef (#[] : Array (Task (Except IO.Error Unit)))
@@ -114,15 +118,16 @@ def start (port : UInt16) (key : String) (resolve : String → String → IO (Ex
 /-- The configured port must survive Core restarts because the credential owner
 stores the relay URL. Only a current VPN preference can open its tunnel. -/
 def configured (rawPort? : Option String) (operatorKey dir : String) (secure : Bool)
-    (pool : AccountVpnPool.Pool) (store : OrbCore.Store.CoreStore) :
+    (pool : AccountVpnPool.Pool) (store : OrbCore.Store.CoreStore)
+    (bindHost : String := "127.0.0.1") :
     IO (Except String (Option Listener)) := do
   let some raw := rawPort? | return .ok none
   let some n := raw.toNat? | return .error "invalid_airvpn_relay_port"
   if n == 0 || n > 65535 || !secure || operatorKey.isEmpty || dir.isEmpty then
     return .error "invalid_airvpn_relay_configuration"
-  let listener ← start n.toUInt16 operatorKey fun provider account => do
+  let listener ← start n.toUInt16 operatorKey (fun provider account => do
     let .ok (some pref) ← AccountVpnRoutes.read store.missionsDb account | return .error "vpn_route_unavailable"
-    AccountVpnPool.allocateGateway pool store.rootDir dir store.missionsDb account provider pref
+    AccountVpnPool.allocateGateway pool store.rootDir dir store.missionsDb account provider pref) bindHost
   return listener.map some
 
 def Listener.stop (listener : Listener) : IO Unit := do
