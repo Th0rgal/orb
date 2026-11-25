@@ -637,16 +637,20 @@ def dispatchMcpToolCall
     if a.isEmpty || b.isEmpty then return false
     if ← missionInTree a b then return true
     missionInTree b a
-  let checkTenantMission (mid : String) (allowParticipant : Bool) : IO Bool := do
+  let checkTenantMission (mid : String) (allowParticipant : Bool) (allowReadGrant : Bool := false) : IO Bool := do
     if !tenantScoped then return true
     let (exists_, owns, shares) ← getMissionRelationship store mid callerUserId
     if !exists_ then return false
     if allowParticipant && shares then return true
     if !owns then return false
     -- A mission session acts inside its own lineage, not every mission the same
-    -- user happens to own (`R16`: unrelated same-user trees stay isolated).
+    -- user happens to own (`R16`: unrelated same-user trees stay isolated unless
+    -- explicitly bridged by an approved cross-mission read grant).
     if callerMid.isEmpty || claims.isExternal then return true
-    sameMissionTree callerMid mid
+    if ← sameMissionTree callerMid mid then return true
+    if allowReadGrant then
+      return ← hasApprovedMissionReadAccess store.rootDir callerMid mid nowEpochSec ("mission:" ++ callerMid)
+    return false
   if toolName == "get_consult_result" then
     match args.field? "mission_ids" with
     | none | some .null => pure ()
@@ -656,7 +660,8 @@ def dispatchMcpToolCall
     let mid := (args.fieldStr? "mission_id").orElse (fun _ =>
       (args.fieldStr? "target_mission_id").orElse (fun _ => args.fieldStr? "id")) |>.getD callerMid
     unless mid.isEmpty && toolName == "get_budget" do
-      unless ← checkTenantMission mid (missionReadTools.contains toolName || collaborateTools.contains toolName) do
+      let isRead := missionReadTools.contains toolName
+      unless ← checkTenantMission mid (isRead || collaborateTools.contains toolName) isRead do
         return mcpErr "not_found" "Mission not found"
   if toolName == "start_mission" || toolName == "consult_model" then
     let parent := (args.fieldStr? "parent_mission_id").getD callerMid
