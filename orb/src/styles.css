@@ -1924,7 +1924,8 @@ button.fork-trigger:hover { color: var(--fg); }
 .file-actions summary { cursor:pointer;padding:5px;list-style:none; }
 .file-actions>div { position:absolute;right:0;top:100%;background:var(--bg);border:1px solid var(--stroke);box-shadow:var(--shadow-lg);border-radius: var(--radius-sm);padding:5px;z-index:5;min-width:140px; }
 .file-actions button { display:block;width:100%;text-align:left; }
-@media(max-width:1150px) { .app[data-files-open="true"] { grid-template-columns:var(--sb-w) 1fr; } .app.sb-hidden[data-files-open="true"] { grid-template-columns:0 1fr; } .file-panel { position:fixed;right:0;top:var(--tb-h);bottom:0;width:min(780px,calc(100vw - var(--sb-w)));background:var(--bg);z-index:30;box-shadow:var(--shadow-lg); } .app.sb-hidden > .file-panel { width:min(95vw,780px); } .file-panel-resize { display:none; } }
+@media(max-width:1150px) { .app[data-files-open="true"]:not(:has(> .file-panel.btw-sidebar)) { grid-template-columns:var(--sb-w) 1fr; } .app.sb-hidden[data-files-open="true"]:not(:has(> .file-panel.btw-sidebar)) { grid-template-columns:0 1fr; } .file-panel:not(.btw-sidebar) { position:fixed;right:0;top:var(--tb-h);bottom:0;width:min(780px,calc(100vw - var(--sb-w)));background:var(--bg);z-index:30;box-shadow:var(--shadow-lg); } .app.sb-hidden > .file-panel:not(.btw-sidebar) { width:min(95vw,780px); } .file-panel:not(.btw-sidebar) > .file-panel-resize { display:none; } }
+@media(max-width:780px) { .app[data-files-open="true"] { grid-template-columns:var(--sb-w) 1fr; } .app.sb-hidden[data-files-open="true"] { grid-template-columns:0 1fr; } .file-panel.btw-sidebar { position:fixed;right:0;top:var(--tb-h);bottom:0;width:min(780px,calc(100vw - var(--sb-w)));background:var(--bg);z-index:30;box-shadow:var(--shadow-lg); } .app.sb-hidden > .file-panel.btw-sidebar { width:min(95vw,780px); } .file-panel-resize { display:none; } }
 @media(max-width:720px) { .file-tree { width:160px; } .file-preview { padding:12px; } .file-panel { width:100vw; } .file-panel.maximized { left:0; } }
 
 .file-source-code code { background:none;padding:0;border-radius:0;font:inherit; }
@@ -2686,7 +2687,7 @@ select.orb-select-native:disabled { cursor: default; }
 
 .btw-actions { display:flex; align-items:center; gap:4px; }
 .btw-drag-strip { position:absolute; top:0; left:0; right:0; height:var(--tb-h); z-index:2; -webkit-app-region:drag; }
-@media(max-width:1150px) { .btw-drag-strip { display:none; } }
+@media(max-width:780px) { .btw-drag-strip { display:none; } }
 .btw-sidebar-content, .btw-sidebar-content > div { height:100%; min-height:0; }
 .btw-sidebar .btw-panel { display:flex; flex-direction:column; height:100%; margin:0; border:0; border-radius:0; box-shadow:none; background:transparent; }
 .btw-sidebar .btw-thread { flex:1; min-height:0; max-height:none; }
@@ -2701,7 +2702,7 @@ select.orb-select-native:disabled { cursor: default; }
 .btw-sidebar .btw-panel form { margin-bottom:var(--composer-bottom-space,46px); }
 .btw-sidebar .btw-actions { display:none; }
 /* Overlay layouts cover the toolbar, so keep a reachable close control. */
-@media(max-width:1150px) {
+@media(max-width:780px) {
   .btw-sidebar .btw-actions { display:flex; }
 }
 
@@ -2727,7 +2728,7 @@ select.orb-select-native:disabled { cursor: default; }
 .btw-sidebar .btw-panel .btw-composer-dock form { box-shadow:0 4px 18px rgb(0 0 0 / 8%); }
 .btw-sidebar .btw-composer-dock { margin:0 24px; padding-bottom:max(16px, calc(var(--composer-bottom-space, 44px) - 28px)); }
 @media(max-width:720px) { .btw-sidebar .btw-composer-dock { margin-left:16px; margin-right:16px; } }
-@media(max-width:1150px) {
+@media(max-width:780px) {
   .btw-sidebar .btw-panel header { display:flex; padding:8px 16px; border:0; justify-content:flex-end; }
   .btw-sidebar .btw-panel header > div:first-child { display:none; }
   .btw-sidebar .btw-thread { padding-top:4px; }
@@ -2737,7 +2738,7 @@ select.orb-select-native:disabled { cursor: default; }
    mid-word, with its own controls directly under the conversation header's. It now takes
    the whole content area below the title bar on an opaque surface. The conversation stays
    mounted and focusable underneath, so shortcuts that act on it keep working. */
-@media(max-width:1150px) {
+@media(max-width:780px) {
   .app:not([data-files-split="true"]) > .file-panel.btw-sidebar:not(.maximized) { left:var(--sb-w); right:0; width:auto; border-left:0; background:var(--bg); box-shadow:none; }
   .app.sb-hidden:not([data-files-split="true"]) > .file-panel.btw-sidebar:not(.maximized) { left:0; width:auto; border-left:0; }
 }
@@ -4275,7 +4276,7 @@ select.orb-select-native:disabled { cursor: default; }
 .app[data-files-split="true"] .tb-left { position:static; width:auto; margin-left:var(--tb-traffic-margin); height:auto; }
 .app[data-files-split="true"] > .file-panel:not(.maximized) { grid-row:1 / 3; position:relative; inset:auto; width:auto; box-shadow:none; }
 .app[data-files-split="true"] > .file-panel > .file-panel-resize { display:none; }
-@media(max-width:1150px) { .app[data-files-split="true"], .app.sb-hidden[data-files-split="true"] { grid-template-columns:0 minmax(0,1fr) minmax(0,1fr); } }
+@media(max-width:780px) { .app[data-files-split="true"], .app.sb-hidden[data-files-split="true"] { grid-template-columns:0 minmax(0,1fr) minmax(0,1fr); } }
 
 /* Settings sections (settingsNav.ts): one page per section, panels folded in. */
 .settings-page .settings-subtitle { margin: -10px 8px 18px; }
