@@ -34,11 +34,16 @@ test('compact quota rows, separate account actions and API key add/edit',async({
  expect(menuBox!.x+menuBox!.width).toBeLessThanOrEqual(cardBox!.x+cardBox!.width+1);
  if (process.env.ORB_REPORT_DIR) await page.screenshot({ path: `${process.env.ORB_REPORT_DIR}/inference-menu-dark.png`, animations: 'disabled', fullPage: true });
  await menuBtn.click();await expect(popup).toHaveCount(0);
+ const mozhenzhenLink=page.getByRole('link',{name:/Compare model prices & check API authenticity on Mozhenzhen/});
+ await expect(mozhenzhenLink).toHaveAttribute('href','https://mozhenzhen.com/go/orb');
  await page.getByRole('button',{name:'Add API key',exact:true}).click();
- const dialog=page.getByRole('dialog');await dialog.locator('input').nth(0).fill('New account');await dialog.locator('input[type=password]').fill('test-only-secret');
+ const dialog=page.getByRole('dialog');
+ await expect(dialog.getByRole('link',{name:/Compare model prices & check API authenticity on Mozhenzhen/})).toHaveAttribute('href','https://mozhenzhen.com/go/orb');
+ await dialog.locator('input').nth(0).fill('New account');await dialog.locator('input[type=password]').fill('test-only-secret');
  await dialog.getByRole('button',{name:'Save',exact:true}).click();await expect(dialog).toHaveCount(0);
  expect(writes[0]).toEqual({method:'POST',body:{provider_type:'openai',name:'New account',api_key:'test-only-secret'}});
  const key=page.locator('.p-acc-wrap').filter({hasText:'Work key'});await key.getByRole('button',{name:/Actions for/}).click();await page.getByRole('menuitem',{name:'Edit API key'}).click();
+ await expect(dialog.getByRole('link',{name:/Compare model prices & check API authenticity on Mozhenzhen/})).toHaveCount(0);
  await expect(dialog.locator('input[type=password]')).toHaveValue('');await dialog.locator('input[type=password]').fill('replacement-test-key');await dialog.getByRole('button',{name:'Save',exact:true}).click();await expect(dialog).toHaveCount(0);
  expect(writes[1]).toEqual({method:'PUT',body:{name:'Work key',api_key:'replacement-test-key'}});
  await expect(account.locator('.p-acc-btn')).toHaveAttribute('aria-expanded','true');

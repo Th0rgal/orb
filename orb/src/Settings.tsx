@@ -62,6 +62,12 @@ import {
   setBackgroundSyncMode,
   type BackgroundSyncMode,
 } from "./backgroundSync";
+import {
+  PROVIDER_DIRECTORY_SETTING_DESC,
+  PROVIDER_DIRECTORY_SETTING_TITLE,
+  setShowProviderDirectoryHints,
+  showProviderDirectoryHints,
+} from "./providerDirectoryHint";
 
 const THEME_LABELS: Record<ThemePref, string> = { auto: "Auto", light: "Light", dark: "Dark" };
 const THEME_PREFS: Record<string, ThemePref> = { Auto: "auto", Light: "light", Dark: "dark" };
@@ -1131,6 +1137,13 @@ export function Settings(p: { onOpenPage?: (id: string) => void } = {}) {
               aria-label="Background sync"
               onChange={(e) => setBackgroundSyncMode(BG_SYNC_MODES[e.currentTarget.value] ?? "auto")}
             ><option>Auto</option><option>On</option><option>Off</option></Select>
+          </Row>
+          <Row title={PROVIDER_DIRECTORY_SETTING_TITLE} desc={PROVIDER_DIRECTORY_SETTING_DESC}>
+            <Toggle
+              label="Show provider directory link"
+              on={showProviderDirectoryHints()}
+              onClick={() => setShowProviderDirectoryHints(!showProviderDirectoryHints())}
+            />
           </Row>
         </Card>
         <AboutCard />
