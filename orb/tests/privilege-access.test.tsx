@@ -13,9 +13,10 @@ vi.mock('../src/deviceApproval',()=>({signedApi:vi.fn(),ApprovalCancelled:class 
 import { api, ApiError } from '../src/api';
 import { signedApi } from '../src/deviceApproval';
 import fixture from '../../shared/orb-spec/fixtures/privilege-access.json';
-import {requestTitle,requesterLabel,approvePrivilegeAccess,bunkerStateLabel,denyPrivilegeAccess,getPrivilegeAccess,lifetimeLabel,livePrivilegeGrant,revokePrivilegeAccess,scopeUnlocks,triggerBunker,unbunkerFleet,type PrivilegeRequest} from '../src/privilegeAccessApi';
+import {requestTitle,requesterLabel,approvePrivilegeAccess,bunkerStateLabel,denyPrivilegeAccess,getPrivilegeAccess,grantMissionPrivilegeAccess,lifetimeLabel,livePrivilegeGrant,revokePrivilegeAccess,scopeUnlocks,triggerBunker,unbunkerFleet,type PrivilegeRequest} from '../src/privilegeAccessApi';
 import {PrivilegeAccessPanel} from '../src/PrivilegeAccessPanel';
 import {MissionAccessPanel} from '../src/MissionAccessPanel';
+import {MissionPermissionsCard} from '../src/MissionPermissionsCard';
 import {SecretAccessPanel} from '../src/SecretAccessPanel';
 const now=Date.now();
 const iso=(ms:number)=>new Date(now+ms).toISOString();
@@ -112,5 +113,54 @@ describe('privilege access',()=>{
    await approvePrivilegeAccess(snap.requests[0]);
    expect(vi.mocked(signedApi).mock.calls[0][1]).toBe('/api/privilege-access/70d723dd-1eaa-411e-83f9-1350e448c4d7/approve');
    expect(vi.mocked(signedApi).mock.calls[1][1]).toBe('/api/privilege-access/requests/70d723dd-1eaa-411e-83f9-1350e448c4d7/approve');
+  });
+  it('pre-authorizes a time-bounded mission-scoped lease with one hardware signature', async () => {
+   vi.mocked(api).mockResolvedValueOnce({
+    id: 'req-m1',
+    requester_mission_id: 'm-123',
+    target_host: 'agent-core',
+    scope: 'service_deploy',
+    ttl_minutes: 240,
+    session_scoped: false,
+    state: 'pending',
+    created_at: iso(0),
+   });
+   vi.mocked(signedApi).mockResolvedValueOnce(
+    req({ id: 'req-m1', requester_mission_id: 'm-123', state: 'approved', session_scoped: false, ttl_minutes: 240, expires_at: iso(4 * 3600_000) }),
+   );
+   await grantMissionPrivilegeAccess({
+    missionId: 'm-123',
+    scope: 'service_deploy',
+    targetHost: 'agent-core',
+    ttlMinutes: 240,
+    allowedUnit: 'orb-core.service',
+   });
+   expect(vi.mocked(api)).toHaveBeenCalledWith(
+    '/api/privilege-access/request',
+    expect.objectContaining({
+     method: 'POST',
+     body: expect.stringContaining('"requester_mission_id":"m-123"'),
+    }),
+   );
+   expect(vi.mocked(signedApi).mock.calls[0].slice(0, 3)).toEqual([
+    'POST',
+    '/api/privilege-access/req-m1/approve',
+    { ttl_minutes: 240, session_scoped: false },
+   ]);
+  });
+  it('MissionPermissionsCard scopes leases to the current mission and renders pre-authorize form', async () => {
+   vi.mocked(api).mockResolvedValue({
+    bunker_state: 0,
+    requests: [
+     req({ id: 'mine', requester_mission_id: 'm-123', state: 'approved', scope: 'ops_read', target_host: 'spark', expires_at: iso(3_600_000) }),
+     req({ id: 'other', requester_mission_id: 'm-999', state: 'approved', scope: 'root_exec', target_host: 'agent-core', expires_at: iso(3_600_000) }),
+    ],
+    audit: [],
+    command_audit: [],
+   });
+   render(() => <MissionPermissionsCard missionId="m-123" />);
+   await waitFor(() => expect(screen.getByText('Read-only ops on spark')).toBeTruthy());
+   expect(screen.queryByText('Root on agent-core')).toBeNull();
+   expect(screen.getByRole('button', { name: /Grant/ })).toBeTruthy();
   });
 });
