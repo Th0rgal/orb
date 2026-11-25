@@ -22,7 +22,7 @@ async function openSideQuestion(page: Page) {
 }
 
 for (const theme of ["dark", "light"] as const) {
-  for (const width of [1000, 700, 390]) {
+  for (const width of [760, 700, 390]) {
     test(`side question takes the whole content area at ${width}px: ${theme}`, async ({ page }) => {
       await page.setViewportSize({ width, height: 800 });
       await openConversation(page, theme, longConversation);
