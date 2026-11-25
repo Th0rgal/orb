@@ -2276,6 +2276,14 @@ button.fork-trigger:hover { color: var(--fg); }
 .ut-dot.active { background: var(--toggle); }
 .ut-dot.pending { background: var(--warning); }
 .ut-field-err { color: var(--red); }
+.settings-body .local-agents-card .s-row-ctrl:has(> .s-input) { flex: 0 1 195px; }
+.settings-body .local-agents-card .s-row:not(:first-child) .s-row-desc { padding-left: 13px; }
+.la-head { display: flex; align-items: baseline; gap: 7px; min-width: 0; }
+.la-head > .ut-dot { align-self: center; }
+.la-name { flex: none; }
+.la-meta { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11.5px; color: var(--fg-3); font-variant-numeric: tabular-nums; }
+.la-path { display: block; padding: 0; background: none; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 11px/16px var(--mono); color: var(--fg-3); }
+.la-err { display: block; margin-top: 2px; color: var(--fg-2); overflow-wrap: anywhere; }
 .settings-body .s-btn { white-space: nowrap; }
 .settings-body .s-btn.primary { background: var(--send-bg); }
 .settings-body .s-btn:hover { background: var(--bg-active); }
@@ -2349,6 +2357,7 @@ button.fork-trigger:hover { color: var(--fg); }
  .routing-entry .routing-actions { grid-column: 3; grid-row: auto; }
  .settings-body .s-row { flex-wrap: wrap; }
  .settings-body .s-row-ctrl { max-width: 100%; }
+ .settings-body .local-agents-card .s-row-ctrl:has(> .s-input) { flex: 1 1 100%; }
 }
 
 .routing-entry > .routing-muted { margin: 0; }
