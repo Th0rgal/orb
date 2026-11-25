@@ -14,10 +14,17 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.asPaddingValues
+import androidx.compose.foundation.layout.calculateEndPadding
+import androidx.compose.foundation.layout.displayCutout
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.ime
+import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.safeDrawing
+import androidx.compose.foundation.layout.statusBars
+import androidx.compose.foundation.layout.union
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -1105,12 +1112,18 @@ fun OrbHomeScreen(
 
         // Bottom Search Bar on Projects Tab
         if (selectedTab == OrbTopTab.Projects) {
+            val cover = LocalOrbCoverScreen.current
             Box(
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
                     .fillMaxWidth()
                     .background(OrbStyle.background.copy(alpha = 0.94f))
-                    .padding(horizontal = 18.dp, vertical = 12.dp)
+                    .padding(
+                        start = if (cover.isCoverScreen) 12.dp else 18.dp,
+                        end = cover.bottomBarEndPadding(if (cover.isCoverScreen) 12.dp else 18.dp),
+                        top = if (cover.isCoverScreen) 8.dp else 12.dp,
+                        bottom = if (cover.isCoverScreen) 10.dp else 12.dp
+                    )
             ) {
                 Row(
                     modifier = Modifier
@@ -3420,14 +3433,41 @@ fun OrbSafeDrawingRoot(
         androidx.compose.foundation.layout.WindowInsets.safeDrawing,
     content: @Composable androidx.compose.foundation.layout.BoxScope.() -> Unit
 ) {
-    Box(
+    androidx.compose.foundation.layout.BoxWithConstraints(
         modifier = modifier
             .fillMaxSize()
             .background(OrbStyle.background)
-            .windowInsetsPadding(insets)
-            .testTag("orb-safe-root"),
-        content = content
-    )
+    ) {
+        val layoutDirection = androidx.compose.ui.platform.LocalLayoutDirection.current
+        val cutoutPadding = androidx.compose.foundation.layout.WindowInsets.displayCutout.asPaddingValues()
+        val cutoutBottom = cutoutPadding.calculateBottomPadding()
+        val cutoutEnd = cutoutPadding.calculateEndPadding(layoutDirection)
+        val imeBottom = androidx.compose.foundation.layout.WindowInsets.ime.asPaddingValues().calculateBottomPadding()
+        val isWideScreen = maxWidth >= 640.dp
+        val isCoverScreen = !isWideScreen && maxWidth > 0.dp && maxHeight > 0.dp &&
+            (maxHeight < 620.dp || maxWidth < 380.dp || cutoutBottom > 0.dp)
+        val coverState = OrbCoverScreenState(
+            isCoverScreen = isCoverScreen,
+            cameraSafeEndPadding = if (isCoverScreen) maxOf(230.dp, cutoutEnd + 14.dp) else 0.dp,
+            imeVisible = imeBottom > 0.dp
+        )
+        val effectiveInsets = if (isCoverScreen) {
+            androidx.compose.foundation.layout.WindowInsets.statusBars
+                .union(androidx.compose.foundation.layout.WindowInsets.navigationBars)
+                .union(androidx.compose.foundation.layout.WindowInsets.ime)
+        } else {
+            insets
+        }
+        androidx.compose.runtime.CompositionLocalProvider(LocalOrbCoverScreen provides coverState) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .windowInsetsPadding(effectiveInsets)
+                    .testTag("orb-safe-root"),
+                content = content
+            )
+        }
+    }
 }
 
 /** Connection failure card: plain-language message, the failing URL, and two ways out. */
