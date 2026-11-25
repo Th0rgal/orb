@@ -63,16 +63,17 @@ void orb_gtk_bind_keyboard_focus(GtkWidget *window) {
 void orb_gtk_apply_theme(GtkCssProvider *css, gboolean light) {
     static const char *m[][2] = { {"#181818", "#ffffff"}, {"#141414", "#fafaf9"}, {"#d8d8d7", "#242423"}, {"#e6e6e5", "#101010"}, {"#b1b1b1", "#535250"}, {"#8a8a8a", "#7b7a76"}, {"#6c6c6b", "#939290"}, {"#5c5c5c", "#a9a8a2"}, {"#5b5b5a", "#535250"}, {"#2c2c2c", "#e8e7e2"}, {"rgba(18,19,19,0.78)", "rgba(246,246,244,0.72)"}, {"216,216,215", "36,36,35"} };
     static const char menu_css[] =
-        "menu.orb-ctx,menu.orb-ctx menu{background-color:#181818;background-image:none;color:#d8d8d7;border:1px solid #2c2c2c;border-radius:8px;padding:4px;font-size:12px;box-shadow:0 8px 24px rgba(0,0,0,0.42);}"
-        "menu.orb-ctx menuitem{min-height:24px;padding:2px 8px;margin:0;border:none;border-radius:5px;background:transparent;background-image:none;color:#d8d8d7;outline:none;box-shadow:none;font-size:12px;}"
-        "menu.orb-ctx menuitem:hover{background-color:rgba(216,216,215,0.09);color:#e6e6e5;}"
+        "window.popup,window.popup decoration{background-color:transparent;background-image:none;border:none;box-shadow:none;}"
+        "menu.orb-ctx,menu.orb-ctx menu{background-color:#181818;background-image:none;color:#d8d8d7;border:1px solid rgba(216,216,215,0.14);border-radius:12px;padding:6px;font-size:13px;box-shadow:none;}"
+        "menu.orb-ctx menuitem{min-height:28px;padding:4px 12px;margin:0;border:none;border-radius:7px;background:transparent;background-image:none;color:#d8d8d7;outline:none;box-shadow:none;font-size:13px;}"
+        "menu.orb-ctx menuitem:hover{background-color:rgba(216,216,215,0.08);color:#e6e6e5;}"
         "menu.orb-ctx menuitem:disabled{opacity:0.45;}"
         "menu.orb-ctx menuitem.orb-danger{color:#e05d5d;}"
         "menu.orb-ctx .orb-ico{color:#8a8a8a;}menu.orb-ctx menuitem:hover .orb-ico{color:#e6e6e5;}menu.orb-ctx menuitem.orb-danger .orb-ico{color:#e05d5d;}"
         "menu.orb-ctx menuitem arrow{min-width:10px;min-height:10px;color:#6c6c6b;}"
-        "menu.orb-ctx separator{background-color:#2c2c2c;min-height:1px;margin:4px 6px;}"
-        "popover.orb-rename,popover.orb-rename.background{background-color:#181818;background-image:none;border:1px solid #2c2c2c;border-radius:8px;padding:6px;box-shadow:0 8px 24px rgba(0,0,0,0.42);}"
-        "popover.orb-rename entry{min-height:28px;padding:0 8px;border-radius:5px;border:1px solid #5b5b5a;background:#141414;color:#e6e6e5;font-size:12.5px;outline:none;box-shadow:none;}";
+        "menu.orb-ctx separator{background-color:rgba(216,216,215,0.10);min-height:1px;margin:5px 10px;}"
+        "popover.orb-rename,popover.orb-rename.background{background-color:#181818;background-image:none;border:1px solid rgba(216,216,215,0.12);border-radius:10px;padding:6px;box-shadow:0 8px 24px rgba(0,0,0,0.22);}"
+        "popover.orb-rename entry{min-height:28px;padding:0 10px;border-radius:6px;border:1px solid #5b5b5a;background:#141414;color:#e6e6e5;font-size:12.5px;outline:none;box-shadow:none;}";
     char *s = g_strconcat(ORB_CHROME_CSS, menu_css, NULL); for (size_t i = 0; light && i < G_N_ELEMENTS(m); i++) { char **parts = g_strsplit(s, m[i][0], -1); g_free(s); s = g_strjoinv(m[i][1], parts); g_strfreev(parts); }
     gtk_css_provider_load_from_data(css, s, -1, NULL); g_free(s); orb_icons_light = light;
 }
@@ -136,7 +137,7 @@ gboolean orb_button_enter(GtkWidget *row, GdkEventKey *event, gpointer data) {
 }
 /* Compact Cursor-style GtkMenuItem with a 14px Cairo Lucide icon and mnemonic label. */
 GtkWidget *orb_menu_row(GtkWidget *menu, const char *label, const char *icon) {
-    GtkWidget *it = gtk_menu_item_new(), *hb = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8), *lbl = gtk_label_new_with_mnemonic(label);
+    GtkWidget *it = gtk_menu_item_new(), *hb = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 10), *lbl = gtk_label_new_with_mnemonic(label);
     gtk_label_set_xalign(GTK_LABEL(lbl), 0.0f);
     if (icon) {
         GtkWidget *ico = orb_make_icon_widget(NULL, icon, NULL, NULL);
