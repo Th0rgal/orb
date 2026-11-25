@@ -140,22 +140,21 @@ def liveBadgeKind (status : String) : String :=
 
 private def liveMissionLead (theme : Theme) (status : String) (phase : Nat) : WidgetNode :=
   let pal := theme.palette
-  let bot := chromeIcon "mission" pal.textMuted
   let kind := liveBadgeKind status
-  if kind.isEmpty then bot else
-    let ring : List (Int × Int) := [(80,15),(112,24),(136,48),(145,80),(136,112),(112,136),
-      (80,145),(48,136),(24,112),(15,80),(24,48),(48,24)]
-    let circle := ring ++ ring.take 1
-    let paths := match kind with
-      | "loader" => [((ring.drop (phase % 12)) ++ (ring.take (phase % 12))).take 10]
-      | "clock" => [circle, [(80,40),(80,80),(105,93)]]
-      | "pause" => [[(55,36),(55,125)],[(105,36),(105,125)]]
-      | "alert" => [circle,[(80,43),(80,86)],[(80,107),(80,111)]]
-      | _ => [circle,[(43,81),(69,105),(116,56)]]
-    let tone := if kind == "loader" || status == "waiting_background" then pal.accent
-      else if kind == "alert" then pal.warning else if kind == "check" then pal.success else pal.textMuted
-    .mk none false false (BoxStyle.row 0 |>.withAlign .center |>.withFixedSize (pxToSub 18) (pxToSub 18))
-      (.vectorIcon paths tone (some (pal.sidebar ||| 255))) [bot]
+  let ring : List (Int × Int) := [(80,15),(112,24),(136,48),(145,80),(136,112),(112,136),
+    (80,145),(48,136),(24,112),(15,80),(24,48),(48,24)]
+  let circle := ring ++ ring.take 1
+  let paths := match kind with
+    | "loader" => [((ring.drop (phase % 12)) ++ (ring.take (phase % 12))).take 10]
+    | "clock" => [circle, [(80,40),(80,80),(105,93)]]
+    | "pause" => [[(55,36),(55,125)],[(105,36),(105,125)]]
+    | "alert" => [circle,[(80,43),(80,86)],[(80,107),(80,111)]]
+    | "check" => [circle,[(43,81),(69,105),(116,56)]]
+    | _ => [circle]
+  let tone := if kind == "loader" || status == "waiting_background" then pal.accent
+    else if kind == "alert" then pal.warning else if kind == "check" then pal.success else pal.textMuted
+  .mk none false false (BoxStyle.row 0 |>.withAlign .center |>.withJustify .center |>.withFixedSize (pxToSub 16) (pxToSub 16))
+    (.vectorIcon paths tone none) []
 
 /-- Body text of the SolidJS chrome (`13px/1.4`), laid out on an `18 px` line. -/
 def chromeText (theme : Theme) (color : Color) : TextStyle :=

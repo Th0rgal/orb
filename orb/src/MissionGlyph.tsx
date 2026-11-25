@@ -48,8 +48,14 @@ export function MissionGlyph(p: { status: string; missionId?: string; unread?: b
     aria-label={items().length ? `${state().label}. View wake-ups` : undefined}
     onClick={e => { if (items().length) show(e); }}
     onKeyDown={e => { if (items().length && (e.key === "Enter" || e.key === " ")) show(e); }}>
-    <Show when={p.identity} fallback={<Icon.Bot />}>{p.identity}</Show>
-    <Show when={state().icon} fallback={<Show when={p.unread}><span class="mission-unread-dot" aria-hidden="true" /></Show>}>{Glyph => <span class="mission-status-mark" aria-hidden="true"><Dynamic component={Glyph()} size={10} class={state().icon === Icon.LoaderCircle ? "mission-status-spin" : undefined} /></span>}</Show>
+    <Show when={p.identity} fallback={
+      <Show when={state().icon} fallback={<Show when={p.unread} fallback={<Icon.Bot />}><span class="mission-unread-dot" aria-hidden="true" /></Show>}>
+        {Glyph => <Dynamic component={Glyph()} size={15} class={state().icon === Icon.LoaderCircle ? "mission-status-spin" : undefined} />}
+      </Show>
+    }>
+      {p.identity}
+      <Show when={state().icon} fallback={<Show when={p.unread}><span class="mission-unread-dot" aria-hidden="true" /></Show>}>{Glyph => <span class="mission-status-mark" aria-hidden="true"><Dynamic component={Glyph()} size={10} class={state().icon === Icon.LoaderCircle ? "mission-status-spin" : undefined} /></span>}</Show>
+    </Show>
   </span><Show when={open()}><Dialog title="Scheduled wake-ups" busy={busy()} onClose={() => setOpen(false)}>
     <Show when={error()}><p class="inline-error" role="alert">{error()}</p></Show>
     <For each={items()} fallback={<p>No pending wake-ups.</p>}>{item => <div class="wake-up-item">
