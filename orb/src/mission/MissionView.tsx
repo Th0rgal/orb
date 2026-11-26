@@ -10,7 +10,7 @@ import { Picker } from "../Picker";
 import { Popover } from "../Popover";
 import { RemoteQueue, type RemoteQueueHandle } from "../RemoteQueue";
 import { MissionCyber, getCyber, requireCyberSupport } from "../cyberAccess";
-import { EMPTY_GOAL_ERROR, goalDraft } from "../goal";
+import { EMPTY_GOAL_ERROR, GOAL_HARNESSES, REMOTE_GOAL_UNSUPPORTED, goalDraft, remoteGoalSupport } from "../goal";
 import { applyRemoteGoalEvent, remoteGoalPhase, remoteGoalStatusLabel, type RemoteGoalProjection } from "../remoteGoal";
 import {NextReminder} from "../AutomaticReminder";
 import { LazyCloudConversation, peekCloudAgentsModule } from "../cloudAgentsLoader";
@@ -107,6 +107,7 @@ import {
   connectionVersion,
   updateMissionSettings,
   type Mission,
+  type RemoteLaunchCapability,
   forkMission,
 } from "../api";
 
@@ -601,7 +602,7 @@ export function MissionView(p: Parameters<typeof NativeMissionView>[0]) {
   return <Show when={canRenderBody()} fallback={<><ErrorToast error={error()} title="Couldn’t load the conversation" action={{ label: "Retry", run: () => { setError(""); return getMission(p.id, { includeHistory: false }).then(setResolved).catch(e => setError(String(e))); } }} onDismiss={() => setError("")} /><ConversationSkeleton /></>}><Show when={resolved()?.backend?.startsWith("cloud_")} fallback={<NativeMissionView {...p} initial={resolved() ?? undefined} onMission={handleMission} />}>{(() => { const mod = peekCloudAgentsModule(); return mod ? <mod.CloudConversation id={p.id} active={p.active} onMission={handleMission} onOpenMission={p.onFork} /> : <Suspense fallback={<ConversationSkeleton />}><LazyCloudConversation id={p.id} active={p.active} onMission={handleMission} onOpenMission={p.onFork} /></Suspense>; })()}</Show></Show>;
 }
 
-export function NativeMissionView(p: { id: string; active?: boolean; launch?:LaunchReceipt; launchError?:string; onRetryLaunch?:()=>void; onPlan?: (id:string,data:PlanProgressData | undefined)=>void; onContext?: (id: string, pct: number | null) => void; initial?: Mission; onMission?: (mission: Mission | null, authoritative?: boolean) => void; onFork?: (mission: Mission) => void }) {
+export function NativeMissionView(p: { id: string; active?: boolean; launch?:LaunchReceipt; launchError?:string; onRetryLaunch?:()=>void; onPlan?: (id:string,data:PlanProgressData | undefined)=>void; onContext?: (id: string, pct: number | null) => void; initial?: Mission; remoteLaunchCapability?: RemoteLaunchCapability | null; onMission?: (mission: Mission | null, authoritative?: boolean) => void; onFork?: (mission: Mission) => void }) {
   const boundMissionId = p.id;
   const staleMission = () => disposed || Boolean(boundMissionId && p.id !== boundMissionId);
   const receipt = p.launch ?? recalledLaunch(p.id);
@@ -1311,7 +1312,10 @@ export function NativeMissionView(p: { id: string; active?: boolean; launch?:Lau
     if (!m?.goal_mode || clientPlaced() || !missionNode(m)) return;
     const phase = remoteGoalPhase(m.status, m.terminal_reason);
     const live = liveGoal();
-    return { phase: phase === "active" ? live?.phase ?? phase : phase, objective: m.goal_objective ?? "", iteration: Math.max(m.goal_iteration ?? 0, live?.iteration ?? 0) };
+    const replaced = Boolean(live?.objective && m.goal_objective && live.objective !== m.goal_objective);
+    const objective = replaced ? live!.objective : (m.goal_objective ?? live?.objective ?? "");
+    const iteration = replaced ? (live?.iteration ?? 0) : Math.max(m.goal_iteration ?? 0, live?.iteration ?? 0);
+    return { phase: replaced ? (live?.phase ?? "active") : phase === "active" ? live?.phase ?? phase : phase, objective, iteration };
   });
   const goalRecovery = createMemo(() => {
     const m = mission();
@@ -1476,7 +1480,11 @@ export function NativeMissionView(p: { id: string; active?: boolean; launch?:Lau
     const m = mission();
     const node = missionAssignedNode(m);
     if (!clientPlaced() && ((node && node !== "local" && node !== "core") || /^(remote(?:_node)?|managed[_-].+)$/.test(m?.placement_kind ?? ""))) {
-      return "Start a new Goal-capable mission to use /goal, or send a standard follow-up.";
+      const backend = m?.backend;
+      const supported = p.remoteLaunchCapability !== undefined
+        ? remoteGoalSupport(p.remoteLaunchCapability, backend)
+        : Boolean(backend && GOAL_HARNESSES.has(backend));
+      return supported ? undefined : REMOTE_GOAL_UNSUPPORTED;
     }
   };
   const sendMsgOnce = async (text: string, images: DraftImage[], chips: AttachChip[], attemptId: ReturnType<typeof crypto.randomUUID>, explicitId?: ReturnType<typeof crypto.randomUUID>, replace = false) => {

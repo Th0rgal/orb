@@ -5429,7 +5429,7 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
       let goalObjective? := prompt?.bind Cyber.parseGoalPrefix?
       let remoteGoal := !clientPlaced && remoteNodeId?.isSome && goalObjective?.isSome
       if remoteGoal then
-        let capability := if RemoteGoal.harnesses.contains backend && st.remoteSup?.isSome
+        let capability := if RemoteGoal.supportsHarness backend && st.remoteSup?.isSome
           then RemoteGoal.Capability.coreEmulated else .unavailable
         match RemoteGoal.admit capability false (goalObjective?.getD "") with
         | .error .emptyObjective =>
@@ -7099,11 +7099,20 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
     let mission? ← match mid? with
       | some mid => getMission? st.store mid
       | none => pure none
-    if (parseGoalPrefix? content).isSome then
+    let mut remoteGoalFollowup? : Option String := none
+    if let some rawGoalObj := parseGoalPrefix? content then
       if let some m := mission? then
         if m.placementKind == "remote" || m.placementKind == "remote_node" || m.placementKind == "managed_vm" ||
             (← resolveMissionRemoteNode? st.store st.managedStore? m.id).isSome then
-          return .ok (mkJson 400 "{\"error\":\"remote_goal_followup_unsupported: Start a new Goal-capable mission to use /goal, or send a standard follow-up.\"}")
+          let capability := if RemoteGoal.supportsHarness m.backend && st.remoteSup?.isSome
+            then RemoteGoal.Capability.coreEmulated else .unavailable
+          match RemoteGoal.admit capability false rawGoalObj with
+          | .error .emptyObjective =>
+            return .ok (mkJson 400 "{\"error\":\"Goal mode requires a non-empty objective.\"}")
+          | .error _ =>
+            return .ok (mkJson 400 "{\"error\":\"remote_goal_unsupported: This remote harness cannot continue a Goal. Choose a Goal-capable harness or send a standard turn.\"}")
+          | .ok obj =>
+            remoteGoalFollowup? := some obj
     let mut promoteCyber? : Option (String × Selection × String) := none
     if let some mid := mid? then
       if let some m := mission? then
@@ -7198,40 +7207,68 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
           let effTagsJson ← if !rentedVmId.isEmpty then
             updateMissionBoundManagedNode st.store mid resolvedNode nowIso
           else pure m.tagsJson
-          if let .error _ ← appendMissionEvent st.store mid "user_message" evPayload nowIso then
-            if keyed && rentedVmId.isEmpty then
-              if let .error _ ← abortIdempotencySlot st.store receiptScope msgId then
-                return .ok (mkJson 500 "{\"error\":\"message_receipt_unconfirmed\"}")
-            return .ok (mkJson 500 "{\"error\":\"message_append_failed\"}")
-          let mut resumeSid? : Option String := none
-          if let .ok sRows ← execParamQuery st.store.missionsDb "SELECT COALESCE(session_id,'') FROM missions WHERE id=?1;" #[mid] then
-            if sRows.size > 1 then
-              let s := (cell sRows[1]! 0).trimAscii.toString
-              if !s.isEmpty then resumeSid? := some s
-          let isSide := (OrbBin.Json.parse effTagsJson).toOption.bind JVal.asArr? |>.getD #[] |>.any (fun v => v.asStr? == some "side-question")
-          if let some tSink := st.telemetrySink? then
-            let actorUid? := if caller.isLegacyUnscoped || caller.userId.isEmpty then none else some caller.userId
-            let actorUname? := if caller.isLegacyUnscoped || caller.username.isEmpty then none else some caller.username
-            observeControlUserPrompt tSink (caller.isLegacyUnscoped || caller.role == "admin") actorUid? actorUname? mid content nowEpochSec
-          let spec : RemoteTurnSpec := {
-            missionId        := mid
-            targetNodeId     := resolvedNode
-            backend          := m.backend
-            modelOverride    := if m.backend == "opencode" && m.modelOverride.isEmpty then "builtin/smart" else m.modelOverride
-            modelEffort      := m.modelEffort
-            workingDirectory := m.workingDirectory
-            project          := m.project
-            ownerUserId      := m.ownerUserId
-            authorityMode    := m.authorityMode
-            placementKind    := m.placementKind
-            reservedDiskGib  := m.reservedDiskGib
-            tagsJson         := effTagsJson
-            prompt           := delivContent
-            resumeSessionId? := resumeSid?
-            sideQuestion     := isSide
-          }
-          if let .error dispErr ← submitRemoteMissionTurn st.store st.managedStore? st.relayHub? st.broadcastHub? sup st.cfg.workingDir spec nowEpochSec then
-            return .ok (mkJson (remoteDispatchHttpStatus dispErr) s!"\{\"error\":{jsonEscape dispErr}}")
+          let mut goalDispatch? : Option (String × UInt64) := none
+          let mut launchPrompt := delivContent
+          if let some goalObj := remoteGoalFollowup? then
+            match ← activateRemoteGoalOnMission st.store mid goalObj nowIso false with
+            | .error e =>
+              if keyed && rentedVmId.isEmpty then
+                discard <| abortIdempotencySlot st.store receiptScope msgId
+              return .ok (mkJson 500 s!"\{\"error\":{jsonEscape e}}")
+            | .ok none =>
+              if let .error e ← enqueueStructuredFollowup st.store "core" msgId mid delivContent "control" nowIso then
+                if keyed && rentedVmId.isEmpty then
+                  if let .error _ ← abortIdempotencySlot st.store receiptScope msgId then
+                    return .ok (mkJson 500 "{\"error\":\"message_receipt_unconfirmed\"}")
+                return .ok (queueRefusal msgId e)
+              queued := true
+            | .ok (some nextGen) =>
+              goalDispatch? := some ("", nextGen)
+              let goalPrompt := remoteGoalPrompt goalObj
+              launchPrompt := if selectedSkills.isEmpty then goalPrompt else withDirective goalPrompt selectedSkills
+          if !queued then
+            if let .error _ ← appendMissionEvent st.store mid "user_message" evPayload nowIso then
+              if keyed && rentedVmId.isEmpty then
+                if let .error _ ← abortIdempotencySlot st.store receiptScope msgId then
+                  return .ok (mkJson 500 "{\"error\":\"message_receipt_unconfirmed\"}")
+              return .ok (mkJson 500 "{\"error\":\"message_append_failed\"}")
+            if let some goalObj := remoteGoalFollowup? then
+              let goalEv := renderCompact (.obj #[("status", .str "active"), ("objective", .str goalObj),
+                ("iteration", .num "0"), ("reason", .str "remote_goal_started")])
+              discard <| appendMissionEvent st.store mid "goal_status" goalEv nowIso
+              publishControlEvent st.broadcastHub? "goal_status" goalEv (some mid)
+            let mut resumeSid? : Option String := none
+            if let .ok sRows ← execParamQuery st.store.missionsDb "SELECT COALESCE(session_id,'') FROM missions WHERE id=?1;" #[mid] then
+              if sRows.size > 1 then
+                let s := (cell sRows[1]! 0).trimAscii.toString
+                if !s.isEmpty then resumeSid? := some s
+            let isSide := (OrbBin.Json.parse effTagsJson).toOption.bind JVal.asArr? |>.getD #[] |>.any (fun v => v.asStr? == some "side-question")
+            if let some tSink := st.telemetrySink? then
+              let actorUid? := if caller.isLegacyUnscoped || caller.userId.isEmpty then none else some caller.userId
+              let actorUname? := if caller.isLegacyUnscoped || caller.username.isEmpty then none else some caller.username
+              observeControlUserPrompt tSink (caller.isLegacyUnscoped || caller.role == "admin") actorUid? actorUname? mid content nowEpochSec
+            let spec : RemoteTurnSpec := {
+              missionId        := mid
+              targetNodeId     := resolvedNode
+              backend          := m.backend
+              modelOverride    := if m.backend == "opencode" && m.modelOverride.isEmpty then "builtin/smart" else m.modelOverride
+              modelEffort      := m.modelEffort
+              workingDirectory := m.workingDirectory
+              project          := m.project
+              ownerUserId      := m.ownerUserId
+              authorityMode    := m.authorityMode
+              placementKind    := m.placementKind
+              reservedDiskGib  := m.reservedDiskGib
+              tagsJson         := effTagsJson
+              prompt           := launchPrompt
+              resumeSessionId? := resumeSid?
+              sideQuestion     := isSide
+              goalDispatch?    := goalDispatch?
+            }
+            if let .error dispErr ← submitRemoteMissionTurn st.store st.managedStore? st.relayHub? st.broadcastHub? sup st.cfg.workingDir spec nowEpochSec then
+              if !(goalDispatch?.isSome && (dispErr == "remote_goal_dispatch_fenced" || dispErr.startsWith "remote_dispatch_uncertain:" ||
+                  dispErr.startsWith "remote_accept_persist_failed:")) then
+                return .ok (mkJson (remoteDispatchHttpStatus dispErr) s!"\{\"error\":{jsonEscape dispErr}}")
       else
         if let some m := mission? then
           let localSend := (bodyJv.fieldBool? "spawn_harness").getD (m.placementKind == "managed" && !isCloudBackendName m.backend)

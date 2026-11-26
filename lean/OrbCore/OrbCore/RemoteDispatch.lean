@@ -13,6 +13,7 @@ import OrbCore.Spec
 import OrbCore.Managed
 import OrbCore.MemoryAndCloud
 import OrbCore.QueueCont
+import OrbCore.Cyber
 import OrbCore.RemoteGoal
 import OrbCore.R7Core
 import OrbCore.LegacyHydrate
@@ -1153,10 +1154,48 @@ private def emitMissionEventAndBroadcast
   publishControlEvent broadcastHub? evType payloadJson (some missionId)
 
 private def resumableGoalSession (backend sid : String) : Bool :=
-  match backend with
+  match RemoteGoal.normalizeHarness backend with
   | "codex" | "antigravity" => parseUuidCanonical? sid == some sid
   | "opencode" => sid.startsWith "ses_"
+  | "claudecode" | "grok" => !sid.trimAscii.toString.isEmpty
   | _ => false
+
+/-- Split an appended `withDirective` skill block from a parsed goal objective. -/
+def splitSkillDirective (text : String) : String × String :=
+  let marker := "\n\nSelected skills (load before performing the current request):\n"
+  match text.splitOn marker with
+  | head :: rest@(_ :: _) => (head.trimAscii.toString, marker ++ marker.intercalate rest)
+  | _ => (text.trimAscii.toString, "")
+
+/-- Atomically start or replace a remote Goal on an existing mission.
+    Retires prior `remote-goal` continuations (resetting the iteration count and
+    revoking any armed continuation for the replaced goal) and advances `run_generation`
+    so stale observations cannot settle the new goal. Returns `none` when `allowActive`
+    is false and the mission is currently active/pending so the caller can queue instead. -/
+def activateRemoteGoalOnMission (store : CoreStore) (missionId objective nowIso : String)
+    (allowActive : Bool := false) : IO (Except String (Option UInt64)) := do
+  withImmediateTx store.missionsDb do
+    let query := execParamQueryUnlocked store.missionsDb
+    let statusClause := if allowActive then "" else " AND status NOT IN ('active','pending')"
+    let .ok rows ← query
+      ("SELECT COALESCE(run_generation,1) FROM missions WHERE id=?1" ++ statusClause ++ ";")
+      #[missionId]
+      | return .error "remote_goal_activate_read_failed"
+    let some row := rows[1]? | return .ok none
+    let nextGen : UInt64 := (cellNat row 0).toUInt64 + 1
+    if let .error e ← query
+      ("UPDATE mission_continuations SET source='remote-goal-replaced'," ++
+       "phase=CASE WHEN phase IN (1,2) THEN 4 ELSE phase END," ++
+       "error=CASE WHEN phase IN (1,2) THEN 'goal_replaced' ELSE error END," ++
+       "updated_at=?2 WHERE mission_id=?1 AND source='remote-goal';")
+      #[missionId, nowIso] then
+      return .error e
+    if let .error e ← query
+      ("UPDATE missions SET goal_mode=1,goal_objective=?2,status='awaiting_user',terminal_reason=''," ++
+       "run_generation=CAST(?3 AS INTEGER),state_revision=state_revision+1,updated_at=?4 WHERE id=?1;")
+      #[missionId, objective, s!"{nextGen}", nowIso] then
+      return .error e
+    return .ok (some nextGen)
 
 def remoteGoalPrompt (objective : String) : String :=
   s!"[Goal mode]\nObjective: {objective}\n\nTake the next concrete step. Report progress during ongoing work. When the objective is fully achieved, give the final result once and end that same message with {RemoteGoal.completionMarker} on its own final line."
@@ -2160,6 +2199,17 @@ partial def spawnRemoteJobPoller
                 -- message when its delivered `user_message` (same `id`) lands in the transcript.
                 emitMissionEventAndBroadcast store broadcastHub? missionId "user_message"
                   (renderCompact (.obj #[("type", .str "user_message"), ("id", .str nextMsgId), ("content", .str nextPrompt), ("source", .str "queue")])) nowIso
+                let mut effNextPrompt := nextPrompt
+                let mut nextGoalDispatch? : Option (String × UInt64) := none
+                if let some rawGoalObj := OrbCore.Cyber.parseGoalPrefix? nextPrompt then
+                  let (cleanObj, skillSuffix) := splitSkillDirective rawGoalObj
+                  if !cleanObj.isEmpty && RemoteGoal.supportsHarness mr.backend then
+                    if let .ok (some nextGen) ← activateRemoteGoalOnMission store missionId cleanObj nowIso true then
+                      emitMissionEventAndBroadcast store broadcastHub? missionId "goal_status"
+                        (renderCompact (.obj #[("status", .str "active"), ("objective", .str cleanObj),
+                          ("iteration", .num "0"), ("reason", .str "remote_goal_started")])) nowIso
+                      effNextPrompt := remoteGoalPrompt cleanObj ++ skillSuffix
+                      nextGoalDispatch? := some ("", nextGen)
                 let followSpec : RemoteTurnSpec := {
                   missionId        := missionId
                   targetNodeId     := effNodeId
@@ -2173,8 +2223,9 @@ partial def spawnRemoteJobPoller
                   placementKind    := mr.placementKind
                   reservedDiskGib  := mr.reservedDiskGib
                   tagsJson         := mr.tagsJson
-                  prompt           := nextPrompt
+                  prompt           := effNextPrompt
                   resumeSessionId? := curSid?
+                  goalDispatch?    := nextGoalDispatch?
                 }
                 discard <| submitRemoteMissionTurn store mc? relayHub? broadcastHub? sup coreWorkDir followSpec nowSec
                 return ()

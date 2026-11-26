@@ -3,7 +3,14 @@
 namespace OrbCore.RemoteGoal
 
 /-- The current emulated adapter contract, shared by admission and discovery. -/
-def harnesses : Array String := #["opencode", "codex", "antigravity"]
+def harnesses : Array String := #["opencode", "claudecode", "codex", "grok", "antigravity"]
+
+def normalizeHarness (backend : String) : String :=
+  let b := backend.trimAscii.toString.toLower
+  if b == "claude" then "claudecode" else b
+
+def supportsHarness (backend : String) : Bool :=
+  harnesses.contains (normalizeHarness backend)
 
 def completionMarker := "<!-- GOAL_COMPLETE -->"
 

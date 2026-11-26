@@ -2440,6 +2440,7 @@ export default function App() {
                         id={slot.missionId()}
                         active={isActive()}
                         initial={findKnownMission(slot.missionId())}
+                        remoteLaunchCapability={remoteLaunch().capability}
                         onMission={syncOpenMission}
                         onPlan={(id, data) => setPreviewPlan({ id, data })}
                         onContext={(id, pct) => setPreviewContext({ id, pct })}
