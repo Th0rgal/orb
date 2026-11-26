@@ -263,6 +263,29 @@ private def runInventoryTests (root : String) : IO Unit := do
       let some (gone, _) ← getManagedMachine? mc id | throw (IO.userError "404 fixture missing")
       check (gone.status == "destroyed" && (← requestedSource.get).isEmpty && (← observedIds.get).contains id)
         "genuine 404 stays destroyed and never forks"
+
+    -- Orphaned `provisioning` VM with empty `provider_id`: protected while in-flight (< 120s),
+    -- reconcilable via `provider.list` on `destroy` once stale (>= 120s).
+    let orphanId := "orphan-colab-spawn"
+    let .ok _ ← provisionManagedMachine mc fleet {
+      id := orphanId, sandboxName := "orb-managed-orphan-colab", provider := "colab",
+      size := "gpu-l4", ttlMinutes := 60, spentCents := 0, deletableAtSec := 0
+    } 3000 | throw (IO.userError "orphan colab fixture failed")
+    let orphanProvider : OrbCore.ManagedProvider.Provider := {
+      OrbCore.ManagedProvisioningTests.mockPolicyProvider mc "colab" with
+      list := pure (.ok #[])
+    }
+    let orphanCtx : OrbCore.RemoteFleetAndRelay.ManagedLifecycleContext := {
+      store := core, fleet,
+      override? := some (orphanProvider, { coreUrl := "https://core.example", script := "#!/bin/sh\nexit 0\n" })
+    }
+    let tooSoon ← OrbCore.RemoteFleetAndRelay.runConfiguredManagedLifecycle mc orphanCtx orphanId "destroy" 3050
+    check (match tooSoon with | .error e => e == "managed_provider_identity_pending" | .ok _ => false)
+      "recent provisioning VM without provider_id rejects destroy while spawn may still be in flight"
+    let .ok reapedOrphan ← OrbCore.RemoteFleetAndRelay.runConfiguredManagedLifecycle mc orphanCtx orphanId "destroy" 3200
+      | throw (IO.userError "stale orphan provisioning VM destroy should succeed once absent from provider.list")
+    check (reapedOrphan.fieldStr? "state" == some "destroyed")
+      "stale provisioning VM absent on provider transitions cleanly to destroyed"
   finally
     closeManagedComputeStore mc
     closeCoreStore core

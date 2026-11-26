@@ -36,6 +36,15 @@ const anonymous = new WeakMap<StreamItem[], TranscriptReducer>();
 const EMPTY_TRANSCRIPT_SLICE: Uint8Array<ArrayBufferLike> = new Uint8Array(0);
 const TRANSCRIPT_EVENT_ENCODER = new TextEncoder();
 
+const normErr = (s: string) => s.trim().replace(/[`'"]/g, "'").replace(/[.!]+$/, "").replace(/\s+/g, " ").toLowerCase();
+export function similarErrorText(a: string, b: string): boolean {
+  const na = normErr(a), nb = normErr(b);
+  if (!na || !nb) return false;
+  if (na === nb) return true;
+  const [shorter, longer] = na.length <= nb.length ? [na, nb] : [nb, na];
+  return shorter.length >= 12 && longer.includes(shorter);
+}
+
 function sameTimeline(a: readonly StreamItem[], b: readonly StreamItem[]): boolean {
   if (a === b) return true;
   if (a.length !== b.length) return false;
@@ -498,14 +507,11 @@ export class TranscriptReducer {
               : "The execution was interrupted before completion. Resume to continue from the saved conversation."
             : prefix&&trimmed.startsWith(prefix)&&trimmed.length>prefix.length?trimmed.slice(prefix.length).trim():text||"Mission failed";
           const nextError:Extract<StreamItem,{kind:"error"}>={kind:"error",key:this.key("error"),text:detail,terminal:true,cancelled:!interruption&&text.trim().toLowerCase()==="cancelled",...(interruption?{title:"Mission interrupted"}:{})};
-          const nextText=detail.trim();
-          const overlaps=(row:StreamItem)=>{
-            if(row.kind!=="error")return false;
-            const prevText=row.text.trim();
-            return !!row.terminal||(!!prevText&&!!nextText&&(prevText===nextText||nextText.includes(prevText)||prevText.includes(nextText)));
-          };
           const matching:number[]=[];
-          for(let i=this.lastUser+1;i<this.items.length;i++)if(overlaps(this.items[i]))matching.push(i);
+          for(let i=this.lastUser+1;i<this.items.length;i++){
+            const row=this.items[i];
+            if(row.kind==="error"&&(!!row.terminal||similarErrorText(row.text,detail)))matching.push(i);
+          }
           if(matching.length>0){
             const keep=matching[0];
             const prev=this.items[keep] as Extract<StreamItem,{kind:"error"}>;
@@ -571,7 +577,12 @@ export class TranscriptReducer {
         const message = str(d.message);
         this.close();
         const prev = this.items[this.items.length - 1];
-        if (message.trim() && prev?.kind === "error" && !prev.terminal && prev.text.trim() === message.trim()) return;
+        if (message.trim() && prev?.kind === "error" && similarErrorText(prev.text, message)) {
+          if (message.trim().length > prev.text.trim().length && !prev.terminal) {
+            this.put(this.items.length - 1, { ...prev, text: message });
+          }
+          return;
+        }
         this.items.push({ kind: "error", key: this.key("error"), text: message });
         return;
       }
@@ -596,16 +607,17 @@ export class TranscriptReducer {
           }
           const genericSummary = summary === "Model error" || summary === "Task execution failed unexpectedly" || /^Remote node ['"].+['"] finished$/i.test(summary);
           let priorErrorIndex = -1;
-          if (terminalIndex < 0 && genericSummary) {
+          if (terminalIndex < 0) {
             for (let i = this.items.length - 1; i > lastUser; i--) {
-              if (this.items[i].kind === "error" && (this.items[i] as Extract<StreamItem, { kind: "error" }>).text.trim()) { priorErrorIndex = i; break; }
+              const row = this.items[i];
+              if (row.kind === "error" && row.text.trim() && (genericSummary || similarErrorText(row.text, summary))) { priorErrorIndex = i; break; }
             }
           }
           if (priorErrorIndex >= 0) {
             const prior = this.items[priorErrorIndex] as Extract<StreamItem, { kind: "error" }>;
             this.put(priorErrorIndex, { ...prior, terminal: true });
           } else {
-            const alreadyShown = terminalIndex >= 0 || this.items.slice(lastUser + 1).some(item => item.kind === "error" && item.text.trim() === summary);
+            const alreadyShown = terminalIndex >= 0 || this.items.slice(lastUser + 1).some(item => item.kind === "error" && similarErrorText(item.text, summary));
             if (!alreadyShown) {
               this.items.push({ kind: "error", key: this.key("error"), text: summary, terminal: true });
             }
@@ -739,20 +751,20 @@ export function visibleTranscript(items: StreamItem[]): StreamItem[] {
       break;
     }
   }
-  const supersededTransient = (index: number, item: StreamItem): boolean => {
-    if (item.kind !== "error" || !isTransientNodeNotice(item.text)) return false;
-    const trimmed = item.text.trim();
+  const supersededError = (index: number, item: StreamItem): boolean => {
+    if (item.kind !== "error") return false;
+    const transient = isTransientNodeNotice(item.text);
     for (let j = index + 1; j < items.length; j++) {
       const next = items[j];
-      if (next.kind === "tool" || next.kind === "think" || (next.kind === "text" && !!next.text.trim())) return true;
-      if (next.kind === "user" && !next.queued && !next.attached) return true;
-      if (next.kind === "error" && next.text.trim() === trimmed) return true;
+      if (next.kind === "user" && !next.queued && !next.attached) return transient;
+      if (transient && (next.kind === "tool" || next.kind === "think" || (next.kind === "text" && !!next.text.trim()))) return true;
+      if (next.kind === "error" && (!item.terminal || !!next.terminal) && similarErrorText(item.text, next.text)) return true;
     }
     return false;
   };
   return withoutFiller(items.filter((item, index) =>
     !(item.kind === "error" && item.terminal && index < lastDelivered) &&
-    !supersededTransient(index, item) &&
+    !supersededError(index, item) &&
     !(item.kind === "text" && item.goalMarkedText !== undefined && !item.text.trim()),
   ));
 }

@@ -896,6 +896,75 @@ private def verifyAdminDirectAntigravityStaticTarget (root : String) : IO Unit :
         store workRoot "ashur" "u-admin" "u-admin" none .unrestricted false staticNodes
       check (denyVpn == none) "VPN-routed admin account never bypasses VPN"
 
+      -- 5b. Multiple Direct Antigravity accounts follow provider sort_order (Ben ahead of Thomas)
+      --     and fall back automatically when the top-priority account is at 100% quota exhaustion.
+      execute "UPDATE account_vpn_routes SET country='', generation=3 WHERE account_id='ag-admin';"
+      IO.ofExcept (← upsertAIProvider store {
+        id := "ag-ben", name := "Antigravity (Ben)", providerType := "antigravity",
+        apiKey := "cli-proxy-managed", enabled := true
+      })
+      IO.FS.writeFile s!"{authDir}/antigravity-ben.json" (renderCompact (.obj #[
+        ("type", .str "antigravity"), ("prefix", .str "ag-ben"),
+        ("access_token", .str "tok-ben"), ("refresh_token", .str "ref-ben"),
+        ("email", .str "ben@example.test"), ("disabled", .bool false)
+      ]))
+      IO.ofExcept (← OrbCore.AccountVpnRoutes.set db "ag-ben" none)
+      execute "UPDATE ai_providers SET sort_order=0 WHERE id='ag-ben';"
+      execute "UPDATE ai_providers SET sort_order=1 WHERE id='ag-admin';"
+      IO.FS.writeFile s!"{workRoot}/.sandboxed-sh/provider_order.json"
+        "{\"ag-ben\":0,\"ag-admin\":1}"
+      let preferBen ← OrbCore.RemoteDispatch.adminDirectAntigravityStaticTarget?
+        store workRoot "ashur" "u-admin" "u-admin" none .unrestricted false staticNodes none 1000
+      check (preferBen == some "antigravity-ben.json")
+        s!"expected priority-0 account antigravity-ben.json, got {reprStr preferBen}"
+      IO.FS.writeFile s!"{authDir}/antigravity-ben.json" (renderCompact (.obj #[
+        ("type", .str "antigravity"), ("prefix", .str "ag-ben"),
+        ("access_token", .str "tok-ben"), ("refresh_token", .str "ref-ben"),
+        ("email", .str "ben@example.test"), ("disabled", .bool false),
+        ("sandboxed_gemini_windows", .arr #[.obj #[("used_percent", .num "100.0"), ("reset_at", .num "2000")]])
+      ]))
+      let fallbackAdmin ← OrbCore.RemoteDispatch.adminDirectAntigravityStaticTarget?
+        store workRoot "ashur" "u-admin" "u-admin" none .unrestricted false staticNodes none 1000
+      check (fallbackAdmin == some "antigravity-admin.json")
+        s!"expected fallback to antigravity-admin.json when priority-0 is at 100%, got {reprStr fallbackAdmin}"
+
+      -- 5c. Cross-harness migration (`session_id = NULL` on a mission with prior assistant turns)
+      --     carries over mission board + recent conversation history without altering brand-new missions.
+      execute "INSERT INTO missions(id,status,title,backend,created_at,updated_at) VALUES('m-handoff','awaiting_user','Pareto','antigravity','2026-11-26T00:00:00Z','2026-11-26T00:00:00Z');"
+      let freshOnly ← OrbCore.RemoteDispatch.buildFreshSessionTranscriptHandoff store "m-handoff" "Initial prompt."
+      check (freshOnly == "Initial prompt.") "brand-new mission prompt is unchanged"
+      discard <| appendMissionEvent store "m-handoff" "user_message" "{\"content\":\"Prove B0 backing.\"}" "2026-11-26T00:01:00Z"
+      discard <| appendMissionEvent store "m-handoff" "assistant_message" "{\"content\":\"Tick 38 complete on integ2.\"}" "2026-11-26T00:02:00Z"
+      discard <| appendMissionEvent store "m-handoff" "user_message" "{\"content\":\"Continue on Gemini 4 Neon.\"}" "2026-11-26T00:03:00Z"
+      let handedOff ← OrbCore.RemoteDispatch.buildFreshSessionTranscriptHandoff store "m-handoff" "Continue on Gemini 4 Neon."
+      check ((handedOff.splitOn "Tick 38 complete on integ2.").length > 1 &&
+             (handedOff.splitOn "Prove B0 backing.").length > 1 &&
+             handedOff.endsWith "Continue on Gemini 4 Neon." &&
+             handedOff.utf8ByteSize ≤ 14000)
+        "migrated fresh session carries prior user/assistant turns into new harness prompt within 16 KiB limit"
+
+      -- 5d. Flapping `observeNodeApi` incidents without intervening mission events do not append
+      --     duplicate consecutive `hung_node` error rows; after new turn progress, a later hang does.
+      execute "CREATE TABLE IF NOT EXISTS remote_node_jobs (job_id TEXT PRIMARY KEY, mission_id TEXT NOT NULL DEFAULT '', node_id TEXT NOT NULL DEFAULT '', state TEXT NOT NULL DEFAULT 'queued', payload_json TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL DEFAULT '');"
+      execute "INSERT INTO remote_node_jobs(job_id,mission_id,node_id,state,created_at,updated_at) VALUES('j-flap','m-handoff','ashur','running','2026-11-26T00:00:00Z','2026-11-26T00:00:00Z');"
+      OrbCore.RemoteFleetAndRelay.observeNodeApi store "ashur" "offline" "2026-11-26T01:00:00Z" (pure true)
+      OrbCore.RemoteFleetAndRelay.observeNodeApi store "ashur" "offline" "2026-11-26T01:00:30Z" (pure true)
+      OrbCore.RemoteFleetAndRelay.observeNodeApi store "ashur" "online"  "2026-11-26T01:01:00Z" (pure true)
+      OrbCore.RemoteFleetAndRelay.observeNodeApi store "ashur" "offline" "2026-11-26T01:02:00Z" (pure true)
+      OrbCore.RemoteFleetAndRelay.observeNodeApi store "ashur" "offline" "2026-11-26T01:02:30Z" (pure true)
+      let .ok flapRows ← execParamQuery db "SELECT COUNT(*) FROM mission_events WHERE mission_id='m-handoff' AND event_type='error';" #[]
+        | throw (IO.userError "flapRows query failed")
+      check ((flapRows[1]?.bind (·[0]?)).getD "" == "1")
+        s!"expected 1 hung_node error across flapping incidents without progress, got {reprStr flapRows}"
+      discard <| appendMissionEvent store "m-handoff" "tool_result" "{\"id\":\"t1\",\"done\":true}" "2026-11-26T01:03:00Z"
+      OrbCore.RemoteFleetAndRelay.observeNodeApi store "ashur" "online"  "2026-11-26T01:03:10Z" (pure true)
+      OrbCore.RemoteFleetAndRelay.observeNodeApi store "ashur" "offline" "2026-11-26T01:04:00Z" (pure true)
+      OrbCore.RemoteFleetAndRelay.observeNodeApi store "ashur" "offline" "2026-11-26T01:04:30Z" (pure true)
+      let .ok flapRows2 ← execParamQuery db "SELECT COUNT(*) FROM mission_events WHERE mission_id='m-handoff' AND event_type='error';" #[]
+        | throw (IO.userError "flapRows2 query failed")
+      check ((flapRows2[1]?.bind (·[0]?)).getD "" == "2")
+        s!"expected 2nd hung_node error after intervening tool progress, got {reprStr flapRows2}"
+
       -- 6. Cloud owner alias (`HERMES_CLOUD_OWNER="prod"`) binds uniquely to bootstrapAdminId
       --    even when active members exist, while strictly denying members and non-bootstrap users.
       let hermesAdminOk ← OrbCore.CloudHttpAndWorker.matchesCloudOwner
