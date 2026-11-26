@@ -501,9 +501,7 @@ export function ThinkBlock(p: { item: Extract<StreamItem, { kind: "think" }> }) 
     <Show when={p.item.done || p.item.text.trim()}>
     <div class={`st-think ${open() ? "open" : ""}`}>
       <button class="st-think-head" aria-expanded={open()} onClick={() => setOpen(!open())}>
-        <Show when={p.item.done} fallback={<span class="shimmer">Thinking</span>}>
-          <span>Thinking</span>
-        </Show>
+        <span class={p.item.done ? undefined : "shimmer"}>Thinking</span>
         <Ic.ChevronRight size={12} class={`chev ${open() ? "open" : ""}`} />
       </button>
       <Show when={open() && p.item.text}>
@@ -699,21 +697,8 @@ function MissionTasksCard(p: { key: string; tasks: TaskItem[]; ended?: boolean; 
 function sameRecordEntry(a: unknown, b: unknown): boolean {
   if (a === b) return true;
   if (!a || !b || typeof a !== "object" || typeof b !== "object") return false;
-  const ka = Object.keys(a as Record<string, unknown>);
-  const kb = Object.keys(b as Record<string, unknown>);
-  if (ka.length !== kb.length) return false;
-  for (const k of ka) {
-    if ((a as Record<string, unknown>)[k] !== (b as Record<string, unknown>)[k]) return false;
-  }
-  return true;
-}
-
-function sameFollowUpMap<V>(a: ReadonlyMap<string, V>, b: ReadonlyMap<string, V>): boolean {
-  if (a.size !== b.size) return false;
-  for (const [k, v] of a) {
-    if (!b.has(k) || !sameRecordEntry(v, b.get(k))) return false;
-  }
-  return true;
+  const x = a as Record<string, unknown>, y = b as Record<string, unknown>, ka = Object.keys(x);
+  return ka.length === Object.keys(y).length && ka.every(k => x[k] === y[k]);
 }
 
 export function Transcript(p: { sizeKey?: string; initialBottom?: boolean; backend?: string | null; prepareSearch?:(signal:AbortSignal)=>Promise<void>; needsPrepareSearch?:()=>boolean; renderText?: (item: {key: string; text: string; live?: boolean}, fallback: JSX.Element) => JSX.Element; items: StreamItem[]; pending?: boolean; /** Message id still being handed to the agent (Send now). */ sending?: string; working?: boolean; workingLabel?: string; onForceSlot?: () => void; forceSlotPending?: boolean; /** `messageId`: the stored message being edited, which the new text replaces. */ onSend?: (text: string, messageId?: string) => boolean | Promise<boolean>; onResume?: () => void; onOpenSource?: () => void; loadToolCall?: ToolCallLoader; checkpoints?: import("./localAgents").CheckpointMeta[]; onRestoreCheckpoint?: (cp: import("./localAgents").CheckpointMeta) => void }) {
@@ -730,29 +715,18 @@ export function Transcript(p: { sizeKey?: string; initialBottom?: boolean; backe
     () => collectFollowUps(p.items),
     { actions: new Map(), missions: new Map(), machines: new Map() },
     {
-      equals: (a, b) =>
-        sameFollowUpMap(a.actions, b.actions) &&
-        sameFollowUpMap(a.missions, b.missions) &&
-        sameFollowUpMap(a.machines, b.machines),
+      equals: (a, b) => (["actions", "missions", "machines"] as const).every(k => a[k].size === b[k].size && [...a[k]].every(([id, v]) => b[k].has(id) && sameRecordEntry(v, b[k].get(id)))),
     },
   );
   const nonQueuedItems = createMemo(() => {
-    const list = p.items;
-    for (let i = 0; i < list.length; i++) {
-      if (list[i].kind === "user" && (list[i] as Extract<StreamItem, { kind: "user" }>).queued) {
-        return list.filter((item) => item.kind !== "user" || !item.queued);
-      }
-    }
-    return list;
+    const list = p.items, q = (it: StreamItem) => it.kind === "user" && it.queued, s = (it: StreamItem) => p.working === false && (it.kind === "think" || it.kind === "tool") && !it.done;
+    return list.some(it => q(it) || s(it)) ? list.filter(it => !q(it)).map(it => s(it) ? { ...it, done: true } : it) : list;
   });
   const groups = createMemo<Grouped[]>((previous) => groupWork(nonQueuedItems(), previous), []);
   /** Key of the last user turn, when nothing follows it yet. Compared by key
    * rather than identity: `reconcile` hands the loop store proxies, not the
    * original objects. */
-  const lastUserKey = createMemo(() => {
-    const last = p.items[p.items.length - 1];
-    return last?.kind === "user" ? last.key : null;
-  });
+  const lastUserKey = createMemo(() => { const last = p.items.at(-1); return last?.kind === "user" ? last.key : null; });
   const checkpointByUserKey = createMemo(() => {
     const map = new Map<string, import("./localAgents").CheckpointMeta>();
     const cps = p.checkpoints;
@@ -769,9 +743,8 @@ export function Transcript(p: { sizeKey?: string; initialBottom?: boolean; backe
     return map;
   });
   const lastErrorKey = createMemo(() => {
-    for (let i = groups().length - 1; i >= 0; i--) {
-      if (groups()[i].kind === "error") return groups()[i].key;
-    }
+    const g = groups();
+    for (let i = g.length - 1; i >= 0; i--) if (g[i].kind === "error") return g[i].key;
     return null;
   });
   const turns=createMemo<Array<{key:string;items:Grouped[]}>>((previous)=>{
