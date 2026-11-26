@@ -245,6 +245,9 @@ private def reaperTests (root : String) : IO Unit := do
         return .ok (if id == active.providerId then some 17 else none)
     }
     let resolve : Resolver := fun _ => pure (.ok provider)
+    -- Actively polling guests stay within `silentProbeDelaySec` before the warning tick.
+    for vm in #[active, archiveObserved, retry, minimum] do
+      discard <| requireOk (← recordAuthenticatedManagedPoll mc vm.id 1 1190) s!"poll {vm.id} before warning"
     -- Warning is owner-scoped and idempotent, with no provider work beforehand.
     discard <| requireOk (← tick mc core fleet resolve 1200) "warning tick"
     discard <| requireOk (← tick mc core fleet resolve 1200) "repeat warning tick"
@@ -254,6 +257,7 @@ private def reaperTests (root : String) : IO Unit := do
       "SELECT COUNT(*) FROM mission_events WHERE mission_id='ttl-owner' AND json_extract(payload,'$.code')='managed_machine_expiring';" #[]) "warning count"
     check (cell warnings[1]! 0 == "5") "one owner warning per expiring guest despite repeated tick"
 
+    discard <| requireOk (← recordAuthenticatedManagedPoll mc minimum.id 1 1290) "poll minimum before expiry"
     let first ← requireOk (← tick mc core fleet resolve 1300) "expiry tick"
     check (((first.fieldArr? "reaped").getD #[]).size == 3 &&
       ((first.fieldArr? "pending").getD #[]) == #[.str retry.id]) "active and archived cleanup succeeds; failed destroy stays pending"
