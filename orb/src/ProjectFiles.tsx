@@ -256,6 +256,8 @@ export function LiveProjectsSection(p: {
   const queuedDeletes = new Set<string>();
   const deletingDescendants = new Map<string, string[]>();
   const deleteFailures: string[] = [];
+  /** Roots whose delete needs a second confirmation because Core reported unloaded descendants. */
+  const descendantOptInTargets: string[] = [];
   /** Deletes held back only by running workers: root id -> running worker ids. */
   const runningBlocks = new Map<string, string[]>();
   /** The user confirmed "Stop and delete" for these roots. */
@@ -397,6 +399,9 @@ export function LiveProjectsSection(p: {
           const failures = deleteFailures.splice(0, deleteFailures.length);
           setActionError(`Couldn’t delete ${failures.length} agent(s). ${failures.join("; ")}`);
         }
+        if (descendantOptInTargets.length) {
+          setDeleteTargets(descendantOptInTargets.splice(0, descendantOptInTargets.length));
+        }
         bumpProjects();
       }
     });
@@ -428,6 +433,7 @@ export function LiveProjectsSection(p: {
         if (error instanceof ApiError && error.status === 409) {
           if (requiresDescendantOptIn(error.detail)) {
             descendantsConfirmed.add(id);
+            descendantOptInTargets.push(id);
             throw error;
           }
           const paused = pausedMissionIds(error.detail);
@@ -885,7 +891,7 @@ export function LiveProjectsSection(p: {
   let warmupActive = 0;
   createEffect(on(connectionVersion, () => {
     if (flushTimer) { clearTimeout(flushTimer); flushTimer = undefined; }
-    deletedInSession.clear(); deleteQueue.length = 0; queuedDeletes.clear(); deletingDescendants.clear(); deleteFailures.length = 0; pendingRemoved = new Set(); pendingUnmark = new Set();
+    deletedInSession.clear(); deleteQueue.length = 0; queuedDeletes.clear(); deletingDescendants.clear(); deleteFailures.length = 0; descendantOptInTargets.length = 0; pendingRemoved = new Set(); pendingUnmark = new Set();
     setDeletingIds(new Set<string>());
     resetPendingArchives();
     setDeleteProjectSlug(null); setProjectDeleteBusy(false);

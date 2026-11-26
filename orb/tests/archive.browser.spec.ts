@@ -195,7 +195,7 @@ test('right-click in archives selects and deletes everything, older than 1 day, 
  await expect(page.getByText('No archived conversations.')).toBeVisible();
 });
 
-test('deletion stays busy until completion and retains failed targets for retry',async({page})=>{
+test('deletion hides targets optimistically and restores failed targets with an error alert',async({page})=>{
  await page.addInitScript(()=>{localStorage.setItem('orb.apiUrl',location.origin);localStorage.setItem('orb.jwt','test');});
  const now=Date.now(),day=24*60*60*1000;
  let missions=[
@@ -236,17 +236,14 @@ test('deletion stays busy until completion and retains failed targets for retry'
  await expect(dialog).toContainText('Delete 2 agents?');
  await dialog.getByRole('button',{name:'Delete',exact:true}).click();
 
- // The modal remains in charge while the mutation is running.
- await expect(dialog).toHaveAttribute('aria-busy','true');
- await expect(dialog.getByRole('button',{name:'Cancel',exact:true})).toBeDisabled();
- await page.keyboard.press('Escape'); await expect(dialog).toBeVisible();
+ // Dialog closes and deleting rows vanish immediately while DELETE is in flight.
+ const archiveTree=page.getByRole('tree',{name:'Archived conversations'});
+ await expect(dialog).toHaveCount(0);
+ await expect(archiveTree.getByRole('button',{name:'Slow delete one',exact:true})).toHaveCount(0);
+ await expect(archiveTree.getByRole('button',{name:'Failed delete two',exact:true})).toHaveCount(0);
  await expect.poll(()=>deleteStarted).toEqual(['fail-two']);
  releaseSlow();
- await expect(dialog).toContainText('fail-two: Error: 409 mission is busy');
- await expect(dialog).not.toHaveAttribute('aria-busy','true');
- await expect(dialog.getByRole('button',{name:'Delete',exact:true})).toBeEnabled();
- await dialog.getByRole('button',{name:'Cancel',exact:true}).click();
- const archiveTree=page.getByRole('tree',{name:'Archived conversations'});
+ await expect(page.getByRole('alert')).toContainText('fail-two: Error: 409 mission is busy');
  await expect(archiveTree.getByRole('button',{name:'Slow delete one',exact:true})).toHaveCount(0);
  await expect(archiveTree.getByRole('button',{name:'Failed delete two',exact:true})).toBeEnabled();
  await expect(archiveTree.getByRole('button',{name:'Fresh conversation',exact:true})).toBeEnabled();

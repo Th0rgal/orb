@@ -417,13 +417,13 @@ test('suggested deletion uses shared confirmation, preserves drafts on cancel an
   await row.getByRole('button',{name:'Delete…',exact:true}).click();
   dialog = page.getByRole('dialog',{name:'Delete 1 agent?'});
   await dialog.getByRole('button',{name:'Delete',exact:true}).click();
+  // Optimistic delete dismisses the dialog and hides the row immediately without duplicate requests.
+  await expect(dialog).toHaveCount(0);
+  await expect(row).toHaveCount(0);
   await expect.poll(() => deletes).toBe(1);
-  await expect(dialog.getByRole('button',{name:'Working…',exact:true})).toBeDisabled();
   await page.keyboard.press('Enter');
   await page.keyboard.press('Escape');
-  await expect(dialog).toBeVisible();
   expect(deletes).toBe(1);
   release();
-  await expect(dialog).toHaveCount(0);
   await expect(row).toHaveCount(0);
 });
