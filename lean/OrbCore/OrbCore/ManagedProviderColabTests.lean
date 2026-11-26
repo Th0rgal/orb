@@ -26,6 +26,7 @@ def run : IO Unit := do
   let tunnelUp ← IO.mkRef true
   let connectedOnly ← IO.mkRef false
   let workerBlips ← IO.mkRef (0 : Nat)
+  let healthBlips ← IO.mkRef (0 : Nat)
   let sleeps ← IO.mkRef (#[] : Array UInt32)
   let clock ← IO.mkRef (0 : Nat)
   let cache ← IO.mkRef none
@@ -60,6 +61,11 @@ def run : IO Unit := do
     return .ok (404, .obj #[("error", .str "HTTP 404")])
   let worker : String → String → Transport := fun url token req => do
     workerRequests.modify (·.push (url, token, req))
+    if req.method == "GET" && req.path == "/health" then
+      if (← healthBlips.get) > 0 then
+        healthBlips.modify (· - 1)
+        return .error { code := "provider_transport_failed_outcome_uncertain" }
+      return .ok (200, .obj #[("ok", .bool true)])
     if token != "per-runtime-token" then return .ok (401, .obj #[("error", .str "unauthorized")])
     if (← workerBlips.get) > 0 then
       workerBlips.modify (· - 1)
@@ -94,7 +100,8 @@ def run : IO Unit := do
   let sent := ((← apiRequests.get).back!.body.getD .null)
   check (created.providerId == notebookId && !provider.isReady created.state &&
     (sent.fieldArr? "accelerator").map (·.size) == some 1 && sent.fieldBool? "worker" == some true &&
-    sent.fieldNat? "assign_timeout_secs" == some 180 && (← apiRequests.get).back!.timeoutMs == 270000)
+    sent.fieldNat? "assign_timeout_secs" == some 180 && sent.fieldNat? "total_timeout_secs" == some 210 &&
+    (← apiRequests.get).back!.timeoutMs == 330000)
     "create by name with the accelerator list; no tunnel yet is not ready"
   let .ok auto := colabSpawnBody { spec with size := "colab-auto" } | throw (IO.userError "auto body")
   check ((auto.fieldArr? "accelerator").map (·.filterMap JVal.asStr?) == some #["H100", "A100", "L4", "T4"]) "auto order, GPUs only"
@@ -108,9 +115,15 @@ def run : IO Unit := do
     "connected without a tunnel URL is not ready"
   connectedOnly.set false
   sleeps.set #[]
+  healthBlips.set 2
+  let healthBefore := (← workerRequests.get).size
+  check ((← provider.exec notebookId "true" 30).isOk &&
+    (← workerRequests.get).size == healthBefore + 4 && (← sleeps.get) == #[2000, 2000])
+    "transient DNS/TLS failures on /health are retried before /exec runs"
+  sleeps.set #[]
   workerBlips.set 1
   let blipBefore := (← workerRequests.get).size
-  check ((← provider.exec notebookId "true" 30).isOk && (← workerRequests.get).size == blipBefore + 2 && (← sleeps.get) == #[2000])
+  check ((← provider.exec notebookId "true" 30).isOk && (← workerRequests.get).size == blipBefore + 4 && (← sleeps.get) == #[2000])
     "one tunnel-edge failure is retried once"
   workerBlips.set 2
   check (!(← provider.exec notebookId "true" 30).isOk) "a second failure is not retried again"
@@ -148,7 +161,9 @@ def run : IO Unit := do
   check ((← observe spec).status == .available && (← apiRequests.get).size == 3) "available"
   check ((← observe spec).status == .available && (← apiRequests.get).size == 3) "cached within 30 s"
   check ((← observe { spec with size := "h100" }).status == .saturated) "requested accelerator not eligible"
-  check (colabAssignTimeoutSecs 1 == 180 && colabAssignTimeoutSecs 4 == 105 && 4 * colabAssignTimeoutSecs 4 + 90 < 900)
+  check (colabAssignTimeoutSecs 1 == 180 && colabAssignTimeoutSecs 4 == 105 &&
+    colabTotalTimeoutSecs 1 == 210 && colabTotalTimeoutSecs 4 == 420 &&
+    colabTotalTimeoutSecs 4 + 120 < 900)
     "the whole create call fits inside the readiness deadline"
   eligible.set #["T4"]
   clock.set 31000
