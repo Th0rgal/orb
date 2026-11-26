@@ -202,7 +202,7 @@ export function LiveProjectsSection(p: {
     // the open conversation's live status updates ahead of the project poll.
     const withCurrent = current
       ? (rows.some(m => m.id === current.id)
-        ? rows.map(m => m.id === current.id ? { ...mergeMission(m, current, "partial"), status: pendingArchiveStatus(m.id) ?? current.status } : m)
+        ? rows.map(m => m.id === current.id ? { ...m, ...current, project: m.project, folder: m.folder, placement_revision: m.placement_revision, status: pendingArchiveStatus(m.id) ?? current.status } : m)
         : [withHierarchy(current), ...rows])
       : rows;
     const shown = new Set(withCurrent.map(r => r.id));
@@ -2475,14 +2475,14 @@ export function LiveProjectsSection(p: {
     for (const m of Object.values(missions).flat()) byId.set(m.id, m);
     for (const m of p.activityMissions ?? []) {
       const prev = byId.get(m.id);
-      byId.set(m.id, prev ? mergeMission(prev, m, "partial") : m);
+      byId.set(m.id, prev ? { ...prev, ...m } : m);
     }
     const cur = currentMission();
     if (cur) {
       const prev = byId.get(cur.id);
-      byId.set(cur.id, prev ? mergeMission(prev, cur, "partial") : cur);
+      byId.set(cur.id, prev ? { ...prev, ...cur } : cur);
     }
-    return withMovedMissions([...byId.values()]);
+    return withMovedMissions([...byId.values()]).map(withHierarchy);
   };
   const activity = createMemo(() => folderActivity(activityMissionsSource()));
   const scheduledActivity = createMemo(() => folderActivity(activityMissionsSource(), m => missionStatusPresentation(rowEffectiveStatus(m), undefined, m.continuation).tone === "scheduled"));
