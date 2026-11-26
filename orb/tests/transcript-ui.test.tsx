@@ -72,6 +72,36 @@ describe("thinking fold", () => {
     expect(container.querySelectorAll(".st-think-head")).toHaveLength(0);
   });
 
+  it("closes an open thinking block when tool_call or text_delta follows, and never shimmers Thinking when working is false", () => {
+    const items = buildTranscript([
+      ev("thinking", { content: "Checking CI status.", done: false }),
+      ev("tool_call", { tool_call_id: "c1", name: "Bash", args: { command: "gh pr checks" } }),
+      ev("tool_result", { tool_call_id: "c1", name: "Bash", result: "ok" }),
+      ev("text_delta", { content: "All checks passed." }),
+    ]);
+    const think = items.find((it) => it.kind === "think");
+    expect(think && think.kind === "think" ? think.done : undefined).toBe(true);
+    const { container } = render(() => <Transcript items={items} working={false} />);
+    const workHead = container.querySelector(".st-work-head");
+    expect(workHead?.textContent).not.toContain("Thinking");
+    expect(workHead?.querySelector(".shimmer")).toBeNull();
+  });
+
+  it("never renders a live Thinking work fold or shimmering thought when working is false even if a cached item has done:false", () => {
+    const { container } = render(() => (
+      <Transcript
+        working={false}
+        items={[
+          { kind: "think", key: "t-stale", text: "Stale thought", done: false },
+          { kind: "tool", key: "tool-1", callId: "1", name: "Bash", args: { command: "ls" }, result: "ok", done: true },
+        ]}
+      />
+    ));
+    const workHead = container.querySelector(".st-work-head");
+    expect(workHead?.textContent).not.toContain("Thinking");
+    expect(workHead?.querySelector(".shimmer")).toBeNull();
+  });
+
   it("loads finished thought groups collapsed", () => {
     const items = buildTranscript([
       ev("thinking", { content: "A", done: true }),

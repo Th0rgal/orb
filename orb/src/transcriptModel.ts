@@ -375,6 +375,7 @@ export class TranscriptReducer {
     if (sliceRes.status !== 0 || !sliceRes.verdict || !sliceRes.verdict.admitted) return;
     this.foldSeq.set(channel, nextFoldSeq);
     this.foldEntries = sliceRes.verdict.nextEntryCount;
+    if (sliceRes.verdict.closedPreviousThinking && thinkingOpen && last?.kind === "think") this.put(this.items.length - 1, { ...last, done: true });
     switch (ev.type) {
       case "text_delta":
       case "text_op": {
