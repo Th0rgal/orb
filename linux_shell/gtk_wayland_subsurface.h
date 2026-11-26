@@ -19,9 +19,10 @@ typedef struct {
     struct wl_surface *parent;
     int x, y, scale;
     gboolean positioned;
+    gboolean above; /* stack above the window (an overlay) instead of below it (a pane) */
 } OrbWlSubsurface;
 
-/* Ensure a Wayland subsurface positioned below the GTK window for Vulkan WSI presentation.
+/* Ensure a Wayland subsurface below (or, with `above`, over) the GTK window for Vulkan WSI presentation.
  * Sets *moved to TRUE when position/creation requires a parent surface commit. */
 gboolean orb_wl_subsurface_ensure(OrbWlSubsurface *sub, GtkWidget *canvas, gboolean *moved);
 
