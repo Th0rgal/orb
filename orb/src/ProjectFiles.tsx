@@ -1,5 +1,5 @@
 import { deleteFileOptimistically, fileMoveKey, filesMovedAway, filesMovedInto, isFilePathPending, mergeArrivingMissions, missionMoveKey, previewMove, movedMission, missionsMovedInto, moveOptimistically, movingOutOf, pendingMoves as pendingPlaceMoves, settleMove, upsertMissionPreservingOrder, waitForFilePathSettled, withMovedMissions } from "./moves";
-import { renameOptimistically } from "./renames";
+import { renamedTitle, renameOptimistically } from "./renames";
 import { isArchivable, isReopenable, isRunning, isLive, isWorking, isSettledStatus, missionActivity, presentedStatus } from "./missionStatus";
 import { localRunActive } from "./localAgents";
 import { swallow } from "./log";
@@ -83,7 +83,7 @@ import { type TreeRow } from "./treeModel";
 const ShareMissionDialog = lazy(() => import("./ShareMissionDialog").then(module => ({ default: module.ShareMissionDialog })));
 import { deletingIds, setDeletingIds, createTreeSelection } from "./tree/selection";
 import { createArchivePager } from "./tree/archivePager";
-import { applyArchiveState, archiveStateTargets } from "./archiveState";
+import { applyArchiveState, archiveStateTargets, confirmPendingArchive, isArchivePending, pendingArchiveStatus, resetPendingArchives, rollbackPendingArchive, stagePendingArchive, withArchiveStatuses } from "./archiveState";
 import { createMissionMoves, type ApprovalConfirmationPrompt } from "./tree/moves";
 const ApprovalTransferDialog = lazy(() => import("./ApprovalTransferDialog"));
 import { createProjectTree, missionFolder, missionIdFromTreeId, type Node, type RowData } from "./tree/TreeView";
@@ -174,7 +174,7 @@ export function LiveProjectsSection(p: {
   const [shareDialogMission, setShareDialogMission] = createSignal<Mission | null>(null);
   const isArchived = (mission: Mission) => mission.status === "acknowledged";
   const sharedWithMeMissions = createMemo(() =>
-    (p.activityMissions ?? []).filter(
+    withArchiveStatuses(p.activityMissions ?? []).filter(
       m =>
         isMissionParticipant(m) &&
         !isArchived(m) &&
@@ -192,6 +192,7 @@ export function LiveProjectsSection(p: {
     // Pending moves: rows leave their old project and appear in the new one at once.
     // The per-project fetch pages history and walks parents. Until it lands,
     // the conversations already on the activity list are the list.
+    const deleting = deletingIds();
     const stored = missions[slug] ?? (p.activityMissions ?? []).filter(m => !isMissionParticipant(m) && (m.project ?? "") === slug);
     const own = stored.filter(m => !isMissionParticipant(m) && !movingOutOf(m.id, slug) && (!m.project || m.project === slug));
     const arriving = pendingPlaceMoves().size ? missionsMovedInto(slug, [...Object.values(missions).flat(), ...(p.activityMissions ?? [])]).filter(m => !isMissionParticipant(m) && !own.some(o => o.id === m.id)) : [];
@@ -201,7 +202,7 @@ export function LiveProjectsSection(p: {
     // the open conversation's live status updates ahead of the project poll.
     const withCurrent = current
       ? (rows.some(m => m.id === current.id)
-        ? rows.map(m => m.id === current.id ? { ...mergeMission(m, current, "partial"), status: archiving.get(m.id) ?? current.status } : m)
+        ? rows.map(m => m.id === current.id ? { ...m, ...current, project: m.project, folder: m.folder, placement_revision: m.placement_revision, status: pendingArchiveStatus(m.id) ?? current.status } : m)
         : [withHierarchy(current), ...rows])
       : rows;
     const shown = new Set(withCurrent.map(r => r.id));
@@ -210,7 +211,8 @@ export function LiveProjectsSection(p: {
     // Parents the resolver fetched by id (paged out of this project's list) are listed as context.
     for (const m of [...withCurrent, ...extraArchived]) shown.add(m.id);
     const fetchedParents = withMovedMissions(resolvedParents<Mission>()).filter(m => (m.project ?? "") === slug && !shown.has(m.id) && !listedIds.has(m.id));
-    const allRows = excludeBtwMissions([...withCurrent, ...extraArchived, ...fetchedParents]);
+    const allRows = withArchiveStatuses(excludeBtwMissions([...withCurrent, ...extraArchived, ...fetchedParents]))
+      .filter(m => !deleting.has(m.id));
     const byId = new Map(allRows.map(m => [m.id, m]));
     return missionTreeRows(allRows, m => !isArchived(m) && (!isSupersededInTree(m, byId) || isSelectedMissionId(m.id)));
   };
@@ -245,7 +247,6 @@ export function LiveProjectsSection(p: {
   const [multiSelectMenu, setMultiSelectMenu] = createSignal<{ x: number; y: number; treeIds: string[] } | null>(null);
   const [movePicker, setMovePicker] = createSignal<{ sources: DragSourceItem[]; anchor?: HTMLElement; treeId: string } | null>(null);
   const [deleteTargets, setDeleteTargets] = createSignal<string[]>([]);
-  const [deleteConfirmBusy, setDeleteConfirmBusy] = createSignal(false);
   const [batchBusy, setBatchBusy] = createSignal(false);
   const deletedInSession = new Set<string>();
   /** Archived elsewhere (superseded by a replacement, or transferred): hidden at
@@ -255,6 +256,8 @@ export function LiveProjectsSection(p: {
   const queuedDeletes = new Set<string>();
   const deletingDescendants = new Map<string, string[]>();
   const deleteFailures: string[] = [];
+  /** Roots whose delete needs a second confirmation because Core reported unloaded descendants. */
+  const descendantOptInTargets: string[] = [];
   /** Deletes held back only by running workers: root id -> running worker ids. */
   const runningBlocks = new Map<string, string[]>();
   /** The user confirmed "Stop and delete" for these roots. */
@@ -270,9 +273,8 @@ export function LiveProjectsSection(p: {
   let pendingUnmark = new Set<string>();
   let flushTimer: ReturnType<typeof setTimeout> | undefined;
   let missionRevision = 0;
-  const archiving = new Map<string, string>();
   const { archivesOpen, setArchivesOpen, archiveExpanded, setArchiveExpanded, archivedMissions, setArchivedMissions, archivesLoading, archivesError, archivesMore, archivesLoaded, archivesRequest, loadArchives, removeArchived, reset: resetArchives } =
-    createArchivePager({ revision: () => missionRevision, archiving, deleted: deletedInSession, currentConnection: version => currentConnection(version) });
+    createArchivePager({ revision: () => missionRevision, deleted: deletedInSession, currentConnection: version => currentConnection(version) });
   const currentMission = createMemo(() => {
     const selected = p.selected();
     if (!selected?.startsWith("m:")) return undefined;
@@ -397,8 +399,9 @@ export function LiveProjectsSection(p: {
           const failures = deleteFailures.splice(0, deleteFailures.length);
           setActionError(`Couldn’t delete ${failures.length} agent(s). ${failures.join("; ")}`);
         }
-        setDeleteConfirmBusy(false);
-        if (!deleteFailures.length && !actionError() || stopPrompt()) setDeleteTargets([]);
+        if (descendantOptInTargets.length) {
+          setDeleteTargets(descendantOptInTargets.splice(0, descendantOptInTargets.length));
+        }
         bumpProjects();
       }
     });
@@ -430,6 +433,7 @@ export function LiveProjectsSection(p: {
         if (error instanceof ApiError && error.status === 409) {
           if (requiresDescendantOptIn(error.detail)) {
             descendantsConfirmed.add(id);
+            descendantOptInTargets.push(id);
             throw error;
           }
           const paused = pausedMissionIds(error.detail);
@@ -564,9 +568,7 @@ export function LiveProjectsSection(p: {
     const version = connectionVersion();
     const currentlyDeleting = deletingIds();
     const targets = deleteTargets().filter(id => !currentlyDeleting.has(id) && !deletedInSession.has(id));
-    if (deleteConfirmBusy()) return;
-    if (!targets.length) {setDeleteTargets([]); return;}
-    setDeleteConfirmBusy(true);
+    if (!targets.length) { setDeleteTargets([]); return; }
     setActionError(null);
     for (const id of targets) if (deleteList([id]).length) descendantsConfirmed.add(id);
     const allLoaded = allKnownMissions();
@@ -576,6 +578,9 @@ export function LiveProjectsSection(p: {
     const allDeleting = expandMissionDescendants(targets, allLoaded);
     const targetSet = new Set(allDeleting);
     batch(() => {
+      // Optimistic: dismiss the dialog and hide the rows immediately; if Core
+      // refuses or fails, unmarking `deletingIds` restores them in place.
+      setDeleteTargets([]);
       setDeletingIds(prev => {
         const next = new Set(prev);
         for (const id of allDeleting) next.add(id);
@@ -598,8 +603,7 @@ export function LiveProjectsSection(p: {
       if (currentRename && "missionId" in currentRename && targetSet.has(currentRename.missionId)) {
         setRename(null);
       }
-      if (p.onDeleted) p.onDeleted(allDeleting);
-      else if (allDeleting.some(id => p.selected() === `m:${id}` || p.selected() === `ms:${id}`)) p.open(null);
+      if (allDeleting.some(id => p.selected() === `m:${id}` || p.selected() === `ms:${id}`)) p.open(null);
     });
     const freshTargets = targets.filter(id => !queuedDeletes.has(id) && !deletedInSession.has(id));
     for (const id of freshTargets) queuedDeletes.add(id);
@@ -887,8 +891,9 @@ export function LiveProjectsSection(p: {
   let warmupActive = 0;
   createEffect(on(connectionVersion, () => {
     if (flushTimer) { clearTimeout(flushTimer); flushTimer = undefined; }
-    deletedInSession.clear(); deleteQueue.length = 0; queuedDeletes.clear(); deletingDescendants.clear(); deleteFailures.length = 0; pendingRemoved = new Set(); pendingUnmark = new Set();
+    deletedInSession.clear(); deleteQueue.length = 0; queuedDeletes.clear(); deletingDescendants.clear(); deleteFailures.length = 0; descendantOptInTargets.length = 0; pendingRemoved = new Set(); pendingUnmark = new Set();
     setDeletingIds(new Set<string>());
+    resetPendingArchives();
     setDeleteProjectSlug(null); setProjectDeleteBusy(false);
     setRename(null); setActionMenu(null); setFileMenu(null); setFileAction(null); setFileClipboard(""); setArchiveMenu(null);
       setMultiSelectMenu(null);
@@ -1118,7 +1123,10 @@ export function LiveProjectsSection(p: {
 
   const newerThan = (a: Mission, b: Mission) => (Date.parse(a.updated_at || "") || 0) > (Date.parse(b.updated_at || "") || 0);
   const hiddenInSession = (id: string) => deletedInSession.has(id) || archivedInSession.has(id);
-  const withArchiving = (m: Mission) => archiving.has(m.id) ? { ...m, status: archiving.get(m.id)! } : m;
+  const withArchiving = (m: Mission) => {
+    const pending = pendingArchiveStatus(m.id);
+    return pending !== undefined ? { ...m, status: pending } : m;
+  };
   const unseenActivity = (slug: string, source: readonly Mission[] | undefined, existing?: readonly Mission[]) => {
     const seen = existing ? new Set(existing.map(m => m.id)) : undefined;
     return (source ?? []).filter(m => !seen?.has(m.id) && !isMissionParticipant(m) && m.project?.trim() === slug && !hiddenInSession(m.id) && !isArchived(m) && !m.tags?.includes("archived") && !isBtwMission(m) && !movingOutOf(m.id, slug)).map(m => withArchiving(withHierarchy(m)));
@@ -1139,7 +1147,7 @@ export function LiveProjectsSection(p: {
         // Reconcile, never replace: a short answer during a Core/Hermes restart keeps what is on screen.
         const misses = listMisses.get(slug) ?? new Map() as Misses; listMisses.set(slug, misses);
         const stored = (missions[slug] ?? []).filter(m => !hiddenInSession(m.id));
-        const reconciled = reconcileMissionList([...unseenActivity(slug, p.activityMissions, stored), ...stored], visibleList.map(withArchiving), misses, partial);
+        const reconciled = reconcileMissionList([...unseenActivity(slug, p.activityMissions, stored), ...stored], withArchiveStatuses(visibleList), misses, partial);
         const merged = mergeById(missions[slug] ?? [], reconciled);
         batch(() => {
           if (merged !== missions[slug]) setMissions(slug, merged);
@@ -1394,7 +1402,7 @@ export function LiveProjectsSection(p: {
   };
   const beginRename = (slug: string) => {
     const project = projects().find((x) => x.slug === slug);
-    const title = (project?.title || slug).trim();
+    const title = (renamedTitle("project", slug, project?.title) || slug).trim();
     // NameDialog captures its clean value when mounted. Publish the target last.
     setRenameValue(title);
     setRenameError(null);
@@ -1403,9 +1411,10 @@ export function LiveProjectsSection(p: {
   const beginMissionRename = (mission: Mission) => {
     setMissionMenu(null);
     setForkTarget(null);
-    setRenameValue(mission.title ?? "");
+    const title = renamedTitle("mission", mission.id, mission.title) ?? "";
+    setRenameValue(title);
     setRenameError(null);
-    setRename({ missionId: mission.id, title: mission.title ?? "" });
+    setRename({ missionId: mission.id, title });
   };
   const saveRename = async () => {
     const target = rename();
@@ -1710,18 +1719,20 @@ export function LiveProjectsSection(p: {
       reportError(message);
       return false;
     };
-    if (archiving.has(mission.id) || deletingIds().has(mission.id)) return reject("Another action is in progress for this mission.");
+    if (isArchivePending(mission.id) || deletingIds().has(mission.id)) return reject("Another action is in progress for this mission.");
     const known = allKnownMissions();
     if (missionSubtree(known, [mission.id]).some(m => deletingIds().has(m.id))) return reject("A mission in this conversation is being deleted.");
     let targets: Mission[];
-    try { targets = archiveStateTargets(mission, known, restore, id => archiving.has(id)); }
+    try { targets = archiveStateTargets(mission, known, restore, id => isArchivePending(id)); }
     catch (e) { return reject(e instanceof Error ? e.message : String(e)); }
     if (!targets.length) return true;
     const id = mission.id, version = connectionVersion();
     const status = restore ? "paused" : "acknowledged";
     const previous = new Map(targets.map(t => [t.id, t.status]));
     const targetIds = new Set(targets.map(t => t.id));
-    for (const t of targets) archiving.set(t.id, status);
+    const restoreSlug = restore ? (mission.project || Object.keys(missions).find(slug => missions[slug]?.some(m => m.id === id))) : undefined;
+    const insertedOnRestore = new Set<string>();
+    const staged = stagePendingArchive(targets.map(t => t.id), status);
     missionRevision++;
     setActionError(null);
     const updateStatus = (statusFor: (m: Mission) => string) => batch(() => {
@@ -1748,17 +1759,33 @@ export function LiveProjectsSection(p: {
       if (mid && targetIds.has(mid)) setSelectionAnchor(null);
     });
     updateStatus(() => status);
+    // Restoring into an already-loaded project reveals the conversation immediately
+    // rather than making it vanish until the server responds.
+    if (restore && restoreSlug && missions[restoreSlug] !== undefined) {
+      const existingIds = new Set(missions[restoreSlug]!.map(m => m.id));
+      for (const t of targets) if (!existingIds.has(t.id)) insertedOnRestore.add(t.id);
+      if (insertedOnRestore.size) {
+        const next = [
+          ...targets.filter(t => insertedOnRestore.has(t.id)).map(t => ({ ...t, status })),
+          ...missions[restoreSlug]!,
+        ];
+        setMissions(restoreSlug, next);
+        p.onProjectMissions?.(restoreSlug, next);
+      }
+    }
     try {
       await applyArchiveState(mission, targets, restore);
-      if (!currentConnection(version)) return;
+      if (!currentConnection(version)) { rollbackPendingArchive(staged); return; }
+      confirmPendingArchive(staged);
       if (restore) {
         for (const t of targets) archivedInSession.delete(t.id);
-        const slug = mission.project || Object.keys(missions).find(slug => missions[slug]?.some(m => m.id === id));
+        const slug = restoreSlug || Object.keys(missions).find(slug => missions[slug]?.some(m => m.id === id));
         if (slug) {
           setMissions(slug, rows => [
             ...targets.map(t => ({ ...t, status })),
             ...(rows ?? []).filter(m => !targetIds.has(m.id)),
           ]);
+          p.onProjectMissions?.(slug, missions[slug] ?? []);
           setExpanded(slug, true);
           void loadDir(slug, "");
           const segments = missionFolder(mission).split("/").filter(Boolean);
@@ -1771,12 +1798,20 @@ export function LiveProjectsSection(p: {
       }
       return true;
     } catch (e) {
+      rollbackPendingArchive(staged);
       if (currentConnection(version)) {
-        updateStatus(m => previous.get(m.id) ?? m.status);
+        batch(() => {
+          if (restoreSlug && insertedOnRestore.size && missions[restoreSlug]) {
+            const cleaned = missions[restoreSlug]!.filter(m => !insertedOnRestore.has(m.id));
+            setMissions(restoreSlug, cleaned);
+            p.onProjectMissions?.(restoreSlug, cleaned);
+          }
+          updateStatus(m => previous.get(m.id) ?? m.status);
+        });
         return reject(e instanceof Error ? e.message : String(e));
       }
       return false;
-    } finally { for (const t of targets) archiving.delete(t.id); missionRevision++; }
+    } finally { missionRevision++; }
   };
   const archiveConversation = (mission: Mission) => changeArchiveState(mission, false);
   createEffect(on(() => p.archiveRequests, reqs => {
@@ -1919,8 +1954,11 @@ export function LiveProjectsSection(p: {
     } finally { setBatchBusy(false); }
   };
   const archivedMissionRows = (slug?: string): Mission[] => {
+    const deleting = deletingIds();
     const rows = new Map<string, Mission>();
-    for (const mission of archivedMissions()) rows.set(mission.id, mission);
+    for (const mission of withArchiveStatuses(archivedMissions())) {
+      if (!deleting.has(mission.id) && isArchived(mission)) rows.set(mission.id, mission);
+    }
     // Archived ancestors already shown around visible children have one row.
     const inMain = Object.keys(missions).flatMap(s => visibleMissions(s));
     return archiveOnlyRows([...rows.values()], inMain)
@@ -2437,14 +2475,14 @@ export function LiveProjectsSection(p: {
     for (const m of Object.values(missions).flat()) byId.set(m.id, m);
     for (const m of p.activityMissions ?? []) {
       const prev = byId.get(m.id);
-      byId.set(m.id, prev ? mergeMission(prev, m, "partial") : m);
+      byId.set(m.id, prev ? { ...prev, ...m } : m);
     }
     const cur = currentMission();
     if (cur) {
       const prev = byId.get(cur.id);
-      byId.set(cur.id, prev ? mergeMission(prev, cur, "partial") : cur);
+      byId.set(cur.id, prev ? { ...prev, ...cur } : cur);
     }
-    return withMovedMissions([...byId.values()]);
+    return withMovedMissions([...byId.values()]).map(withHierarchy);
   };
   const activity = createMemo(() => folderActivity(activityMissionsSource()));
   const scheduledActivity = createMemo(() => folderActivity(activityMissionsSource(), m => missionStatusPresentation(rowEffectiveStatus(m), undefined, m.continuation).tone === "scheduled"));
@@ -2566,19 +2604,19 @@ export function LiveProjectsSection(p: {
           onClick={e => { e.stopPropagation(); e.currentTarget.focus({ preventScroll: true }); const box = e.currentTarget.getBoundingClientRect(); setActionMenu({ x: Math.max(8, box.right - 176), y: box.bottom + 4, slug: d.slug, path: d.path! }); }}><Ic.PlusIcon size={13} /></button>
       </div>;
     }
-    const deleting = () => d.mission ? deletingIds().has(d.mission.id) : false;
     const isMissionCut = () => !!d.mission && (!d.placeholder || !expanded[d.mission.project ?? ""]) && (d.mission.id === cutId() || pendingMoves().includes(d.mission.id) || isItemCut(row.id));
     const effectiveMissionStatus = () => d.mission ? rowEffectiveStatus(d.mission) : "";
-    const tipDetail = () => rowDetail(d.label, [d.mission && isArchived(d.mission) ? [projects().find(project => project.slug === d.slug)?.title || d.slug, missionFolder(d.mission)].filter(Boolean).join(" / ") : undefined, d.mission ? missionMachine(d.mission) : undefined, d.mission?.backend, d.mission?.model_override, d.mission?.id, d.mission ? (deleting() ? "Deleting…" : missionStatusPresentation(effectiveMissionStatus(), pendingMissionInteraction(d.mission.id), d.mission.continuation).label) : undefined]);
+    const statusLabel = () => d.mission ? missionStatusPresentation(effectiveMissionStatus(), pendingMissionInteraction(d.mission.id), d.mission.continuation).label : undefined;
+    const tipDetail = () => rowDetail(d.label, [d.mission && isArchived(d.mission) ? [projects().find(project => project.slug === d.slug)?.title || d.slug, missionFolder(d.mission)].filter(Boolean).join(" / ") : undefined, d.mission ? missionMachine(d.mission) : undefined, d.mission?.backend, d.mission?.model_override, d.mission?.id, statusLabel()]);
     const tip = rowTip.bind(tipDetail());
-    return <><button disabled={deleting()} aria-busy={deleting() ? true : undefined} aria-current={isSelectedRow(row.id) ? "page" : undefined} aria-expanded={d.launched || d.versions ? row.expanded : undefined}
-      onKeyDown={e => { if (deleting()) return; if ((d.launched || d.versions) && ((e.key === "ArrowRight" && !row.expanded) || (e.key === "ArrowLeft" && row.expanded))) { e.preventDefault(); e.stopPropagation(); setExpanded(row.id, !row.expanded); } }}
-      aria-description={d.mission ? (deleting() ? "Deleting…" : missionStatusPresentation(effectiveMissionStatus(), pendingMissionInteraction(d.mission.id), d.mission.continuation).label) : undefined} class={`row ${d.kind === "mission" ? "agent" : "file"} ${d.mission && pendingPlaceMoves().has(missionMoveKey(d.mission.id)) ? "mission-arriving" : ""} ${deleting() ? "mission-deleting" : ""} ${d.kind === "file" && ((cutFile()?.slug === d.slug && cutFile()?.path === d.path) || isItemCut(row.id)) ? "mission-cut" : ""} ${d.mission && isSettledStatus(effectiveMissionStatus()) ? "done" : ""} ${isMissionCut() ? "mission-cut" : ""} ${rowDrag.isLifted(row.id) ? "drag-source" : ""} ${!deleting() && isRowActive(row.id) ? "active" : ""}`} {...tip}
-      onPointerDown={e => { if (e.button === 0 && !deleting()) { if (d.mission) { cancelHoverTranscript(); prefetchTranscript(d.mission.id); } else { cachePrefetch(row.id, () => readProjectFile(d.slug, d.path!).then(text => cachePut(row.id, text))); } } }}
-      onPointerEnter={e => { if (deleting()) return; if (rowDrag.phase() === 0) rowTip.bind(tipDetail()).onPointerEnter(e); if (d.mission) scheduleHoverTranscript(d.mission.id); else cachePrefetch(row.id, () => readProjectFile(d.slug, d.path!).then(text => cachePut(row.id, text))); }}
+    return <><button aria-current={isSelectedRow(row.id) ? "page" : undefined} aria-expanded={d.launched || d.versions ? row.expanded : undefined}
+      onKeyDown={e => { if ((d.launched || d.versions) && ((e.key === "ArrowRight" && !row.expanded) || (e.key === "ArrowLeft" && row.expanded))) { e.preventDefault(); e.stopPropagation(); setExpanded(row.id, !row.expanded); } }}
+      aria-description={statusLabel()} class={`row ${d.kind === "mission" ? "agent" : "file"} ${d.mission && pendingPlaceMoves().has(missionMoveKey(d.mission.id)) ? "mission-arriving" : ""} ${d.kind === "file" && ((cutFile()?.slug === d.slug && cutFile()?.path === d.path) || isItemCut(row.id)) ? "mission-cut" : ""} ${d.mission && isSettledStatus(effectiveMissionStatus()) ? "done" : ""} ${isMissionCut() ? "mission-cut" : ""} ${rowDrag.isLifted(row.id) ? "drag-source" : ""} ${isRowActive(row.id) ? "active" : ""}`} {...tip}
+      onPointerDown={e => { if (e.button === 0) { if (d.mission) { cancelHoverTranscript(); prefetchTranscript(d.mission.id); } else { cachePrefetch(row.id, () => readProjectFile(d.slug, d.path!).then(text => cachePut(row.id, text))); } } }}
+      onPointerEnter={e => { if (rowDrag.phase() === 0) rowTip.bind(tipDetail()).onPointerEnter(e); if (d.mission) scheduleHoverTranscript(d.mission.id); else cachePrefetch(row.id, () => readProjectFile(d.slug, d.path!).then(text => cachePut(row.id, text))); }}
       onPointerLeave={() => { tip.onPointerLeave(); if (d.mission) cancelHoverTranscript(); }}
-      onFocus={e => { rowTip.bind(tipDetail()).onFocus(e); if (!deleting() && d.mission) prefetchTranscript(d.mission.id); }}
-      onContextMenu={e => { if (d.mission) { if (deleting()) { e.preventDefault(); e.stopPropagation(); return; } const dest = resolveTreeDestination(row.id); onMissionContext(e, d.mission, row.id, dest?.slug ?? (isArchived(d.mission) ? "" : d.slug), dest?.path ?? ""); } else {
+      onFocus={e => { rowTip.bind(tipDetail()).onFocus(e); if (d.mission) prefetchTranscript(d.mission.id); }}
+      onContextMenu={e => { if (d.mission) { const dest = resolveTreeDestination(row.id); onMissionContext(e, d.mission, row.id, dest?.slug ?? (isArchived(d.mission) ? "" : d.slug), dest?.path ?? ""); } else {
         e.preventDefault(); e.stopPropagation(); setActionMenu(null); setMissionMenu(null); setArchiveMenu(null); setMultiSelectMenu(null);
         const group = contextSelectRow(row.id);
         if (group.length > 1) {
@@ -2586,7 +2624,7 @@ export function LiveProjectsSection(p: {
           return;
         }
         setFileMenu({ slug: d.slug, path: d.path!, x: e.clientX, y: e.clientY });
-      } }} onClick={e => { if (d.mission) { if (deleting()) return; clickAgent(e, d.mission.id, row.id); } else { clickSelectableRow(e, row.id, () => p.open(row.id)); } }}>
+      } }} onClick={e => { if (d.mission) clickAgent(e, d.mission.id, row.id); else clickSelectableRow(e, row.id, () => p.open(row.id)); }}>
       <span class={`row-ico glyph ${d.mission ? "mission-lead" : ""}`}><Show when={d.mission} fallback={<Ic.FileIcon />}>{m => <Show when={isArchived(m())} fallback={<MissionGlyph missionId={m().id} status={rowEffectiveStatus(m())} unread={isMissionUnread(m(), isCurrentMissionId(m().id) ? m().id : undefined, Boolean(pendingMissionInteraction(m().id)))} continuation={m().continuation} identity={m().backend?.startsWith("cloud_") ? <ProviderLogo type={m().backend!} /> : undefined} />}><SidebarIcon.MessageCircle size={15} /></Show>}</Show></span>
       <span class="row-label">{d.label}</span><Show when={d.version}><span class="row-version-tag">earlier</span></Show><Show when={!d.launched && !d.versions}><MachineBadge name={d.mission ? missionMachine(d.mission) : undefined} /></Show>
     </button>
@@ -2622,7 +2660,7 @@ export function LiveProjectsSection(p: {
                     identity={m.backend?.startsWith("cloud_") ? <ProviderLogo type={m.backend!} /> : undefined}
                   />
                 </span>
-                <span class="row-label">{m.title || "Untitled conversation"}</span>
+                <span class="row-label">{renamedTitle("mission", m.id, m.title) || "Untitled conversation"}</span>
                 <Show when={m.owner_username}>
                   <span class="row-machine">
                     <span class="row-machine-name">@{m.owner_username}</span>
@@ -2718,7 +2756,7 @@ export function LiveProjectsSection(p: {
           description={deleteList(deleteTargets()).length
             ? `${descendantsSentence(deleteList(deleteTargets()))} Their history and workspace files are permanently deleted with ${deleteTargets().length === 1 ? "it" : "them"}.`
             : "This permanently deletes the selected conversations and their workspace files."}
-          busy={deleteConfirmBusy()} error={actionError()} onConfirm={() => void deleteSelected()} onClose={() => {setActionError(null);setDeleteTargets([]);}}/>
+          busy={false} error={actionError()} onConfirm={() => void deleteSelected()} onClose={() => {setActionError(null);setDeleteTargets([]);}}/>
       </Show>
       <Show when={pendingLargeImport()} keyed>{pending => (
         <ConfirmDialog

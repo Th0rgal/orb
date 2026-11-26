@@ -74,14 +74,14 @@ test('one collapsed archive spans projects, while completion stays in place; res
  await expect(projects.getByRole('button',{name:'Second project',exact:true})).toHaveAttribute('aria-expanded','true');
  await expect(page.getByRole('button',{name:'notes',exact:true})).toHaveAttribute('aria-expanded','true');
  await expect(page.getByRole('button',{name:'deep',exact:true})).toHaveAttribute('aria-expanded','true');
- expect(writes).toEqual([{path:'/api/control/missions/archived/status',body:{status:'paused'}}]);
+ await expect.poll(()=>writes).toEqual([{path:'/api/control/missions/archived/status',body:{status:'paused'}}]);
  expect(missions[2].folder).toBe('notes/deep');
  await page.screenshot({path:'/tmp/orb-shared-archives.png'});
  await restoredRow.click({button:'right'});await page.getByRole('menuitem',{name:'Delete agent…',exact:true}).click();
  await page.getByRole('dialog').getByRole('button',{name:'Delete',exact:true}).click();
  await expect(page.getByRole('dialog')).toHaveCount(0);
  await expect(restoredRow).toHaveCount(0);
- expect(writes).toEqual([
+ await expect.poll(()=>writes).toEqual([
   {path:'/api/control/missions/archived/status',body:{status:'paused'}},
   {path:'/api/control/missions/archived/status',body:{status:'acknowledged'}},
   {path:'/api/control/missions/archived',method:'DELETE'},
@@ -195,7 +195,7 @@ test('right-click in archives selects and deletes everything, older than 1 day, 
  await expect(page.getByText('No archived conversations.')).toBeVisible();
 });
 
-test('deletion stays busy until completion and retains failed targets for retry',async({page})=>{
+test('deletion hides targets optimistically and restores failed targets with an error alert',async({page})=>{
  await page.addInitScript(()=>{localStorage.setItem('orb.apiUrl',location.origin);localStorage.setItem('orb.jwt','test');});
  const now=Date.now(),day=24*60*60*1000;
  let missions=[
@@ -236,17 +236,14 @@ test('deletion stays busy until completion and retains failed targets for retry'
  await expect(dialog).toContainText('Delete 2 agents?');
  await dialog.getByRole('button',{name:'Delete',exact:true}).click();
 
- // The modal remains in charge while the mutation is running.
- await expect(dialog).toHaveAttribute('aria-busy','true');
- await expect(dialog.getByRole('button',{name:'Cancel',exact:true})).toBeDisabled();
- await page.keyboard.press('Escape'); await expect(dialog).toBeVisible();
+ // Dialog closes and deleting rows vanish immediately while DELETE is in flight.
+ const archiveTree=page.getByRole('tree',{name:'Archived conversations'});
+ await expect(dialog).toHaveCount(0);
+ await expect(archiveTree.getByRole('button',{name:'Slow delete one',exact:true})).toHaveCount(0);
+ await expect(archiveTree.getByRole('button',{name:'Failed delete two',exact:true})).toHaveCount(0);
  await expect.poll(()=>deleteStarted).toEqual(['fail-two']);
  releaseSlow();
- await expect(dialog).toContainText('fail-two: Error: 409 mission is busy');
- await expect(dialog).not.toHaveAttribute('aria-busy','true');
- await expect(dialog.getByRole('button',{name:'Delete',exact:true})).toBeEnabled();
- await dialog.getByRole('button',{name:'Cancel',exact:true}).click();
- const archiveTree=page.getByRole('tree',{name:'Archived conversations'});
+ await expect(page.getByRole('alert')).toContainText('fail-two: Error: 409 mission is busy');
  await expect(archiveTree.getByRole('button',{name:'Slow delete one',exact:true})).toHaveCount(0);
  await expect(archiveTree.getByRole('button',{name:'Failed delete two',exact:true})).toBeEnabled();
  await expect(archiveTree.getByRole('button',{name:'Fresh conversation',exact:true})).toBeEnabled();

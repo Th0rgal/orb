@@ -11,6 +11,8 @@ import {
 import { writeClipboardReference } from "./clipboard";
 import { localContextFile } from "./projectContext";
 import { applyServerPlacementEvent, moveMission, moveMissions, planMissionMoves } from "./missionMove";
+import { isArchived } from "./missionStatus";
+import { isSupersededMission } from "./missionTree";
 
 export interface FileClipboard { slug: string; path: string; copy: boolean; directory?: boolean; backend: string; account: string; nonce: string }
 export type ClipboardItem =
@@ -113,67 +115,60 @@ const missionFolderIn = (slug: string, path: string, mission: Mission) => {
   return norm && containsFolder(path, norm) ? norm : undefined;
 };
 
-/** Synchronous check against missions already loaded in memory. */
+const isBlockingFolderMission = (m: Mission) => !isArchived(m.status) && !isSupersededMission(m);
+const folderWorkMsg = (action: string) => `Move or archive the agents in this folder before ${action} it.`;
+
+/** Synchronous check against active (non-archived, non-superseded) missions already loaded in memory. */
 export function folderWorkError(
   slug: string,
   path: string,
   knownMissions: readonly Mission[],
   action = "deleting",
 ): string | null {
-  if (knownMissions.some(mission => missionFolderIn(slug, path, mission) !== undefined)) {
-    return `Move the agents out of this folder before ${action} it.`;
-  }
-  return null;
+  return knownMissions.some(m => isBlockingFolderMission(m) && missionFolderIn(slug, path, m) !== undefined)
+    ? folderWorkMsg(action) : null;
 }
 
 /** Agents filed in a folder or below it. */
 async function folderWork(slug: string, path: string, first = false) {
   const normPrefix = normalizeMissionFolder(path);
   const version = connectionVersion();
-  const checkConnection = () => { if (version !== connectionVersion()) throw new Error("Connection changed. Try again."); };
+  const check = () => { if (version !== connectionVersion()) throw new Error("Connection changed. Try again."); };
   const missions = new Map<string, string>();
   const allById = new Map<string, Mission>();
   const collect = (list: Mission[]) => {
-    for (const mission of list) {
-      allById.set(mission.id, mission);
-      const at = missionFolderIn(slug, path, mission);
-      if (at !== undefined) missions.set(mission.id, at);
+    for (const m of list) {
+      allById.set(m.id, m);
+      if (first && !isBlockingFolderMission(m)) continue;
+      const at = missionFolderIn(slug, path, m);
+      if (at !== undefined) missions.set(m.id, at);
+    }
+  };
+  const scanPages = async (extra: string) => {
+    for (let offset = 0; ; offset += 200) {
+      const page = await api<Mission[]>(`/api/control/missions?project=${encodeURIComponent(slug)}&limit=200&offset=${offset}${extra}`);
+      check();
+      collect(page);
+      if ((first && missions.size) || page.length < 200) break;
     }
   };
   if (!first) {
     await Promise.all([
-      import("./localOrigins").then(m => m.localOrigins()).then(local => { checkConnection(); collect(local); }),
-      (async () => {
-        for (let offset = 0; ; offset += 200) {
-          const page = await api<Mission[]>(`/api/control/missions?project=${encodeURIComponent(slug)}&limit=200&offset=${offset}&all=true`);
-          checkConnection();
-          collect(page);
-          if (page.length < 200) break;
-        }
-      })(),
+      import("./localOrigins").then(m => m.localOrigins()).then(local => { check(); collect(local); }),
+      scanPages("&all=true"),
     ]);
-    checkConnection();
+    check();
     return { missions, allMissions: [...allById.values()] };
   }
   collect(await import("./localOrigins").then(m => m.localOrigins()));
-  checkConnection();
-  if (missions.size) return { missions, allMissions: [] as Mission[] };
-  for (let offset = 0; ; offset += 200) {
-    const page = await api<Mission[]>(
-      `/api/control/missions?project=${encodeURIComponent(slug)}&folder_prefix=${encodeURIComponent(normPrefix)}&limit=${first ? 1 : 200}&offset=${offset}&all=true`,
-    );
-    checkConnection();
-    collect(page);
-    if (first && missions.size) return { missions, allMissions: [] as Mission[] };
-    if (page.length < (first ? 1 : 200)) break;
-  }
+  check();
+  if (!missions.size) await scanPages(`&folder_prefix=${encodeURIComponent(normPrefix)}`);
   return { missions, allMissions: [] as Mission[] };
 }
 
-/** Keep executable work visible: removing documents must not orphan its folder. */
+/** Keep executable work visible: removing documents must not orphan active agents in its folder. */
 export async function assertFolderHasNoWork(slug: string, path: string, action = "deleting"): Promise<void> {
-  const work = await folderWork(slug, path, true);
-  if (work.missions.size) throw new Error(`Move the agents out of this folder before ${action} it.`);
+  if ((await folderWork(slug, path, true)).missions.size) throw new Error(folderWorkMsg(action));
 }
 
 /** Fallback helper for local-context or cross-project folder moves; server-side `transfer_file` cascades same-project moves automatically. */

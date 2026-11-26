@@ -3931,11 +3931,12 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
         let mut hasProjSkill := false
         if !activeClaims.isExternal && !activeClaims.missionId.isEmpty then
           if let .ok mRs ← execParamQuery st.store.missionsDb
-              "SELECT placement_kind, project, tags FROM missions WHERE id=?1;" #[activeClaims.missionId] then
+              "SELECT placement_kind, project, tags, COALESCE(owner_user_id,'') FROM missions WHERE id=?1;" #[activeClaims.missionId] then
             if mRs.size > 1 then
               let pk := (mRs[1]?.bind (·[0]?)).getD ""
               let mProj := (mRs[1]?.bind (·[1]?)).getD ""
               let mTags := parseStringJsonArray ((mRs[1]?.bind (·[2]?)).getD "[]")
+              let mOwner := (mRs[1]?.bind (·[3]?)).getD ""
               if pk == "managed_vm" || pk.startsWith "managed-" then
                 onManagedNode := true
               if mTags.contains "skill:spark-memory" then
@@ -3948,6 +3949,16 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
                   if pRs.size > 1 then
                     let skills := parseStringJsonArray ((pRs[1]?.bind (·[0]?)).getD "[]")
                     hasProjSkill := skills.contains "spark-memory" || skills.contains "skill:spark-memory"
+              if !hasProjSkill && !onManagedNode then
+                let effOwner ←
+                  if !mOwner.isEmpty then pure mOwner
+                  else match scopedClaims? with
+                    | some claims => pure ((← OrbCore.McpGateway.scopedCallerUserId? st.store claims nowEpochSec).getD "")
+                    | none => pure ((mcpCaller?.map (·.userId)).getD "")
+                if let .ok plan ← buildDeliveryPlan st.cfg.workingDir
+                    (if mProj.trimAscii.toString.isEmpty then none else some mProj)
+                    st.store.rootDir effOwner st.bootstrapAdminId then
+                  hasProjSkill := plan.skills.any (fun s => s.name == "spark-memory")
           if !onManagedNode then
             if let some mst := st.managedStore? then
               if let .ok vmRs ← execParamQuery mst.db

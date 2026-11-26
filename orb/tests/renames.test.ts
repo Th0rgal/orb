@@ -57,8 +57,10 @@ it("shows the accepted title in a cached row as Core acknowledges the rename", a
   observeCoreMissionTitle("m1", "New");
   await Promise.resolve();
   expect(renamedTitle("mission", "m1", "Old")).toBe("New");
+  expect(withRenamedTitles("mission", [{ id: "m1", title: "Old" }], m => m.id)[0].title).toBe("New");
   stickHierarchy({ id: "m1", title: "Old", metadata_updated_at: "2026-11-18T09:00:00Z" });
   expect(renamedTitle("mission", "m1", "New")).toBe("Old");
+  expect(withRenamedTitles("mission", [{ id: "m1", title: "New" }], m => m.id)[0].title).toBe("Old");
 });
 
 it("stops overriding the server after the confirmation timeout", async () => {

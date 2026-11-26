@@ -435,7 +435,7 @@ export function withHierarchy<M extends HierarchyFields>(m: M): M {
     if (m.folder === undefined ? place.folder.length > 0 : curFolder !== place.folder) set("folder", place.folder);
     if ((m.placement_revision ?? 0) < place.rev) set("placement_revision", place.rev);
     if (out && place.pendingOpId !== 0) {
-      Object.defineProperty(out, Symbol.for("orb.projectedMove"), { value: true, enumerable: false });
+      Object.defineProperty(out, Symbol.for("orb.projectedMove"), { value: true, enumerable: true });
     }
   }
   return out ?? m;

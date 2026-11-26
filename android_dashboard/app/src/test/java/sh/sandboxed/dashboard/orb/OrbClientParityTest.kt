@@ -163,4 +163,15 @@ class OrbClientParityTest {
         assertTrue(isValidHttpUrl("https://inference.ethereum.foundation/v1"))
         assertFalse(isValidHttpUrl("ftp://inference.ethereum.foundation/v1"))
     }
+
+    @Test
+    fun folderDeletionBlockingMissions() {
+        val archived = OrbRow(mapOf("id" to "m-arch", "status" to "acknowledged", "folder" to "crons"))
+        val superseded = OrbRow(mapOf("id" to "m-sup", "status" to "completed", "folder" to "crons/nightly", "superseded_by_mission_id" to "m-next"))
+        val active = OrbRow(mapOf("id" to "m-live", "status" to "completed", "folder" to "crons/sub"))
+        val other = OrbRow(mapOf("id" to "m-other", "status" to "completed", "folder" to "notes"))
+        assertFalse(OrbMissionTree.hasBlockingFolderMissions(listOf(archived, superseded, other), "crons"))
+        assertTrue(OrbMissionTree.hasBlockingFolderMissions(listOf(archived, active), "crons"))
+        assertFalse(OrbMissionTree.hasBlockingFolderMissions(listOf(active), "cron"))
+    }
 }

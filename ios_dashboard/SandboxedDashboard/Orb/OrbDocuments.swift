@@ -156,7 +156,8 @@ struct OrbDocuments: View {
         .alert(deletingIsDir ? "Delete folder?" : "Delete file?", isPresented: Binding(get: { deletingPath != nil }, set: { if !$0 { deletingPath = nil } })) {
             Button("Delete", role: .destructive) {
                 if let target = deletingPath {
-                    Task { await deleteItem(target) }
+                    let isDir = deletingIsDir
+                    Task { await deleteItem(target, isDirectory: isDir) }
                 }
             }
             Button("Cancel", role: .cancel) { deletingPath = nil }
@@ -246,11 +247,18 @@ struct OrbDocuments: View {
         } catch { self.error = error.localizedDescription }
     }
 
-    private func deleteItem(_ itemPath: String) async {
+    private func deleteItem(_ itemPath: String, isDirectory: Bool) async {
         guard !pendingDeletes.contains(itemPath) else { return }
         pendingDeletes.insert(itemPath)
         defer { pendingDeletes.remove(itemPath) }
         do {
+            if isDirectory {
+                let check = try await api.call("/api/control/missions?project=\(OrbCore.escape(project))&folder_prefix=\(OrbCore.escape(itemPath))&limit=200")
+                if OrbMissionTree.hasBlockingFolderMissions(check.items.map { OrbRow($0) }, folder: itemPath) {
+                    self.error = "Move or archive the agents in \"\(itemPath)\" before deleting it."
+                    return
+                }
+            }
             _ = try await api.call("/api/projects/\(OrbCore.escape(project))/file?path=\(OrbCore.escape(itemPath))", method: "DELETE")
             entries.removeAll { (path.isEmpty ? $0["name"].text : "\(path)/\($0["name"].text)") == itemPath }
             invalidateProjectCaches()

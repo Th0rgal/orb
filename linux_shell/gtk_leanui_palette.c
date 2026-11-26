@@ -10,7 +10,7 @@ static void pal_clear_prev_focus(OrbPalette *p) {
 
 void orb_pal_close(OrbPalette *p, gboolean restore_prev) {
     if (!p->open) return;
-    p->open = FALSE; p->dirty = FALSE; p->pending_enter = FALSE; p->scroll_acc = 0.0;
+    p->open = FALSE; p->dirty = FALSE; p->pending_enter = FALSE; p->selected_all = FALSE; p->scroll_acc = 0.0;
     p->hit_count = 0; p->has_card = 0; p->req_gen++; p->applied_gen = p->req_gen;
     orb_pal_clear_items(p);
     GdkWindow *gw = gtk_widget_get_window(p->canvas);
@@ -46,7 +46,7 @@ void orb_leanui_palette_open(GtkWidget *overlay) {
     }
     g_string_truncate(p->query, 0); orb_pal_clear_items(p);
     p->selected = 0; p->hit_count = 0; p->has_card = 0; p->scroll_acc = 0.0;
-    p->pending_enter = FALSE; p->dirty = FALSE;
+    p->pending_enter = FALSE; p->dirty = FALSE; p->selected_all = FALSE;
     p->req_gen++; p->applied_gen = p->req_gen; p->open = TRUE;
     gtk_widget_show(p->canvas); gtk_widget_grab_focus(p->canvas);
     if (p->wv) webkit_web_view_evaluate_javascript(WEBKIT_WEB_VIEW(p->wv), "document.documentElement.classList.add('orb-pal-blur')", -1, NULL, NULL, NULL, NULL, NULL);
@@ -62,7 +62,8 @@ void orb_leanui_palette_theme(GtkWidget *overlay, gboolean light) {
 static void pal_paste_cb(GtkClipboard *cb, const gchar *text, gpointer ud) {
     (void)cb; GtkWidget *overlay = ud;
     OrbPalette *p = g_object_get_data(G_OBJECT(overlay), "orb-palette");
-    if (p && !p->closed && p->open && text && *text && p->query->len < 256) {
+    if (p && !p->closed && p->open && text && *text && (p->selected_all || p->query->len < 256)) {
+        if (p->selected_all) { g_string_truncate(p->query, 0); p->selected_all = FALSE; }
         char clean[257];
         orb_palette_sanitize(text, clean, (256 - p->query->len) + 1);
         if (*clean) { g_string_append(p->query, clean); orb_pal_query(p); orb_pal_invalidate(p); }
@@ -71,42 +72,37 @@ static void pal_paste_cb(GtkClipboard *cb, const gchar *text, gpointer ud) {
 }
 
 static void pal_paste(OrbPalette *p) {
-    if (!p->overlay) return;
-    GtkClipboard *cb = gtk_clipboard_get_for_display(gtk_widget_get_display(p->canvas), GDK_SELECTION_CLIPBOARD);
-    if (!cb) return;
-    g_object_ref(p->overlay);
-    gtk_clipboard_request_text(cb, pal_paste_cb, p->overlay);
+    GtkClipboard *cb = p->overlay ? gtk_clipboard_get_for_display(gtk_widget_get_display(p->canvas), GDK_SELECTION_CLIPBOARD) : NULL;
+    if (cb) { g_object_ref(p->overlay); gtk_clipboard_request_text(cb, pal_paste_cb, p->overlay); }
 }
+
+static void pal_redraw_sel(OrbPalette *p) { if (p->gpu_active) orb_pal_invalidate(p); else gtk_widget_queue_draw(p->canvas); }
 
 gboolean orb_leanui_palette_key(GtkWidget *overlay, GdkEventKey *ev) {
     OrbPalette *p = overlay ? g_object_get_data(G_OBJECT(overlay), "orb-palette") : NULL;
     if (!p || p->closed || (!p->open && gtk_grab_get_current() != NULL)) return FALSE;
     guint mod = ev->state & gtk_accelerator_get_default_mod_mask(), key = gdk_keyval_to_lower(ev->keyval);
-    gboolean ctrl = (mod & GDK_CONTROL_MASK) != 0;
-    gboolean super = ((mod & (GDK_SUPER_MASK | GDK_META_MASK)) != 0) || ((ev->state & GDK_MOD4_MASK) != 0);
-    gboolean primary = (ctrl != super) && !(mod & GDK_MOD1_MASK);
-    gboolean exclusive_primary = primary && !(mod & GDK_SHIFT_MASK);
-    gboolean primary_shift = primary && ((mod & GDK_SHIFT_MASK) != 0);
-    if (primary_shift && key == GDK_KEY_f) {
-        if (p->open) orb_pal_close(p, TRUE); else orb_leanui_palette_open(overlay);
-        return TRUE;
-    }
+    gboolean ctrl = (mod & GDK_CONTROL_MASK) != 0, super = ((mod & (GDK_SUPER_MASK | GDK_META_MASK)) != 0) || ((ev->state & GDK_MOD4_MASK) != 0);
+    gboolean primary = (ctrl || super) && !(mod & GDK_MOD1_MASK), exclusive_primary = primary && !(mod & GDK_SHIFT_MASK);
+    if (primary && (mod & GDK_SHIFT_MASK) && key == GDK_KEY_f) return (p->open ? orb_pal_close(p, TRUE) : orb_leanui_palette_open(overlay)), TRUE;
     if (!p->open) return FALSE;
     if (ev->is_modifier) return TRUE;
     if (ev->keyval == GDK_KEY_Escape) return orb_pal_close(p, TRUE), TRUE;
-    if (ev->keyval == GDK_KEY_Return || ev->keyval == GDK_KEY_KP_Enter) {
-        if (p->applied_gen != p->req_gen) p->pending_enter = TRUE; else orb_pal_activate(p, p->selected);
+    if (ev->keyval == GDK_KEY_Return || ev->keyval == GDK_KEY_KP_Enter) return (p->applied_gen != p->req_gen ? (void)(p->pending_enter = TRUE) : orb_pal_activate(p, p->selected)), TRUE;
+    if (exclusive_primary && key == GDK_KEY_a) { if (p->query->len > 0 && !p->selected_all) { p->selected_all = TRUE; pal_redraw_sel(p); } return TRUE; }
+    if (exclusive_primary && (key == GDK_KEY_c || key == GDK_KEY_x)) {
+        if (p->selected_all && p->query->len > 0) {
+            GtkClipboard *cb = gtk_clipboard_get_for_display(gtk_widget_get_display(p->canvas), GDK_SELECTION_CLIPBOARD);
+            if (cb) gtk_clipboard_set_text(cb, p->query->str, (gint)p->query->len);
+            if (key == GDK_KEY_x) { g_string_truncate(p->query, 0); p->selected_all = FALSE; orb_pal_query(p); orb_pal_invalidate(p); }
+        }
         return TRUE;
     }
     if (exclusive_primary && key == GDK_KEY_v) return pal_paste(p), TRUE;
-    if (ev->keyval == GDK_KEY_Up || ev->keyval == GDK_KEY_KP_Up) {
+    if (p->selected_all && (ev->keyval == GDK_KEY_Left || ev->keyval == GDK_KEY_Right)) return p->selected_all = FALSE, pal_redraw_sel(p), TRUE;
+    if (ev->keyval == GDK_KEY_Up || ev->keyval == GDK_KEY_KP_Up || ev->keyval == GDK_KEY_Down || ev->keyval == GDK_KEY_KP_Down) {
         p->pending_enter = FALSE;
-        if (p->count > 0) { p->selected = (p->selected + p->count - 1) % p->count; orb_pal_invalidate(p); }
-        return TRUE;
-    }
-    if (ev->keyval == GDK_KEY_Down || ev->keyval == GDK_KEY_KP_Down) {
-        p->pending_enter = FALSE;
-        if (p->count > 0) { p->selected = (p->selected + 1) % p->count; orb_pal_invalidate(p); }
+        if (p->count > 0) { int d = (ev->keyval == GDK_KEY_Up || ev->keyval == GDK_KEY_KP_Up) ? p->count - 1 : 1; p->selected = (p->selected + d) % p->count; orb_pal_invalidate(p); }
         return TRUE;
     }
     if (ev->keyval == GDK_KEY_Home || ev->keyval == GDK_KEY_End) {
@@ -114,8 +110,8 @@ gboolean orb_leanui_palette_key(GtkWidget *overlay, GdkEventKey *ev) {
         if (p->count > 0) { p->selected = ev->keyval == GDK_KEY_Home ? 0 : p->count - 1; orb_pal_invalidate(p); }
         return TRUE;
     }
-    if (ev->keyval == GDK_KEY_BackSpace || (exclusive_primary && key == GDK_KEY_u)) {
-        if (ctrl || super) g_string_truncate(p->query, 0);
+    if (ev->keyval == GDK_KEY_BackSpace || (p->selected_all && ev->keyval == GDK_KEY_Delete) || (exclusive_primary && key == GDK_KEY_u)) {
+        if (ctrl || super || p->selected_all) { g_string_truncate(p->query, 0); p->selected_all = FALSE; }
         else if (p->query->len > 0) {
             const char *prev = g_utf8_find_prev_char(p->query->str, p->query->str + p->query->len);
             g_string_truncate(p->query, prev ? (gsize)(prev - p->query->str) : 0);
@@ -123,14 +119,22 @@ gboolean orb_leanui_palette_key(GtkWidget *overlay, GdkEventKey *ev) {
         return orb_pal_query(p), orb_pal_invalidate(p), TRUE;
     }
     guint32 uc = (!(ctrl || super) && !(mod & GDK_MOD1_MASK)) ? gdk_keyval_to_unicode(ev->keyval) : 0;
-    if (uc >= 0x20 && uc != 0x7F && p->query->len < 256) {
+    if (uc >= 0x20 && uc != 0x7F && (p->selected_all || p->query->len < 256)) {
+        if (p->selected_all) { g_string_truncate(p->query, 0); p->selected_all = FALSE; }
         g_string_append_unichar(p->query, uc); orb_pal_query(p); orb_pal_invalidate(p);
     }
     return TRUE;
 }
 
 static gboolean on_draw(GtkWidget *w, cairo_t *cr, OrbPalette *p) {
-    (void)w; if (!p->gpu_active && p->surface) { cairo_set_source_surface(cr, p->surface, 0, 0); cairo_paint(cr); } return TRUE;
+    if (!p->gpu_active && p->surface) {
+        cairo_set_source_surface(cr, p->surface, 0, 0); cairo_paint(cr);
+        if (p->selected_all && p->query->len > 0 && p->has_card) {
+            PangoLayout *pl = gtk_widget_create_pango_layout(w, p->query->str); int tw = 0, th = 0; pango_layout_get_pixel_size(pl, &tw, &th); g_object_unref(pl);
+            cairo_set_source_rgba(cr, p->light ? 0.18 : 0.525, p->light ? 0.42 : 0.682, p->light ? 0.85 : 0.894, 0.28); cairo_rectangle(cr, p->card.x + 38, p->card.y + 13, CLAMP(tw + 6, 8, MAX(8, p->card.w - 92)), 20); cairo_fill(cr);
+        }
+    }
+    return TRUE;
 }
 static void on_alloc(GtkWidget *w, GtkAllocation *a, OrbPalette *p) {
     int sc = gtk_widget_get_scale_factor(w);

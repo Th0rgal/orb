@@ -61,7 +61,7 @@ static GtkWidget *button(OrbSidebar *s, const char *action, const char *rid, con
     char *key = g_strdup_printf("%s/%s", action, rid);
     GtkWidget *b = g_hash_table_lookup(s->buttons, key);
     if (!b) {
-        b = gtk_button_new();
+        b = gtk_button_new(); gtk_widget_set_focus_on_click(b, FALSE);
         gtk_widget_set_app_paintable(b, TRUE);
         g_signal_connect(b, "draw", G_CALLBACK(orb_draw_squircle_btn), NULL);
         orb_gtk_bind_pointer_cursor(b);

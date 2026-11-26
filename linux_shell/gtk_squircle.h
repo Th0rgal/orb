@@ -90,7 +90,8 @@ static inline gboolean orb_draw_squircle_btn(GtkWidget *w, cairo_t *cr, gpointer
     gboolean multi = gtk_style_context_has_class(sc, "orb-multi");
     gboolean hov = (fl & GTK_STATE_FLAG_PRELIGHT) != 0 && gtk_widget_get_sensitive(w);
     GtkWidget *top = gtk_widget_get_toplevel(w);
-    gboolean kfocus = (fl & GTK_STATE_FLAG_FOCUSED) != 0 && GTK_IS_WINDOW(top) && gtk_window_get_focus_visible(GTK_WINDOW(top));
+    gboolean kfocus = (fl & GTK_STATE_FLAG_FOCUSED) != 0 && GTK_IS_WINDOW(top) &&
+                      gtk_style_context_has_class(gtk_widget_get_style_context(top), "orb-keyboard-focus");
     if (!multi && !hov && !kfocus) return FALSE;
     double width = (double)gtk_widget_get_allocated_width(w), height = (double)gtk_widget_get_allocated_height(w);
     cairo_save(cr);

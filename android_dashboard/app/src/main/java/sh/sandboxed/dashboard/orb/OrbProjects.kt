@@ -1864,12 +1864,7 @@ fun OrbProjectPage(
 
     fun performDeleteFolder(folderPath: String) {
         if (pendingFolderDeletes.containsKey(folderPath)) return
-        val hasActiveOrCompletedMissions = projectMissions.any { m ->
-            if (OrbMissionTree.isArchived(m)) return@any false
-            val f = OrbMissionTree.folderPath(m) ?: ""
-            f == folderPath || f.startsWith("$folderPath/")
-        }
-        if (hasActiveOrCompletedMissions) {
+        if (OrbMissionTree.hasBlockingFolderMissions(projectMissions, folderPath)) {
             folderActionError = "Move or archive the agents in \"$folderPath\" before deleting it."
             return
         }
@@ -1879,6 +1874,14 @@ fun OrbProjectPage(
             try {
                 val encoded = core.encodeComponent(projectSlug)
                 val encodedPath = core.encodeComponent(folderPath)
+                val check = core.fetchRows(
+                    "/api/control/missions?project=$encoded&folder_prefix=$encodedPath&limit=200",
+                    null
+                )
+                if (OrbMissionTree.hasBlockingFolderMissions(check, folderPath)) {
+                    folderActionError = "Move or archive the agents in \"$folderPath\" before deleting it."
+                    return@launch
+                }
                 core.request(
                     path = "/api/projects/$encoded/file?path=$encodedPath",
                     method = "DELETE"

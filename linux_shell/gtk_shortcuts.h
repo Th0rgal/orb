@@ -17,7 +17,7 @@ static gboolean orb_gtk_window_shortcut(GtkWindow *window, GdkEventKey *event,
         return orb_gtk_row_context_menu(webview, gtk_widget_get_parent(focus), focus, NULL);
     if (modifiers == 0 && event->keyval == GDK_KEY_F2 && sb_row && !gtk_grab_get_current())
         return orb_sidebar_rename_focused(webview, focus);
-    gboolean primary = (modifiers & (GDK_CONTROL_MASK | GDK_SUPER_MASK | GDK_META_MASK)) != 0;
+    gboolean primary = ((modifiers & (GDK_CONTROL_MASK | GDK_SUPER_MASK | GDK_META_MASK)) != 0) || ((event->state & GDK_MOD4_MASK) != 0);
     gboolean extra = (modifiers & (GDK_SHIFT_MASK | GDK_MOD1_MASK)) != 0;
     if (primary && !extra && sb_row && !gtk_grab_get_current()) {
         if (k == GDK_KEY_x || k == GDK_KEY_c)

@@ -76,7 +76,7 @@ static gboolean pal_paint(gpointer data) {
     p->wl.above = TRUE;
     if (!p->gpu_disabled && orb_wl_subsurface_ensure(&p->wl, p->canvas, NULL)) {
         char gpu[96];
-        int g = snprintf(gpu, sizeof(gpu), "G\t%" PRIuPTR "\t%" PRIuPTR "\n", (uintptr_t)p->wl.display, (uintptr_t)p->wl.surface);
+        int g = snprintf(gpu, sizeof(gpu), "%sG\t%" PRIuPTR "\t%" PRIuPTR "\n", p->selected_all ? "S\n" : "", (uintptr_t)p->wl.display, (uintptr_t)p->wl.surface);
         g_string_prepend(req, gpu);
         int rc = orb_leanui_paint(req->str, NULL, 0, pal_hits_cb, p);
         g_string_erase(req, 0, g);
