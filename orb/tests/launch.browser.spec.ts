@@ -138,10 +138,12 @@ test("an existing Goal-capable remote harness offers and sends /goal follow-ups"
  });
  await page.getByRole("button",{name:"Test",exact:true}).click();
  await page.getByRole("button",{name:/Remote task/}).click();
- const input=page.getByPlaceholder("Send follow-up");
+ await expect(page.getByPlaceholder("Send follow-up")).toBeVisible();
+ const input=page.locator(".composer textarea").last();
  await input.fill("/g");
  await expect(page.getByRole("option",{name:"Goal",exact:true})).toBeVisible();
  await input.fill(prompt);
+ await expect(page.locator(".composer .mode-chip")).toContainText("Goal");
  await expect(page.getByText(/does not support Goals/)).toHaveCount(0);
  await input.press("Enter");
  await expect.poll(()=>followups.length).toBe(1);
