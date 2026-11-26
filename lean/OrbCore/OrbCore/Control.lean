@@ -3926,9 +3926,10 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
         unless (← ownerAllowed) do
           return .ok (mkJson 200 "{\"ok\":false,\"error\":{\"code\":\"memory_tool_denied\",\"message\":\"Administrator required\"}}")
         let mut onManagedNode := false
-        -- Memory authority comes from an attached skill or an explicit grant, never
-        -- from the mere existence of a project (`SEC-11`).
+        -- Memory authority comes from an attached/delivered `spark-memory` skill or an
+        -- explicit secret grant, never from the mere existence of a project (`SEC-11`).
         let mut hasProjSkill := false
+        let mut missionProj := activeClaims.project
         if !activeClaims.isExternal && !activeClaims.missionId.isEmpty then
           if let .ok mRs ← execParamQuery st.store.missionsDb
               "SELECT placement_kind, project, tags, COALESCE(owner_user_id,'') FROM missions WHERE id=?1;" #[activeClaims.missionId] then
@@ -3937,6 +3938,8 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
               let mProj := (mRs[1]?.bind (·[1]?)).getD ""
               let mTags := parseStringJsonArray ((mRs[1]?.bind (·[2]?)).getD "[]")
               let mOwner := (mRs[1]?.bind (·[3]?)).getD ""
+              if missionProj.isEmpty then
+                missionProj := mProj
               if pk == "managed_vm" || pk.startsWith "managed-" then
                 onManagedNode := true
               if mTags.contains "skill:spark-memory" then
@@ -3955,8 +3958,9 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
                   else match scopedClaims? with
                     | some claims => pure ((← OrbCore.McpGateway.scopedCallerUserId? st.store claims nowEpochSec).getD "")
                     | none => pure ((mcpCaller?.map (·.userId)).getD "")
+                let effProj := missionProj.trimAscii.toString
                 if let .ok plan ← buildDeliveryPlan st.cfg.workingDir
-                    (if mProj.trimAscii.toString.isEmpty then none else some mProj)
+                    (if effProj.isEmpty then none else some effProj)
                     st.store.rootDir effOwner st.bootstrapAdminId then
                   hasProjSkill := plan.skills.any (fun s => s.name == "spark-memory")
           if !onManagedNode then
@@ -3967,6 +3971,11 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
                   #[activeClaims.missionId] then
                 if vmRs.size > 1 then
                   onManagedNode := true
+        let callerSubject := if activeClaims.isExternal then "session:" ++ activeClaims.sessionId
+          else if !activeClaims.missionId.isEmpty then "mission:" ++ activeClaims.missionId else ""
+        let hasSecAccess ←
+          if callerSubject.isEmpty then pure false
+          else missionHasApprovedMemorySecretAccess st.store.rootDir activeClaims.missionId missionProj nowEpochSec callerSubject
         let bunkerSt ← match st.bunkerStateRef? with | some r => r.get | none => pure (0 : UInt8)
         let memCache ← match st.memTokenCache? with | some c => pure c | none => newMemoryTokenCache
         let ctx : MemoryCallerContext := {
@@ -3975,7 +3984,7 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
           onManagedNode := onManagedNode
           bunkerState := bunkerSt
           hasProjectMemorySkill := hasProjSkill
-          hasSecretAccess := false
+          hasSecretAccess := hasSecAccess
         }
         match ← executeMemoryMcpTool memCache ctx toolName args nowEpochSec with
         | .ok resVal =>
