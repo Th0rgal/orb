@@ -2154,7 +2154,25 @@ def dispatchMcpToolCall
     let callerOnManagedNode ← missionHasManagedPlacement store mc? callerMid
     let callerSubject := if claims.isExternal then "session:" ++ claims.sessionId
       else if !callerMid.isEmpty then "mission:" ++ callerMid else ""
-    return mcpOk (← mcpSecretGet workingDir store.rootDir callerMid callerProj secName reason callerOnManagedNode nowEpochSec callerSubject)
+    let initial ← mcpSecretGet workingDir store.rootDir callerMid callerProj secName reason callerOnManagedNode nowEpochSec callerSubject
+    let waitSec ←
+      match args.fieldNat? "wait_seconds" with
+      | some n => pure (Nat.min 25 n)
+      | none =>
+        match (← IO.getEnv "ORB_SECRET_WAIT_SECONDS").bind String.toNat? with
+        | some n => pure (Nat.min 25 n)
+        | none => pure (if (← IO.getEnv "ORB_HERMETIC_TEST") == some "1" then 0 else 25)
+    let mut finalRes := initial
+    if (initial.fieldStr? "status") == some "pending" then
+      let reqId := (initial.fieldStr? "request_id").getD ""
+      if !reqId.isEmpty && waitSec > 0 then
+        finalRes ← mcpSecretWait workingDir store.rootDir callerMid callerProj reqId callerSubject callerOnManagedNode waitSec (← coreEpochSec)
+      if (finalRes.fieldStr? "status") == some "pending" && !reqId.isEmpty && !callerMid.isEmpty then
+        let bwProj := (finalRes.fieldStr? "bitwarden_project").orElse (fun _ => initial.fieldStr? "bitwarden_project") |>.getD ""
+        let armed ← armSecretApprovalWakeup store callerMid reqId "secret_get" secName bwProj (← coreEpochSec)
+        if armed then
+          finalRes := finalRes.setField "auto_resume" (.bool true)
+    return mcpOk finalRes
 
   | "secret_request" | "secret_put" | "secret_delete" | "secret_move" =>
     let bwProj := (args.fieldStr? "bitwarden_project").orElse (fun _ => args.fieldStr? "project") |>.getD "unassigned"
@@ -2164,7 +2182,25 @@ def dispatchMcpToolCall
     let reason := (args.fieldStr? "reason").getD ""
     let callerSubject := if claims.isExternal then "session:" ++ claims.sessionId
       else if !callerMid.isEmpty then "mission:" ++ callerMid else ""
-    return mcpOk (← mcpSecretQueueAction workingDir store.rootDir toolName callerMid callerProj bwProj secName val note reason nowEpochSec callerSubject)
+    let initial ← mcpSecretQueueAction workingDir store.rootDir toolName callerMid callerProj bwProj secName val note reason nowEpochSec callerSubject
+    let waitSec ←
+      match args.fieldNat? "wait_seconds" with
+      | some n => pure (Nat.min 25 n)
+      | none =>
+        match (← IO.getEnv "ORB_SECRET_WAIT_SECONDS").bind String.toNat? with
+        | some n => pure (Nat.min 25 n)
+        | none => pure (if (← IO.getEnv "ORB_HERMETIC_TEST") == some "1" then 0 else 25)
+    let mut finalRes := initial
+    if (initial.fieldStr? "status") == some "pending" then
+      let reqId := (initial.fieldStr? "request_id").getD ""
+      if !reqId.isEmpty && waitSec > 0 then
+        let callerOnManagedNode ← missionHasManagedPlacement store mc? callerMid
+        finalRes ← mcpSecretWait workingDir store.rootDir callerMid callerProj reqId callerSubject callerOnManagedNode waitSec (← coreEpochSec)
+      if (finalRes.fieldStr? "status") == some "pending" && !reqId.isEmpty && !callerMid.isEmpty then
+        let armed ← armSecretApprovalWakeup store callerMid reqId toolName secName bwProj (← coreEpochSec)
+        if armed then
+          finalRes := finalRes.setField "auto_resume" (.bool true)
+    return mcpOk finalRes
 
   | "request_mission_access" =>
     let targetMid := (args.fieldStr? "target_mission_id").orElse (fun _ => args.fieldStr? "mission_id") |>.getD ""

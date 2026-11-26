@@ -4,7 +4,7 @@ import OrbBin.SandboxedMcpMain
 namespace OrbCore.R16aSecretTests
 
 open OrbBin.Json OrbBin.SandboxedMcp OrbBin.PosixExt LeanSys.Posix
-open OrbCore.Control OrbCore.Managed OrbCore.Store OrbCore.MemoryAndCloud
+open OrbCore.Control OrbCore.Managed OrbCore.Store OrbCore.MemoryAndCloud OrbCore.SecretAndApproval OrbCore.R7Core OrbCore.LegacyHydrate
 
 private def check (ok : Bool) (label : String) : IO Unit := do
   unless ok do throw (IO.userError s!"R16a secret delivery: {label}")
@@ -146,9 +146,84 @@ private def exercise (root : System.FilePath) (store : CoreStore) (mc : ManagedC
     stop.set true
     IO.ofExcept server.get
 
+private def exerciseHybridSecretApproval (store : CoreStore) : IO Unit := do
+  -- Ensure `mission_continuations` exists in this fresh fixture DB.
+  let .ok () ← OrbCore.QueueCont.ensureQueueContSchema store
+    | throw (IO.userError "R16a hybrid: ensureQueueContSchema failed")
+  let nowSec : UInt64 := 1795700000
+  let nowIso := formatEpochIso8601Utc nowSec
+  -- Seed a remote mission and a client-placed (local) mission.
+  let .ok () ← insertNewMission store {
+      id := "m-sec-remote", title := "Remote Secret Mission", status := "awaiting_user", backend := "claudecode",
+      modelOverride := "", modelEffort := "", workingDirectory := "/tmp", project := "perso", folder := "",
+      createdAt := nowIso, updatedAt := nowIso, totalCostCents := 0, authorityMode := "writer",
+      placementKind := "remote_node", reservedDiskGib := 0, nodeBootEpoch := store.bootEpoch,
+      tagsJson := "[\"remote-node:uruk\"]", track := "", repo := "", ownerUserId := "admin"
+    } | throw (IO.userError "R16a hybrid: insert remote mission failed")
+  let .ok () ← insertNewMission store {
+      id := "m-sec-client", title := "Client Secret Mission", status := "awaiting_user", backend := "antigravity",
+      modelOverride := "", modelEffort := "", workingDirectory := "/tmp", project := "perso", folder := "",
+      createdAt := nowIso, updatedAt := nowIso, totalCostCents := 0, authorityMode := "writer",
+      placementKind := "client", reservedDiskGib := 0, nodeBootEpoch := store.bootEpoch,
+      tagsJson := "[\"placement:client\"]", track := "", repo := "", ownerUserId := "admin"
+    } | throw (IO.userError "R16a hybrid: insert client mission failed")
+
+  -- 1. Slow path (remote): queue a secret_request, arm approval wakeup, approve -> continuation becomes due-now.
+  let reqRemote ← mcpSecretQueueAction "" store.rootDir "secret_request" "m-sec-remote" "perso" "critical" "" "" "" "need critical" nowSec "mission:m-sec-remote"
+  let reqRemoteId := (reqRemote.fieldStr? "request_id").getD ""
+  check (!reqRemoteId.isEmpty && reqRemote.fieldStr? "status" == some "pending") "remote secret_request starts pending"
+  let armedRemote ← armSecretApprovalWakeup store "m-sec-remote" reqRemoteId "secret_request" "" "critical" nowSec
+  check armedRemote "remote secret approval wakeup arms cleanly"
+  let .ok cRows1 ← execParamQuery store.missionsDb
+    "SELECT trigger_kind, phase FROM mission_continuations WHERE mission_id='m-sec-remote' AND job_id=?1;" #[reqRemoteId]
+    | throw (IO.userError "R16a hybrid: read remote cont")
+  check (cRows1.size > 1 && cRows1[1]![0]! == "secret_approval" && cRows1[1]![1]! == "1")
+    "remote continuation is armed with trigger_kind=secret_approval"
+  let targetRemote := JVal.obj #[("id", .str reqRemoteId), ("mission_id", .str "m-sec-remote"), ("bitwarden_project", .str "critical")]
+  notifySecretApprovalDecision store targetRemote "approved" (nowSec + 10) (formatEpochIso8601Utc (nowSec + 10)) none
+  let .ok cRows2 ← execParamQuery store.missionsDb
+    "SELECT trigger_kind, due_epoch, prompt FROM mission_continuations WHERE mission_id='m-sec-remote' AND job_id=?1;" #[reqRemoteId]
+    | throw (IO.userError "R16a hybrid: read promoted remote cont")
+  check (cRows2.size > 1 && cRows2[1]![0]! == "time" && cRows2[1]![1]! == s!"{nowSec + 10}" &&
+    (cRows2[1]![2]!).contains "Secret approval granted")
+    "approving remote secret request promotes continuation to due-now time trigger"
+
+  -- 2. Slow path (client/local): arm wakeup, approve -> continuation retired and SSE event emitted for client auto-resume.
+  let reqClient ← mcpSecretQueueAction "" store.rootDir "secret_request" "m-sec-client" "perso" "sensitive" "" "" "" "need sensitive" nowSec "mission:m-sec-client"
+  let reqClientId := (reqClient.fieldStr? "request_id").getD ""
+  let armedClient ← armSecretApprovalWakeup store "m-sec-client" reqClientId "secret_request" "" "sensitive" nowSec
+  check armedClient "client secret approval wakeup arms cleanly"
+  let seenEvents ← IO.mkRef (#[] : Array (String × String × String))
+  let targetClient := JVal.obj #[("id", .str reqClientId), ("mission_id", .str "m-sec-client"), ("bitwarden_project", .str "sensitive")]
+  notifySecretApprovalDecision store targetClient "approved" (nowSec + 12) (formatEpochIso8601Utc (nowSec + 12))
+    (some (fun mid ty pl => seenEvents.modify (·.push (mid, ty, pl))))
+  let evs ← seenEvents.get
+  check (evs.size == 1 && evs[0]!.1 == "m-sec-client" && evs[0]!.2.1 == "secret_approval_decided" &&
+    evs[0]!.2.2.contains "\"auto_resume\":true" && evs[0]!.2.2.contains "\"auto_resume_host\":\"client\"")
+    "approving client secret request broadcasts secret_approval_decided with auto_resume_host=client"
+  let .ok cRows3 ← execParamQuery store.missionsDb
+    "SELECT phase FROM mission_continuations WHERE mission_id='m-sec-client' AND job_id=?1;" #[reqClientId]
+    | throw (IO.userError "R16a hybrid: read client cont")
+  check (cRows3.size > 1 && cRows3[1]![0]! == "4") "client continuation is retired after SSE relay"
+
+  -- 3. Sync wait path: mcpSecretWait returns approved for secret_request once status flips to approved.
+  let brokerPath := System.FilePath.mk store.rootDir / "secret_broker.json"
+  let brokerRaw ← IO.FS.readFile brokerPath
+  let broker0 := (OrbBin.Json.parse brokerRaw).toOption.getD (.obj #[])
+  let reqs0 := (broker0.fieldArr? "requests").getD #[]
+  let reqs1 := reqs0.map fun r =>
+    if (r.fieldStr? "id").getD "" == reqRemoteId then
+      (r.setField "status" (.str "approved")).setField "grant_id" (.str "grant-sync-1")
+    else r
+  IO.FS.writeFile brokerPath (renderCompact (broker0.setField "requests" (.arr reqs1)))
+  let waited ← mcpSecretWait "" store.rootDir "m-sec-remote" "perso" reqRemoteId "mission:m-sec-remote" false 0 nowSec
+  check (waited.fieldStr? "status" == some "approved" && waited.fieldStr? "grant_id" == some "grant-sync-1")
+    "mcpSecretWait returns approved for secret_request without calling secret_get"
+
 def run : IO Unit := IO.FS.withTempDir fun root => do
   let .ok store ← openCoreStore (root / "core").toString | throw (IO.userError "R16a Core fixture store")
   try
+    exerciseHybridSecretApproval store
     let .ok mc ← openManagedComputeStore (root / "managed.db").toString
       | throw (IO.userError "R16a managed fixture store")
     try withFakeVault root (exercise root store mc)

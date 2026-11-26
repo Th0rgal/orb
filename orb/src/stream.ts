@@ -405,6 +405,7 @@ export function storedToStream(ev: StoredEvent): StreamEvent | null {
       return d({ status: ev.metadata?.status, summary: ev.content || undefined });
     case "goal_status":
     case "goal_iteration":
+    case "secret_approval_decided":
       return d({ ...ev.metadata, ...(() => { try { return JSON.parse(ev.content || "{}"); } catch { return {}; } })() });
     default:
       return null;

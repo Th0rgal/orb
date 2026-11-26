@@ -484,6 +484,65 @@ function MissionDock(p: {
  * re-ran catalog loads several times a minute. */
 const sameMission = (a: Mission | null, b: Mission | null) => a === b || (!!a && !!b && shallowEqual(a, b));
 
+const handledSecretResumes = new Set<string>();
+
+/**
+ * Merge canonical transcript items with optimistic/outbox user messages and
+ * local-run live output (`localActivities` / `localLiveText`).
+ *
+ * When `runActive` is false, any leftover `nativeTools` / `live` output belongs
+ * to the finished turn in `canonical` (before newly projected follow-up user
+ * messages), never after a follow-up that has not started running yet.
+ */
+export function mergeProjectedViewItems(args: {
+  canonical: StreamItem[];
+  projected: StreamItem[];
+  nativeTools: StreamItem[];
+  live: string;
+  liveKey: string;
+  runActive: boolean;
+  busy: boolean;
+}): StreamItem[] {
+  const { canonical, projected, nativeTools, live, liveKey, runActive, busy } = args;
+  const base = runActive && projected.length ? [...canonical, ...projected] : canonical;
+  let withNativeTools = base;
+  if (nativeTools.length) {
+    let lastUserIdx = -1;
+    for (let i = base.length - 1; i >= 0; i--) { const it = base[i]; if (it.kind === "user" && !it.queued) { lastUserIdx = i; break; } }
+    let hasCanonicalToolsAfterUser = false;
+    for (let i = lastUserIdx + 1; i < base.length; i++) {
+      if (base[i].kind === "tool" || base[i].kind === "think") { hasCanonicalToolsAfterUser = true; break; }
+    }
+    if (!hasCanonicalToolsAfterUser) {
+      const copy = [...base];
+      let insertAt = copy.length;
+      for (let i = copy.length - 1; i > lastUserIdx; i--) {
+        if (copy[i].kind === "text") insertAt = i;
+        else break;
+      }
+      copy.splice(insertAt, 0, ...nativeTools);
+      withNativeTools = copy;
+    }
+  }
+  // The server rewrites a local run's reply in place without re-emitting it,
+  // so a transcript fetched mid-run holds a prefix of the live text.
+  let stale = -1;
+  for (let i = withNativeTools.length - 1; i >= 0 && withNativeTools[i].kind !== "user"; i--) {
+    const item = withNativeTools[i];
+    if (item.kind === "text" && live.startsWith(item.text)) { stale = i; break; }
+  }
+  const liveItem = { kind: "text" as const, key: liveKey, text: live, live: runActive };
+  const withLive = !live || withNativeTools.some(item => item.kind === "text" && item.text === live) ? withNativeTools
+    : stale >= 0 ? withNativeTools.map((item, i) => i === stale ? liveItem : item)
+    : [...withNativeTools, liveItem];
+  const combined = !runActive && projected.length ? [...withLive, ...projected] : withLive;
+  if (busy) return combined;
+  // Terminal mission: force-close any bubble left open by a dropped
+  // assistant_message finalizer.
+  if (!combined.some((i) => i.kind === "text" && i.live)) return combined;
+  return combined.map((i) => (i.kind === "text" && i.live ? { ...i, live: false } : i));
+}
+
 export function MissionView(p: Parameters<typeof NativeMissionView>[0]) {
   const [resolved, setResolved] = createSignal<Mission | null>(
     applyWarmMissionPatch(p.initial, { preserveSettings: Boolean(p.id && inflightSettings.has(p.id)) }),
@@ -1011,6 +1070,16 @@ export function NativeMissionView(p: { id: string; active?: boolean; launch?:Lau
           if (ev.type === "goal_status" || ev.type === "goal_iteration") {
             setLiveGoal(old => applyRemoteGoalEvent(old ?? { phase: "active", objective: "", iteration: 0 }, { type: ev.type, data: ev.data }));
           }
+          if (ev.type === "secret_approval_decided") {
+            const reqId = typeof ev.data?.request_id === "string" ? ev.data.request_id : "";
+            const prompt = typeof ev.data?.prompt === "string" ? ev.data.prompt : "";
+            const autoResume = ev.data?.auto_resume === true && ev.data?.auto_resume_host === "client";
+            if (autoResume && reqId && prompt && clientPlaced() && localBinding(p.id) && !handledSecretResumes.has(reqId)) {
+              handledSecretResumes.add(reqId);
+              void sendMsg(prompt);
+            }
+            return;
+          }
           if (replaying) held.push(ev);
           else applyLive(ev);
         },
@@ -1291,52 +1360,22 @@ export function NativeMissionView(p: { id: string; active?: boolean; launch?:Lau
     const canonical = withInitialPrompt(history, record, receipt, awaiting() || spinePending);
     const outbox = [...acceptedLocalMessages(p.id), ...queuedLocalMessages(p.id).filter(row=>!row.error&&(!row.waiting||row.state==='accepted'||row.state==='dispatching'))];
     const drafts=optimisticList();
-    let list = canonical;
+    const projected: StreamItem[] = [];
     if (outbox.length || drafts.length) {
       const known = new Set<string | undefined>();
       for (const i of canonical) if (i.kind === 'user') known.add(i.messageId);
-      const projected:StreamItem[]=[];
       for(const row of outbox){if(!known.has(row.id)){known.add(row.id);projected.push({kind:'user',key:`user:${row.id}`,messageId:row.id,text:row.text});}}
       for(const draft of drafts){if((!draft.waiting||draft.failed||sendError())&&!known.has(draft.id)){known.add(draft.id);projected.push({kind:'user',key:`user:${draft.id}`,messageId:draft.id,text:draft.text,images:draft.images});}}
-      if (projected.length) list = [...canonical, ...projected];
     }
-    const nativeTools = clientPlaced() ? localActivitiesToStreamItems(localActivities(p.id)) : [];
-    let withNativeTools = list;
-    if (nativeTools.length) {
-      let lastUserIdx = -1;
-      for (let i = list.length - 1; i >= 0; i--) { const it = list[i]; if (it.kind === "user" && !it.queued) { lastUserIdx = i; break; } }
-      let hasCanonicalToolsAfterUser = false;
-      for (let i = lastUserIdx + 1; i < list.length; i++) {
-        if (list[i].kind === "tool" || list[i].kind === "think") { hasCanonicalToolsAfterUser = true; break; }
-      }
-      if (!hasCanonicalToolsAfterUser) {
-        const copy = [...list];
-        let insertAt = copy.length;
-        for (let i = copy.length - 1; i > lastUserIdx; i--) {
-          if (copy[i].kind === "text") insertAt = i;
-          else break;
-        }
-        copy.splice(insertAt, 0, ...nativeTools);
-        withNativeTools = copy;
-      }
-    }
-    const live = localLiveText(p.id);
-    // The server rewrites a local run's reply in place without re-emitting it,
-    // so a transcript fetched mid-run holds a prefix of the live text.
-    let stale = -1;
-    for (let i = withNativeTools.length - 1; i >= 0 && withNativeTools[i].kind !== "user"; i--) {
-      const item = withNativeTools[i];
-      if (item.kind === "text" && live.startsWith(item.text)) { stale = i; break; }
-    }
-    const liveItem = { kind: "text" as const, key: `local:${p.id}`, text: live, live: localRunActive(p.id) };
-    const withLive = !live || withNativeTools.some(item => item.kind === "text" && item.text === live) ? withNativeTools
-      : stale >= 0 ? withNativeTools.map((item, i) => i === stale ? liveItem : item)
-      : [...withNativeTools, liveItem];
-    if (busy()) return withLive;
-    // Terminal mission: force-close any bubble left open by a dropped
-    // assistant_message finalizer.
-    if (!withLive.some((i) => i.kind === "text" && i.live)) return withLive;
-    return withLive.map((i) => (i.kind === "text" && i.live ? { ...i, live: false } : i));
+    return mergeProjectedViewItems({
+      canonical,
+      projected,
+      nativeTools: clientPlaced() ? localActivitiesToStreamItems(localActivities(p.id)) : [],
+      live: localLiveText(p.id),
+      liveKey: `local:${p.id}`,
+      runActive: localRunActive(p.id),
+      busy: busy(),
+    });
   });
 
   const nonQueuedViewItems = createMemo(() => {
