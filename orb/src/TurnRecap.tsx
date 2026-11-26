@@ -3,6 +3,7 @@ import type { Mission } from "./api";
 import type { StreamItem } from "./transcriptModel";
 import { getCachedInboxDigest, requestInboxDigest, inboxDigestVersion } from "./inboxDigest";
 import { DONE_STATUSES, isFailedStatus } from "./missionStatus";
+import { isTransientNodeNotice } from "./stream";
 import { missionResponseTimestampMs } from "./missionUnread";
 import { inboxConfig } from "./inboxSettings";
 import { isMermaidLang, parseMarkdownRaw } from "./markdownAst";
@@ -57,7 +58,7 @@ export function TurnRecap(p: { mission?: Mission; items: StreamItem[]; busy: boo
   const verdict = createMemo(() => {
     const status = (p.mission?.status ?? "").toLowerCase();
     const turn = latestTurn();
-    if (isFailedStatus(status) || turn.some((i) => i.kind === "error" && !i.cancelled)) return "failed";
+    if (isFailedStatus(status) || turn.some((i) => i.kind === "error" && !i.cancelled && !isTransientNodeNotice(i.text))) return "failed";
     if (status === "interrupted" || status === "cancelled" || status === "canceled" || turn.some((i) => i.kind === "error" && i.cancelled)) return "interrupted";
     if (DONE_STATUSES.has(status)) return "succeeded";
     if (status === "blocked") return "needs_input";

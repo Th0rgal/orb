@@ -60,4 +60,16 @@ describe("provider usage limits", () => {
     expect(describeError("Maximum parallel missions (4) reached. 4 running.")).toMatchObject({ title: "Mission limit reached" });
     expect(describeError('Remote opencode job failed: CLI error: {"data":{"isRetryable":true,"message":"Provider response headers timed out after 300000ms","metadata":{"code":"ProviderHeaderTimeoutError","timeoutMs":"300000"}},"name":"APIError"}')).toMatchObject({ title: "The server is taking too long to answer" });
   });
+  it("renders hung-node notices as warnings with inline code spans instead of literal backticks or Mission failed", () => {
+    const raw = "Node `ashur` answers ping but its API is unresponsive.";
+    render(() => <ErrorNotice error={raw} title="Mission failed" />);
+    const alert = screen.getByRole("alert");
+    expect(alert.classList.contains("warning")).toBe(true);
+    expect(alert.querySelector("strong")?.textContent).toBe("Execution node unresponsive");
+    expect(alert.textContent).not.toContain("Mission failed");
+    const code = alert.querySelector("p code");
+    expect(code?.textContent).toBe("ashur");
+    expect(alert.querySelector("p")?.textContent).toBe("Node ashur answers ping but its API is unresponsive.");
+    expect(alert.querySelector("details")).toBeNull();
+  });
 });

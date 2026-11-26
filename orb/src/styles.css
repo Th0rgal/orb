@@ -1747,9 +1747,10 @@ input[type="checkbox"]:enabled, input[type="radio"]:enabled { cursor: pointer; }
 button.fork-trigger { color: inherit; cursor: pointer; }
 button.fork-trigger:hover { color: var(--fg); }
 
-/* Timeline/modal error cards share the exact card grammar of floating toasts (toast.tsx). */
-.error-notice { display: flex; align-items: flex-start; gap: 10px; min-width: 0; margin-top: 10px; padding: 10px 8px 10px 14px; border: 1px solid var(--overlay-border, var(--stroke)); border-radius: var(--radius-lg); background: var(--overlay-surface, var(--bg-elev)); color: var(--fg-2); text-align: left; font-size: 12px; line-height: 1.4; }
-.error-notice-icon { flex: none; color: var(--red); margin-top: 2px; }
+/* Timeline/modal error & warning cards match conversation prose scale (13px) and bubble surface. */
+.error-notice { display: flex; align-items: flex-start; gap: 10px; min-width: 0; margin-top: 10px; padding: 11px 10px 11px 14px; border: 1px solid var(--stroke); border-radius: var(--radius-lg); background: var(--bg-elev); color: var(--fg-2); text-align: left; font-size: 13px; line-height: 1.5; }
+.dlg .error-notice, .overlay-popover .error-notice { background: var(--overlay-field); border-color: var(--overlay-border); }
+.error-notice-icon { flex: none; color: var(--red); margin-top: 2.5px; }
 /* One vertical rhythm for the transcript, measured between what the reader sees.
    Each turn is its own flow-root box that starts with the user bubble. Placing the
    inter-turn gap below every turn before the last (`:last-child` is always mounted by
@@ -1772,19 +1773,21 @@ button.fork-trigger:hover { color: var(--fg); }
 [data-turn-key] > .st-text + .error-notice { margin-top: calc(var(--tx-block-gap) - 10px); }
 /* Provider limits are a wait, not a failure: amber instead of red. */
 .error-notice.warning .error-notice-icon { color: var(--amber); }
-.error-notice-link { display: inline-flex; align-items: center; gap: 5px; min-height: 24px; padding: 0 9px; border: 0; border-radius: 6px; background: var(--bg-active); color: var(--fg); font: 500 11.5px/1 var(--sans); cursor: pointer; }
+.error-notice-link { display: inline-flex; align-items: center; gap: 5px; min-height: 26px; padding: 0 10px; border: 0; border-radius: var(--radius-sm); background: var(--bg-active); color: var(--fg); font: 500 12px/1 var(--sans); cursor: pointer; }
 .error-notice-link:hover:not(:disabled) { background: var(--overlay-hover); }
 .error-notice-link.primary { background: var(--fg); color: var(--bg); }
 .error-notice-link.primary:hover:not(:disabled) { background: var(--fg); opacity: .88; }
 .error-notice-link:disabled { opacity: .5; cursor: default; }
 .error-notice-body { flex: 1; min-width: 0; overflow-wrap: anywhere; }
-.error-notice strong { color: var(--fg); font-size: 12px; font-weight: 500; line-height: 1.4; }
-.error-notice p { margin: 2px 0 0; font-size: 11.5px; line-height: 1.45; white-space: pre-wrap; }
-.error-notice details, .legacy-log { margin-top: 6px; color: var(--fg-3); font-size: 11px; }
+.error-notice strong { display: block; color: var(--fg); font-size: 13px; font-weight: 500; line-height: 20px; }
+.error-notice p { margin: 2px 0 0; font-size: 13px; line-height: 20px; color: var(--fg-2); white-space: pre-wrap; }
+.error-notice code, .toast-message code, .error-dialog code { font: 12px/1.35 var(--mono); background: var(--bg-code); color: var(--fg); padding: 1px 5px; border-radius: var(--radius-xs); margin: 0 1px; }
+.error-notice details, .legacy-log { margin-top: 6px; color: var(--fg-3); font-size: 12px; }
 .error-notice summary, .legacy-log summary { cursor: pointer; width: fit-content; }
-.error-notice pre, .legacy-log pre { margin: 6px 0 0; padding: 8px; border-radius: var(--radius-sm); background: var(--bg-inset); color: var(--fg-2); font: 11px/1.5 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; max-height: 160px; overflow: auto; }
+.error-notice pre, .legacy-log pre { margin: 6px 0 0; padding: 8px 10px; border-radius: var(--radius-sm); background: var(--bg-inset); color: var(--fg-2); font: 11.5px/1.5 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; max-height: 160px; overflow: auto; }
 .error-notice-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 8px; }
-.error-notice > .icon-btn { flex: none; width: 24px; height: 24px; align-self: flex-start; }
+.error-notice > .icon-btn, .error-notice .toast-icon-btn { flex: none; width: 26px; height: 26px; align-self: flex-start; color: var(--fg-3); }
+.error-notice .toast-icon-btn:hover { color: var(--fg); background: var(--bg-hover); }
 
 .machine-menu { width: 280px; }
 .machine-section-label { padding: 7px 10px 5px; font-size: 10.5px; font-weight: 500; color: var(--fg-3); letter-spacing: .04em; text-transform: uppercase; }
