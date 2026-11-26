@@ -32,7 +32,7 @@ static gboolean press(GtkWidget *btn, GdkEventButton *event, OrbSidebar *s) {
     if (event->button != GDK_BUTTON_PRIMARY) return FALSE;
     if (event->state & (GDK_CONTROL_MASK | GDK_SUPER_MASK | GDK_SHIFT_MASK))
         return orb_sel_click(s->overlay, btn, (event->state & GDK_SHIFT_MASK) != 0);
-    orb_sel_clear(s->overlay);
+    orb_sel_clear(s->overlay); orb_sidebar_set_active(orb_widget_row_id(btn));
     return FALSE;
 }
 
@@ -64,7 +64,7 @@ static GtkWidget *button(OrbSidebar *s, const char *action, const char *rid, con
         b = gtk_button_new(); gtk_widget_set_focus_on_click(b, FALSE);
         gtk_widget_set_app_paintable(b, TRUE);
         g_signal_connect(b, "draw", G_CALLBACK(orb_draw_squircle_btn), NULL);
-        orb_gtk_bind_pointer_cursor(b);
+        orb_gtk_bind_pointer_cursor(b); orb_bind_row_track(b);
         gtk_widget_set_no_show_all(b, TRUE);
         g_object_set_data_full(G_OBJECT(b), "orb-action", g_strdup(action), g_free);
         g_signal_connect(b, "clicked", G_CALLBACK(activate), s);

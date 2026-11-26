@@ -6,7 +6,6 @@ import { swallow } from "./log";
 import { useTooltip } from "./Tooltip";
 import { ErrorToast } from "./toast";
 import {nativeComposerDrop} from "./composerDrop";
-import {importProjectFiles} from "./projectFileImport";
 import {backgroundUploads,cancelBackgroundUpload,formatFileSize,pauseBackgroundUpload,resumeBackgroundUpload,type UploadSource} from "./uploads";
 import {subscribeProjectContext} from "./projectContext";
 import { assertFolderHasNoWork, didServerCascadeFolderTransfer, folderWorkError, moveFolderWork, makeFileReference, readFileReference, makeItemsReference, readItemsReference, type ClipboardItem, fileDestination, fileParent, fileName as fileBaseName, transferProjectFile } from "./fileActions";
@@ -1918,9 +1917,25 @@ export function LiveProjectsSection(p: {
             openNativeMovePicker([{ treeId: `pf:${r.slug}:${folder}`, kind: 2, srcSlug: r.slug, srcPath: folder, srcParent: fileParent(folder), label: fileBaseName(folder) }]);
           }
           break;
+        case "cancel-cut": {
+          const prevClip = fileClipboard();
+          if (cutFile() || cutItems().length) {
+            consumedFileClipboard = prevClip;
+            retireClipboardReference(prevClip);
+          } else if (isUnsyncedClipboard(prevClip)) {
+            retireClipboardReference(prevClip);
+          }
+          setFileClipboard(""); syncToCommitted(); setPendingMoves([]); setCutId(null);
+          break;
+        }
         case "paste": {
           if (!r.slug) break;
-          if (pendingMoves().length > 1) { pasteMission(r.slug, folder); break; }
+          const localClip = fileClipboard();
+          const hasUnsyncedFileClip = !!localClip && localClip !== consumedFileClipboard && !isClipboardReferenceRetired(localClip) && isUnsyncedClipboard(localClip);
+          if (pendingMoves().length > 1 || hasUnsyncedCutClipboard() || hasUnsyncedFileClip) {
+            applyPastePayload(r.slug, folder);
+            break;
+          }
           const version = connectionVersion();
           void Promise.resolve().then(() => navigator.clipboard.readText()).then(text => {
             if (version !== connectionVersion()) return;
@@ -2387,13 +2402,15 @@ export function LiveProjectsSection(p: {
   });
   onCleanup(() => rowDrag.cancel());
   onMount(() => {
+    if (p.headless) return;
     const editableTarget = (t: EventTarget | null) =>
       t instanceof Element && !!t.closest('input, textarea, [contenteditable="true"], [role="dialog"], dialog');
     const onCutOrCopy = (event: ClipboardEvent) => {
       if (!isSidebarActive() || editableTarget(event.target)) return;
       if (!(window.getSelection()?.isCollapsed ?? true)) return;
       const copy = event.type === "copy";
-      const entryId = event.target instanceof Element ? event.target.closest<HTMLElement>(".tree-entry")?.dataset.treeId : undefined;
+      const entryId = (event.target instanceof Element ? event.target.closest<HTMLElement>(".tree-entry")?.dataset.treeId : undefined)
+        ?? (pointerPos ? document.elementFromPoint(pointerPos.x, pointerPos.y)?.closest<HTMLElement>(".tree-entry")?.dataset.treeId : undefined);
       const fallbackId = !entryId
         ? (selectionActive() ? (selectionAnchor() ?? [...(selectedRowIds() ?? [])][0]) : (!copy && p.selected()?.startsWith("m:") ? p.selected()! : undefined))
         : undefined;
@@ -2432,6 +2449,7 @@ export function LiveProjectsSection(p: {
     const version = connectionVersion();
     setImporting(true); setImportStatus('Importing files to shared context…'); setActionError(null);
     try {
+      const { importProjectFiles } = await import("./projectFileImport");
       const result = await importProjectFiles(slug, folder, sources, {
         confirmedLarge,
         onBackgroundStarted: () => {

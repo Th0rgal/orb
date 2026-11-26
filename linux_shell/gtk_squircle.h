@@ -87,26 +87,35 @@ static inline gboolean orb_draw_squircle_btn(GtkWidget *w, cairo_t *cr, gpointer
     (void)ud;
     GtkStyleContext *sc = gtk_widget_get_style_context(w);
     GtkStateFlags fl = gtk_widget_get_state_flags(w);
+    gboolean cut = gtk_style_context_has_class(sc, "orb-cut");
     gboolean multi = gtk_style_context_has_class(sc, "orb-multi");
     gboolean hov = (fl & GTK_STATE_FLAG_PRELIGHT) != 0 && gtk_widget_get_sensitive(w);
     GtkWidget *top = gtk_widget_get_toplevel(w);
     gboolean kfocus = (fl & GTK_STATE_FLAG_FOCUSED) != 0 && GTK_IS_WINDOW(top) &&
                       gtk_style_context_has_class(gtk_widget_get_style_context(top), "orb-keyboard-focus");
-    if (!multi && !hov && !kfocus) return FALSE;
+    if (!cut && !multi && !hov && !kfocus) return FALSE;
     double width = (double)gtk_widget_get_allocated_width(w), height = (double)gtk_widget_get_allocated_height(w);
     cairo_save(cr);
-    orb_cairo_squircle(cr, 0.5, 0.5, width - 1.0, height - 1.0, 6.0);
-    if (multi || hov) {
-        double a = multi ? (orb_icons_light ? 0.09 : 0.12) : (orb_icons_light ? 0.05 : 0.07);
-        if (orb_icons_light) cairo_set_source_rgba(cr, 0.078, 0.078, 0.075, a);
-        else cairo_set_source_rgba(cr, 0.847, 0.847, 0.843, a);
-        if (kfocus) cairo_fill_preserve(cr); else cairo_fill(cr);
+    if (cut) {
+        orb_cairo_squircle(cr, 0.0, 0.0, width, height, 6.0);
+        if (orb_icons_light) cairo_set_source_rgba(cr, 246.0 / 255.0, 246.0 / 255.0, 244.0 / 255.0, 0.55);
+        else cairo_set_source_rgba(cr, 18.0 / 255.0, 19.0 / 255.0, 19.0 / 255.0, 0.55);
+        cairo_fill(cr);
     }
-    if (kfocus) {
-        cairo_set_line_width(cr, 1.0);
-        if (orb_icons_light) cairo_set_source_rgba(cr, 0.325, 0.322, 0.314, 0.55);
-        else cairo_set_source_rgba(cr, 0.470, 0.470, 0.455, 0.55);
-        cairo_stroke(cr);
+    if (multi || hov || kfocus) {
+        orb_cairo_squircle(cr, 0.5, 0.5, width - 1.0, height - 1.0, 6.0);
+        if (multi || hov) {
+            double a = multi ? (orb_icons_light ? 0.09 : 0.12) : (orb_icons_light ? 0.05 : 0.07);
+            if (orb_icons_light) cairo_set_source_rgba(cr, 0.078, 0.078, 0.075, a);
+            else cairo_set_source_rgba(cr, 0.847, 0.847, 0.843, a);
+            if (kfocus) cairo_fill_preserve(cr); else cairo_fill(cr);
+        }
+        if (kfocus) {
+            cairo_set_line_width(cr, 1.0);
+            if (orb_icons_light) cairo_set_source_rgba(cr, 0.325, 0.322, 0.314, 0.55);
+            else cairo_set_source_rgba(cr, 0.470, 0.470, 0.455, 0.55);
+            cairo_stroke(cr);
+        }
     }
     cairo_restore(cr);
     return FALSE;

@@ -134,14 +134,12 @@ void orb_inline_rename(GtkWidget *wv, GtkWidget *row, const char *mode, const ch
 typedef struct { GtkWidget *wv, *row; const char *action; char *target, *title; gboolean inline_ren; } ProjAct;
 static void free_proj_act(gpointer p, GClosure *cl) { (void)cl; ProjAct *a = p; g_free(a->target); g_free(a->title); g_free(a); }
 static void on_proj_item(GtkMenuItem *mi, gpointer ud) {
-    (void)mi; ProjAct *a = ud;
-    if (!a || !a->wv) return;
-    if (a->inline_ren && a->row && gtk_widget_get_ancestor(a->row, GTK_TYPE_OVERLAY)) {
-        orb_inline_rename(a->wv, a->row, a->action, a->target, a->title);
-        return;
-    }
-    if (!strcmp(a->action, "cut") || !strcmp(a->action, "copy") || !strcmp(a->action, "cut-file") || !strcmp(a->action, "copy-file"))
-        orb_sidebar_mark_cut(TRUE);
+    (void)mi; ProjAct *a = ud; if (!a || !a->wv) return;
+    if (a->inline_ren && a->row && gtk_widget_get_ancestor(a->row, GTK_TYPE_OVERLAY)) { orb_inline_rename(a->wv, a->row, a->action, a->target, a->title); return; }
+    if (!strcmp(a->action, "paste")) orb_sidebar_clear_cut(NULL);
+    else if (!strcmp(a->action, "cut") && a->row) orb_sidebar_mark_cut_target(NULL, g_object_get_data(G_OBJECT(a->row), "orb-project"), g_object_get_data(G_OBJECT(a->row), "orb-folder"), FALSE);
+    else if (!strcmp(a->action, "cut-file") && a->row) orb_sidebar_mark_cut_target(g_object_get_data(G_OBJECT(a->row), "orb-row-id"), NULL, NULL, FALSE);
+    else if (!strcmp(a->action, "copy") || !strcmp(a->action, "copy-file")) orb_sidebar_mark_cut_target(NULL, NULL, NULL, TRUE);
     orb_eval_project_action(a->wv, a->action, a->target, NULL);
 }
 static void add_proj_item(GtkWidget *menu, const char *label, const char *icon, GtkWidget *wv, GtkWidget *row, const char *action, const char *target, const char *inline_title) {
@@ -196,15 +194,13 @@ void orb_file_menu_populate(GtkWidget *wv, GtkWidget *menu, GtkWidget *row, cons
     orb_menu_separator(menu);
     add_proj_item(menu, "_Delete\xE2\x80\xA6", orb_menu_icon_name("delete-file"), wv, row, "delete-file", tgt, NULL);
 }
-#endif
-
-#if defined(ORB_HAS_WEBKITGTK)
 gboolean orb_sidebar_paste(GtkWidget *wv, GtkWidget *focus) {
-    if (!wv || !focus) return FALSE;
+    if (!wv || !focus || !orb_sidebar_has_cut()) return FALSE;
     const char *proj = g_object_get_data(G_OBJECT(focus), "orb-project"), *fld = g_object_get_data(G_OBJECT(focus), "orb-folder");
+    if (!proj || !*proj) proj = orb_menu_project_slug(g_object_get_data(G_OBJECT(focus), "orb-target"));
     if (!proj || !*proj) return FALSE;
     g_autofree char *t = (fld && *fld) ? g_strdup_printf("%s:%s", proj, fld) : g_strdup(proj);
-    orb_eval_project_action(wv, "paste", t, NULL); return TRUE;
+    return orb_sidebar_clear_cut(NULL), orb_eval_project_action(wv, "paste", t, NULL), TRUE;
 }
 gboolean orb_sidebar_rename_focused(GtkWidget *wv, GtkWidget *focus) {
     if (!wv || !focus) return FALSE;

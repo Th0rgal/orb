@@ -8,7 +8,14 @@ import {
 } from "./missionCache";
 import { markUnfocusedBtwDirty, noteBtwPresentationHint } from "./btwAgent";
 import { lookupMissionById, resetMissionLookup } from "./missionLookup";
-import { movedMission, withMovedMissions } from "./moves";
+import {
+  mergeArrivingMissions,
+  missionsMovedInto,
+  movedMission,
+  movingOutOf,
+  pendingMoves,
+  withMovedMissions,
+} from "./moves";
 import { applyServerPlacementEvent, moveMissions, planMissionMoves } from "./missionMove";
 import { MissionBoardSection } from "./MissionBoard";
 import { MissionLookupContext } from "./orchestrationModel";
@@ -191,6 +198,7 @@ import { harnessChoices, harnessPick, effectivePick, refreshHarnessChoices, refr
 import { Composer } from "./composer/Composer";
 import { MissionView, NativeMissionView } from "./mission/MissionView";
 import {
+  applyPendingFileMoves,
   createNativeChromeSyncer,
   installNativeChromeWindowHandlers,
   type NativeMissionAction,
@@ -1187,6 +1195,10 @@ export default function App() {
     open(null);
   };
   const nativeProjectAction = (action: NativeProjectAction, rawTarget: string, arg?: string): boolean => {
+    if (action === "cancel-cut") {
+      setProjectActionRequests(q => [...q, { action: "cancel-cut", slug: "_" }]);
+      return true;
+    }
     const { slug, folder: path } = parseNativeDestination(rawTarget);
     if (!slug) return false;
     switch (action) {
@@ -1236,6 +1248,7 @@ export default function App() {
     let lastRenames = renameVersion();
     let lastArchives = pendingArchives();
     let lastDeleting = deletingIds();
+    let lastMoves = pendingMoves();
     createEffect(() => {
       const canBack = hIdx() > 0;
       const canForward = hIdx() < history().length - 1;
@@ -1259,13 +1272,16 @@ export default function App() {
       const renamesRef = renameVersion();
       const archivesRef = pendingArchives();
       const deleting = deletingIds();
+      const movesRef = pendingMoves();
       const optimisticChanged =
         renamesRef !== lastRenames ||
         archivesRef !== lastArchives ||
-        deleting !== lastDeleting;
+        deleting !== lastDeleting ||
+        movesRef !== lastMoves;
       lastRenames = renamesRef;
       lastArchives = archivesRef;
       lastDeleting = deleting;
+      lastMoves = movesRef;
       // Present the same effective status as the HTML sidebar row (`rowEffectiveStatus` in
       // ProjectFiles.tsx): a just-sent turn, a "send now" handoff or a local run reads as working
       // even before Core's mission list catches up, so switching away never shows a stale glyph.
@@ -1276,7 +1292,7 @@ export default function App() {
       // stale live-list copies; optimistic deletes filter rows out without erasing backing state
       // so rollbacks restore them immediately.
       const live = new Map(missions().map(m => [m.id, m]));
-      const shown = (rows: readonly Mission[]) =>
+      const shownRaw = (rows: readonly Mission[]) =>
         withArchiveStatuses(
           withLiveExecution(
             withRenamedTitles("mission", deleting.size ? rows.filter(m => !deleting.has(m.id)) : [...rows], m => m.id),
@@ -1286,12 +1302,23 @@ export default function App() {
           const status = presentedStatus(m, missionActivity(m, [], { localRun: localRunActive(m.id) }));
           return status === m.status ? m : { ...m, status };
         });
-      const liveMissions = shown(missions());
-      const archived = shown(nativeArchived());
-      const compMissions = shown(completedMissions());
-      const projMissions = Object.fromEntries(Object.entries(projectMissions()).map(([slug, rows]) => [slug, shown(rows)]));
-      const projFolders = projectFolders();
-      const projFiles = projectFiles();
+      const rawLive = shownRaw(missions());
+      const rawArchived = shownRaw(nativeArchived());
+      const rawComp = shownRaw(completedMissions());
+      const rawProjEntries = Object.entries(projectMissions()).map(([slug, rows]) => [slug, shownRaw(rows)] as const);
+      const allKnownRaw = [...rawLive, ...rawComp, ...rawProjEntries.flatMap(([, r]) => r), ...rawArchived];
+      const liveMissions = withMovedMissions(rawLive);
+      const archived = withMovedMissions(rawArchived);
+      const compMissions = withMovedMissions(rawComp);
+      const projMissions: Record<string, Mission[]> = {};
+      const seenSlugs = new Set<string>(projs.map(p => p.slug));
+      for (const [slug] of rawProjEntries) seenSlugs.add(slug);
+      const rawProjMap = new Map(rawProjEntries);
+      for (const slug of seenSlugs) {
+        const own = withMovedMissions((rawProjMap.get(slug) ?? []).filter(m => !movingOutOf(m.id, slug)));
+        projMissions[slug] = mergeArrivingMissions(own, missionsMovedInto(slug, allKnownRaw));
+      }
+      const { folders: projFolders, files: projFiles } = applyPendingFileMoves(projectFolders(), projectFiles(), movesRef);
       nativeChromeSyncer.schedule({
         scope,
         selected: sel,
