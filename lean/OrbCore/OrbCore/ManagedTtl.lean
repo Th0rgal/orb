@@ -160,6 +160,57 @@ private def reconcileExpiredResume (mc : ManagedComputeStore) (m : ManagedMachin
     | .error e => pure (e.status == 404 || e.status == 410)
   if gone then discard <| abortManagedResume mc (cell rows[1]! 0) (some m.providerId)
 
+/-- Seconds without a relay poll before a `ready` managed VM is probed at its provider
+    for premature termination (`reaped`/`deleted`/`destroyed`/404/410) prior to TTL expiry. -/
+def silentProbeDelaySec : UInt64 := 180
+
+/-- If a `ready` managed VM has gone silent on the relay before its TTL expires, ask its
+    provider whether the exact current VM is permanently gone. Only conclusive provider loss
+    closes the lease early; running/stopped VMs and transient provider errors are left alone. -/
+private def reconcileSilentManagedMachine (mc : ManagedComputeStore) (store : CoreStore)
+    (m : ManagedMachine) (resolve : Resolver) (nowEpoch : UInt64) : IO (Option JVal) := do
+  if m.status != "ready" || m.providerId.isEmpty || m.lastPollSec == 0 ||
+      nowEpoch < m.lastPollSec + silentProbeDelaySec then
+    return none
+  let .ok resumeRows ← execParamQuery mc.db
+      "SELECT 1 FROM managed_resume_intents WHERE machine_id=?1 AND state IN ('pending','aborting') LIMIT 1;"
+      #[m.id] | return none
+  if resumeRows.size > 1 then return none
+  let .ok provider ← resolve m.provider | return none
+  let observed ← provider.get m.providerId
+  let loss? : Option (ProviderObservation × String) := match observed with
+    | .ok remote =>
+      if remote.providerId != m.providerId then none
+      else
+        let st := safeState remote.state
+        match observeProviderPayload m.provider m.id 200 (.obj #[("state", .str st)]) with
+        | .ok obs =>
+          if obs.orphaned then
+            let recorded := if #["reaped", "deleted", "destroyed"].contains st then st else "deleted"
+            some (obs, recorded)
+          else none
+        | .error _ => none
+    | .error e =>
+      if e.status == 404 || (m.provider != "boat" && e.status == 410) then
+        match observeProviderPayload m.provider m.id e.status (.obj #[]) with
+        | .ok obs => if obs.orphaned then some (obs, "deleted") else none
+        | .error _ => none
+      else none
+  let some (obs, observedState) := loss? | return none
+  let usage ← match ← provider.usageCents m.providerId with
+    | .ok amount => pure amount
+    | .error _ => pure none
+  match ← applyProviderObservation mc { obs with
+      expectedProviderId? := some m.providerId, expectedBootEpoch? := some m.nodeBootEpoch
+    } nowEpoch 0 1 with
+  | .error _ => return none
+  | .ok _ =>
+    let .ok () ← recordManagedProviderLoss mc m observedState usage | return none
+    discard <| eventOnce store m "managed_machine_provider_lost"
+      s!"Managed VM {m.sandboxName} (managed-{m.id}) was reported {observedState} by {m.provider} before its TTL expired; its compute lease is closed."
+      nowEpoch observedState usage
+    return some (.obj #[("id", .str m.id), ("provider_state", .str observedState), ("was_billable", .bool false)])
+
 /-- TTL is an explicit hard boundary, including busy guests. Provider errors keep
     cleanup pending; an expiry never becomes successful just because polls stop.
     Already nonbilling archived disks are retained rather than deleting recoverable work. -/
@@ -177,6 +228,10 @@ def tick (mc : ManagedComputeStore) (store : CoreStore) (defaults : ManagedFleet
   let mut pending : Array JVal := #[]
   for m in fleet.machines do
     if m.expiresAtSec == 0 then continue
+    if nowEpoch < m.expiresAtSec then
+      if let some lostEntry ← reconcileSilentManagedMachine mc store m resolve nowEpoch then
+        reaped := reaped.push lostEntry
+        continue
     if let some minutes := warningDue m nowEpoch then
       discard <| eventOnce store m "managed_machine_expiring"
         (s!"Managed VM {m.sandboxName} (managed-{m.id}) expires in at most {minutes} minutes, at " ++

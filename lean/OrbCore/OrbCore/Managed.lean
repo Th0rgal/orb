@@ -1380,6 +1380,22 @@ def recordManagedExpiry (st : ManagedComputeStore) (m : ManagedMachine) (provide
   | .error e => return .error e
   | .ok _ => return .ok ()
 
+/-- Record provider-confirmed permanent loss of a managed VM that disappeared before its TTL,
+    so `verifiedManagedWorkerLoss` can settle in-flight remote jobs without waiting for expiry. -/
+def recordManagedProviderLoss (st : ManagedComputeStore) (m : ManagedMachine) (providerState : String)
+    (usageCents? : Option UInt64 := none) : IO (Except String Unit) := do
+  match ← execParamQuery st.db
+      ("INSERT INTO managed_expirations(machine_id,boot_epoch,provider_id,expires_at_sec,observed_state,state,spend_cents,spend_source) " ++
+       "VALUES(?1,?2,?3,?4,?5,'completed',?6,?7) " ++
+       "ON CONFLICT(machine_id,boot_epoch) DO UPDATE SET provider_id=excluded.provider_id,observed_state=excluded.observed_state," ++
+       "state='completed',spend_cents=CASE WHEN ?8='1' THEN excluded.spend_cents ELSE spend_cents END," ++
+       "spend_source=CASE WHEN ?8='1' THEN 'provider_usage' ELSE spend_source END;")
+      #[m.id, s!"{m.nodeBootEpoch}", m.providerId, s!"{m.expiresAtSec}", providerState,
+        s!"{usageCents?.getD m.spentCents}", if usageCents?.isSome then "provider_usage" else "lease_reservation_estimate",
+        if usageCents?.isSome then "1" else "0"] with
+  | .error e => return .error e
+  | .ok _ => return .ok ()
+
 def provisionManagedMachine (st : ManagedComputeStore) (fleet : ManagedFleetState)
     (machine : ManagedMachine) (nowEpoch : UInt64)
     (userAdmission? : Option ManagedUserAdmission := none) : IO (Except String ManagedMachine) := do

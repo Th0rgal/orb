@@ -568,7 +568,63 @@ private def expiredResumeTests (root : String) : IO Unit := do
     closeManagedComputeStore mc
     closeCoreStore core
 
+/-- A `ready` managed VM that goes silent on the relay before its TTL expires is probed
+    at its provider; conclusive loss (`reaped`, `deleted`, 404/410) closes the lease early
+    and records a completed `managed_expirations` row so `verifiedManagedWorkerLoss` can
+    settle in-flight remote jobs without waiting hours for TTL expiry. -/
+private def silentProviderLossTests (root : String) : IO Unit := do
+  let mc ← requireOk (← openManagedComputeStore s!"{root}/ttl-silent-loss.db") "open silent loss"
+  let core ← requireOk (← openCoreStore s!"{root}/ttl-silent-loss-core") "open silent loss core"
+  try
+    let owner := "owner-silent-loss"
+    discard <| requireOk (← execParamQuery core.missionsDb
+      "INSERT INTO missions(id,title,status,backend,owner_user_id,created_at,updated_at) VALUES(?1,'Silent Loss','completed','antigravity','alice','t0','t0');"
+      #[owner]) "owner mission"
+    let reapedVm ← seed mc "silent-reaped" 1000 360 1000 owner
+    let liveVm ← seed mc "silent-live" 1000 360 1000 owner
+    let errVm ← seed mc "silent-err" 1000 360 1000 owner
+    for vm in #[reapedVm, liveVm, errVm] do
+      discard <| sql mc "UPDATE managed_machines SET provider='leanci' WHERE id=?1;" #[vm.id]
+    let gets ← IO.mkRef (#[] : Array String)
+    let provider : Provider := { OrbCore.ManagedProvisioningTests.mockPolicyProvider mc "leanci" with
+      get := fun id => do
+        gets.modify (·.push id)
+        if id == reapedVm.providerId then return .ok { providerId := id, state := "reaped" }
+        if id == liveVm.providerId then return .ok { providerId := id, state := "running" }
+        return .error { code := "unavailable", status := 503 }
+      destroy := fun _ => throw (IO.userError "must not call destroy on already-reaped VM")
+    }
+    let resolve : Resolver := fun _ => pure (.ok provider)
+    -- Before the silent probe threshold (180s), healthy VMs are not probed at the provider.
+    let early ← requireOk (← tick mc core fleet resolve 1179) "before silent threshold"
+    check ((← gets.get).isEmpty && ((early.fieldArr? "reaped").getD #[]).isEmpty &&
+      (← machine mc reapedVm.id).status == "ready")
+      "recent pollers are not probed before silentProbeDelaySec"
+    -- Once silent >= 180s, only the provider-confirmed reaped VM is closed early.
+    let after ← requireOk (← tick mc core fleet resolve 1180) "after silent threshold"
+    let afterReaped := (after.fieldArr? "reaped").getD #[]
+    let closed ← machine mc reapedVm.id
+    let stillLive ← machine mc liveVm.id
+    let stillErr ← machine mc errVm.id
+    check (afterReaped.size == 1 && closed.status == "destroyed" &&
+      closed.expiryCleanupState == "completed" && closed.expiryProviderState == "reaped")
+      "provider-reaped silent VM closes early with verified expiration record"
+    check (stillLive.status == "ready" && stillLive.expiryCleanupState.isEmpty &&
+      stillErr.status == "ready" && stillErr.expiryCleanupState.isEmpty)
+      "running and transiently failing silent VMs remain ready"
+    let evRows ← requireOk (← execParamQuery core.missionsDb
+      "SELECT COUNT(*) FROM mission_events WHERE mission_id=?1 AND payload LIKE '%managed_machine_provider_lost%';"
+      #[owner]) "provider lost event count"
+    check (evRows.size > 1 && cell evRows[1]! 0 == "1") "owner receives provider_lost event once"
+    -- Re-running tick is a no-op for the already closed VM.
+    let repeatTick ← requireOk (← tick mc core fleet resolve 1240) "repeat silent tick"
+    check (((repeatTick.fieldArr? "reaped").getD #[]).isEmpty) "closed VM is not reaped twice"
+  finally
+    closeManagedComputeStore mc
+    closeCoreStore core
+
 def run (root : String) : IO Unit := do
+  silentProviderLossTests root
   expiredResumeTests root
   provisioningArchiveTests root
   warningTests root
