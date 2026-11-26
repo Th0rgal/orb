@@ -58,11 +58,12 @@ export function observeCoreMissionTitle(id: string, title: string | null | undef
 /** `rows` with pending renames applied; unchanged rows keep their identity. */
 export function withRenamedTitles<T extends { title?: string | null }>(kind: RenameKind, rows: readonly T[], id: (row: T) => string): T[] {
   const map = pending();
-  if (!map.size) return rows as T[];
+  if (!map.size && kind !== "mission") return rows as T[];
   let changed = false;
   const out = rows.map(row => {
-    const title = renamedTitle(kind, id(row), row.title ?? null);
-    if (title === (row.title ?? null)) return row;
+    const cur = row.title ?? null;
+    const title = renamedTitle(kind, id(row), cur);
+    if (title === cur) return row;
     changed = true;
     return { ...row, title };
   });
@@ -70,7 +71,7 @@ export function withRenamedTitles<T extends { title?: string | null }>(kind: Ren
 }
 
 export const isRenamePending = (kind: RenameKind, id: string) => pending().has(keyOf(kind, id));
-export const pendingRenames = () => pending();
+export const renameVersion = () => pending();
 
 /**
  * Show `title` now and send it with `save`. On failure the previous title

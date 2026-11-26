@@ -612,14 +612,43 @@ export function Composer(p: {
     measureCtx.font = getComputedStyle(ta).font;
     return measureCtx.measureText(value).width < compactWidth - 24;
   };
+  let thumbEl: HTMLSpanElement | undefined;
+  const thumbMetrics = () => {
+    const ch = ta?.clientHeight ?? 0, sh = ta?.scrollHeight ?? 0;
+    if (!thumbEl || !composerElement || ch <= 0 || sh <= ch + 1) return null;
+    const baseTop = ta.offsetParent === composerElement ? ta.offsetTop : ta.getBoundingClientRect().top - composerElement.getBoundingClientRect().top;
+    const track = Math.max(0, ch - 4), h = Math.min(track, Math.max(24, Math.round((track * ch) / sh)));
+    return { baseTop, h, range: sh - ch, travel: Math.max(0, track - h) };
+  };
+  const syncThumb = () => {
+    const m = thumbMetrics();
+    if (!m) { if (thumbEl) thumbEl.hidden = true; return; }
+    const y = m.baseTop + 2 + (m.range > 0 ? m.travel * Math.max(0, Math.min(1, ta.scrollTop / m.range)) : 0);
+    thumbEl!.hidden = false;
+    thumbEl!.style.height = `${m.h}px`;
+    thumbEl!.style.transform = `translateY(${Math.round(y * 2) / 2}px)`;
+  };
+  const startThumbDrag = (e: PointerEvent) => {
+    const m = thumbMetrics(), el = thumbEl;
+    if (e.button !== 0 || !m || !el || m.travel <= 0) return;
+    e.preventDefault(); e.stopPropagation();
+    const pid = e.pointerId, y0 = e.clientY, top0 = ta.scrollTop, ratio = m.range / m.travel;
+    el.setPointerCapture?.(pid); el.classList.add("dragging");
+    const onMove = (ev: PointerEvent) => { if (ev.pointerId === pid) { ta.scrollTop = top0 + (ev.clientY - y0) * ratio; syncThumb(); } };
+    const toggle = (on: boolean) => (["pointermove", "pointerup", "pointercancel"] as const).forEach((k, i) => window[on ? "addEventListener" : "removeEventListener"](k, (i ? onUp : onMove) as EventListener, true));
+    const onUp = (ev: PointerEvent) => { if (ev.pointerId === pid) { el.classList.remove("dragging"); if (el.hasPointerCapture?.(pid)) el.releasePointerCapture(pid); toggle(false); } };
+    toggle(true);
+  };
+  createEffect(on([images, selectedSkills], () => queueMicrotask(syncThumb), { defer: true }));
   let wasHidden = false;
   onMount(() => {
     if (typeof ResizeObserver === "undefined") return;
     const observer = new ResizeObserver(([entry]) => {
       const width = entry.contentRect.width;
-      if (width <= 0) { wasHidden = true; return; }
+      if (width <= 0) { wasHidden = true; if (thumbEl) thumbEl.hidden = true; return; }
       if (!multiline()) compactWidth = width;
       if (wasHidden) { wasHidden = false; if (ta.value) resize(); }
+      syncThumb();
     });
     observer.observe(ta);
     onCleanup(() => observer.disconnect());
@@ -631,6 +660,7 @@ export function Composer(p: {
     const value = text();
     if (!multiline() && !p.tall && !images().length && !value.includes("\n") && fitsOneLine(value)) {
       ta.style.height = "";
+      if (thumbEl) thumbEl.hidden = true;
       return;
     }
     const val = ta.value;
@@ -641,6 +671,7 @@ export function Composer(p: {
     if (!multiline() && !val.includes("\n") && val.length <= 32 && ta.scrollHeight <= singleLineHeight + 1) {
       composer.classList.toggle("tall", Boolean(p.tall || images().length));
       ta.style.height = "";
+      if (thumbEl) thumbEl.hidden = true;
       return;
     }
     // Measuring collapses the textarea: hold the composer's box so the
@@ -665,6 +696,7 @@ export function Composer(p: {
     ta.style.minHeight = "";
     composer.style.minHeight = "";
     ta.scrollTop = follow ? ta.scrollHeight : top;
+    syncThumb();
   };
 
   createEffect(() => { const revision = p.revision; if (revision) { setMode(null); setText(current => { const next = revision.append && current ? `${current}\n\n${revision.text}` : revision.text; ta.value = next; return next; }); queueMicrotask(() => { resize(); ta?.focus(); }); } });
@@ -864,41 +896,23 @@ export function Composer(p: {
               }}>Attach</button>
             </div>
           </Show>
-          <Show when={plusItems().some((i) => i.section === "Folders")}>
-            <div class="slash-head">Folders</div>
-            <For each={plusItems().filter((i) => i.section === "Folders")}>
-              {(it) => {
+          <For each={["Folders", "Files"] as const}>{(sec) => (
+            <Show when={plusItems().some((i) => i.section === sec)}>
+              <div class="slash-head">{sec}</div>
+              <For each={plusItems().filter((i) => i.section === sec)}>{(it) => {
+                const isFolder = sec === "Folders";
                 const display = () => ctxFolder() && it.label.toLowerCase().startsWith(`${ctxFolder().toLowerCase()}/`) ? it.label.slice(ctxFolder().length + 1) : it.label;
                 return (
-                  <button class={`menu-item ${mentionedIds().has(it.id) ? "on" : ""}`} title={it.path ?? it.label} onClick={() => setCtxFolder((it.path ?? it.label).replace(/\/$/, ""))}>
-                    <span class="menu-ico"><Ic.FolderIcon size={14} /></span>
+                  <button class={`menu-item ${mentionedIds().has(it.id) ? "on" : ""}`} title={it.path ?? it.label} onClick={() => isFolder ? setCtxFolder((it.path ?? it.label).replace(/\/$/, "")) : (p.onAttachments && pickAttach(it))}>
+                    <span class="menu-ico">{isFolder ? <Ic.FolderIcon size={14} /> : <Ic.FileIcon size={14} />}</span>
                     <span class="slash-item-label">{display()}</span>
                     <span class="menu-attachment-mark" aria-hidden="true">{mentionedIds().has(it.id) ? "✓" : ""}</span>
-                    <span class="slash-chevron"><Ic.ChevronRight size={12} /></span>
+                    <Show when={isFolder}><span class="slash-chevron"><Ic.ChevronRight size={12} /></span></Show>
                   </button>
                 );
-              }}
-            </For>
-          </Show>
-          <Show when={plusItems().some((i) => i.section === "Files")}>
-            <div class="slash-head">Files</div>
-            <For each={plusItems().filter((i) => i.section === "Files")}>
-              {(item) => {
-                const display = () => ctxFolder() && item.label.toLowerCase().startsWith(`${ctxFolder().toLowerCase()}/`) ? item.label.slice(ctxFolder().length + 1) : item.label;
-                return (
-                  <button
-                    class={`menu-item ${mentionedIds().has(item.id) ? "on" : ""}`}
-                    title={item.path ?? item.label}
-                    onClick={() => { if (p.onAttachments) pickAttach(item); }}
-                  >
-                    <span class="menu-ico"><Ic.FileIcon size={14} /></span>
-                    <span class="slash-item-label">{display()}</span>
-                    <span class="menu-attachment-mark" aria-hidden="true">{mentionedIds().has(item.id) ? "✓" : ""}</span>
-                  </button>
-                );
-              }}
-            </For>
-          </Show>
+              }}</For>
+            </Show>
+          )}</For>
         </Menu>
       </Show>
     </div>
@@ -1246,8 +1260,10 @@ export function Composer(p: {
               send();
             }
           }}
+          onScroll={syncThumb}
         />
       </div>
+      <span ref={thumbEl} class="composer-scroll-thumb" aria-hidden="true" hidden onClick={e => e.stopPropagation()} onPointerDown={startThumbDrag} />
       {p.controls ?? modelBtn}
       {voice}
       {sendBtn}

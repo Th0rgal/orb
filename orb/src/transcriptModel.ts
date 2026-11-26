@@ -8,7 +8,7 @@ import {
   orbWireTranscriptSliceStep,
 } from "./orbKernel";
 import { projectTranscriptCounts } from "./clientCore";
-import { isCancellationRequestedNotice, isGeneratedRemoteJobStatus, isTransientNodeNotice, type StreamEvent } from "./stream";
+import { isCancellationRequestedNotice, isGeneratedRemoteJobStatus, transientNoticeNodeId, type StreamEvent } from "./stream";
 
 export type StreamItem =
   | { kind: "user"; key: string; text: string; images?: DraftImage[]; messageId?: string; eventId?: string; sequence?: number; source?: string; senderUsername?: string; queued?: boolean; attached?: boolean; receipt?: boolean; /** Server time the message was stored (ISO), when known. */ at?: string }
@@ -33,6 +33,7 @@ export type StreamItem =
 const str = (v: unknown): string => typeof v === "string" ? v : v == null ? "" : String(v);
 const reducers = new Map<string, TranscriptReducer[]>();
 const anonymous = new WeakMap<StreamItem[], TranscriptReducer>();
+const supersededTransient = new WeakSet<StreamItem>();
 const EMPTY_TRANSCRIPT_SLICE: Uint8Array<ArrayBufferLike> = new Uint8Array(0);
 const TRANSCRIPT_EVENT_ENCODER = new TextEncoder();
 
@@ -375,6 +376,17 @@ export class TranscriptReducer {
     if (sliceRes.status !== 0 || !sliceRes.verdict || !sliceRes.verdict.admitted) return;
     this.foldSeq.set(channel, nextFoldSeq);
     this.foldEntries = sliceRes.verdict.nextEntryCount;
+    if (sliceRes.verdict.closedPreviousThinking && thinkingOpen && last?.kind === "think") this.put(this.items.length - 1, { ...last, done: true });
+    if (ev.type === "text_delta" || ev.type === "text_op" || ev.type === "thinking" || ev.type === "tool_call" || ev.type === "tool_result" || (ev.type === "assistant_message" && d.success !== false)) {
+      for (let i = this.lastUser + 1; i < this.items.length; i++) {
+        const row = this.items[i];
+        if (row.kind === "error" && !row.terminal && transientNoticeNodeId(row.text) && !supersededTransient.has(row)) {
+          const marked = { ...row };
+          supersededTransient.add(marked);
+          this.put(i, marked);
+        }
+      }
+    }
     switch (ev.type) {
       case "text_delta":
       case "text_op": {
@@ -564,21 +576,22 @@ export class TranscriptReducer {
         // late arguments for a row its result created have none to compare.
         const prior=index==null?undefined:this.items[index];
         const reused=ev.type==="tool_call"&&prior?.kind==="tool"&&prior.done&&prior.args!=null&&JSON.stringify(prior.args)!==JSON.stringify(d.args??null);
+        const trunc = d.truncated === true ? { truncated: true } : undefined;
         if(index!=null&&!reused){
           const old=this.items[index];
-          if(old.kind==="tool"&&ev.type==="tool_result")this.put(index,{...old,result:d.result,done:true,unresolved:false,...(d.truncated===true?{truncated:true}:{})});
-          else if(old.kind==="tool"&&ev.type==="tool_call")this.put(index,{...old,name:name||old.name,args:d.args??old.args,...(d.truncated===true?{truncated:true}:{})});
+          if(old.kind==="tool"&&ev.type==="tool_result")this.put(index,{...old,result:d.result,done:true,unresolved:false,...trunc});
+          else if(old.kind==="tool"&&ev.type==="tool_call")this.put(index,{...old,name:name||old.name,args:d.args??old.args,...trunc});
           return;
         }
         this.tools.set(callId,this.items.length);
-        this.items.push({kind:"tool",key:reused?`tool:${callId}:${this.items.length}`:`tool:${callId}`,callId,name:name||"tool",args:d.args??null,...(ev.type==="tool_result"?{result:d.result}:{}),...(d.truncated===true?{truncated:true}:{}),...(ev.sequence!=null?{sequence:ev.sequence}:{}),done:ev.type==="tool_result"});return;
+        this.items.push({kind:"tool",key:reused?`tool:${callId}:${this.items.length}`:`tool:${callId}`,callId,name:name||"tool",args:d.args??null,...(ev.type==="tool_result"?{result:d.result}:{}),...trunc,...(ev.sequence!=null?{sequence:ev.sequence}:{}),done:ev.type==="tool_result"});return;
       }
       case "error": {
         const message = str(d.message);
         this.close();
         const prev = this.items[this.items.length - 1];
         if (message.trim() && prev?.kind === "error" && similarErrorText(prev.text, message)) {
-          if (message.trim().length > prev.text.trim().length && !prev.terminal) {
+          if (!prev.terminal && message.trim().length > prev.text.trim().length) {
             this.put(this.items.length - 1, { ...prev, text: message });
           }
           return;
@@ -742,7 +755,7 @@ export function stripGoalCompletionMarkers(items: StreamItem[]): StreamItem[] {
  * subsequent turn progress (or a newer duplicate notice) supersedes a transient
  * remote-node reachability warning. Keep the raw history intact, and do not
  * dismiss failures for queued input. */
-export function visibleTranscript(items: StreamItem[]): StreamItem[] {
+export function visibleTranscript(items: StreamItem[], isNodeOnline?: (nodeId: string) => boolean): StreamItem[] {
   let lastDelivered = -1;
   for (let i = items.length - 1; i >= 0; i--) {
     const item = items[i];
@@ -753,7 +766,10 @@ export function visibleTranscript(items: StreamItem[]): StreamItem[] {
   }
   const supersededError = (index: number, item: StreamItem): boolean => {
     if (item.kind !== "error") return false;
-    const transient = isTransientNodeNotice(item.text);
+    if (supersededTransient.has(item)) return true;
+    const nodeId = transientNoticeNodeId(item.text);
+    const transient = !!nodeId;
+    if (transient && !item.terminal && isNodeOnline?.(nodeId)) return true;
     for (let j = index + 1; j < items.length; j++) {
       const next = items[j];
       if (next.kind === "user" && !next.queued && !next.attached) return transient;
@@ -929,7 +945,7 @@ export function reuseUnchanged(prev: StreamItem[], next: StreamItem[], session?:
   let reused = 0;
   let out = next.map(item => {
     const was = old.get(item.key);
-    if (was && was !== item && was.kind === item.kind && shallowEqual(was, item)) { reused++; return was; }
+    if (was && was !== item && was.kind === item.kind && supersededTransient.has(was) === supersededTransient.has(item) && shallowEqual(was, item)) { reused++; return was; }
     return item;
   });
   if (!reused) return next;

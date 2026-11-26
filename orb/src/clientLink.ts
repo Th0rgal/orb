@@ -6,6 +6,12 @@ import { nativeInvoke } from "./clientRuns";
 
 const connection = () => ({ api_url: getApiUrl(), token: getJwt() ?? "" });
 let unsupportedClientLinkEpoch: string | null = null;
+const carriedMissionsByEpoch = new Map<string, Set<string>>();
+
+export function resetClientLinkStateForTest(): void {
+  unsupportedClientLinkEpoch = null;
+  carriedMissionsByEpoch.clear();
+}
 
 export interface ClientLinkJournalEnqueueReceipt {
   seq: number;
@@ -39,12 +45,23 @@ export async function enqueueClientLinkFrame(id: string, payload: unknown): Prom
   if (isClientLinkUnsupportedForCurrentEpoch()) return null;
   const invoke = nativeInvoke();
   if (!invoke) return null;
-  return await invoke("client_link_flush", {
+  const receipt = await invoke("client_link_flush", {
     connection: connection(),
     action: "enqueue",
     mission: id,
     payload,
   }) as ClientLinkJournalEnqueueReceipt;
+  const cleanId = id.trim();
+  if (cleanId) {
+    const epoch = currentCapabilityEpochKey();
+    let set = carriedMissionsByEpoch.get(epoch);
+    if (!set) {
+      set = new Set();
+      carriedMissionsByEpoch.set(epoch, set);
+    }
+    set.add(cleanId);
+  }
+  return receipt;
 }
 
 /** Acknowledge cumulative `ackSeq` on `orb-locald`'s client-link journal ring (`SM-26`). */
@@ -79,9 +96,11 @@ export async function flushClientLink(id: string, timeoutMs = 15000): Promise<bo
   if (isClientLinkUnsupportedForCurrentEpoch()) return false;
   // Not gated on the handshake: a run can finish before `welcome` arrives.
   // Native flush is false for any run the link did not carry.
+  const cleanId = id.trim();
+  if (!cleanId || !carriedMissionsByEpoch.get(currentCapabilityEpochKey())?.has(cleanId)) return false;
   const invoke = nativeInvoke();
   if (!invoke) return false;
-  try { return await invoke("client_link_flush", { connection: connection(), mission: id, timeoutMs }) === true; }
+  try { return await invoke("client_link_flush", { connection: connection(), mission: cleanId, timeoutMs }) === true; }
   catch { return false; }
 }
 

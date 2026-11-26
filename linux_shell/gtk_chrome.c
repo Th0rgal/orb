@@ -157,7 +157,7 @@ static void on_script_msg(WebKitUserContentManager *ucm, WebKitJavascriptResult 
     char *cmd = jv_str(v, "command"); JSCValue *args = jsc_value_object_get_property(v, "args");
     if (strcmp(cmd, "set_native_sidebar") == 0) { gboolean open = (args && jsc_value_is_object(args)) ? jv_bool(args, "open") : !gtk_widget_get_visible(c->sb_box); gtk_widget_set_visible(c->sb_box, open); }
     else if (strcmp(cmd, "set_window_theme") == 0 && args && jsc_value_is_object(args)) { char *t = jv_str(args, "theme"); gboolean light = !g_strcmp0(t, "light"); orb_gtk_apply_theme(c->css, light); if (ORB_EMBEDDED) { orb_leanui_theme(c->sb_box, light); orb_leanui_palette_theme(c->palette, light); } gtk_widget_queue_draw(c->win); g_free(t); }
-    else if (strcmp(cmd, "window_drag") == 0) { orb_gtk_begin_window_drag(c->win); }
+    else if (strcmp(cmd, "window_drag") == 0) { orb_gtk_begin_window_drag(c->win); } else if (strcmp(cmd, "native_chrome_sync_state") == 0 && args && jsc_value_is_string(args)) { char *s = jsc_value_to_string(args); rpc_call_async(c, s, 1, 0); g_free(s); }
     else if (strcmp(cmd, "set_native_history") == 0 && args && jsc_value_is_object(args)) { if (ORB_EMBEDDED) { orb_leanui_history(c->sb_box, jv_bool(args, "can_back"), jv_bool(args, "can_forward")); } else { gtk_widget_set_sensitive(c->back_btn, jv_bool(args, "can_back")); gtk_widget_set_sensitive(c->fwd_btn, jv_bool(args, "can_forward")); } }
     if (args) { g_object_unref(args); } g_free(cmd);
 }
@@ -189,8 +189,8 @@ static void build_classic_sidebar(OrbGtkChrome *c) {
 static void embedded_action(gpointer data, const char *kind, const char *target) {
     OrbGtkChrome *c = data;
     if (!strcmp(kind, "expand")) { toggle_row_expand(c, target); return; }
-    if (!strcmp(kind, "hide") || (target && (!strcmp(target, "new-agent") || !strncmp(target, "new-agent:", 10) || !strcmp(target, "new-project")))) gtk_widget_grab_focus(c->wv);
-    if (!strcmp(kind, "hide")) on_tb_sb_clicked(NULL, c); else eval_wv_target(c, kind, target);
+    if (!strcmp(kind, "hide") || (target && (!strcmp(target, "search") || !strcmp(target, "new-agent") || !strncmp(target, "new-agent:", 10) || !strcmp(target, "new-project")))) gtk_widget_grab_focus(c->wv);
+    if (!strcmp(kind, "hide")) on_tb_sb_clicked(NULL, c); else { orb_leanui_optimistic(c->sb_box, kind, target, NULL); eval_wv_target(c, kind, target); }
 }
 #endif
 GtkWidget *orb_gtk_chrome_wrap(GtkWidget *win, GtkWidget *wv, WebKitUserContentManager *ucm, unsigned port, const char *token) {

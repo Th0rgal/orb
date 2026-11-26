@@ -8,6 +8,7 @@ GtkWidget *orb_leanui_new(GtkWidget *webview, OrbSidebarAction activate, gpointe
 void orb_leanui_rows(GtkWidget *view, JSCValue *rows, JSCValue *footer, const char *scope);
 void orb_leanui_theme(GtkWidget *view, gboolean light);
 void orb_leanui_history(GtkWidget *view, gboolean back, gboolean forward);
+void orb_leanui_optimistic(GtkWidget *view, const char *kind, const char *target, const char *ren_title);
 GtkWidget *orb_leanui_palette_new(GtkWidget *base, GtkWidget *wv, unsigned port, const char *token,
                                   OrbSidebarAction action, gpointer chrome);
 void orb_leanui_palette_open(GtkWidget *overlay);
@@ -24,6 +25,7 @@ gboolean orb_leanui_palette_key(GtkWidget *overlay, GdkEventKey *ev);
 #define orb_leanui_rows(...) ((void)0)
 #define orb_leanui_theme(...) ((void)0)
 #define orb_leanui_history(...) ((void)0)
+#define orb_leanui_optimistic(...) ((void)0)
 #define orb_leanui_palette_new(base, ...) (base)
 #define orb_leanui_palette_open(...) ((void)0)
 #define orb_leanui_palette_theme(...) ((void)0)

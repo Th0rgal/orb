@@ -359,19 +359,27 @@ describe("nativeChromeBridge", () => {
         completedMissions: [],
         projectMissions: {},
       };
+      // Cold-start snapshot flushes immediately without waiting 16ms.
       syncer.schedule({ ...baseSnap, inboxUnread: 1 });
-      syncer.schedule({ ...baseSnap, inboxUnread: 2 });
-      expect(calls).toHaveLength(0);
-      await vi.advanceTimersByTimeAsync(20);
       expect(calls).toHaveLength(1);
       expect(calls[0]?.args.revision).toBe(1);
-      expect(calls[0]?.args.inbox_unread).toBe(2);
+      expect(calls[0]?.args.inbox_unread).toBe(1);
+      await Promise.resolve();
+
+      // Subsequent non-urgent updates coalesce within the 16ms debounce window.
+      syncer.schedule({ ...baseSnap, inboxUnread: 2 });
+      syncer.schedule({ ...baseSnap, inboxUnread: 3 });
+      expect(calls).toHaveLength(1);
+      await vi.advanceTimersByTimeAsync(20);
+      expect(calls).toHaveLength(2);
+      expect(calls[1]?.args.revision).toBe(2);
+      expect(calls[1]?.args.inbox_unread).toBe(3);
 
       syncer.schedule({ ...baseSnap, inboxUnread: 5 }, true);
       await Promise.resolve();
-      expect(calls).toHaveLength(2);
-      expect(calls[1]?.args.revision).toBe(2);
-      expect(calls[1]?.args.inbox_unread).toBe(5);
+      expect(calls).toHaveLength(3);
+      expect(calls[2]?.args.revision).toBe(3);
+      expect(calls[2]?.args.inbox_unread).toBe(5);
       syncer.dispose();
 
       // A fresh syncer created after a WebView reload starts strictly above prior wall-clock revisions.
@@ -379,7 +387,7 @@ describe("nativeChromeBridge", () => {
       const reloadedA = createNativeChromeSyncer(invoke);
       reloadedA.schedule(baseSnap, true);
       await Promise.resolve();
-      const revBeforeReload = calls[2]?.args.revision as number;
+      const revBeforeReload = calls[3]?.args.revision as number;
       expect(revBeforeReload).toBeGreaterThan(1_000_000_000_000);
       reloadedA.dispose();
 
@@ -387,7 +395,7 @@ describe("nativeChromeBridge", () => {
       const reloadedB = createNativeChromeSyncer(invoke);
       reloadedB.schedule(baseSnap, true);
       await Promise.resolve();
-      const revAfterReload = calls[3]?.args.revision as number;
+      const revAfterReload = calls[4]?.args.revision as number;
       expect(revAfterReload).toBeGreaterThan(revBeforeReload);
       reloadedB.dispose();
     } finally {

@@ -2784,6 +2784,39 @@ def dispatchResourcesAndSystemRoute
           (if isTerm then "client_runner" else "") "" nowIso true "orb-client" then
         return some (jsonErr 500 s!"local run not stored: {e}")
 
+      -- Seed Turn 1 into `mission_events` idempotently so Turn 2+ `client-transcript`
+      -- appends onto a complete conversational event log instead of hiding Turn 1.
+      let uEvId := s!"origin-user:{mid}"
+      if !prompt.trimAscii.toString.isEmpty then
+        if let .ok rs ← execParamQuery store.missionsDb
+            "SELECT 1 FROM mission_events WHERE mission_id=?1 LIMIT 1;" #[mid] then
+          if rs.size ≤ 1 then
+            let uPayload := renderCompact (.obj #[("content", .str prompt), ("id", .str uEvId)])
+            if let .ok uSeq ← appendMissionEvent store mid "user_message" uPayload createdIso then
+              let _ ← execParamStmt store.missionsDb
+                "UPDATE mission_events SET event_id=?3, content=?4 WHERE mission_id=?1 AND seq=?2;"
+                #[mid, toString uSeq, uEvId, prompt]
+      let cleanText := text.trimAscii.toString
+      if !cleanText.isEmpty then
+        let aEvId := s!"origin-assistant:{mid}"
+        let aPayload := renderCompact (.obj #[("content", .str text), ("id", .str aEvId)])
+        let existingAsst ← execParamQuery store.missionsDb
+          "SELECT seq FROM mission_events WHERE mission_id=?1 AND event_id=?2 LIMIT 1;" #[mid, aEvId]
+        match existingAsst with
+        | .ok rs =>
+          if rs.size > 1 then
+            let aSeqStr := (rs[1]![0]?).getD ""
+            if !aSeqStr.isEmpty then
+              let _ ← execParamStmt store.missionsDb
+                "UPDATE mission_events SET content=?3, payload=?4, timestamp=?5, created_at=?5 WHERE mission_id=?1 AND seq=?2;"
+                #[mid, aSeqStr, text, aPayload, nowIso]
+          else
+            if let .ok aSeq ← appendMissionEvent store mid "assistant_message" aPayload nowIso then
+              let _ ← execParamStmt store.missionsDb
+                "UPDATE mission_events SET event_id=?3, content=?4 WHERE mission_id=?1 AND seq=?2;"
+                #[mid, toString aSeq, aEvId, text]
+        | .error _ => pure ()
+
       return some (jsonResp 200 (.obj #[("ok", .bool true)]))
 
     -- 7e. Conversation Search (`/api/control/missions/search/messages` & `/api/control/missions/search/moments`)

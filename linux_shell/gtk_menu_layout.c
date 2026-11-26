@@ -5,9 +5,9 @@
 #include <stdlib.h>
 #include <string.h>
 #if defined(ORB_HAS_WEBKITGTK)
+#include "gtk_leanui.h"
 #include "gtk_squircle.h"
 #include <webkit2/webkit2.h>
-
 GtkWidget *orb_menu_page(void) {
     GtkWidget *menu = gtk_menu_new();
     gtk_menu_set_reserve_toggle_size(GTK_MENU(menu), FALSE);
@@ -71,6 +71,7 @@ static void commit_inline_rename(InlineRename *r, gboolean restore_focus) {
     if (!r->cancelled && r->entry && GTK_IS_ENTRY(r->entry)) {
         g_autofree char *next = g_strdup(gtk_entry_get_text(GTK_ENTRY(r->entry)));
         if (*g_strstrip(next) && g_strcmp0(next, r->title) != 0) {
+            if (r->row) { g_object_set_data_full(G_OBJECT(r->row), "orb-title", g_strdup(next), g_free); orb_leanui_optimistic(r->ov, NULL, g_object_get_data(G_OBJECT(r->row), "orb-row-id"), next); }
             if (g_strcmp0(r->mode, "mission") == 0) {
                 char *i = orb_json_escape_string(r->id), *g = orb_json_escape_string(next);
                 if (i && g) {
@@ -79,9 +80,7 @@ static void commit_inline_rename(InlineRename *r, gboolean restore_focus) {
                     g_free(js);
                 }
                 free(i); free(g);
-            } else {
-                orb_eval_project_action(r->wv, r->mode, r->id, next);
-            }
+            } else orb_eval_project_action(r->wv, r->mode, r->id, next);
         }
     }
     g_idle_add(finish_inline_rename, r);
@@ -90,7 +89,8 @@ static void commit_inline_rename(InlineRename *r, gboolean restore_focus) {
 static void on_inline_activate(GtkEntry *e, gpointer ud) { (void)e; commit_inline_rename(ud, TRUE); }
 static gboolean on_inline_focus_out(GtkWidget *w, GdkEventFocus *ev, gpointer ud) { (void)w; (void)ev; commit_inline_rename(ud, FALSE); return FALSE; }
 static gboolean on_inline_key(GtkWidget *w, GdkEventKey *ev, gpointer ud) {
-    (void)w; InlineRename *r = ud;
+    InlineRename *r = ud;
+    if ((ev->state & (GDK_CONTROL_MASK | GDK_SUPER_MASK | GDK_MOD4_MASK)) && !(ev->state & (GDK_MOD1_MASK | GDK_SHIFT_MASK)) && gdk_keyval_to_lower(ev->keyval) == GDK_KEY_a) return gtk_editable_select_region(GTK_EDITABLE(w), 0, -1), TRUE;
     if (ev->keyval == GDK_KEY_Escape) { r->cancelled = TRUE; commit_inline_rename(r, TRUE); return TRUE; }
     return FALSE;
 }

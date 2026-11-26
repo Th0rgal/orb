@@ -440,6 +440,23 @@ describe("telemetry redaction and SearchDialog state discipline", () => {
     dateSelect.dispatchEvent(downOnSelect);
     expect(downOnSelect.defaultPrevented).toBe(false);
 
+    // Cmd+A / Super+Ctrl+A selects the entire search input text (including when focus is on a filter/result inside the dialog).
+    const searchInput = screen.getByLabelText("Search conversations and messages") as HTMLInputElement;
+    searchInput.setSelectionRange(0, 0);
+    const cmdA = new KeyboardEvent("keydown", {
+      key: "a",
+      code: "KeyA",
+      metaKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    dateSelect.focus();
+    row.dispatchEvent(cmdA);
+    expect(cmdA.defaultPrevented).toBe(true);
+    expect(document.activeElement).toBe(searchInput);
+    expect(searchInput.selectionStart).toBe(0);
+    expect(searchInput.selectionEnd).toBe("beta".length);
+
     // Explicit Open passage button navigates.
     await fireEvent.click(screen.getByTestId("search-open-hit"));
     expect(onOpenHit).toHaveBeenCalledTimes(1);

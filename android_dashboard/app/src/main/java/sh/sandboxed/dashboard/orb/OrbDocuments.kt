@@ -642,6 +642,16 @@ fun OrbProjectDocumentsPage(
                             pendingDeletes[targetPath] = true
                             scope.launch {
                                 try {
+                                    if (isDir) {
+                                        val check = core.fetchRows(
+                                            "/api/control/missions?project=${core.encodeComponent(slug)}&folder_prefix=${core.encodeComponent(targetPath)}&limit=200",
+                                            null
+                                        )
+                                        if (OrbMissionTree.hasBlockingFolderMissions(check, targetPath)) {
+                                            error = "Move or archive the agents in \"$targetPath\" before deleting it."
+                                            return@launch
+                                        }
+                                    }
                                     core.request(
                                         "/api/projects/${core.encodeComponent(slug)}/file?path=${core.encodeComponent(targetPath)}",
                                         method = "DELETE"

@@ -68,6 +68,7 @@ import {
 } from "../missionCache";
 import { ConversationSkeleton, DelayedTranscriptSkeleton, ActivitySkeleton } from "../Skeleton";
 import { projectCompletedGoal, stripGoalCompletionMarkers, visibleTranscript, removeUsers, mapUsers, reuseUnchanged } from "../transcriptModel";
+import { isFleetNodeOnline } from "../machineLoad";
 import { pollWhileVisible } from "../poll";
 import { contextPct, contextWindow, estimateTokens, formatTokens } from "../missionContext";
 import {
@@ -203,6 +204,32 @@ export function localHistoryToStreamEvents(
         data: { id: id || `local:${missionId}:${index}`, content: row.content },
       };
     });
+}
+
+export function reconcileLocalOriginEvents(
+  missionId: string,
+  remoteStream: ReadonlyArray<StreamEvent>,
+  localHistory: Mission["history"] | undefined,
+  outbox: ReadonlyArray<{ id: string; text: string }> = [],
+): StreamEvent[] | null {
+  if (!localHistory?.length) return null;
+  const localEvents = localHistoryToStreamEvents(missionId, localHistory, outbox);
+  const countReplies = (evs: ReadonlyArray<StreamEvent>) =>
+    evs.filter(e => e.type === "assistant_message" && String(e.data?.content ?? "").trim()).length;
+  const countTurns = (evs: ReadonlyArray<StreamEvent>) =>
+    evs.filter(e => e.type === "user_message" || e.type === "assistant_message").length;
+  const localReplies = countReplies(localEvents), remoteReplies = countReplies(remoteStream);
+  if (localReplies < remoteReplies || (localReplies === remoteReplies && countTurns(localEvents) <= countTurns(remoteStream))) {
+    return null;
+  }
+  const localIds = new Set(localEvents.map(e => String(e.data?.id ?? "")).filter(Boolean));
+  let lastMatchedIdx = -1;
+  remoteStream.forEach((ev, idx) => {
+    const eid = ev.eventId || (typeof ev.data?.id === "string" ? ev.data.id : "");
+    if (eid && localIds.has(eid)) lastMatchedIdx = idx;
+  });
+  const trailing = lastMatchedIdx >= 0 ? remoteStream.slice(lastMatchedIdx + 1) : (remoteStream.length === 0 ? [] : null);
+  return trailing ? [...localEvents, ...trailing] : null;
 }
 
 function MissionDock(p: {
@@ -839,7 +866,18 @@ export function NativeMissionView(p: { id: string; active?: boolean; launch?:Lau
       }
       const snap = await (fresh ? refreshTranscript(p.id, forceFull) : loadTranscript(p.id));
       if(disposed)return;
+      let baseItems = snap.items;
       history = snap.stream;
+      if (clientPlaced()) {
+        const localRow = (await import("../localOrigins").then(m => m.localOrigins(p.id)).catch(() => [])).find(m => m.id === p.id);
+        if (disposed) return;
+        const outbox = [...acceptedLocalMessages(p.id), ...queuedLocalMessages(p.id).filter(row => !row.error && (!row.waiting || row.state === "accepted" || row.state === "dispatching"))];
+        const mergedLocal = reconcileLocalOriginEvents(p.id, snap.stream, localRow?.history, outbox);
+        if (mergedLocal) {
+          history = mergedLocal;
+          baseItems = applyStreamEvents([], mergedLocal);
+        }
+      }
       liveEvents=heldAfterHistory(history,liveEvents);
       // Absence from a queue snapshot is not proof of delivery: the event
       // logger can lag dequeue. Keep known pending entries until their ID is
@@ -848,7 +886,7 @@ export function NativeMissionView(p: { id: string; active?: boolean; launch?:Lau
       for (const item of items()) if (item.kind === "user" && item.queued && item.messageId) {
         queuedUsers.push({ type: "user_message", data: { id: item.messageId, content: item.text, queued: true, receipt: item.receipt, attached: item.attached } });
       }
-      let next = applyStreamEvents(snap.items, [...liveEvents, ...queuedUsers]);
+      let next = applyStreamEvents(baseItems, [...liveEvents, ...queuedUsers]);
       next = reuseUnchanged(items(), next);
       setItems(next);
       putTranscript(p.id, { ...snap, items: next });
@@ -1358,7 +1396,7 @@ export function NativeMissionView(p: { id: string; active?: boolean; launch?:Lau
     [],
     { equals: (a, b) => a.length === b.length && a.every((v, i) => v === b[i]) },
   );
-  const visibleViewItems = createMemo(() => visibleTranscript(viewItems()));
+  const visibleViewItems = createMemo(() => visibleTranscript(viewItems(), isFleetNodeOnline));
   const planProgress = createPlanProgress({get mission(){return p.id;},get items(){return viewItems();},get active(){return clientPlaced()?localRunActive(p.id):busy();}});
   createEffect(() => { if (p.active !== false) p.onPlan?.(p.id, planProgress()); });
   const estimatedTokens = createMemo(() => estimateTokens(viewItems()));

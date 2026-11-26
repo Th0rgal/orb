@@ -2,7 +2,8 @@ import { expect, it } from "vitest";
 import { render } from "@solidjs/testing-library";
 import { createSignal } from "solid-js";
 import { Transcript } from "../src/Transcript";
-import { applyStreamEvent, buildTranscript, visibleTranscript } from "../src/transcriptModel";
+import { isFleetNodeOnline, recordFleet } from "../src/machineLoad";
+import { applyStreamEvent, applyStreamEvents, buildTranscript, visibleTranscript } from "../src/transcriptModel";
 import { storedToStream, type StreamEvent } from "../src/stream";
 
 const cancelled = (sequence: number) => storedToStream({
@@ -181,4 +182,39 @@ it("collapses similar or wrapped error notices within the same turn into a singl
   ]);
   const { container: c2 } = render(() => <Transcript items={visibleTranscript(errorThenPrefixedStatus)} />);
   expect(c2.querySelectorAll(".error-notice")).toHaveLength(1);
+});
+
+it("dismisses hung-node warnings on in-place tool_result/text_delta progress or fleet node recovery", () => {
+  const warningText = "Node `ashur` answers ping but its API is unresponsive.";
+  try {
+    recordFleet([]);
+    // Exact sequence from mission d186dca1: cumulative text_delta_latest + running schedule tool_call
+    // precede the hung-node error, then tool_result + cumulative text_delta update earlier items in place.
+    const parked = buildTranscript([
+      storedToStream({ id: 554, sequence: 554, event_id: "td-554", event_type: "text_delta", timestamp: "", content: "Initial check complete.", metadata: {} })!,
+      storedToStream({ id: 567, sequence: 567, event_id: "tc-567", event_type: "tool_call", timestamp: "", content: "", tool_call_id: "sched-1", tool_name: "schedule", metadata: { done: false } })!,
+      storedToStream({ id: 568, sequence: 568, event_id: "e-568", event_type: "error", timestamp: "", content: warningText, metadata: {} })!,
+    ]);
+    expect(visibleTranscript(parked, isFleetNodeOnline).filter(i => i.kind === "error")).toHaveLength(1);
+
+    const afterInPlaceProgress = applyStreamEvents(parked, [
+      storedToStream({ id: 569, sequence: 569, event_id: "tr-569", event_type: "tool_result", timestamp: "", content: "Timer fired", tool_call_id: "sched-1", tool_name: "schedule", metadata: { done: true } })!,
+      storedToStream({ id: 570, sequence: 570, event_id: "td-570", event_type: "text_delta", timestamp: "", content: "Initial check complete.\n\nNext check passed.", metadata: {} })!,
+    ]);
+    expect(visibleTranscript(afterInPlaceProgress, isFleetNodeOnline).filter(i => i.kind === "error")).toHaveLength(0);
+
+    // Next long schedule tool starts (582), node briefly hangs (583), then node recovers online in fleet while schedule stays parked.
+    const nextParkedWithHang = applyStreamEvents(afterInPlaceProgress, [
+      storedToStream({ id: 582, sequence: 582, event_id: "tc-582", event_type: "tool_call", timestamp: "", content: "", tool_call_id: "sched-2", tool_name: "schedule", metadata: { done: false } })!,
+      storedToStream({ id: 583, sequence: 583, event_id: "e-583", event_type: "error", timestamp: "", content: warningText, metadata: {} })!,
+    ]);
+    const { container } = render(() => <Transcript items={nextParkedWithHang} />);
+    expect(container.querySelectorAll(".error-notice.warning")).toHaveLength(1);
+
+    recordFleet([{ id: "ashur", status: "online" } as never]);
+    expect(container.querySelectorAll(".error-notice")).toHaveLength(0);
+    expect(visibleTranscript(nextParkedWithHang, isFleetNodeOnline).filter(i => i.kind === "error")).toHaveLength(0);
+  } finally {
+    recordFleet([]);
+  }
 });
