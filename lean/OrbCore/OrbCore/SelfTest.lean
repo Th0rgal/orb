@@ -1895,6 +1895,51 @@ private def runFastMemoryBrokerTests
     closeCoreStore store
     IO.eprintln s!"[orb-core-test] FAIL: SM-10 empty placement_kind expected 400: {bogusBeginResp.status} {bogusBeginStr}"
     return 1
+  -- SEC-11 + delivered Library `spark-memory` parity: plain project without `spark-memory` is denied,
+  -- whereas delivering `spark-memory` (audience includes `mission`) admits trusted executor `memory_*`.
+  let sec11CreateBody := "{\"id\":\"m-sec11-perso\",\"title\":\"Perso Mission\",\"placement\":\"client\",\"project\":\"perso\"}"
+  let sec11CreateRaw := s!"POST /api/control/missions HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {validJwt}\r\nContent-Length: {sec11CreateBody.utf8ByteSize}\r\n\r\n{sec11CreateBody}".toUTF8
+  let .ok sec11CreateReq := parseRequest sec11CreateRaw none | do closeCoreStore store; return 1
+  let .ok sec11CreateResp ← dispatchCoreRequest appSt sec11CreateReq nowSec | do closeCoreStore store; return 1
+  if sec11CreateResp.status != 201 then
+    closeCoreStore store
+    IO.eprintln s!"[orb-core-test] FAIL: SEC-11 mission create expected 201: {sec11CreateResp.status}"
+    return 1
+  let sec11SessBody := "{\"mission_id\":\"m-sec11-perso\",\"role\":\"worker\",\"project\":\"perso\"}"
+  let sec11SessRaw := s!"POST /api/mcp/session HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {validJwt}\r\nContent-Length: {sec11SessBody.utf8ByteSize}\r\n\r\n{sec11SessBody}".toUTF8
+  let .ok sec11SessReq := parseRequest sec11SessRaw none | do closeCoreStore store; return 1
+  let .ok sec11SessResp ← dispatchCoreRequest appSt sec11SessReq nowSec | do closeCoreStore store; return 1
+  let .ok sec11SessJson := OrbBin.Json.parseBytes sec11SessResp.body | do closeCoreStore store; return 1
+  let sec11McpTok := (sec11SessJson.fieldStr? "token").getD ""
+  let sec11TreeBody := "{\"name\":\"memory_get_knowledge_tree\",\"arguments\":{\"bank\":\"thomas\"}}"
+  let sec11CallRaw := s!"POST /api/mcp/call HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {sec11McpTok}\r\nContent-Length: {sec11TreeBody.utf8ByteSize}\r\n\r\n{sec11TreeBody}".toUTF8
+  let .ok sec11DenyReq := parseRequest sec11CallRaw none | do closeCoreStore store; return 1
+  let .ok sec11DenyResp ← dispatchCoreRequest appSt sec11DenyReq nowSec | do closeCoreStore store; return 1
+  let sec11DenyStr := String.fromUTF8! sec11DenyResp.body
+  if sec11DenyResp.status != 200 || (sec11DenyStr.splitOn "Caller is not authorized to invoke `memory_*` tools").length != 2 then
+    closeCoreStore store
+    IO.eprintln s!"[orb-core-test] FAIL: SEC-11 plain project without spark-memory must deny executor: {sec11DenyStr}"
+    return 1
+  let .ok sec11OwnerRs ← execParamQuery store.missionsDb "SELECT COALESCE(owner_user_id,'') FROM missions WHERE id='m-sec11-perso';" #[]
+    | do closeCoreStore store; return 1
+  let sec11Owner := (sec11OwnerRs[1]?.bind (·[0]?)).getD ""
+  let sparkSkillDir :=
+    if OrbCore.Skills.isLibraryOwner sec11Owner appSt.bootstrapAdminId then
+      System.FilePath.mk appSt.cfg.workingDir / ".sandboxed-sh" / "library" / "skills" / "spark-memory"
+    else
+      System.FilePath.mk store.rootDir / "library" / "users" / sec11Owner / "skills" / "spark-memory"
+  IO.FS.createDirAll sparkSkillDir
+  IO.FS.writeFile (sparkSkillDir / "SKILL.md")
+    "---\nname: spark-memory\ndescription: Personal memory\nmetadata:\n  sandboxed:\n    audience: [mission, coordinator, local]\n---\nUse memory tools.\n"
+  let .ok sec11AllowReq := parseRequest sec11CallRaw none | do closeCoreStore store; return 1
+  let .ok sec11AllowResp ← dispatchCoreRequest appSt sec11AllowReq nowSec | do closeCoreStore store; return 1
+  let sec11AllowStr := String.fromUTF8! sec11AllowResp.body
+  try IO.FS.removeFile (sparkSkillDir / "SKILL.md") catch _ => pure ()
+  try IO.FS.removeDir sparkSkillDir catch _ => pure ()
+  if sec11AllowResp.status != 200 || (sec11AllowStr.splitOn "Caller is not authorized to invoke `memory_*` tools").length != 1 then
+    closeCoreStore store
+    IO.eprintln s!"[orb-core-test] FAIL: delivered spark-memory skill should pass memoryToolGate: {sec11AllowStr}"
+    return 1
   return 0
 
 private def runCloudHandoffTests
