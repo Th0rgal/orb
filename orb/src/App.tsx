@@ -1477,6 +1477,19 @@ export default function App() {
       void refreshMissions();
       return;
     }
+    if (
+      (e.metaKey || e.ctrlKey) &&
+      !e.altKey &&
+      !e.shiftKey &&
+      (e.code === "KeyA" || e.key.toLowerCase() === "a") &&
+      (e.target instanceof HTMLTextAreaElement ||
+        (e.target instanceof HTMLInputElement &&
+          /^(text|search|url|tel|password|email)$/i.test(e.target.type)))
+    ) {
+      e.preventDefault();
+      e.target.select();
+      return;
+    }
     if (hasOverlay()) return;
     const destination = navigationShortcut(e);
     if (destination) {

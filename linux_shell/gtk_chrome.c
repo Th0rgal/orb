@@ -189,7 +189,7 @@ static void build_classic_sidebar(OrbGtkChrome *c) {
 static void embedded_action(gpointer data, const char *kind, const char *target) {
     OrbGtkChrome *c = data;
     if (!strcmp(kind, "expand")) { toggle_row_expand(c, target); return; }
-    if (!strcmp(kind, "hide") || (target && (!strcmp(target, "new-agent") || !strncmp(target, "new-agent:", 10) || !strcmp(target, "new-project")))) gtk_widget_grab_focus(c->wv);
+    if (!strcmp(kind, "hide") || (target && (!strcmp(target, "search") || !strcmp(target, "new-agent") || !strncmp(target, "new-agent:", 10) || !strcmp(target, "new-project")))) gtk_widget_grab_focus(c->wv);
     if (!strcmp(kind, "hide")) on_tb_sb_clicked(NULL, c); else { orb_leanui_optimistic(c->sb_box, kind, target, NULL); eval_wv_target(c, kind, target); }
 }
 #endif

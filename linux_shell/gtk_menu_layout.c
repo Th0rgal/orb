@@ -89,7 +89,8 @@ static void commit_inline_rename(InlineRename *r, gboolean restore_focus) {
 static void on_inline_activate(GtkEntry *e, gpointer ud) { (void)e; commit_inline_rename(ud, TRUE); }
 static gboolean on_inline_focus_out(GtkWidget *w, GdkEventFocus *ev, gpointer ud) { (void)w; (void)ev; commit_inline_rename(ud, FALSE); return FALSE; }
 static gboolean on_inline_key(GtkWidget *w, GdkEventKey *ev, gpointer ud) {
-    (void)w; InlineRename *r = ud;
+    InlineRename *r = ud;
+    if ((ev->state & (GDK_CONTROL_MASK | GDK_SUPER_MASK | GDK_MOD4_MASK)) && !(ev->state & (GDK_MOD1_MASK | GDK_SHIFT_MASK)) && gdk_keyval_to_lower(ev->keyval) == GDK_KEY_a) return gtk_editable_select_region(GTK_EDITABLE(w), 0, -1), TRUE;
     if (ev->keyval == GDK_KEY_Escape) { r->cancelled = TRUE; commit_inline_rename(r, TRUE); return TRUE; }
     return FALSE;
 }

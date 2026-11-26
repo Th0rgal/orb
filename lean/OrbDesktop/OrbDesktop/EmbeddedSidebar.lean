@@ -30,6 +30,7 @@ structure PaletteRequest where
   selectedIdx : Nat
   query       : String
   items       : List PaletteRow
+  selectedAll : Bool := false
   deriving Repr, Inhabited, BEq
 
 /-- Parse one tab-separated palette item line (`index\tid\tkind\ttitle\tsubtitle\tstatus\tshortcut[\tcolor]`). -/
@@ -126,6 +127,11 @@ def buildPaletteChrome (req : PaletteRequest) : Theme × WidgetNode :=
   let queryContent : List WidgetNode :=
     if req.query.isEmpty then
       [caret, chromeLabel (pxToSub 20) [overlaySynthRun queryStyle "Search missions, projects, or commands…"]]
+    else if req.selectedAll then
+      [WidgetNode.rrect
+        (BoxStyle.row 0 |>.withAlign .center |>.withPadding (Edges.xy (pxToSub 2) 0))
+        pal.accentMuted (CornerRadii.uniform (pxToSub 3)) BorderStyle.none
+        [chromeLabel (pxToSub 20) [overlaySynthRun queryStyle req.query]]]
     else
       [chromeLabel (pxToSub 20) [overlaySynthRun queryStyle req.query], caret]
   let queryBox : WidgetNode :=
@@ -820,6 +826,9 @@ def dispatchEmbeddedRequest (request : String)
     if !palette then
       if let some gpuRef := gpuSurface? then discard <| detachEmbeddedGpu gpuRef 0
     return ("GPU_DETACHED", ByteArray.empty)
+  -- `S\n`: the query text in the palette search input is selected via Cmd/Ctrl+A.
+  let selectedAll := request.startsWith "S\n"
+  let request := if selectedAll then (request.drop 2).toString else request
   -- `G\t<display>\t<surface>\n`: the palette host offers a Wayland subsurface for Vulkan.
   let (gpuTarget, request) :=
     if request.startsWith "G\t" then
@@ -836,6 +845,7 @@ def dispatchEmbeddedRequest (request : String)
   if request.startsWith "P\t" then
     let some palReq := parsePaletteRequest? request
       | throw (IO.userError "invalid palette allocation")
+    let palReq := { palReq with selectedAll }
     let atlas := paletteAtlas?.getD atlas
     if let (some (wd, ws), some surfRef) := (gpuTarget, paletteSurface?) then
       if wd != 0 && ws != 0 then

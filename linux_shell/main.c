@@ -110,6 +110,7 @@ static void on_zoom_scale(GtkGestureZoom *z, gdouble scale, gpointer ud) {
 }
 static gboolean on_wv_event(GtkWidget *wv, GdkEvent *ev, gpointer ud) {
     (void)ud; guint *st = (ev->type == GDK_KEY_PRESS || ev->type == GDK_KEY_RELEASE) ? &ev->key.state : (ev->type == GDK_BUTTON_PRESS || ev->type == GDK_BUTTON_RELEASE) ? &ev->button.state : (ev->type == GDK_SCROLL) ? &ev->scroll.state : NULL;
+    if (st && (ev->type == GDK_KEY_PRESS || ev->type == GDK_KEY_RELEASE) && (*st & GDK_CONTROL_MASK) && (*st & (GDK_SUPER_MASK | GDK_MOD4_MASK)) && !(*st & GDK_MOD1_MASK)) { guint k = gdk_keyval_to_lower(ev->key.keyval); if (k == GDK_KEY_a || k == GDK_KEY_c || k == GDK_KEY_v || k == GDK_KEY_x || k == GDK_KEY_z) *st &= ~(guint)(GDK_SUPER_MASK | GDK_MOD4_MASK | GDK_META_MASK); }
     if (st && (*st & (GDK_SUPER_MASK | GDK_MOD4_MASK)) && !(*st & GDK_CONTROL_MASK)) *st |= GDK_META_MASK;
     if (ev->type != GDK_TOUCHPAD_PINCH) return FALSE;
     const GdkEventTouchpadPinch *p = &ev->touchpad_pinch;
