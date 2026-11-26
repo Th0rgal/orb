@@ -803,6 +803,11 @@ def buildPaletteScene (req : PaletteRequest) (ac0 : Text.GlyphAtlasCache) (shape
   let box := layoutNode sc none theme.palette.focusRing 0 0 (pxToSub req.width) (pxToSub req.height) tree.toLayoutNode
   return (ac.finishUploads, buildSceneFromLayout sc {} theme tree box (recordNodes := false))
 
+/-- Clear color for embedded sidebar surfaces (both Vulkan subsurface and CPU fallback).
+    `buildSidebarChrome` paints a full-bleed `pal.sidebar` root rect, so clearing to transparent
+    avoids double-compositing the frosted sidebar alpha (e.g. 0.78 over 0.78 -> 0.95). -/
+def sidebarClearColor : Color := 0
+
 /-- Dispatch one embedded paint request, routing `"P\t"` exclusively to the palette pipeline
     and `"D\t"` to GPU surface teardown so malformed headers never fall through or clobber state. -/
 def dispatchEmbeddedRequest (request : String)
@@ -874,16 +879,16 @@ def dispatchEmbeddedRequest (request : String)
     | some d, false => return paletteRegionFrame next.width hits next.framebuffer d
     | _, _ => return (hits, next.framebuffer)
   let frame ← prepareSidebarFrame request atlas sidebarCache shape (← IO.monoMsNow)
-  let { theme, scene, hitPayload, devW, devH, wlDisplay, wlSurface } := frame
+  let { scene, hitPayload, devW, devH, wlDisplay, wlSurface, .. } := frame
   if wlDisplay != 0 && wlSurface != 0 then
     if let some gpuRef := gpuSurface? then
-      match ← presentEmbeddedGpu gpuRef atlas devW devH wlDisplay wlSurface theme.palette.sidebar scene.prims with
+      match ← presentEmbeddedGpu gpuRef atlas devW devH wlDisplay wlSurface sidebarClearColor scene.prims with
       | none => return ("GPU_FALLBACK", ByteArray.empty)
       | some false => return ("GPU_SKIP", ByteArray.empty)
       | some true => return ("GPU_OK\n" ++ hitPayload, ByteArray.empty)
   let ctx ← framebuffer.modifyGet fun c => (c, { c with framebuffer := ByteArray.empty, previousPaint := none })
   let next ← Vulkan.renderFrameDamage { ctx with width := devW, height := devH }
-    0 (← atlas.get) ⟨0, 0, 1, 1⟩ scene.prims
+    sidebarClearColor (← atlas.get) ⟨0, 0, 1, 1⟩ scene.prims
   framebuffer.set next
   return (hitPayload, next.framebuffer)
 
@@ -1033,6 +1038,17 @@ def embeddedPaletteSelfTest : IO Unit := do
       atlasRef sbFbRef palFbRef sbCache paletteIdentityShape (some gpuRef)
     unless sb8Px.size == 220 * 200 * 4 && !sb8Hits.isEmpty do
       throw (IO.userError s!"8-field CPU fallback failed: px={sb8Px.size}")
+    -- 4a4. Sidebar clear color must stay transparent so GPU and CPU paths preserve the frosted
+    --      sidebar alpha (199 dark / 184 light) without double-compositing `pal.sidebar`.
+    unless sidebarClearColor == 0 do
+      throw (IO.userError s!"sidebarClearColor must be 0, got {sidebarClearColor}")
+    for (lightFlag, expectedAlpha) in [(0, (199 : UInt8)), (1, (184 : UInt8))] do
+      let (_, px) ← dispatchEmbeddedRequest
+        s!"220\t200\t1\t{lightFlag}\t0\t0\n1000\tnav:new-agent\tnav\tNew Agent\t0\t\t⌘N\t0\t1\t0\t"
+        atlasRef sbFbRef palFbRef sbCache paletteIdentityShape (some gpuRef)
+      let alpha := px.get! 3
+      unless alpha == expectedAlpha do
+        throw (IO.userError s!"sidebar background alpha mismatch (light={lightFlag}): got {alpha}, expected {expectedAlpha}")
 
     let mut ac ← atlasRef.get
     let mut fb := rt.vulkan
