@@ -51,6 +51,7 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.material3.rememberModalBottomSheetState
@@ -544,6 +545,8 @@ fun OrbSetupView(
     var isConnecting by remember { mutableStateOf(false) }
     var errorMessage by remember { mutableStateOf<String?>(null) }
     val context = LocalContext.current
+    LaunchedEffect(context) { OrbProviderDirectoryHint.ensureLoaded(context) }
+    val showDirectoryHints by OrbProviderDirectoryHint.enabled.collectAsState()
     val signedInToken by core.tokenFlow.collectAsState()
     val currentUser by core.currentUserFlow.collectAsState()
     val bgSyncState by OrbBackgroundSyncMonitor.stateFlow.collectAsState()
@@ -982,6 +985,48 @@ fun OrbSetupView(
                         color = OrbStyle.textMuted,
                         fontSize = 13.sp,
                         lineHeight = 18.sp
+                    )
+                }
+            }
+
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(
+                    text = "APPEARANCE",
+                    color = OrbStyle.textMuted,
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Bold,
+                    letterSpacing = 0.6.sp
+                )
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(14.dp))
+                        .background(OrbStyle.surface)
+                        .border(1.dp, OrbStyle.border, RoundedCornerShape(14.dp))
+                        .padding(horizontal = 14.dp, vertical = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    Column(
+                        modifier = Modifier.weight(1f),
+                        verticalArrangement = Arrangement.spacedBy(3.dp)
+                    ) {
+                        Text(
+                            text = OrbProviderDirectoryHint.SETTING_TITLE,
+                            color = Color.White,
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.Medium
+                        )
+                        Text(
+                            text = OrbProviderDirectoryHint.SETTING_DESCRIPTION,
+                            color = OrbStyle.textMuted,
+                            fontSize = 12.sp,
+                            lineHeight = 17.sp
+                        )
+                    }
+                    Switch(
+                        checked = showDirectoryHints,
+                        onCheckedChange = { OrbProviderDirectoryHint.setEnabled(context, it) }
                     )
                 }
             }

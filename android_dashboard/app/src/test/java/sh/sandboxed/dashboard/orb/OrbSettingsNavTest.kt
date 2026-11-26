@@ -137,4 +137,17 @@ class OrbInboxSummaryChoiceTest {
             assertEquals(name, g["expected"] as Boolean, got)
         }
     }
+
+    @Test fun providerDirectoryHintMatchesSharedFixture() {
+        val spec = OrbSpec.dict("fixtures/provider-directory-hint.json")
+        assertEquals(spec["storage_key"], OrbProviderDirectoryHint.STORAGE_KEY)
+        assertEquals(spec["default_enabled"], OrbProviderDirectoryHint.DEFAULT_ENABLED)
+        assertEquals(spec["url"], OrbProviderDirectoryHint.URL)
+        assertEquals(spec["copy"], OrbProviderDirectoryHint.COPY)
+        assertEquals(spec["setting_title"], OrbProviderDirectoryHint.SETTING_TITLE)
+        assertEquals(spec["setting_description"], OrbProviderDirectoryHint.SETTING_DESCRIPTION)
+        assertEquals(true, OrbProviderDirectoryHint.resolveEnabled(null))
+        assertEquals(false, OrbProviderDirectoryHint.resolveEnabled(false))
+        assertEquals(true, OrbProviderDirectoryHint.resolveEnabled(true))
+    }
 }

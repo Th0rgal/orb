@@ -586,4 +586,23 @@ final class OrbSettingsTests: XCTestCase {
         }
     }
 
+    func testProviderDirectoryHintMatchesSharedSpec() throws {
+        let spec = try OrbSpec.json("fixtures/provider-directory-hint.json")
+        XCTAssertEqual(OrbProviderDirectoryHint.storageKey, spec["storage_key"] as? String)
+        XCTAssertEqual(OrbProviderDirectoryHint.defaultEnabled, spec["default_enabled"] as? Bool)
+        XCTAssertEqual(OrbProviderDirectoryHint.urlString, spec["url"] as? String)
+        XCTAssertEqual(OrbProviderDirectoryHint.copy, spec["copy"] as? String)
+        XCTAssertEqual(OrbProviderDirectoryHint.settingTitle, spec["setting_title"] as? String)
+        XCTAssertEqual(OrbProviderDirectoryHint.settingDescription, spec["setting_description"] as? String)
+
+        let suiteName = "OrbProviderDirectoryHintTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        XCTAssertTrue(OrbProviderDirectoryHint.isEnabled(in: defaults))
+        defaults.set(false, forKey: OrbProviderDirectoryHint.storageKey)
+        XCTAssertFalse(OrbProviderDirectoryHint.isEnabled(in: defaults))
+        defaults.set(true, forKey: OrbProviderDirectoryHint.storageKey)
+        XCTAssertTrue(OrbProviderDirectoryHint.isEnabled(in: defaults))
+    }
+
 }

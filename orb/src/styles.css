@@ -1272,6 +1272,33 @@ button.under-model { color: inherit; }
 .p-key-foot-note {
   margin: 0;
 }
+.p-directory-hint {
+  margin: 8px 2px 0;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--fg-3);
+}
+.p-directory-link {
+  color: var(--fg-3);
+  text-decoration: none;
+  transition: color 120ms ease;
+}
+.p-directory-link:hover {
+  color: var(--fg-2);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.p-directory-link:focus-visible {
+  color: var(--fg-2);
+  outline: 1px solid var(--focus-border);
+  outline-offset: 2px;
+  border-radius: var(--radius-xs);
+  box-shadow: none;
+}
+.p-directory-ext {
+  font-size: 11px;
+  opacity: 0.72;
+}
 .sr-only {
   position: absolute;
   width: 1px;

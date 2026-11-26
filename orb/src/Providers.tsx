@@ -54,6 +54,24 @@ import { nativeInvoke } from "./clientRuns";
 import { listHealth, type AccountHealthSnapshot } from "./routingApi";
 import { applyOrder, moveAccount, orderAccounts } from "./accountOrder";
 import { groupProviderAccounts, isGroupOpen, loadGroupPrefs, saveGroupPrefs, summarizeProviderGroup, toggleGroupPref, type GroupPrefs } from "./providerGroups";
+import { MOZHENZHEN_PROVIDER_COPY, MOZHENZHEN_PROVIDER_URL, showProviderDirectoryHints } from "./providerDirectoryHint";
+
+function MozhenzhenDirectoryLink() {
+  return (
+    <a
+      href={MOZHENZHEN_PROVIDER_URL}
+      target="_blank"
+      rel="noopener noreferrer"
+      class="p-directory-link"
+      onClick={(e) => {
+        e.preventDefault();
+        void openExternalUrl(MOZHENZHEN_PROVIDER_URL);
+      }}
+    >
+      {MOZHENZHEN_PROVIDER_COPY} <span class="p-directory-ext" aria-hidden="true">↗</span>
+    </a>
+  );
+}
 
 type AuthKind = "oauth" | "api";
 
@@ -570,6 +588,9 @@ function LiveProviders(p: { list: AIProvider[]; health?: Record<string, AccountH
             <div class="s-row"><div class="s-row-desc">No API keys configured.</div></div>
           </Show>
         </div>
+        <Show when={showProviderDirectoryHints()}>
+          <p class="p-directory-hint"><MozhenzhenDirectoryLink /></p>
+        </Show>
       </section>
 
       <Show when={adding()}>
@@ -830,7 +851,13 @@ function ApiKeyDialog(p: {provider?: AIProvider; onClose: () => void; onDone: ()
         <input class="s-input" inputMode="numeric" value={maxConcurrency()} onInput={e=>setMaxConcurrency(e.currentTarget.value)} placeholder="e.g. 10" />
       </Field>
     </div>
-    <p class="s-row-desc p-key-foot-note">{p.provider ? (canEditCredentials() ? "Leave the key blank to update limits or label without rotating credentials. Saved keys are never displayed." : "Update the label or router pacing limits for this shared account.") : "Encrypted at rest on the connected backend and never shown again."}</p>
+    <p class="s-row-desc p-key-foot-note">
+      {p.provider ? (canEditCredentials() ? "Leave the key blank to update limits or label without rotating credentials. Saved keys are never displayed." : "Update the label or router pacing limits for this shared account.") : "Encrypted at rest on the connected backend and never shown again."}
+      <Show when={!p.provider && showProviderDirectoryHints()}>
+        {" · "}
+        <MozhenzhenDirectoryLink />
+      </Show>
+    </p>
     <Show when={canEditBaseUrl() && url().trim() && !urlValid()}><p role="alert" class="inline-error">{isAdminUser() ? "Base URL must start with http:// or https://." : "Members can set a base URL only to a public https:// address."}</p></Show>
     <Show when={!capsValid()}><p role="alert" class="inline-error">RPM limit (1–100000) and max concurrency (1–1024) must be whole numbers when set.</p></Show>
     <Show when={error()}><p role="alert" class="inline-error">{error()}</p></Show>

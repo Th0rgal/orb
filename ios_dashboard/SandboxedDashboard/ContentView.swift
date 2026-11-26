@@ -194,6 +194,7 @@ struct SetupSheet: View {
     @State private var noticeMessage: String?
     @State private var gitHubPending = false
     @State private var showChangePassword = false
+    @AppStorage(OrbProviderDirectoryHint.storageKey) private var showDirectoryHints = OrbProviderDirectoryHint.defaultEnabled
 
     private let api = OrbCore.shared
     private let backgroundSync = OrbBackgroundSyncMonitor.shared
@@ -248,6 +249,25 @@ struct SetupSheet: View {
                     .fixedSize(horizontal: false, vertical: true)
                     .accessibilityIdentifier("account.background-sync.status")
             }
+            .padding(14)
+            .background(OrbStyle.surface, in: RoundedRectangle(cornerRadius: 14))
+        }
+    }
+
+    private var providerDirectorySection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Appearance").font(.subheadline).foregroundStyle(.secondary)
+            Toggle(isOn: $showDirectoryHints) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(OrbProviderDirectoryHint.settingTitle)
+                        .font(.subheadline.weight(.medium))
+                    Text(OrbProviderDirectoryHint.settingDescription)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .accessibilityIdentifier("account.provider-directory-hints")
             .padding(14)
             .background(OrbStyle.surface, in: RoundedRectangle(cornerRadius: 14))
         }
@@ -360,6 +380,7 @@ struct SetupSheet: View {
                 }
                 if embedded {
                     backgroundSyncSection
+                    providerDirectorySection
                 }
                 if let noticeMessage { Text(noticeMessage).font(.subheadline).foregroundStyle(OrbStyle.success) }
                 if let errorMessage { Text(errorMessage).font(.subheadline).foregroundStyle(.red) }
