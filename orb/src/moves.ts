@@ -11,7 +11,7 @@
  * File moves retain `MOVE_CONFIRM_MS` / `settleMove` until directory listings
  * refresh.
  */
-import { createSignal } from "solid-js";
+import { batch, createSignal } from "solid-js";
 import { ApprovalTransferConfirmationRequiredError } from "./api";
 import {
   allocatePlacementOpId,
@@ -229,14 +229,16 @@ export async function moveBatchOptimistically(
     if (mid) stageOptimisticPlacement(mid, move.toProject, normPath, opId, { project: move.fromProject });
     return { key, entry, mid };
   });
-  for (const { key, entry } of staged) update(key, entry);
+  batch(() => { for (const { key, entry } of staged) update(key, entry); });
   try {
     await save(opId);
   } catch (error) {
-    for (const { key, entry, mid } of staged) {
-      if (mid && entry.opId) rollbackOptimisticPlacement(mid, entry.opId);
-      clearIf(key, entry);
-    }
+    batch(() => {
+      for (const { key, entry, mid } of staged) {
+        if (mid && entry.opId) rollbackOptimisticPlacement(mid, entry.opId);
+        clearIf(key, entry);
+      }
+    });
     if (!(error instanceof ApprovalTransferConfirmationRequiredError)) {
       const primary = items[0]!;
       const verb = primary.move.delete ? "delete" : "move";

@@ -10,7 +10,7 @@ import { markUnfocusedBtwDirty, noteBtwPresentationHint } from "./btwAgent";
 import { lookupMissionById, resetMissionLookup } from "./missionLookup";
 import { movedMission, withMovedMissions } from "./moves";
 import { applyServerPlacementEvent, moveMissions, planMissionMoves } from "./missionMove";
-const MissionBoardSection = lazy(() => import("./MissionBoard").then(m => ({ default: m.MissionBoardSection })));
+import { MissionBoardSection } from "./MissionBoard";
 import { MissionLookupContext } from "./orchestrationModel";
 import { pendingArchives, pendingArchiveStatus, withArchiveStatuses } from "./archiveState";
 import { pendingRenames, renamedTitle, renameOptimistically, withRenamedTitles } from "./renames";
@@ -33,7 +33,7 @@ import {
   setDraftWorktreeMode,
 } from "./ClaudePermissionPicker";
 import {trackScrollbarHover} from "./scrollbarHover";
-import {WorkingDirectoryPicker} from "./WorkingDirectoryPicker";
+const WorkingDirectoryPicker = lazy(() => import("./WorkingDirectoryPicker").then(m => ({ default: m.WorkingDirectoryPicker })));
 import {MentionProjectContext} from "./PromptEditor";
 import { startLocalWakeups } from "./localWakeups";
 import { startClientDelegations } from "./clientDelegations";
@@ -2354,7 +2354,7 @@ export default function App() {
                         />
                       )}
                     </Show>
-                  </div><WorkingDirectoryPicker machine={newMachine()} machineName={machineLabel()} missions={missions()} value={workingDirectory()} disabled={creating()} onChange={chooseDirectory}/>
+                  </div><Suspense><WorkingDirectoryPicker machine={newMachine()} machineName={machineLabel()} missions={missions()} value={workingDirectory()} disabled={creating()} onChange={chooseDirectory}/></Suspense>
                   <Show when={showAskPaloma()}>
                     <button
                       type="button"
@@ -2415,7 +2415,7 @@ export default function App() {
           return (
             <div class="mission-slot" data-slot-key={slot.slotKey} hidden={!isActive()}>
               <SlotActiveContext.Provider value={isActive}>
-                <Show when={isActive() && slot.missionId()}><Suspense><MissionBoardSection chrome id={slot.missionId()} project={findKnownMission(slot.missionId())?.project} missionHint={projectMissionHint()} /></Suspense></Show>
+                <Show when={isActive() && slot.missionId()}><MissionBoardSection chrome id={slot.missionId()} project={findKnownMission(slot.missionId())?.project} missionHint={projectMissionHint()} /></Show>
                 <Show
                   when={slot.kind === "launch"}
                   fallback={
