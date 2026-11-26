@@ -68,6 +68,7 @@ import {
 } from "../missionCache";
 import { ConversationSkeleton, DelayedTranscriptSkeleton, ActivitySkeleton } from "../Skeleton";
 import { projectCompletedGoal, stripGoalCompletionMarkers, visibleTranscript, removeUsers, mapUsers, reuseUnchanged } from "../transcriptModel";
+import { isFleetNodeOnline } from "../machineLoad";
 import { pollWhileVisible } from "../poll";
 import { contextPct, contextWindow, estimateTokens, formatTokens } from "../missionContext";
 import {
@@ -1358,7 +1359,7 @@ export function NativeMissionView(p: { id: string; active?: boolean; launch?:Lau
     [],
     { equals: (a, b) => a.length === b.length && a.every((v, i) => v === b[i]) },
   );
-  const visibleViewItems = createMemo(() => visibleTranscript(viewItems()));
+  const visibleViewItems = createMemo(() => visibleTranscript(viewItems(), isFleetNodeOnline));
   const planProgress = createPlanProgress({get mission(){return p.id;},get items(){return viewItems();},get active(){return clientPlaced()?localRunActive(p.id):busy();}});
   createEffect(() => { if (p.active !== false) p.onPlan?.(p.id, planProgress()); });
   const estimatedTokens = createMemo(() => estimateTokens(viewItems()));

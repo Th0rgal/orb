@@ -63,7 +63,8 @@ import { rememberLaunch, recalledLaunch, missionDestination, nativeLaunchWarning
 import { goalDraft, goalPrompt, planObjective, missionTitle, displayTitle, EMPTY_GOAL_ERROR, remoteGoalSupport, REMOTE_GOAL_UNSUPPORTED } from "./goal";
 import { chipToAttachment, type AttachChip } from "./attach";
 import { DEFAULT_PROJECT, ensureDefaultProject, projectChoices, requireLaunchProject } from "./defaultProject";
-import { ProjectPicker, ProjectCreation } from "./ProjectPicker";
+const ProjectPicker = lazy(() => import("./ProjectPicker").then(module => ({ default: module.ProjectPicker })));
+const ProjectCreation = lazy(() => import("./ProjectPicker").then(module => ({ default: module.ProjectCreation })));
 import { hasInteractiveOverlay, hasOverlay, overlayTrigger } from "./overlayLayer";
 import { For, Show, Switch, Match, Suspense, lazy, createMemo, createSignal, createEffect, on, onCleanup, onMount, batch, type JSX } from "solid-js";
 import { Portal } from "solid-js/web";
@@ -2041,17 +2042,19 @@ export default function App() {
                       <Ic.ChevronDown size={12} />
                     </button>
                     <Show when={envOpen() === "project"}>
-                      <ProjectPicker projects={isConnected() ? projectChoices(liveProjects()) : []}
-                        selected={newProject() ?? ""} canCreate={isConnected()}
-                        onSelect={(id) => { setNewFolder(null); setNewProject(id); setEnvOpen(null); }}
-                        onClose={() => setEnvOpen(null)}
-                        onCreate={() => { setProjectCreationAnchor(undefined); setEnvOpen(null); setNewProjectDraft(true); }}
-                        onMachine={() => {
-                          setProviderSubmenu(undefined);
-                          setAgentVmsOpen(sortedNodes().filter(isAgentSpawnedManagedNode).some(n => n.id === newMachine()));
-                          warmManagedCatalog();
-                          setEnvOpen("machine");
-                        }} />
+                      <Suspense>
+                        <ProjectPicker projects={isConnected() ? projectChoices(liveProjects()) : []}
+                          selected={newProject() ?? ""} canCreate={isConnected()}
+                          onSelect={(id) => { setNewFolder(null); setNewProject(id); setEnvOpen(null); }}
+                          onClose={() => setEnvOpen(null)}
+                          onCreate={() => { setProjectCreationAnchor(undefined); setEnvOpen(null); setNewProjectDraft(true); }}
+                          onMachine={() => {
+                            setProviderSubmenu(undefined);
+                            setAgentVmsOpen(sortedNodes().filter(isAgentSpawnedManagedNode).some(n => n.id === newMachine()));
+                            warmManagedCatalog();
+                            setEnvOpen("machine");
+                          }} />
+                      </Suspense>
                     </Show>
                   </div>
 
@@ -2545,7 +2548,7 @@ export default function App() {
       <Show when={ctx()}>
         {(c) => <PopupMenu x={c().x} y={c().y} items={c().items} onClose={() => setCtx(null)} />}
       </Show>
-      <Show when={newProjectDraft()}><ProjectCreation anchor={projectCreationAnchor()} existingIds={projectChoices(liveProjects()).map(p => p.id)} onCreate={submitNewProject} onClose={() => setNewProjectDraft(false)} /></Show>
+      <Show when={newProjectDraft()}><Suspense><ProjectCreation anchor={projectCreationAnchor()} existingIds={projectChoices(liveProjects()).map(p => p.id)} onCreate={submitNewProject} onClose={() => setNewProjectDraft(false)} /></Suspense></Show>
       <Show when={titleShareMission()}>
         {m => (
           <Suspense>

@@ -4914,7 +4914,10 @@ def queryMissionEventsPage
         pure s!"CASE WHEN event_type IN ('tool_call','tool_result') AND LENGTH(COALESCE(content,'')) > CAST(?{pCCut} AS INTEGER) THEN SUBSTR(COALESCE(content,''),1,CAST(?{pCMax} AS INTEGER)) ELSE COALESCE(content,'') END"
       else pure "COALESCE(content,'')"
     | none => pure "COALESCE(content,'')"
-  let mut whereSql := "WHERE mission_id=?1"
+  let resolvedHungNodeFilter :=
+    "NOT (event_type='error' AND CASE WHEN json_valid(payload) THEN json_extract(payload,'$.reason') END='hung_node' " ++
+    "AND NOT EXISTS (SELECT 1 FROM node_api_hangs h WHERE h.node_id=json_extract(payload,'$.node_id') AND h.strikes>=2))"
+  let mut whereSql := s!"WHERE mission_id=?1 AND {resolvedHungNodeFilter}"
   let forwardOrder ← do
     match sinceSeq?, beforeSeq? with
     | some s, _ =>
@@ -5000,7 +5003,8 @@ def queryMissionSyncReplayFrames
     let res ← execParamQuery st.missionsDb
       (s!"SELECT {effSeqExpr} AS eff_seq,event_type,COALESCE(payload,''),COALESCE(NULLIF(created_at,''),timestamp,'')," ++
        "COALESCE(event_id,''),COALESCE(tool_call_id,''),COALESCE(tool_name,''),COALESCE(content,''),COALESCE(content_file,''),COALESCE(metadata,'') " ++
-       s!"FROM mission_events WHERE mission_id=?1 AND {effSeqExpr}>CAST(?2 AS INTEGER) ORDER BY eff_seq ASC, id ASC LIMIT CAST(?3 AS INTEGER);")
+       "FROM mission_events WHERE mission_id=?1 AND NOT (event_type='error' AND CASE WHEN json_valid(payload) THEN json_extract(payload,'$.reason') END='hung_node' AND NOT EXISTS (SELECT 1 FROM node_api_hangs h WHERE h.node_id=json_extract(payload,'$.node_id') AND h.strikes>=2)) " ++
+       s!"AND {effSeqExpr}>CAST(?2 AS INTEGER) ORDER BY eff_seq ASC, id ASC LIMIT CAST(?3 AS INTEGER);")
       #[missionId, s!"{s}", s!"{fetchLim}"]
     let .ok rs := res | return .error "mission_events_replay_failed"
     let cnt := if rs.size > 0 then rs.size - 1 else 0
