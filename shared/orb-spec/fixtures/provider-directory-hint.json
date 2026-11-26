@@ -1,0 +1,8 @@
+{
+  "storage_key": "orb.providerDirectoryHints",
+  "default_enabled": true,
+  "url": "https://mozhenzhen.com/go/orb",
+  "copy": "Compare model prices & check API authenticity on Mozhenzhen",
+  "setting_title": "Provider directory link",
+  "setting_description": "Show the Mozhenzhen model pricing and API authenticity link in provider setup."
+}

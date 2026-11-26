@@ -1,5 +1,6 @@
 package sh.sandboxed.dashboard.orb
 
+import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import androidx.compose.foundation.background
@@ -88,9 +89,43 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
+
+/** Provider directory hint preference & constants. Spec: shared/orb-spec/fixtures/provider-directory-hint.json. */
+internal object OrbProviderDirectoryHint {
+    private const val PREFS_NAME = "orb_ui_prefs"
+    const val STORAGE_KEY = "orb.providerDirectoryHints"
+    const val DEFAULT_ENABLED = true
+    const val URL = "https://mozhenzhen.com/go/orb"
+    const val COPY = "Compare model prices & check API authenticity on Mozhenzhen"
+    const val SETTING_TITLE = "Provider directory link"
+    const val SETTING_DESCRIPTION = "Show the Mozhenzhen model pricing and API authenticity link in provider setup."
+
+    fun resolveEnabled(stored: Boolean?): Boolean = stored ?: DEFAULT_ENABLED
+
+    private val _enabled = MutableStateFlow(DEFAULT_ENABLED)
+    val enabled: StateFlow<Boolean> = _enabled
+    @Volatile private var loaded = false
+
+    fun ensureLoaded(context: Context) {
+        if (loaded) return
+        val prefs = context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val stored = if (prefs.contains(STORAGE_KEY)) prefs.getBoolean(STORAGE_KEY, DEFAULT_ENABLED) else null
+        _enabled.value = resolveEnabled(stored)
+        loaded = true
+    }
+
+    fun setEnabled(context: Context, value: Boolean) {
+        val prefs = context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        prefs.edit().putBoolean(STORAGE_KEY, value).apply()
+        _enabled.value = value
+        loaded = true
+    }
+}
 
 /** Anthropic unified rate-limit badge. Spec: shared/orb-spec/fixtures/usage-limit-status.json. */
 internal data class UsageLimitStatus(val tone: String, val label: String)
@@ -547,6 +582,8 @@ fun OrbProvidersSettingsPage(
     onBack: () -> Unit
 ) {
     val context = LocalContext.current
+    LaunchedEffect(context) { OrbProviderDirectoryHint.ensureLoaded(context) }
+    val showDirectoryHints by OrbProviderDirectoryHint.enabled.collectAsState()
     val scope = rememberCoroutineScope()
     val cachedProviders by core.providers.collectAsState()
     val currentUser by core.currentUserFlow.collectAsState()
@@ -2043,8 +2080,38 @@ fun OrbProvidersSettingsPage(
                                         )
                                     }
                                 }
+                                if (showDirectoryHints) {
+                                    Text(
+                                        text = "${OrbProviderDirectoryHint.COPY} ↗",
+                                        color = OrbStyle.textMuted,
+                                        fontSize = 12.sp,
+                                        lineHeight = 16.sp,
+                                        modifier = Modifier
+                                            .orbPressClickable {
+                                                runCatching {
+                                                    context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(OrbProviderDirectoryHint.URL)))
+                                                }
+                                            }
+                                            .padding(top = 2.dp)
+                                    )
+                                }
                             }
                         }
+                    }
+                    if (showDirectoryHints) {
+                        Text(
+                            text = "${OrbProviderDirectoryHint.COPY} ↗",
+                            color = OrbStyle.textMuted,
+                            fontSize = 12.sp,
+                            lineHeight = 16.sp,
+                            modifier = Modifier
+                                .padding(horizontal = 4.dp, vertical = 8.dp)
+                                .orbPressClickable {
+                                    runCatching {
+                                        context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(OrbProviderDirectoryHint.URL)))
+                                    }
+                                }
+                        )
                     }
                 }
             }
@@ -2268,7 +2335,7 @@ private fun AlternativeRouterSettings(core: OrbCore, account: String) {
 }
 
 @Composable
-private fun AccountVpnSettings(core: OrbCore, account: String, nativeAccount: Boolean) {
+internal fun AccountVpnSettings(core: OrbCore, account: String, nativeAccount: Boolean) {
     val scope = rememberCoroutineScope()
     var route by remember(core, account) { mutableStateOf<OrbDict?>(null) }
     var requests by remember(core, account) { mutableStateOf(OrbAccountVpn.Requests()) }

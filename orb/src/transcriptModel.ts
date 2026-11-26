@@ -8,7 +8,7 @@ import {
   orbWireTranscriptSliceStep,
 } from "./orbKernel";
 import { projectTranscriptCounts } from "./clientCore";
-import { isCancellationRequestedNotice, isGeneratedRemoteJobStatus, type StreamEvent } from "./stream";
+import { isCancellationRequestedNotice, isGeneratedRemoteJobStatus, transientNoticeNodeId, type StreamEvent } from "./stream";
 
 export type StreamItem =
   | { kind: "user"; key: string; text: string; images?: DraftImage[]; messageId?: string; eventId?: string; sequence?: number; source?: string; senderUsername?: string; queued?: boolean; attached?: boolean; receipt?: boolean; /** Server time the message was stored (ISO), when known. */ at?: string }
@@ -33,8 +33,18 @@ export type StreamItem =
 const str = (v: unknown): string => typeof v === "string" ? v : v == null ? "" : String(v);
 const reducers = new Map<string, TranscriptReducer[]>();
 const anonymous = new WeakMap<StreamItem[], TranscriptReducer>();
+const supersededTransient = new WeakSet<StreamItem>();
 const EMPTY_TRANSCRIPT_SLICE: Uint8Array<ArrayBufferLike> = new Uint8Array(0);
 const TRANSCRIPT_EVENT_ENCODER = new TextEncoder();
+
+const normErr = (s: string) => s.trim().replace(/[`'"]/g, "'").replace(/[.!]+$/, "").replace(/\s+/g, " ").toLowerCase();
+export function similarErrorText(a: string, b: string): boolean {
+  const na = normErr(a), nb = normErr(b);
+  if (!na || !nb) return false;
+  if (na === nb) return true;
+  const [shorter, longer] = na.length <= nb.length ? [na, nb] : [nb, na];
+  return shorter.length >= 12 && longer.includes(shorter);
+}
 
 function sameTimeline(a: readonly StreamItem[], b: readonly StreamItem[]): boolean {
   if (a === b) return true;
@@ -366,6 +376,17 @@ export class TranscriptReducer {
     if (sliceRes.status !== 0 || !sliceRes.verdict || !sliceRes.verdict.admitted) return;
     this.foldSeq.set(channel, nextFoldSeq);
     this.foldEntries = sliceRes.verdict.nextEntryCount;
+    if (sliceRes.verdict.closedPreviousThinking && thinkingOpen && last?.kind === "think") this.put(this.items.length - 1, { ...last, done: true });
+    if (ev.type === "text_delta" || ev.type === "text_op" || ev.type === "thinking" || ev.type === "tool_call" || ev.type === "tool_result" || (ev.type === "assistant_message" && d.success !== false)) {
+      for (let i = this.lastUser + 1; i < this.items.length; i++) {
+        const row = this.items[i];
+        if (row.kind === "error" && !row.terminal && transientNoticeNodeId(row.text) && !supersededTransient.has(row)) {
+          const marked = { ...row };
+          supersededTransient.add(marked);
+          this.put(i, marked);
+        }
+      }
+    }
     switch (ev.type) {
       case "text_delta":
       case "text_op": {
@@ -498,14 +519,11 @@ export class TranscriptReducer {
               : "The execution was interrupted before completion. Resume to continue from the saved conversation."
             : prefix&&trimmed.startsWith(prefix)&&trimmed.length>prefix.length?trimmed.slice(prefix.length).trim():text||"Mission failed";
           const nextError:Extract<StreamItem,{kind:"error"}>={kind:"error",key:this.key("error"),text:detail,terminal:true,cancelled:!interruption&&text.trim().toLowerCase()==="cancelled",...(interruption?{title:"Mission interrupted"}:{})};
-          const nextText=detail.trim();
-          const overlaps=(row:StreamItem)=>{
-            if(row.kind!=="error")return false;
-            const prevText=row.text.trim();
-            return !!row.terminal||(!!prevText&&!!nextText&&(prevText===nextText||nextText.includes(prevText)||prevText.includes(nextText)));
-          };
           const matching:number[]=[];
-          for(let i=this.lastUser+1;i<this.items.length;i++)if(overlaps(this.items[i]))matching.push(i);
+          for(let i=this.lastUser+1;i<this.items.length;i++){
+            const row=this.items[i];
+            if(row.kind==="error"&&(!!row.terminal||similarErrorText(row.text,detail)))matching.push(i);
+          }
           if(matching.length>0){
             const keep=matching[0];
             const prev=this.items[keep] as Extract<StreamItem,{kind:"error"}>;
@@ -558,16 +576,29 @@ export class TranscriptReducer {
         // late arguments for a row its result created have none to compare.
         const prior=index==null?undefined:this.items[index];
         const reused=ev.type==="tool_call"&&prior?.kind==="tool"&&prior.done&&prior.args!=null&&JSON.stringify(prior.args)!==JSON.stringify(d.args??null);
+        const trunc = d.truncated === true ? { truncated: true } : undefined;
         if(index!=null&&!reused){
           const old=this.items[index];
-          if(old.kind==="tool"&&ev.type==="tool_result")this.put(index,{...old,result:d.result,done:true,unresolved:false,...(d.truncated===true?{truncated:true}:{})});
-          else if(old.kind==="tool"&&ev.type==="tool_call")this.put(index,{...old,name:name||old.name,args:d.args??old.args,...(d.truncated===true?{truncated:true}:{})});
+          if(old.kind==="tool"&&ev.type==="tool_result")this.put(index,{...old,result:d.result,done:true,unresolved:false,...trunc});
+          else if(old.kind==="tool"&&ev.type==="tool_call")this.put(index,{...old,name:name||old.name,args:d.args??old.args,...trunc});
           return;
         }
         this.tools.set(callId,this.items.length);
-        this.items.push({kind:"tool",key:reused?`tool:${callId}:${this.items.length}`:`tool:${callId}`,callId,name:name||"tool",args:d.args??null,...(ev.type==="tool_result"?{result:d.result}:{}),...(d.truncated===true?{truncated:true}:{}),...(ev.sequence!=null?{sequence:ev.sequence}:{}),done:ev.type==="tool_result"});return;
+        this.items.push({kind:"tool",key:reused?`tool:${callId}:${this.items.length}`:`tool:${callId}`,callId,name:name||"tool",args:d.args??null,...(ev.type==="tool_result"?{result:d.result}:{}),...trunc,...(ev.sequence!=null?{sequence:ev.sequence}:{}),done:ev.type==="tool_result"});return;
       }
-      case "error": this.close(); this.items.push({kind:"error",key:this.key("error"),text:str(d.message)});return;
+      case "error": {
+        const message = str(d.message);
+        this.close();
+        const prev = this.items[this.items.length - 1];
+        if (message.trim() && prev?.kind === "error" && similarErrorText(prev.text, message)) {
+          if (!prev.terminal && message.trim().length > prev.text.trim().length) {
+            this.put(this.items.length - 1, { ...prev, text: message });
+          }
+          return;
+        }
+        this.items.push({ kind: "error", key: this.key("error"), text: message });
+        return;
+      }
       case "mission_status_changed": {
         const status = str(d.status).toLowerCase();
         if (["completed", "failed", "not_feasible", "interrupted", "cancelled", "canceled"].includes(status)) {
@@ -589,16 +620,17 @@ export class TranscriptReducer {
           }
           const genericSummary = summary === "Model error" || summary === "Task execution failed unexpectedly" || /^Remote node ['"].+['"] finished$/i.test(summary);
           let priorErrorIndex = -1;
-          if (terminalIndex < 0 && genericSummary) {
+          if (terminalIndex < 0) {
             for (let i = this.items.length - 1; i > lastUser; i--) {
-              if (this.items[i].kind === "error" && (this.items[i] as Extract<StreamItem, { kind: "error" }>).text.trim()) { priorErrorIndex = i; break; }
+              const row = this.items[i];
+              if (row.kind === "error" && row.text.trim() && (genericSummary || similarErrorText(row.text, summary))) { priorErrorIndex = i; break; }
             }
           }
           if (priorErrorIndex >= 0) {
             const prior = this.items[priorErrorIndex] as Extract<StreamItem, { kind: "error" }>;
             this.put(priorErrorIndex, { ...prior, terminal: true });
           } else {
-            const alreadyShown = terminalIndex >= 0 || this.items.slice(lastUser + 1).some(item => item.kind === "error" && item.text.trim() === summary);
+            const alreadyShown = terminalIndex >= 0 || this.items.slice(lastUser + 1).some(item => item.kind === "error" && similarErrorText(item.text, summary));
             if (!alreadyShown) {
               this.items.push({ kind: "error", key: this.key("error"), text: summary, terminal: true });
             }
@@ -702,9 +734,28 @@ export function projectCompletedGoal(items: StreamItem[]): StreamItem[] {
   return copy;
 }
 
-/** A delivered follow-up supersedes the previous attempt's terminal notice.
- * Keep the raw history intact, and do not dismiss failures for queued input. */
-export function visibleTranscript(items: StreamItem[]): StreamItem[] {
+/** Strip standalone trailing `<!-- GOAL_COMPLETE -->` protocol markers from finalized
+ * assistant answers in missions that used `/goal`, even after follow-up turns move
+ * the mission out of `completed` / `remote_goal_complete`. */
+export function stripGoalCompletionMarkers(items: StreamItem[]): StreamItem[] {
+  let copy: StreamItem[] | undefined;
+  for (let i = 0; i < items.length; i++) {
+    const item = items[i];
+    if (item.kind !== "text" || item.live) continue;
+    const projected = projectGoalAnswer(item);
+    if (projected !== item) {
+      if (!copy) copy = items.slice();
+      copy[i] = projected;
+    }
+  }
+  return copy ?? items;
+}
+
+/** A delivered follow-up supersedes the previous attempt's terminal notice, and
+ * subsequent turn progress (or a newer duplicate notice) supersedes a transient
+ * remote-node reachability warning. Keep the raw history intact, and do not
+ * dismiss failures for queued input. */
+export function visibleTranscript(items: StreamItem[], isNodeOnline?: (nodeId: string) => boolean): StreamItem[] {
   let lastDelivered = -1;
   for (let i = items.length - 1; i >= 0; i--) {
     const item = items[i];
@@ -713,8 +764,23 @@ export function visibleTranscript(items: StreamItem[]): StreamItem[] {
       break;
     }
   }
+  const supersededError = (index: number, item: StreamItem): boolean => {
+    if (item.kind !== "error") return false;
+    if (supersededTransient.has(item)) return true;
+    const nodeId = transientNoticeNodeId(item.text);
+    const transient = !!nodeId;
+    if (transient && !item.terminal && isNodeOnline?.(nodeId)) return true;
+    for (let j = index + 1; j < items.length; j++) {
+      const next = items[j];
+      if (next.kind === "user" && !next.queued && !next.attached) return transient;
+      if (transient && (next.kind === "tool" || next.kind === "think" || (next.kind === "text" && !!next.text.trim()))) return true;
+      if (next.kind === "error" && (!item.terminal || !!next.terminal) && similarErrorText(item.text, next.text)) return true;
+    }
+    return false;
+  };
   return withoutFiller(items.filter((item, index) =>
     !(item.kind === "error" && item.terminal && index < lastDelivered) &&
+    !supersededError(index, item) &&
     !(item.kind === "text" && item.goalMarkedText !== undefined && !item.text.trim()),
   ));
 }
@@ -879,7 +945,7 @@ export function reuseUnchanged(prev: StreamItem[], next: StreamItem[], session?:
   let reused = 0;
   let out = next.map(item => {
     const was = old.get(item.key);
-    if (was && was !== item && was.kind === item.kind && shallowEqual(was, item)) { reused++; return was; }
+    if (was && was !== item && was.kind === item.kind && supersededTransient.has(was) === supersededTransient.has(item) && shallowEqual(was, item)) { reused++; return was; }
     return item;
   });
   if (!reused) return next;

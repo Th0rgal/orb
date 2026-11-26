@@ -55,6 +55,7 @@ structure SidebarRow where
   target         : String := ""
   project        : String := ""
   folder         : String := ""
+  folders        : Array String := #[]
   status         : String := ""
   shortcut       : String := ""
   icon           : String := ""
@@ -69,7 +70,7 @@ structure SidebarRow where
   deriving Repr, Inhabited, BEq
 
 def SidebarRow.toJson (r : SidebarRow) : JVal :=
-  .obj #[
+  let base : Array (String × JVal) := #[
     ("row_id", .str r.rowId),
     ("kind", .str r.kind),
     ("depth", .nat r.depth),
@@ -90,6 +91,7 @@ def SidebarRow.toJson (r : SidebarRow) : JVal :=
     ("selected", .bool r.selected),
     ("attention", .bool r.attention)
   ]
+  .obj (if r.folders.isEmpty then base else base.push ("folders", .arr (r.folders.map .str)))
 
 structure PaletteItem where
   itemId   : String
@@ -632,7 +634,7 @@ private def matchesFilterNeedle (m : ChromeMissionInput) (needleLower : ByteArra
 /-- Map a selected page id to its owning Settings section id (matching `orb/src/settingsNav.ts` and `shared/orb-spec/fixtures/settings-nav.json`). -/
 def settingsSectionIdForSelected (sel : String) : Option String :=
   if sel == "settings" || sel == "users-settings" || sel == "usage-telemetry" then some "account"
-  else if sel == "routing" || sel == "routing-providers" || sel == "usage-settings" || sel == "routing-keys" then some "models"
+  else if sel == "routing" || sel == "routing-providers" || sel == "airvpn-settings" || sel == "usage-settings" || sel == "routing-keys" then some "models"
   else if sel == "skills-settings" || sel == "hermes-settings" || sel == "btw-settings" || sel == "inbox-summaries" || sel == "local-agents" || sel == "execution" then some "agents"
   else if sel.startsWith "sk:" then some "agents"
   else if sel == "security-settings" || sel == "bitwarden-settings" then some "security"
@@ -1059,6 +1061,7 @@ def projectSidebarRows (st : ChromeScopeState) (filterQuery : String := "") : Ar
         title := proj.name
         target := s!"project:{proj.slug}"
         project := proj.slug
+        folders := sortedFolders
         icon := if projExpanded then "folder-open" else "folder"
         color := projIconColor
         expandable := true

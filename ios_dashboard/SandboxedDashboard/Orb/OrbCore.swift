@@ -924,6 +924,19 @@ enum OrbMissionTree {
         return mission.hasTypedSuperseded
     }
 
+    /// True when any active (non-archived, non-superseded) mission is filed in `folder` or a subfolder.
+    static func hasBlockingFolderMissions(_ missions: [OrbRow], folder: String) -> Bool {
+        let norm = folder.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        guard !norm.isEmpty else { return false }
+        return missions.contains { m in
+            let state = m.state.lowercased()
+            if state == "acknowledged" || state == "archived" { return false }
+            if isSuperseded(m) { return false }
+            let f = m.folder.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+            return f == norm || f.hasPrefix(norm + "/")
+        }
+    }
+
     /// True when a mission or any of its ancestors is superseded and this mission is not actively running.
     static func isSupersededInTree(_ mission: OrbRow, byID: [String: OrbRow]) -> Bool {
         if mission.active { return false }

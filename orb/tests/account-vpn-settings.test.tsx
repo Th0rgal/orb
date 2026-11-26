@@ -1,3 +1,4 @@
+import { Suspense } from "solid-js";
 import { fireEvent, render, screen } from "@solidjs/testing-library";
 import { expect, it, vi } from "vitest";
 import { api } from "../src/api";
@@ -93,4 +94,22 @@ it("confirms an implicit Direct native route without briefly enabling a VPN", as
     ["/api/ai/providers/native/vpn", undefined],
     ["/api/ai/providers/native/vpn", { method: "PUT", body: JSON.stringify({ mode: "direct" }) }],
   ]);
+});
+
+it("does not trigger an outer page Suspense fallback while loading the account route", async () => {
+  let resolveRoute!: (v: unknown) => void;
+  vi.mocked(api).mockClear().mockImplementationOnce(() => new Promise(resolve => { resolveRoute = resolve; }));
+  render(() => (
+    <Suspense fallback={<div data-testid="outer-skeleton">OUTER_SKELETON</div>}>
+      <div data-testid="page-content">
+        <AccountVpnSettings account="agy-1" nativeAccount />
+      </div>
+    </Suspense>
+  ));
+  expect(screen.queryByTestId("outer-skeleton")).toBeNull();
+  expect(screen.getByTestId("page-content")).toBeTruthy();
+  expect(screen.getByText("Account connection")).toBeTruthy();
+  resolveRoute({ mode: "direct", status: "direct", countries: ["NL"], can_configure: true });
+  await screen.findByLabelText("Account connection");
+  expect(screen.queryByTestId("outer-skeleton")).toBeNull();
 });

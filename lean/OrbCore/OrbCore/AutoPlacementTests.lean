@@ -121,13 +121,27 @@ private def gatewayTests (root : String) : IO Unit := do
     check (legacy.contains "remote-node:ashur" && legacy.contains "fork-workspace:legacy")
       s!"children of a legacy auto parent stay with it: {legacy}"
     -- R19: play two observations of the same incident through the durable
-    -- ledger, automatic placement and the actual MCP resume boundary.
+    -- ledger, automatic placement and the actual MCP resume boundary, while
+    -- ensuring a single transient blip or fresh active job poll never flags.
     discard <| sql "UPDATE remote_node_jobs SET mission_id='free' WHERE job_id='j1'"
     discard <| sql "UPDATE remote_node_jobs SET mission_id='worker' WHERE job_id='j2'"
     for n in #["ashur", "ur"] do -- healthy idle / healthy active
       observeNodeApi store n "online" "t0" (throw (IO.userError "healthy API must not require ping"))
     observeNodeApi store "babylon" "offline" "t0" (pure false)
     check (← nodeApiHangCause? store "babylon").isNone "R19: unreachable host alone is not an API hang"
+    -- A single transient timeout recovered on the next heartbeat must neither cordon nor emit mission errors.
+    observeNodeApi store "babylon" "offline" "t0-blip" (pure true)
+    check (← nodeApiHangCause? store "babylon").isNone "R19: single transient timeout does not cordon node"
+    let blipFlags ← sql "SELECT mission_id FROM mission_events WHERE json_extract(payload,'$.reason')='hung_node'"
+    check (blipFlags.size == 1) "R19: single transient timeout emits no mission error event"
+    observeNodeApi store "babylon" "online" "t0-recover" (pure false)
+    -- Fresh active `/jobs/:id` HTTP activity suppresses false hang conviction even across two missed heartbeats.
+    discard <| sql "UPDATE remote_node_jobs SET updated_at='2026-11-25T23:14:28Z' WHERE job_id='j1'"
+    observeNodeApi store "babylon" "offline" "2026-11-25T23:14:29Z" (pure true)
+    observeNodeApi store "babylon" "offline" "2026-11-25T23:14:30Z" (pure true)
+    check (← nodeApiHangCause? store "babylon").isNone "R19: fresh active job HTTP poll proves API is responsive"
+    discard <| sql "UPDATE remote_node_jobs SET updated_at='' WHERE job_id='j1'"
+    -- Two consecutive pingable API misses without fresh job activity confirm the hang and flag once.
     for t in #["t1", "t2"] do observeNodeApi store "babylon" "offline" t (pure true)
     let (_, nodes) ← loadStaticRemoteNodes
     let cs ← candidates store nodes

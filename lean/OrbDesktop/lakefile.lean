@@ -8,16 +8,16 @@ package «orb-desktop-native» where
 require «orb-spec» from ".."
 
 lean_lib «LeanUI» where
-  roots := #[`LeanUI, `OrbDesktop.State, `OrbDesktop.Core, `OrbDesktop.Voice, `OrbDesktop.Chrome, `OrbDesktop.Screens]
+  roots := #[`LeanUI, `LeanUI.Swapchain, `OrbDesktop.State, `OrbDesktop.Core, `OrbDesktop.Voice, `OrbDesktop.Chrome, `OrbDesktop.Screens]
   precompileModules := false
 
 /-- Proof shards and replayed-event checks. Built by `scripts/build_orb_bins.sh` with the binary. -/
 lean_lib «LeanUISpec» where
-  roots := #[`LeanUI.Spec.LayoutSpec, `LeanUI.Spec.DamageSpec, `LeanUI.Spec.SceneDamageSpec, `LeanUI.Spec.FocusSpec, `LeanUI.Spec.AtlasSpec, `LeanUI.Spec.MutantSuite, `OrbDesktop.Spec.ComposerDamage, `OrbDesktop.Spec.StreamDamage, `OrbDesktop.Spec.ChromeGeometry, `OrbDesktop.Spec.RasterParity, `OrbDesktop.Spec.InputU6]
+  roots := #[`LeanUI.Spec.LayoutSpec, `LeanUI.Spec.DamageSpec, `LeanUI.Spec.SceneDamageSpec, `LeanUI.Spec.FocusSpec, `LeanUI.Spec.AtlasSpec, `LeanUI.Spec.SwapchainSpec, `LeanUI.Spec.MutantSuite, `OrbDesktop.Spec.ComposerDamage, `OrbDesktop.Spec.StreamDamage, `OrbDesktop.Spec.ChromeGeometry, `OrbDesktop.Spec.RasterParity, `OrbDesktop.Spec.InputU6]
   precompileModules := false
 
 lean_lib «LeanUIRuntime» where
-  roots := #[`LeanUI.FFI, `LeanUI.Wayland, `LeanUI.Text, `LeanUI.Vulkan, `LeanUI.Runtime, `LeanUI.Canary, `OrbDesktop.EmbeddedSidebar, `OrbDesktop.Core, `OrbDesktop.RepaintCheck, `OrbDesktop.Main]
+  roots := #[`LeanUI.FFI, `LeanUI.Wayland, `LeanUI.Text, `LeanUI.Shaders, `LeanUI.VulkanStructs, `LeanUI.VulkanDevice, `LeanUI.VulkanSwapchain, `LeanUI.VulkanPipeline, `LeanUI.Vulkan, `LeanUI.Runtime, `LeanUI.Canary, `OrbDesktop.EmbeddedSidebar, `OrbDesktop.Core, `OrbDesktop.RepaintCheck, `OrbDesktop.Main]
   precompileModules := false
 
 target lean_ui_wayland_o pkg : FilePath := do
@@ -25,7 +25,7 @@ target lean_ui_wayland_o pkg : FilePath := do
   let srcJob ← inputTextFile <| pkg.dir / "c" / "lean_ui_wayland.c"
   let leanIncludeDir ← getLeanIncludeDir
   let cDir := pkg.dir / "c"
-  buildO oFile srcJob #["-I", leanIncludeDir.toString, "-I", cDir.toString] #["-std=c11", "-O2", "-fPIC"] ((← IO.getEnv "LEAN_CC").getD "cc")
+  buildO oFile srcJob #["-I", leanIncludeDir.toString, "-I", cDir.toString] #["-std=gnu11", "-O2", "-Wall", "-Wextra", "-Werror", "-fPIC"] ((← IO.getEnv "LEAN_CC").getD "cc")
 
 target lean_ui_text_o pkg : FilePath := do
   let oFile := pkg.buildDir / "c" / "lean_ui_text.o"
@@ -38,28 +38,36 @@ target lean_ui_text_o pkg : FilePath := do
     match (← IO.getEnv "LEANUI_TEXT_CFLAGS") with
     | some f => ((f.splitOn " ").filter (· ≠ "")).toArray
     | none => #["-I/usr/include/freetype2", "-I/usr/include/harfbuzz"]
-  buildO oFile srcJob (#["-I", leanIncludeDir.toString, "-I", cDir.toString] ++ textFlags) #["-std=c11", "-O2", "-fPIC"] ((← IO.getEnv "LEAN_CC").getD "cc")
+  buildO oFile srcJob (#["-I", leanIncludeDir.toString, "-I", cDir.toString] ++ textFlags) #["-std=gnu11", "-O2", "-Wall", "-Wextra", "-Werror", "-fPIC"] ((← IO.getEnv "LEAN_CC").getD "cc")
 
 target lean_ui_vulkan_o pkg : FilePath := do
   let oFile := pkg.buildDir / "c" / "lean_ui_vulkan.o"
   let srcJob ← inputTextFile <| pkg.dir / "c" / "lean_ui_vulkan.c"
   let leanIncludeDir ← getLeanIncludeDir
   let cDir := pkg.dir / "c"
-  buildO oFile srcJob #["-I", leanIncludeDir.toString, "-I", cDir.toString] #["-std=c11", "-O2", "-fPIC"] ((← IO.getEnv "LEAN_CC").getD "cc")
+  buildO oFile srcJob #["-I", leanIncludeDir.toString, "-I", cDir.toString] #["-std=gnu11", "-O2", "-Wall", "-Wextra", "-Werror", "-ffp-contract=off", "-fPIC"] ((← IO.getEnv "LEAN_CC").getD "cc")
+
+target lean_ui_vk_bridge_o pkg : FilePath := do
+  let oFile := pkg.buildDir / "c" / "lean_ui_vk_bridge.o"
+  let srcJob ← inputTextFile <| pkg.dir / "c" / "lean_ui_vk_bridge.c"
+  let leanIncludeDir ← getLeanIncludeDir
+  let cDir := pkg.dir / "c"
+  buildO oFile srcJob #["-I", leanIncludeDir.toString, "-I", cDir.toString] #["-std=gnu11", "-O2", "-Wall", "-Wextra", "-Werror", "-fPIC"] ((← IO.getEnv "LEAN_CC").getD "cc")
 
 target lean_ui_sidebar_o pkg : FilePath := do
   let oFile := pkg.buildDir / "c" / "lean_ui_sidebar.o"
   let srcJob ← inputTextFile <| pkg.dir / "c" / "lean_ui_sidebar.c"
   let leanIncludeDir ← getLeanIncludeDir
   let cDir := pkg.dir / "c"
-  buildO oFile srcJob #["-I", leanIncludeDir.toString, "-I", cDir.toString] #["-std=c11", "-O2", "-fPIC"] ((← IO.getEnv "LEAN_CC").getD "cc")
+  buildO oFile srcJob #["-I", leanIncludeDir.toString, "-I", cDir.toString] #["-std=gnu11", "-O2", "-Wall", "-Wextra", "-Werror", "-fPIC"] ((← IO.getEnv "LEAN_CC").getD "cc")
 
 extern_lib liblean_ui_c pkg := do
   let wlO ← lean_ui_wayland_o.fetch
   let txO ← lean_ui_text_o.fetch
   let vkO ← lean_ui_vulkan_o.fetch
+  let vkBridgeO ← lean_ui_vk_bridge_o.fetch
   let sidebarO ← lean_ui_sidebar_o.fetch
-  buildStaticLib (pkg.staticLibDir / nameToStaticLib "lean_ui_c") #[wlO, txO, vkO, sidebarO]
+  buildStaticLib (pkg.staticLibDir / nameToStaticLib "lean_ui_c") #[wlO, txO, vkO, vkBridgeO, sidebarO]
 
 lean_exe «orb-desktop-native» where
   root := `OrbDesktop.Main

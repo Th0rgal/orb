@@ -31,6 +31,11 @@ import {
   type Mission,
   type ProjectSummary,
 } from "./api";
+import {
+  confirmPendingArchive,
+  rollbackPendingArchive,
+  stagePendingArchive,
+} from "./archiveState";
 import { Composer } from "./composer/Composer";
 import { chipToAttachment, type AttachChip } from "./attach";
 import {
@@ -751,10 +756,13 @@ export function InboxPage(p: {
     undoTimer = setTimeout(() => setUndoItem(null), 6000);
 
     usageTelemetry.action("inbox_done", "inbox");
+    const staged = stagePendingArchive([item.id], "acknowledged");
     try {
       await archiveMission(item.id);
+      confirmPendingArchive(staged);
       void p.onRefresh();
     } catch (e) {
+      rollbackPendingArchive(staged);
       if (wasUnread) markMissionUnread(item.mission);
       setDismissedIds((prev) => {
         const next = new Set(prev);
@@ -780,10 +788,13 @@ export function InboxPage(p: {
       return next;
     });
     usageTelemetry.action("inbox_archive", "inbox", ids.length);
+    const staged = stagePendingArchive(ids, "acknowledged");
     try {
       await Promise.all(ids.map((id) => archiveMission(id)));
+      confirmPendingArchive(staged);
       void p.onRefresh();
     } catch (e) {
+      rollbackPendingArchive(staged);
       setDismissedIds((prev) => {
         const next = new Set(prev);
         for (const id of ids) next.delete(id);
@@ -808,10 +819,13 @@ export function InboxPage(p: {
       return next;
     });
     setFocusedId(last.id);
+    const staged = stagePendingArchive([last.id], "paused");
     try {
       await reopenMission(last.id);
+      confirmPendingArchive(staged);
       void p.onRefresh();
     } catch (e) {
+      rollbackPendingArchive(staged);
       setError(e instanceof Error ? e.message : String(e));
     }
   };

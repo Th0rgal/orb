@@ -1,4 +1,5 @@
 import LeanUI.Kernel
+import LeanUI.Swapchain
 /-!
 # MutantSuite — two-sided negative witnesses
 
@@ -185,5 +186,62 @@ theorem focusAlwaysDamaged_changedWitness :
         focusAlwaysDamaged { x := 0, y := 0, w := 100, h := 80 } := by
   intro focused
   cases focused <;> decide
+
+/-! ### Swapchain synchronization & lifecycle negative-witness mutants -/
+
+open LeanUI.Swapchain
+
+/-- Mutant: resets the slot fence BEFORE `vkAcquireNextImageKHR`, causing deadlock on `OUT_OF_DATE`. -/
+def acquireResetFenceFirst (s : SwapchainState) (res : WsiResult) (imgIdx : Nat) : SwapchainState :=
+  let sReset := { s with fences := fun k => if k == s.curSlot then .unsignaled else s.fences k }
+  sReset.onAcquire res imgIdx
+
+theorem acquireResetFenceFirst_deadlocks_negWitness :
+    let s0 := ({} : SwapchainState).initOrRecreate 1470 923 3
+    (acquireResetFenceFirst s0 .outOfDate 0).fences s0.curSlot = .unsignaled ∧
+    (s0.onAcquire .outOfDate 0).fences s0.curSlot = .signaled := by
+  decide
+
+/-- Mutant: indexes `renderFinished` semaphores by `frameSlot` (`imgIdx % 2`) instead of `imgIdx`. -/
+def renderFinishedByFrameSlot (imgIdx : Nat) : Nat := imgIdx % 2
+
+theorem renderFinishedByFrameSlot_aliases_negWitness :
+    renderFinishedByFrameSlot 0 = renderFinishedByFrameSlot 2 ∧
+    SwapchainState.renderFinishedSemIndex 0 ≠ SwapchainState.renderFinishedSemIndex 2 := by
+  decide
+
+/-- Mutant: creates a ready swapchain even when width or height is zero (invalid Vulkan usage). -/
+def initZeroExtentUnsafe (s : SwapchainState) (w h n : Nat) : SwapchainState :=
+  { s with phase := .ready w h n }
+
+theorem initZeroExtentUnsafe_invalid_negWitness :
+    let s0 : SwapchainState := {}
+    (initZeroExtentUnsafe s0 0 800 3).phase = .ready 0 800 3 ∧
+    (s0.initOrRecreate 0 800 3).phase = .suspendedZeroExtent := by
+  decide
+
+/-- Mutant: allows `initOrRecreate` after `destroy`, breaking the `StickyFence` teardown barrier. -/
+def initAfterDestroyUnsafe (s : SwapchainState) (w h n : Nat) : SwapchainState :=
+  { s with phase := .ready w h n }
+
+theorem initAfterDestroyUnsafe_reopens_negWitness :
+    let d := (({} : SwapchainState).initOrRecreate 800 600 2).destroy
+    (initAfterDestroyUnsafe d 800 600 2).phase ≠ .destroyed ∧
+    (d.initOrRecreate 800 600 2).phase = .destroyed := by
+  decide
+
+/-- Mutant: skips the cross-slot `MAILBOX` `imageFence` wait when `imgIdx` was submitted by another slot. -/
+def acquireSkipImageFenceGuard (s : SwapchainState) (imgIdx : Nat) : SwapchainState :=
+  { s with images := s.images.set imgIdx (.acquired s.curSlot), acquireCount := s.acquireCount + 1 }
+
+theorem acquireSkipImageFenceGuard_races_negWitness :
+    let s0 := ({} : SwapchainState).initOrRecreate 1470 923 3
+    let s1 := s0.onAcquire .success 0
+    let s2 := s1.onSubmitAndPresent 1470 923 0 .success
+    -- Now `curSlot = 1`, while `imageFence[0] = some 0` (slot 0 still in flight on image 0).
+    let bad := acquireSkipImageFenceGuard s2 0
+    let good := s2.onAcquire .success 0
+    bad.canSubmit 1470 923 0 = false ∧ good.canSubmit 1470 923 0 = true := by
+  decide
 
 end LeanUI.Spec.Mutant

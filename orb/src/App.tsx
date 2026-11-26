@@ -12,7 +12,9 @@ import { movedMission, withMovedMissions } from "./moves";
 import { applyServerPlacementEvent, moveMissions, planMissionMoves } from "./missionMove";
 import { MissionBoardSection } from "./MissionBoard";
 import { MissionLookupContext } from "./orchestrationModel";
-import { renamedTitle, renameOptimistically, withRenamedTitles } from "./renames";
+import { pendingArchives, pendingArchiveStatus, withArchiveStatuses } from "./archiveState";
+import { renamedTitle, renameOptimistically, renameVersion, withRenamedTitles } from "./renames";
+import { deletingIds } from "./tree/selection";
 import { readString, writeString } from "./storage";
 import { missionAssignedNode, nodeLabel } from "./machines/nodes";
 import { isLive, isWorking, missionActivity, presentedStatus } from "./missionStatus";
@@ -31,7 +33,7 @@ import {
   setDraftWorktreeMode,
 } from "./ClaudePermissionPicker";
 import {trackScrollbarHover} from "./scrollbarHover";
-import {WorkingDirectoryPicker} from "./WorkingDirectoryPicker";
+const WorkingDirectoryPicker = lazy(() => import("./WorkingDirectoryPicker").then(m => ({ default: m.WorkingDirectoryPicker })));
 import {MentionProjectContext} from "./PromptEditor";
 import { startLocalWakeups } from "./localWakeups";
 import { startClientDelegations } from "./clientDelegations";
@@ -63,7 +65,8 @@ import { rememberLaunch, recalledLaunch, missionDestination, nativeLaunchWarning
 import { goalDraft, goalPrompt, planObjective, missionTitle, displayTitle, EMPTY_GOAL_ERROR, remoteGoalSupport, REMOTE_GOAL_UNSUPPORTED } from "./goal";
 import { chipToAttachment, type AttachChip } from "./attach";
 import { DEFAULT_PROJECT, ensureDefaultProject, projectChoices, requireLaunchProject } from "./defaultProject";
-import { ProjectPicker, ProjectCreation } from "./ProjectPicker";
+const ProjectPicker = lazy(() => import("./ProjectPicker").then(module => ({ default: module.ProjectPicker })));
+const ProjectCreation = lazy(() => import("./ProjectPicker").then(module => ({ default: module.ProjectCreation })));
 import { hasInteractiveOverlay, hasOverlay, overlayTrigger } from "./overlayLayer";
 import { For, Show, Switch, Match, Suspense, lazy, createMemo, createSignal, createEffect, on, onCleanup, onMount, batch, type JSX } from "solid-js";
 import { Portal } from "solid-js/web";
@@ -71,6 +74,7 @@ import { requestSearchTarget } from "./searchTarget";
 import * as Ic from "./icons";
 const SearchDialog = lazy(() => import("./SearchDialog"));
 const Settings=lazy(()=>import("./Settings").then(module=>({default:module.Settings})));
+const AirVpnSettings=lazy(()=>import("./AirVpnSettings").then(module=>({default:module.AirVpnSettings})));
 const LocalAgentsSettings=lazy(()=>import("./Settings").then(module=>({default:module.LocalAgentsSettings})));
 const SecuritySettings=lazy(()=>import("./SettingsShell").then(module=>({default:module.SecuritySettings})));
 const SettingsShell=lazy(()=>import("./SettingsShell").then(module=>({default:module.SettingsShell})));
@@ -193,6 +197,8 @@ import {
   type NativeProjectAction,
   withLiveExecution,
   nativeActionTargets,
+  parseNativeDestination,
+  expandNativeDestination,
   isNativeChromeEnabled,
   shouldAutoCollapseSidebar,
   notifyNativeChromeShell,
@@ -792,7 +798,7 @@ export default function App() {
       cfg,
     ).map(item => item.id);
   });
-  const inboxCount = () => inboxBadgeIds().length;
+  const inboxCount = createMemo(() => inboxBadgeIds().length);
   onMount(() => {
     // Web Inspector can read the actual badge inputs without opening a mission or fetching a transcript.
     const inspector = window as Window & { orbInboxBadgeIds?: () => string[] };
@@ -1088,7 +1094,7 @@ export default function App() {
   // native Archived section is fed from here.
   const [nativeArchived, setNativeArchived] = createSignal<Mission[]>([]);
   const [archiveRequests, setArchiveRequests] = createSignal<{ mission: Mission; restore: boolean }[]>([]);
-  const [projectActionRequests, setProjectActionRequests] = createSignal<{ action: NativeProjectAction; slug: string }[]>([]);
+  const [projectActionRequests, setProjectActionRequests] = createSignal<{ action: NativeProjectAction | "cut-missions" | "move-missions-picker"; slug: string; path?: string; arg?: string }[]>([]);
   const [nativeApprovalPrompt, setNativeApprovalPrompt] = createSignal<ApprovalConfirmationPrompt | null>(null);
   createEffect(on(connectionVersion, () => setNativeApprovalPrompt(null), { defer: true }));
   const loadNativeArchived = () => {
@@ -1107,7 +1113,7 @@ export default function App() {
   }
   /** Native sidebar context-menu actions, sharing the HTML sidebar's API calls. */
   const nativeMissionAction = (action: NativeMissionAction, id: string, arg: string): boolean => {
-    const settle = () => { void refreshMissions(); loadNativeArchived(); };
+    const settle = () => { void refreshMissions(); bumpProjects(); loadNativeArchived(); };
     if (action === "delete") {
       // One confirmation for the whole selection, through the headless sidebar's delete flow
       // (running workers, descendants). `arg` lists the selected ids; "current" is the open one.
@@ -1116,16 +1122,27 @@ export default function App() {
       setDeleteMissionRequest(ids);
       return true;
     }
+    if (action === "cut" || action === "move-picker") {
+      const ids = nativeActionTargets(action, id, arg, null);
+      if (!ids.length) return false;
+      setProjectActionRequests(q => [
+        ...q,
+        { action: action === "cut" ? "cut-missions" : "move-missions-picker", slug: "", arg: ids.join(" ") },
+      ]);
+      return true;
+    }
     if (action === "move") {
       // A selection moves as one batch through the shared family planner (as `tree/moves.ts`),
       // so callback-only children follow and one secret-transfer confirmation covers every id.
       const ids = nativeActionTargets(action, id, arg, null);
-      if (!ids.length || !arg) return false;
+      const { slug: dstSlug, folder: dstFolder } = parseNativeDestination(arg);
+      if (!ids.length || !dstSlug) return false;
+      expandNativeDestination(dstSlug, dstFolder, historyScope());
       const version = connectionVersion(); // fence the response and the confirmation (as tree/moves.ts)
       const move = async (policy: ApprovalTransferPolicy) => {
         if (version !== connectionVersion()) return;
         const known = [...missions(), ...completedMissions(), ...Object.values(projectMissions()).flat(), ...nativeArchived()];
-        const failures = await moveMissions(planMissionMoves(ids, arg, "", known), arg, { approvalPolicy: policy });
+        const failures = await moveMissions(planMissionMoves(ids, dstSlug, dstFolder, known), dstSlug, { approvalPolicy: policy });
         if (version !== connectionVersion()) return;
         const approval = failures.find(f => f.error instanceof ApprovalTransferConfirmationRequiredError)?.error as ApprovalTransferConfirmationRequiredError | undefined;
         if (approval) setNativeApprovalPrompt({ error: approval, confirm: chosen => void move(chosen), cancel: () => {} });
@@ -1134,20 +1151,30 @@ export default function App() {
       void move("check");
       return true;
     }
-    const mission = findKnownMission(id) ?? nativeArchived().find(m => m.id === id);
+    const mission = findKnownMission(id)
+      ?? completedMissions().find(m => m.id === id)
+      ?? Object.values(projectMissions()).flat().find(m => m.id === id)
+      ?? nativeArchived().find(m => m.id === id);
     if (!mission) return false;
     const fail = (title: string) => (error: unknown) => notify({ kind: "error", key: `native-action:${id}`, title, message: error instanceof Error ? error.message : String(error) });
     switch (action) {
-      case "rename":
-        if (!arg || arg === mission.title) return false;
-        void renameOptimistically("mission", id, arg, mission.title ?? null, () => renameMission(id, arg)).then(settle, swallow("app.nativeRename", { mission: id }));
+      case "rename": {
+        const prev = renamedTitle("mission", id, mission.title);
+        if (!arg || arg === prev) return false;
+        void renameOptimistically("mission", id, arg, prev ?? null, () => renameMission(id, arg)).then(settle, swallow("app.nativeRename", { mission: id }));
         return true;
+      }
       case "archive":
       case "restore": {
         // Runs through the HTML sidebar's `changeArchiveState` (headless ProjectFiles): same subtree
-        // targeting, optimistic status, in-flight guard and rollback. The Archived list moves now too.
+        // targeting, optimistic status, in-flight guard and rollback.
         const restore = action === "restore";
-        if (restore !== (mission.status === "acknowledged")) return false; // bulk: skip rows already in that state
+        const effectiveStatus = pendingArchiveStatus(id) ?? mission.status;
+        if (restore !== (effectiveStatus === "acknowledged")) return false; // bulk: skip rows already in that state
+        // Ensure the mission is present in `nativeArchived` when archiving so `orb-locald`
+        // keeps it in the Archived section; on restore, `withArchiveStatuses` flips its status
+        // to `"paused"` immediately across all lists so `orb-locald` moves it back to its project.
+        if (!restore) setNativeArchived(rows => [{ ...mission, status: "acknowledged" }, ...rows.filter(m => m.id !== id)]);
         setArchiveRequests(q => [...q, { mission, restore }]);
         return true;
       }
@@ -1164,24 +1191,22 @@ export default function App() {
     setNewProject(slug);
     open(null);
   };
-  const nativeProjectAction = (action: NativeProjectAction, slug: string): boolean => {
+  const nativeProjectAction = (action: NativeProjectAction, rawTarget: string, arg?: string): boolean => {
+    const { slug, folder: path } = parseNativeDestination(rawTarget);
     if (!slug) return false;
     switch (action) {
       case "new-agent":
-        newAgentIn(slug, "");
+        newAgentIn(slug, path);
         return true;
       case "new-cloud-agent":
         setNewProject(slug);
-        setNewFolder(null);
+        setNewFolder(path ? { project: slug, path } : null);
         open("cloud-agent");
         return true;
       case "settings":
         return open(`ps:${slug}`);
-      case "new-folder":
-      case "rename":
-      case "archive":
-      case "delete":
-        setProjectActionRequests(q => [...q, { action, slug }]);
+      default:
+        setProjectActionRequests(q => [...q, { action, slug, ...(path ? { path } : {}), ...(arg ? { arg } : {}) }]);
         return true;
     }
   };
@@ -1213,6 +1238,9 @@ export default function App() {
     });
   });
   if (nativeChromeSyncer) {
+    let lastRenames = renameVersion();
+    let lastArchives = pendingArchives();
+    let lastDeleting = deletingIds();
     createEffect(() => {
       const canBack = hIdx() > 0;
       const canForward = hIdx() < history().length - 1;
@@ -1233,17 +1261,36 @@ export default function App() {
         const c = projectColor(proj.slug);
         if (c) projColors[proj.slug] = c;
       }
+      const renamesRef = renameVersion();
+      const archivesRef = pendingArchives();
+      const deleting = deletingIds();
+      const optimisticChanged =
+        renamesRef !== lastRenames ||
+        archivesRef !== lastArchives ||
+        deleting !== lastDeleting;
+      lastRenames = renamesRef;
+      lastArchives = archivesRef;
+      lastDeleting = deleting;
       // Present the same effective status as the HTML sidebar row (`rowEffectiveStatus` in
       // ProjectFiles.tsx): a just-sent turn, a "send now" handoff or a local run reads as working
       // even before Core's mission list catches up, so switching away never shows a stale glyph.
       // The live list is the single owner of execution state: `syncOpenMission` patches only it
       // (an optimistic send keeps `updated_at`), so per-project and completed copies take their
       // status from it instead of overriding it on a timestamp tie in `orb-locald`'s merge.
+      // Optimistic archive/restore statuses apply AFTER `withLiveExecution` so they win over
+      // stale live-list copies; optimistic deletes filter rows out without erasing backing state
+      // so rollbacks restore them immediately.
       const live = new Map(missions().map(m => [m.id, m]));
-      const shown = (rows: readonly Mission[]) => withLiveExecution(withRenamedTitles("mission", [...rows], m => m.id), live).map(m => {
-        const status = presentedStatus(m, missionActivity(m, [], { localRun: localRunActive(m.id) }));
-        return status === m.status ? m : { ...m, status };
-      });
+      const shown = (rows: readonly Mission[]) =>
+        withArchiveStatuses(
+          withLiveExecution(
+            withRenamedTitles("mission", deleting.size ? rows.filter(m => !deleting.has(m.id)) : [...rows], m => m.id),
+            live,
+          ),
+        ).map(m => {
+          const status = presentedStatus(m, missionActivity(m, [], { localRun: localRunActive(m.id) }));
+          return status === m.status ? m : { ...m, status };
+        });
       const liveMissions = shown(missions());
       const archived = shown(nativeArchived());
       const compMissions = shown(completedMissions());
@@ -1267,7 +1314,7 @@ export default function App() {
         completedMissions: compMissions,
         archivedMissions: archived,
         projectMissions: projMissions,
-      });
+      }, optimisticChanged);
     });
   }
 
@@ -1459,8 +1506,21 @@ export default function App() {
         window.location.reload();
         return;
       }
-      window.dispatchEvent(new Event("orb:refresh"));
+      window.dispatchEvent(new CustomEvent("orb:refresh", { detail: { manual: true } }));
       void refreshMissions();
+      return;
+    }
+    if (
+      (e.metaKey || e.ctrlKey) &&
+      !e.altKey &&
+      !e.shiftKey &&
+      (e.code === "KeyA" || e.key.toLowerCase() === "a") &&
+      (e.target instanceof HTMLTextAreaElement ||
+        (e.target instanceof HTMLInputElement &&
+          /^(text|search|url|tel|password|email)$/i.test(e.target.type)))
+    ) {
+      e.preventDefault();
+      e.target.select();
       return;
     }
     if (hasOverlay()) return;
@@ -1494,8 +1554,9 @@ export default function App() {
       return;
     }
     if (hasPrimaryModifier(e) && !e.altKey && !e.shiftKey && e.key === "/") {
-      // Core-hosted reference files render through ProjectFileView.
-      if (currentProjectFile()) {
+      // Core-hosted reference files render through ProjectFileView; skills render through SkillPage.
+      const skillPage = skillPageName(selected());
+      if (currentProjectFile() || (skillPage && !skillPage.history)) {
         e.preventDefault();
         toggleMdSource();
       }
@@ -1797,8 +1858,7 @@ export default function App() {
         });
       }}
       onProjectMissions={(slug, rows) => {
-        const clean = rows.filter(m => !isMissionDeleting(m.id));
-        setProjectMissions(prev => ({ ...prev, [slug]: clean }));
+        setProjectMissions(prev => ({ ...prev, [slug]: rows }));
       }}
       onProjectEntries={(slug, folders, files) => {
         setProjectFolders(prev => ({ ...prev, [slug]: folders }));
@@ -2033,17 +2093,19 @@ export default function App() {
                       <Ic.ChevronDown size={12} />
                     </button>
                     <Show when={envOpen() === "project"}>
-                      <ProjectPicker projects={isConnected() ? projectChoices(liveProjects()) : []}
-                        selected={newProject() ?? ""} canCreate={isConnected()}
-                        onSelect={(id) => { setNewFolder(null); setNewProject(id); setEnvOpen(null); }}
-                        onClose={() => setEnvOpen(null)}
-                        onCreate={() => { setProjectCreationAnchor(undefined); setEnvOpen(null); setNewProjectDraft(true); }}
-                        onMachine={() => {
-                          setProviderSubmenu(undefined);
-                          setAgentVmsOpen(sortedNodes().filter(isAgentSpawnedManagedNode).some(n => n.id === newMachine()));
-                          warmManagedCatalog();
-                          setEnvOpen("machine");
-                        }} />
+                      <Suspense>
+                        <ProjectPicker projects={isConnected() ? projectChoices(liveProjects()) : []}
+                          selected={newProject() ?? ""} canCreate={isConnected()}
+                          onSelect={(id) => { setNewFolder(null); setNewProject(id); setEnvOpen(null); }}
+                          onClose={() => setEnvOpen(null)}
+                          onCreate={() => { setProjectCreationAnchor(undefined); setEnvOpen(null); setNewProjectDraft(true); }}
+                          onMachine={() => {
+                            setProviderSubmenu(undefined);
+                            setAgentVmsOpen(sortedNodes().filter(isAgentSpawnedManagedNode).some(n => n.id === newMachine()));
+                            warmManagedCatalog();
+                            setEnvOpen("machine");
+                          }} />
+                      </Suspense>
                     </Show>
                   </div>
 
@@ -2313,7 +2375,7 @@ export default function App() {
                         />
                       )}
                     </Show>
-                  </div><WorkingDirectoryPicker machine={newMachine()} machineName={machineLabel()} missions={missions()} value={workingDirectory()} disabled={creating()} onChange={chooseDirectory}/>
+                  </div><Suspense><WorkingDirectoryPicker machine={newMachine()} machineName={machineLabel()} missions={missions()} value={workingDirectory()} disabled={creating()} onChange={chooseDirectory}/></Suspense>
                   <Show when={showAskPaloma()}>
                     <button
                       type="button"
@@ -2470,6 +2532,7 @@ export default function App() {
                   <Match when={selected() === "routing" || selected() === "routing-providers" || selected() === "routing-keys"}>
                     <RoutingSettings onOpenClient={() => open("settings")} tab={selected() === "routing-providers" ? "health" : selected() === "routing-keys" ? "keys" : "chains"} />
                   </Match>
+                  <Match when={selected() === "airvpn-settings"}><AirVpnSettings onOpenPage={open} /></Match>
                   <Match when={selected() === "usage-settings"}><UsageSettings /></Match>
                   <Match when={selected() === "skills-settings"}><SkillsSettings onOpenPage={open} /></Match>
                   <Match when={selected() === "hermes-settings"}><HermesSettings /></Match>
@@ -2536,7 +2599,7 @@ export default function App() {
       <Show when={ctx()}>
         {(c) => <PopupMenu x={c().x} y={c().y} items={c().items} onClose={() => setCtx(null)} />}
       </Show>
-      <Show when={newProjectDraft()}><ProjectCreation anchor={projectCreationAnchor()} existingIds={projectChoices(liveProjects()).map(p => p.id)} onCreate={submitNewProject} onClose={() => setNewProjectDraft(false)} /></Show>
+      <Show when={newProjectDraft()}><Suspense><ProjectCreation anchor={projectCreationAnchor()} existingIds={projectChoices(liveProjects()).map(p => p.id)} onCreate={submitNewProject} onClose={() => setNewProjectDraft(false)} /></Suspense></Show>
       <Show when={titleShareMission()}>
         {m => (
           <Suspense>

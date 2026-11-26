@@ -157,4 +157,14 @@ final class OrbClientParityTests: XCTestCase {
         XCTAssertNil(OrbProjectGrant.projectLimitOf(.object(["parallel_missions": .number(0)])))
         XCTAssertEqual(OrbProjectGrant.projectLimitOf(.object(["parallel_missions": .number(3)])), 3)
     }
+
+    func testFolderDeletionBlockingMissions() {
+        let archived = OrbRow(.object(["id": .string("m-arch"), "status": .string("acknowledged"), "folder": .string("crons")]))
+        let superseded = OrbRow(.object(["id": .string("m-sup"), "status": .string("completed"), "folder": .string("crons/nightly"), "superseded_by_mission_id": .string("m-next")]))
+        let active = OrbRow(.object(["id": .string("m-live"), "status": .string("completed"), "folder": .string("crons/sub")]))
+        let other = OrbRow(.object(["id": .string("m-other"), "status": .string("completed"), "folder": .string("notes")]))
+        XCTAssertFalse(OrbMissionTree.hasBlockingFolderMissions([archived, superseded, other], folder: "crons"))
+        XCTAssertTrue(OrbMissionTree.hasBlockingFolderMissions([archived, active], folder: "crons"))
+        XCTAssertFalse(OrbMissionTree.hasBlockingFolderMissions([active], folder: "cron"))
+    }
 }

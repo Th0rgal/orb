@@ -2421,6 +2421,16 @@ def buildCoreHarnessCallbacks (st : CoreAppState) (missionId : String) (generati
         interrupted      := isErr || emptyVerdict?.isSome
       }
       observeControlTurnFinished tSink missionId turnUsage ownerUid? ownerUname? nowSec
+    let bLow := finalSnap.harness.trimAscii.toString.toLower
+    let normHarness := if bLow == "claude" then "claudecode" else bLow
+    if normHarness == "antigravity" || normHarness == "grok" then
+      let mRec? ← getMission? st.store missionId
+      let effModel :=
+        (finalSnap.model?.orElse fun _ =>
+          (mRec?.map (·.modelOverride.trimAscii.toString)).filter (!·.isEmpty)).getD ""
+      recordNativeHarnessUsage st.store nowSec normHarness effModel missionId
+        ((mRec?.map (·.parentMissionId)).getD "") ((mRec?.map (·.modelOverride)).getD "")
+        (finalSnap.inputTokens?.getD 0).toNat (finalSnap.outputTokens?.getD 0).toNat (finalSnap.cacheReadTokens?.getD 0).toNat
     let stPl := renderCompact (.obj #[("status", .str nextStatus), ("content", .str finalSnap.text)])
     discard <| appendMissionEvent st.store missionId "mission_status_changed" stPl ts
     publishControlEvent st.broadcastHub? "mission_status_changed" stPl (some missionId)
@@ -3921,11 +3931,12 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
         let mut hasProjSkill := false
         if !activeClaims.isExternal && !activeClaims.missionId.isEmpty then
           if let .ok mRs ← execParamQuery st.store.missionsDb
-              "SELECT placement_kind, project, tags FROM missions WHERE id=?1;" #[activeClaims.missionId] then
+              "SELECT placement_kind, project, tags, COALESCE(owner_user_id,'') FROM missions WHERE id=?1;" #[activeClaims.missionId] then
             if mRs.size > 1 then
               let pk := (mRs[1]?.bind (·[0]?)).getD ""
               let mProj := (mRs[1]?.bind (·[1]?)).getD ""
               let mTags := parseStringJsonArray ((mRs[1]?.bind (·[2]?)).getD "[]")
+              let mOwner := (mRs[1]?.bind (·[3]?)).getD ""
               if pk == "managed_vm" || pk.startsWith "managed-" then
                 onManagedNode := true
               if mTags.contains "skill:spark-memory" then
@@ -3938,6 +3949,16 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
                   if pRs.size > 1 then
                     let skills := parseStringJsonArray ((pRs[1]?.bind (·[0]?)).getD "[]")
                     hasProjSkill := skills.contains "spark-memory" || skills.contains "skill:spark-memory"
+              if !hasProjSkill && !onManagedNode then
+                let effOwner ←
+                  if !mOwner.isEmpty then pure mOwner
+                  else match scopedClaims? with
+                    | some claims => pure ((← OrbCore.McpGateway.scopedCallerUserId? st.store claims nowEpochSec).getD "")
+                    | none => pure ((mcpCaller?.map (·.userId)).getD "")
+                if let .ok plan ← buildDeliveryPlan st.cfg.workingDir
+                    (if mProj.trimAscii.toString.isEmpty then none else some mProj)
+                    st.store.rootDir effOwner st.bootstrapAdminId then
+                  hasProjSkill := plan.skills.any (fun s => s.name == "spark-memory")
           if !onManagedNode then
             if let some mst := st.managedStore? then
               if let .ok vmRs ← execParamQuery mst.db
@@ -4179,8 +4200,14 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
     unless token.startsWith "orb-jwt-v2:" && !st.cfg.devMode do
       return .ok (mkJson 403 "{\"error\":\"operator_session_required\"}")
     let save := st.vpnPool?.map AccountVpnPool.saveSecret
+    let delete := st.vpnPool?.map AccountVpnPool.deleteSecret
+    let tunnels ← match req.method, st.vpnPool? with
+      | "GET", some pool => AccountVpnPool.activeTunnels pool
+      | _, _ => pure #[]
     let (status, body) ← OrbCore.AirVpnSettings.settings st.store.rootDir req.method req.bodySlice.toByteArray
       (save.getD OrbCore.Managed.sealAirVpnSecret)
+      (delete.getD OrbCore.Managed.deleteAirVpnSecret)
+      tunnels
     return .ok (mkJson status (renderCompact body))
 
   -- Explicit operator-triggered vault-to-Core sealing. Reauthenticate with dev
@@ -6171,9 +6198,9 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
         let some existing := existing?
           | return .ok (mkJson 404 "{\"error\":\"provider_not_found\"}")
         let own := !existing.createdByUserId.isEmpty && existing.createdByUserId == caller.userId
-        -- Members edit settings of any shared account; credentials and endpoint only on their own.
+        -- Members edit settings of any shared account; credentials, global enablement, and endpoint only on their own.
         if !isAdm then
-          if (jv.fieldBool? "enabled").any (· != existing.enabled) then
+          if !own && (jv.fieldBool? "enabled").any (· != existing.enabled) then
             return .ok (mkJson 403 "{\"error\":\"admin_required\",\"field\":\"enabled\"}")
           let newKey := ((jv.fieldStr? "api_key").getD "").trimAscii.toString
           if !newKey.isEmpty && (!own || newKey == "cli-proxy-managed") then
@@ -6225,7 +6252,7 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
           rpmLimit? := rpm?, maxConcurrency? := conc?, customModels := cModels,
           updatedAt := s!"{nowEpochSec}"
         }
-        match ← upsertAIProvider st.store updated (memberEdit := !isAdm) (credentialOwner := own) with
+        match ← upsertAIProvider st.store updated (memberEdit := !isAdm && !own) (credentialOwner := own) with
         | .error "provider_changed" => return .ok (mkJson 409 "{\"error\":\"provider_changed\"}")
         | .error e => return .ok (mkJson 400 s!"\{\"error\":\"invalid_provider_limits\",\"detail\":{jsonEscape e}}")
         | .ok () =>
@@ -6261,7 +6288,7 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
               return .ok (mkJson 403 "{\"error\":\"not_account_owner\"}")
         -- Disable any matched CLIProxyAPI sidecar login before deleting the Core row so a
         -- removed OAuth provider cannot respawn as an active (`enabled: true`) synthetic row.
-        if isAdm then
+        if isAdm || existing?.isSome then
           if let some (code, ctype, body) ← syncSidecarAuthFileDisabledForProvider st.store st.cfg.workingDir pid true then
             return .ok { status := code, contentType := ctype, corsOrigin? := reqOrigin?, body := body }
         match ← deleteAIProvider st.store pid with
@@ -8817,8 +8844,9 @@ def runCoreServer (cfg : CoreConfig) (maxRequests? : Option Nat := none) : IO UI
       closeCoreStore store
       IO.eprintln s!"[sandboxed-sh] FATAL: remote submission startup fence failed: {e}"
       return 1
+    let vpnRelayBind := ((← IO.getEnv "ORB_AIRVPN_RELAY_BIND").getD "127.0.0.1").trimAscii.toString
     let vpnRelay? ← match ← AccountVpnRelay.configured (← IO.getEnv "ORB_AIRVPN_RELAY_PORT")
-        (effectiveJwtSecret cfg) vpnCoordinatorDir (!cfg.devMode) vpnPool store with
+        (effectiveJwtSecret cfg) vpnCoordinatorDir (!cfg.devMode) vpnPool store vpnRelayBind with
       | .ok listener => pure listener
       | .error e =>
         discard <| closeFd listenFd
@@ -8828,8 +8856,25 @@ def runCoreServer (cfg : CoreConfig) (maxRequests? : Option Nat := none) : IO UI
         IO.eprintln s!"[sandboxed-sh] Failed to initialize the AirVPN account relay: {e}"
         return 1
     let relayUrl? := vpnRelay?.map fun listener => AccountVpnRelay.proxyUrl (effectiveJwtSecret cfg) listener.port
+    let meshRelayHost := ((← IO.getEnv "ORB_AIRVPN_MESH_RELAY_HOST").getD "").trimAscii.toString
+    let effMeshHost :=
+      if !meshRelayHost.isEmpty then meshRelayHost
+      else if vpnRelayBind != "127.0.0.1" && vpnRelayBind != "0.0.0.0" && !vpnRelayBind.isEmpty then vpnRelayBind
+      else ""
+    let meshRelayUrl? := vpnRelay?.bind fun listener =>
+      if effMeshHost.isEmpty then none
+      else some fun provider account =>
+        AccountVpnRelay.proxyUrl (effectiveJwtSecret cfg) listener.port provider account effMeshHost "socks5h"
     let providerHub := { providerHub with accountRelayUrl? := relayUrl? }
-    let appState := { appState with vpnRelayPort? := vpnRelay?.map (·.port), providerHub? := some providerHub }
+    let remoteSup := { remoteSup with
+      providerHub? := some providerHub
+      vpnPool? := some vpnPool
+      vpnCoordinatorDir := vpnCoordinatorDir
+      vpnMeshRelayUrl? := meshRelayUrl? }
+    let appState := { appState with
+      vpnRelayPort? := vpnRelay?.map (·.port)
+      providerHub? := some providerHub
+      remoteSup? := some remoteSup }
     let lostTurns ← interruptTurnsLostToRestart store.missionsDb
     if lostTurns > 0 then
       IO.eprintln s!"[sandboxed-sh] {lostTurns} mission turn(s) lost to the restart marked interrupted"

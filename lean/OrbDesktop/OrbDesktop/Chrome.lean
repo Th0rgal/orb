@@ -93,20 +93,28 @@ def buildMissionMenu (st : DesktopState) (menu : MissionMenu) (width : SubPx) (v
     let hasChevron := item.id == 711 || (menu.page == .settings && (settingTrigger item.id).isSome)
     -- Keep every visible glyph inside the row that receives the click.
     let labelWidth := width - pxToSub (12 + 16 + 14 + 9 + (if hasChevron then 21 else 0))
+    let baseRun := overlaySynthRun (Theme.bodyText st.theme) item.label
+    let isDraftRow := item.id == 1 && (menu.page == .rename || menu.page == .draftDirectory)
+    let draftLen := menu.draft.text.length + menu.draft.imePreeditText.length
+    let draftPos := ComposerBuffer.clampCursor menu.draft.text menu.draft.cursorOffset + menu.draft.imePreeditText.length
+    let run := if isDraftRow && draftLen > 0 then { baseRun with editorStart := some 0 } else baseRun
+    let caret : Option TextCaretSpec :=
+      if isDraftRow then some { owner := 1, pos := draftPos, length := draftLen, color := pal.textPrimary }
+      else none
     let label := WidgetNode.text { (BoxStyle.row 0 |>.withFixedSize labelWidth (pxToSub 18)) with clip := true } (pxToSub 18)
-      [overlaySynthRun (Theme.bodyText st.theme) item.label]
+      [run] none caret
     let row := WidgetNode.focusable item.id <| WidgetNode.box
       (BoxStyle.row (pxToSub 9) |>.withRadius (pxToSub 6)
         |>.withBg (if menu.first + i == menu.highlighted then withAlpha pal.textPrimary 0x18 else pal.elevatedSurface)
         |>.withAlign .center |>.withPadding (Edges.xy (pxToSub 8) 0)
-        |>.withFixedSize (width - pxToSub 12) (pxToSub 30))
+        |>.withFixedSize (width - pxToSub 8) (pxToSub 26))
       ([chromeIcon item.icon pal.textSecondary 14, label] ++
         (if hasChevron then [chromeIcon "chevron-right" pal.textMuted 12] else []))
     if item.separatorBefore then
-      [WidgetNode.box (BoxStyle.row 0 |>.withFixedSize (width - pxToSub 12) (pxToSub 1) |>.withBg pal.border) [], row]
+      [WidgetNode.box (BoxStyle.row 0 |>.withFixedSize (width - pxToSub 8) (pxToSub 1) |>.withBg pal.border) [], row]
     else [row]
   WidgetNode.box
-    (BoxStyle.col 0 |>.withPadding (Edges.all (pxToSub 6)) |>.withRadius (pxToSub 10)
+    (BoxStyle.col 0 |>.withPadding (Edges.all (pxToSub 4)) |>.withRadius (pxToSub 10)
       |>.withBorder st.theme.borderWidth pal.border |>.withBg pal.elevatedSurface)
     rows.flatten
 
@@ -132,22 +140,27 @@ def liveBadgeKind (status : String) : String :=
 
 private def liveMissionLead (theme : Theme) (status : String) (phase : Nat) : WidgetNode :=
   let pal := theme.palette
-  let bot := chromeIcon "mission" pal.textMuted
   let kind := liveBadgeKind status
-  if kind.isEmpty then bot else
-    let ring : List (Int × Int) := [(80,15),(112,24),(136,48),(145,80),(136,112),(112,136),
-      (80,145),(48,136),(24,112),(15,80),(24,48),(48,24)]
-    let circle := ring ++ ring.take 1
-    let paths := match kind with
-      | "loader" => [((ring.drop (phase % 12)) ++ (ring.take (phase % 12))).take 10]
-      | "clock" => [circle, [(80,40),(80,80),(105,93)]]
-      | "pause" => [[(55,36),(55,125)],[(105,36),(105,125)]]
-      | "alert" => [circle,[(80,43),(80,86)],[(80,107),(80,111)]]
-      | _ => [circle,[(43,81),(69,105),(116,56)]]
-    let tone := if kind == "loader" || status == "waiting_background" then pal.accent
-      else if kind == "alert" then pal.warning else if kind == "check" then pal.success else pal.textMuted
-    .mk none false false (BoxStyle.row 0 |>.withAlign .center |>.withFixedSize (pxToSub 18) (pxToSub 18))
-      (.vectorIcon paths tone (some (pal.sidebar ||| 255))) [bot]
+  let ring : List (Int × Int) := [(80,15),(112,24),(136,48),(145,80),(136,112),(112,136),
+    (80,145),(48,136),(24,112),(15,80),(24,48),(48,24)]
+  let circle := ring ++ ring.take 1
+  let spinnerArc : List (Int × Int) :=
+    let base := Float.ofNat (phase % 60) * 0.10471975511965977 - 1.5707963267948966
+    let step := 4.71238898038469 / 17.0
+    (List.range 18).map fun i =>
+      let a := base + Float.ofNat i * step
+      ((80.0 + 65.0 * Float.cos a).toInt64.toInt, (80.0 + 65.0 * Float.sin a).toInt64.toInt)
+  let paths := match kind with
+    | "loader" => [spinnerArc]
+    | "clock" => [circle, [(80,40),(80,80),(105,93)]]
+    | "pause" => [[(55,36),(55,125)],[(105,36),(105,125)]]
+    | "alert" => [circle,[(80,43),(80,86)],[(80,107),(80,111)]]
+    | "check" => [circle,[(43,81),(69,105),(116,56)]]
+    | _ => [circle]
+  let tone := if kind == "loader" || status == "waiting_background" then pal.accent
+    else if kind == "alert" then pal.warning else if kind == "check" then pal.success else pal.textMuted
+  .mk none false false (BoxStyle.row 0 |>.withAlign .center |>.withJustify .center |>.withFixedSize (pxToSub 16) (pxToSub 16))
+    (.vectorIcon paths tone none) []
 
 /-- Body text of the SolidJS chrome (`13px/1.4`), laid out on an `18 px` line. -/
 def chromeText (theme : Theme) (color : Color) : TextStyle :=
@@ -175,15 +188,31 @@ def buildSidebarRowWidget (theme : Theme) (innerW : SubPx) (row : ChromeSidebarR
     let isArchives := row.rowId == "section:archives"
     let icon := if isArchives then (if expanded then "chevron-down" else "chevron-right")
       else if row.rowId == "section:archived" then "chevron-right" else "plus"
-    let sectionRow := WidgetNode.box
-      (BoxStyle.row 0
-        |>.withAlign .center
-        |>.withPadding (Edges.trbl 0 (pxToSub 8) 0 (pxToSub 10))
-        |>.withMargin margin
-        |>.withFixedSize innerW (pxToSub 18))
-       [chromeLabel small.lineHeightSub [overlaySynthRun small row.title] 1,
-        chromeIcon icon pal.textFaint 14]
-       (if isArchives then some row.widgetId else none)
+    let sectionRow :=
+      if isArchives then
+        let archStyle := { (chromeText theme pal.textSecondary) with lineHeightSub := pxToSub 17 }
+        WidgetNode.rrect
+          (BoxStyle.row (pxToSub 8)
+            |>.withAlign .center
+            |>.withPadding (Edges.trbl 0 (pxToSub 8) 0 (pxToSub 10))
+            |>.withMargin margin
+            |>.withFixedSize innerW (pxToSub 30))
+          (if hovered then (pal.textPrimary &&& 0xFFFFFF00) ||| 0x0C else 0x00000000)
+          (CornerRadii.uniform (pxToSub 6))
+          BorderStyle.none
+          [chromeIcon icon pal.textMuted 14,
+           chromeLabel archStyle.lineHeightSub [overlaySynthRun archStyle row.title] 1]
+          (some row.widgetId)
+      else
+        WidgetNode.box
+          (BoxStyle.row 0
+            |>.withAlign .center
+            |>.withPadding (Edges.trbl 0 (pxToSub 8) 0 (pxToSub 10))
+            |>.withMargin margin
+            |>.withFixedSize innerW (pxToSub 18))
+          [chromeLabel small.lineHeightSub [overlaySynthRun small row.title] 1,
+           chromeIcon icon pal.textFaint 14]
+          none
     if isArchives || (embedded && row.rowId == "section:projects") then WidgetNode.focusable row.widgetId sectionRow else sectionRow
   else
     let isFooter := row.kind == "footer"
@@ -196,12 +225,17 @@ def buildSidebarRowWidget (theme : Theme) (innerW : SubPx) (row : ChromeSidebarR
     let leadSize : SubPx := if isMission then pxToSub 18 else pxToSub 16
     let projectRunning := row.kind == "project" && ((row.rowId.drop 5).toString.toNat?.getD 99) < 8
     let isTreeChild := (isMission || row.kind == "folder" || row.kind == "file") && row.depth > 0
+    let treeLineColor : Color := if theme.isDark then pal.borderSubtle else 0xC6C5BEFF
+    let selectedBg : Color := if theme.isDark then pal.rowActive else 0xDCDCD7FF
+    let selectedBorder : BorderStyle :=
+      if row.selected && !isFooter && !theme.isDark then BorderStyle.uniform theme.borderWidth 0xC8C7C0FF
+      else BorderStyle.none
     let lead : WidgetNode :=
       .mk none false false
         (BoxStyle.row 0 |>.withAlign .center |>.withFixedSize leadSize leadSize)
-        (.treeDecoration isTreeChild last children rails pal.borderSubtle
+        (.treeDecoration isTreeChild last children rails treeLineColor
           (if isMission && livePhase.isNone then statusBadgeColor pal row.status else if projectRunning && livePhase.isNone then pal.accent else 0)
-          (if row.selected then pal.rowActive else pal.sidebar))
+          (if row.selected then selectedBg else pal.sidebar))
         [if isMission && livePhase.isSome then liveMissionLead theme row.status (livePhase.getD 0) else chromeIcon (if isMission then "mission" else if row.kind == "project" || row.kind == "folder" then (if expanded then "project-folder-open" else "project-folder") else row.rowId) (row.iconColor.getD pal.textMuted)]
     let labelColor : Color :=
       if isFooter then (if row.selected then pal.textPrimary else pal.textSecondary)
@@ -246,10 +280,10 @@ def buildSidebarRowWidget (theme : Theme) (innerW : SubPx) (row : ChromeSidebarR
           |>.withPadding (Edges.trbl 0 padRight 0 padLeft)
           |>.withMargin margin
           |>.withFixedSize innerW (if isFooter then pxToSub 32 else pxToSub 30))
-        (if row.selected && !isFooter then pal.rowActive
+        (if row.selected && !isFooter then selectedBg
          else if hovered then (pal.textPrimary &&& 0xFFFFFF00) ||| 0x0C else 0x00000000)
         (CornerRadii.uniform (if isFooter then pxToSub 8 else pxToSub 6))
-        BorderStyle.none
+        selectedBorder
         ([lead, if isMission then
             WidgetNode.text
               { (BoxStyle.row 0 |>.withFixedSize (innerW - padLeft - padRight - leadSize - pxToSub 8 - (if badge.isEmpty then 0 else pxToSub 46)) labelStyle.lineHeightSub) with clip := true }
@@ -344,7 +378,7 @@ def buildSidebarChrome (st : DesktopState) (availH : SubPx) (useReferenceTree : 
           if rails.isEmpty then []
           else [.mk none false false
             (BoxStyle.row 0 |>.withFixedSize 0 (pxToSub 16))
-            (.treeDecoration false true false rails pal.borderSubtle 0 0) []]
+            (.treeDecoration false true false rails (if theme.isDark then pal.borderSubtle else 0xC6C5BEFF) 0 0) []]
         WidgetNode.box
           (BoxStyle.row 0
             |>.withAlign .center
@@ -364,7 +398,7 @@ def buildSidebarChrome (st : DesktopState) (availH : SubPx) (useReferenceTree : 
     |>.withPadding (Edges.trbl 0 (pxToSub 6) (pxToSub 12) (pxToSub 6))
   let roster := if st.liveData then
       WidgetNode.scrollClip (BoxStyle.col 0 |>.withFixedSize innerW rosterH)
-        { offsetY := st.rosterTopSub } (WidgetNode.box rosterStyle (navRows ++ treeRows)) (some rosterViewportId) (hitTestable := false)
+        { offsetY := st.rosterTopSub, showScrollbar := !embedded } (WidgetNode.box rosterStyle (navRows ++ treeRows)) (some rosterViewportId) (hitTestable := false)
     else WidgetNode.box (rosterStyle.withFixedSize innerW rosterH) (navRows ++ treeRows)
   let searchToolId := if embedded then 118 else sidebarSearchId
   let backToolId := if embedded then 119 else sidebarBackId

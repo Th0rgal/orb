@@ -1,7 +1,10 @@
 #include "gtk_leanui_private.h"
 #include "gtk_menu.h"
 #include "gtk_icons.h"
+#include "gtk_disclosure.h"
+#include "gtk_squircle.h"
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 static char *field(JSCValue *row, const char *name) {
@@ -58,7 +61,9 @@ static GtkWidget *button(OrbSidebar *s, const char *action, const char *rid, con
     char *key = g_strdup_printf("%s/%s", action, rid);
     GtkWidget *b = g_hash_table_lookup(s->buttons, key);
     if (!b) {
-        b = gtk_button_new();
+        b = gtk_button_new(); gtk_widget_set_focus_on_click(b, FALSE);
+        gtk_widget_set_app_paintable(b, TRUE);
+        g_signal_connect(b, "draw", G_CALLBACK(orb_draw_squircle_btn), NULL);
         orb_gtk_bind_pointer_cursor(b);
         gtk_widget_set_no_show_all(b, TRUE);
         g_object_set_data_full(G_OBJECT(b), "orb-action", g_strdup(action), g_free);
@@ -83,7 +88,10 @@ static void add_row(OrbSidebar *s, JSCValue *row) {
     g_object_set_data_full(G_OBJECT(b), "orb-title", g_strdup(title), g_free);
     g_object_set_data_full(G_OBJECT(b), "orb-status", g_strdup(status), g_free);
     g_object_set_data_full(G_OBJECT(b), "orb-project", field(row, "project"), g_free);
+    g_object_set_data_full(G_OBJECT(b), "orb-folder", field(row, "folder"), g_free);
+    if (!strcmp(kind, "project")) g_object_set_data_full(G_OBJECT(b), "orb-folders", orb_jsc_join_strings(row, "folders"), g_free);
     g_object_set_data_full(G_OBJECT(b), "orb-target", field(row, "target"), g_free);
+    g_object_set_data(G_OBJECT(b), "orb-depth", GINT_TO_POINTER(number(row, "depth")));
     g_object_set_data(G_OBJECT(b), "orb-exp", GINT_TO_POINTER(number(row, "expandable")));
     guint id = 1000 + s->indices->len;
     int badge = !strcmp(kind, "mission") ? number(row, "child_count") : number(row, "badge");
@@ -106,6 +114,7 @@ void orb_leanui_rows(GtkWidget *view, JSCValue *rows, JSCValue *footer, const ch
     if (g_strcmp0(scope, s->scope)) {
         orb_sel_clear(view);
         s->scroll = 0;
+        s->scroll_pos = 0.0;
         g_free(s->scope);
         s->scope = g_strdup(scope);
     }
@@ -152,17 +161,26 @@ static GtkWidget *hit_button(OrbSidebar *s, unsigned id) {
     g_object_set_data_full(G_OBJECT(b),"orb-parent-id",g_strdup(rid),g_free);
     return b;
 }
-
+static gboolean fade_wake(gpointer data) {
+    OrbSidebar *s = data;
+    s->fade = 0;
+    orb_sidebar_invalidate(s);
+    return G_SOURCE_REMOVE;
+}
 void orb_sidebar_hits(void *view, const char *regions) {
     OrbSidebar *s = view;
     g_auto(GStrv) lines = g_strsplit(regions, "\n", -1);
-    s->limit = atoi(lines[0]);
-    if (s->scroll > s->limit) { s->scroll = s->limit; orb_sidebar_invalidate(s); }
+    char *wake = NULL;
+    s->limit = (int)strtol(lines[0], &wake, 10);
+    /* "<limit> <ms>": the renderer asks for one more paint to fade the overlay scrollbar. */
+    long ms = wake ? strtol(wake, NULL, 10) : 0;
+    if (ms > 0 && !s->fade) s->fade = g_timeout_add((guint)ms, fade_wake, s);
+    if (s->scroll > s->limit) { s->scroll = s->limit; s->scroll_pos = (double)s->limit; orb_sidebar_invalidate(s); }
     GHashTableIter iter;
     gpointer child;
     g_hash_table_iter_init(&iter,s->buttons);
     while (g_hash_table_iter_next(&iter,NULL,&child)) g_object_set_data(child,"orb-visible",NULL);
-    gboolean running = FALSE;
+    gboolean running = FALSE, moved = FALSE;
     for (char **line = lines+1; *line; line++) {
         unsigned id;
         GdkRectangle r;
@@ -174,11 +192,12 @@ void orb_sidebar_hits(void *view, const char *regions) {
         GdkRectangle *old = g_object_get_data(G_OBJECT(b),"orb-hit");
         if (!old || !gdk_rectangle_equal(old,&r)) {
             g_object_set_data_full(G_OBJECT(b),"orb-hit",g_memdup2(&r,sizeof r),g_free);
-            gtk_widget_queue_resize(b);
+            moved = TRUE;
         }
         g_object_set_data(G_OBJECT(b),"orb-visible",GINT_TO_POINTER(1));
         gtk_widget_show(b);
     }
+    if (moved) gtk_widget_queue_allocate(s->overlay);
     g_hash_table_iter_init(&iter,s->buttons);
     while (g_hash_table_iter_next(&iter,NULL,&child)) {
         if (g_object_get_data(child,"orb-visible")) continue;
@@ -190,10 +209,9 @@ void orb_sidebar_hits(void *view, const char *regions) {
     }
     gboolean animations = TRUE;
     g_object_get(gtk_widget_get_settings(s->overlay),"gtk-enable-animations",&animations,NULL);
-    if (running && animations && !s->animation) s->animation = g_timeout_add(100,animate,s);
+    if (running && animations && !s->animation) s->animation = g_timeout_add(16,animate,s);
     if ((!running || !animations) && s->animation) { g_source_remove(s->animation); s->animation = 0; }
 }
-
 void orb_sidebar_model_free(OrbSidebar *s) {
     g_hash_table_destroy(s->buttons);
     g_ptr_array_free(s->indices,TRUE);

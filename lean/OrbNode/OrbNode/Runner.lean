@@ -3,6 +3,7 @@
   Bounded Log Byte-Range Slicing (`<= 256 KiB` newline-cut), and Process-Group (`-pgid`)
   Zero-Orphan Execution for `/execute`, `raw_command`, and `lean_build`.
 -/
+import Std.Sync.Mutex
 import LeanSys.Posix
 import LeanSys.Auth
 import Orb.Kernel
@@ -1465,17 +1466,47 @@ private def detectLeanRuntimeReady (workDir : String) : IO Bool := do
     if (← cand.pathExists) && !(← cand.isDir) then return true
   return false
 
+private initialize binaryShaCache :
+    Std.Mutex (Std.HashMap String (UInt64 × IO.FS.SystemTime × String)) ←
+  Std.Mutex.new {}
+
 private def computeBinarySha256? (fp : System.FilePath) : IO (Option String) := do
   if !(← fp.pathExists) || (← fp.isDir) then return none
-  if let .ok md ← fp.metadata |>.toBaseIO then
-    if md.byteSize ≤ 32 * 1024 * 1024 then
-      if let .ok bytes ← IO.FS.readBinFile fp |>.toBaseIO then
-        return some (bytesToHexLower (sha256Bytes bytes))
-  if let .ok out ← (IO.Process.output { cmd := "sha256sum", args := #[fp.toString] }).toBaseIO then
-    if out.exitCode == 0 then
-      let hex := ((out.stdout.splitOn " ").headD "").trimAscii.toString.toLower
-      if hex.length == 64 then return some hex
-  return none
+  let key := fp.toString
+  let md? ← match ← fp.metadata |>.toBaseIO with
+    | .ok md => pure (some md)
+    | .error _ => pure none
+  if let some md := md? then
+    let cached? ← binaryShaCache.atomically do
+      let tbl ← get
+      match tbl.get? key with
+      | some (sz, mt, hex) =>
+        if sz == md.byteSize && mt == md.modified then return some hex
+        else return none
+      | none => return none
+    if let some hex := cached? then
+      return some hex
+  let computed? ← do
+    if let .ok out ← (IO.Process.output { cmd := "sha256sum", args := #[key] }).toBaseIO then
+      if out.exitCode == 0 then
+        let hex := ((out.stdout.splitOn " ").headD "").trimAscii.toString.toLower
+        if hex.length == 64 then pure (some hex) else pure none
+      else pure none
+    else pure none
+  let finalHex? ← match computed? with
+    | some hex => pure (some hex)
+    | none => do
+      if let some md := md? then
+        if md.byteSize ≤ 32 * 1024 * 1024 then
+          if let .ok bytes ← IO.FS.readBinFile fp |>.toBaseIO then
+            pure (some (bytesToHexLower (sha256Bytes bytes)))
+          else pure none
+        else pure none
+      else pure none
+  if let (some md, some hex) := (md?, finalHex?) then
+    binaryShaCache.atomically do
+      modify (·.insert key (md.byteSize, md.modified, hex))
+  return finalHex?
 
 private def firstExistingBinarySha256? (paths : Array String) : IO (Option String) := do
   for p in paths do

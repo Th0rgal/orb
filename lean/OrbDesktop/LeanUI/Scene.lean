@@ -10,13 +10,21 @@ namespace LeanUI
 /-- Semantic widget identity alias (`EntityId`). -/
 abbrev WidgetId := EntityId
 
+/-- Caret overlay drawn inside a `WidgetPayload.text` when `focusState.owner == some owner`. -/
+structure TextCaretSpec where
+  owner : WidgetId
+  pos : Nat
+  length : Nat
+  color : Color
+  deriving DecidableEq, Repr, Inhabited
+
 /-- Visual payload carried by a declarative `WidgetNode`. -/
 inductive WidgetPayload where
   | container
   | rrect (fill : Color) (radii : CornerRadii) (border : BorderStyle)
   | shadow (shadow : ShadowStyle) (radius : SubPx)
   | linearGradient (c0 c1 : Color) (angleDeg : Nat) (radius : SubPx)
-  | text (lineHeightSub : SubPx) (runs : List InlineRun)
+  | text (lineHeightSub : SubPx) (runs : List InlineRun) (caret : Option TextCaretSpec := none)
   | iconMask (page : Nat) (src : Rect) (color : Color) (badgeBg : Option Color := none)
   /-- Round-capped polylines in a 16px view box, coordinates in tenths of a pixel.
   `strokeTenths` is the stroke radius in tenths of a view unit (55 → the historical
@@ -30,7 +38,7 @@ inductive WidgetPayload where
   | scrollClip (scroll : ScrollSpec)
   | roundedClip (radii : CornerRadii)
   | opacityLayer (opacity : Nat)
-  deriving Repr, Inhabited
+  deriving Repr, Inhabited, BEq
 
 /-- High-level declarative UI widget / scene node. -/
 inductive WidgetNode where
@@ -41,7 +49,7 @@ inductive WidgetNode where
     (style : BoxStyle)
     (payload : WidgetPayload)
     (children : List WidgetNode)
-  deriving Repr, Inhabited
+  deriving Repr, Inhabited, BEq
 
 /-- Alias for `WidgetNode` when used as a declarative scene graph node. -/
 abbrev SceneNode := WidgetNode
@@ -89,8 +97,8 @@ namespace WidgetNode
 
 /-- Declarative inline text run widget builder. -/
 @[inline] def text (style : BoxStyle) (lineHeightSub : SubPx) (runs : List InlineRun)
-    (id : Option WidgetId := none) : WidgetNode :=
-  .mk id false id.isSome style (.text lineHeightSub runs) []
+    (id : Option WidgetId := none) (caret : Option TextCaretSpec := none) : WidgetNode :=
+  .mk id false id.isSome style (.text lineHeightSub runs caret) []
 
 /-- Declarative coverage-mask icon / vector glyph widget builder. -/
 @[inline] def icon (style : BoxStyle) (page : Nat) (src : Rect) (color : Color)
@@ -130,7 +138,7 @@ def downChevronPaths : List (List (Int × Int)) := [[(50,65),(80,95),(110,65)]]
 def toLayoutNode : WidgetNode → LayoutNode
   | .mk id _ _ style payload children =>
     match payload with
-    | .text lineHeightSub runs =>
+    | .text lineHeightSub runs _ =>
       .text id style lineHeightSub runs
     | .scrollClip sc =>
       let childLayout := match children with
@@ -201,11 +209,45 @@ where
             { x := gxSub, y := originYSub + Int.ofNat pg.relY + pg.glyph.yOffset,
               w := Int.ofNat (max 1 pg.glyph.xAdvance),
               h := Int.ofNat (max 1 subPerPx) }
-      (if gw > 0 && gh > 0 then [Prim.glyph pg.glyph.atlasSrc dst pg.color pg.glyph.isColor] else []) ++
+      (if gw > 0 && gh > 0 then [Prim.glyph pg.glyph.atlasSrc dst pg.color pg.glyph.isColor pg.glyph.atlasPage] else []) ++
         emitLineGlyphs scale120 originXSub originYSub lineHSub pgs
 
+/-- Emit a crisp vertical caret bar at the logical scalar insertion point when `owner` is focused. -/
+def emitTextCaret (scale120 : Nat) (focusState : FocusState) (box : ComputedBox)
+    (lineH : SubPx) : Option TextCaretSpec → List Prim
+  | none => []
+  | some c =>
+    if focusState.owner != some c.owner then []
+    else
+      let barW : Int := Int.ofNat (max 1 (scaleSubPx scale120 (pxToSub 1 + pxToSub 1 / 2)))
+      if c.length == 0 then
+        let r : Rect := {
+          x := roundDev scale120 box.contentRectSub.x,
+          y := roundDev scale120 (box.contentRectSub.y + pxToSub 1),
+          w := barW,
+          h := Int.ofNat (max 1 (scaleSubPx scale120 (lineH - pxToSub 2)))
+        }
+        [Prim.quad r c.color 0 0 0]
+      else
+        let rows := editorRows box.lines c.length
+        let row := rows[editorRowIndex rows c.pos]?.getD
+          { start := 0, stops := [(0, 0)], top := 0, height := lineH }
+        let relX : SubPx :=
+          match row.stops.find? (fun p => p.1 >= c.pos) with
+          | some (_, x) => x
+          | none => match row.stops.getLast? with
+            | some (_, x) => x
+            | none => 0
+        let r : Rect := {
+          x := roundDev scale120 (box.contentRectSub.x + Int.ofNat relX),
+          y := roundDev scale120 (box.contentRectSub.y + Int.ofNat row.top + pxToSub 1),
+          w := barW,
+          h := Int.ofNat (max 1 (scaleSubPx scale120 (row.height - pxToSub 2)))
+        }
+        [Prim.quad r c.color 0 0 0]
+
 /-- Emit payload-specific primitives for a single laid-out node. -/
-def emitPayloadPrims (scale120 : Nat) (box : ComputedBox) : WidgetPayload → List Prim
+def emitPayloadPrims (scale120 : Nat) (focusState : FocusState) (box : ComputedBox) : WidgetPayload → List Prim
   | .container => []
   | .rrect fill radii border =>
     let radiiPx := radii.toDevTuple scale120
@@ -221,8 +263,9 @@ def emitPayloadPrims (scale120 : Nat) (box : ComputedBox) : WidgetPayload → Li
     [.shadow shRect sh.color (scaleSubPx scale120 radius) (scaleSubPx scale120 sh.blur)]
   | .linearGradient c0 c1 angleDeg radius =>
     [.linear box.rectDev c0 c1 angleDeg (scaleSubPx scale120 radius)]
-  | .text _ _ =>
-    emitWrappedLineGlyphs scale120 box.contentRectSub.x box.contentRectSub.y box.lines
+  | .text lineH _ caret =>
+    emitWrappedLineGlyphs scale120 box.contentRectSub.x box.contentRectSub.y box.lines ++
+      emitTextCaret scale120 focusState box lineH caret
   | .iconMask page src color none =>
     [.mask page src box.contentRectDev color]
   | .iconMask page src color (some bg) =>
@@ -289,10 +332,27 @@ structure SceneOutput where
   nodeRecords : Array SceneNodeRecord := #[]
   deriving Repr, Inhabited
 
+/-- Whether a widget node paints a visible focus ring: bordered text inputs step their 1px border
+whenever focused, borderless text inputs (e.g. search bar `701`) rely on their vertical caret, and
+non-text controls paint `focusRing` only on keyboard `:focus-visible`. -/
+def nodeShowsFocusRing (id : Option WidgetId) (style : BoxStyle) (payload : WidgetPayload)
+    (focusState : FocusState) (focusVisible : Bool) : Bool :=
+  let isFocused := match id, focusState.owner with
+    | some wid, some owner => wid == owner
+    | _, _ => false
+  let isTextInput := match id with
+    | some wid => isTextInputEntity wid
+    | none => false
+  let hasVisibleBorder : Bool :=
+    match payload with
+    | .rrect _ _ border => border.isVisible
+    | _ => style.border.isVisible
+  isFocused && (if isTextInput then hasVisibleBorder else focusVisible)
+
 /-- Fingerprint paint-affecting node content without including child nodes, which are tracked by
 separate records. -/
-def nodeFingerprint (node : WidgetNode) (box : ComputedBox) : UInt64 :=
-  hash s!"{repr node.styleOf}|{repr node.payloadOf}|{repr box.rectDev}|{repr box.lines}|{repr box.focusedBorderPrim}"
+def nodeFingerprint (node : WidgetNode) (box : ComputedBox) (showFocusRing : Bool := false) : UInt64 :=
+  hash s!"{repr node.styleOf}|{repr node.payloadOf}|{repr box.rectDev}|{repr box.lines}|{repr box.focusedBorderPrim}|{showFocusRing}"
 
 /-- Expand a node's layout damage enough to cover local shadows, focus rings, and decorative
 branches. This is deliberately conservative: under-invalidation leaves stale pixels, while a
@@ -302,24 +362,28 @@ def effectBounds (r : Rect) : Rect :=
 
 /-- Collect explicitly identified nodes in document order. Anonymous nodes remain covered by the
 existing conservative root damage path. -/
-def collectNodeRecords : WidgetNode → ComputedBox → Array SceneNodeRecord
+def collectNodeRecords (focusState : FocusState := {}) (focusVisible : Bool := true) :
+    WidgetNode → ComputedBox → Array SceneNodeRecord
   | node, box =>
     match node with
-    | .mk id _ _ _ _ children =>
+    | .mk id _ _ style payload children =>
       let self := match id with
         | none => #[]
         | some wid =>
+          let showRing := nodeShowsFocusRing id style payload focusState focusVisible
           let record : SceneNodeRecord :=
             { id := wid
               effectBoundsDev := effectBounds box.damageRectDev
-              fingerprint := nodeFingerprint node box }
+              fingerprint := nodeFingerprint node box showRing }
           #[record]
-      self ++ collectChildren children box.children
+      self ++ collectChildren focusState focusVisible children box.children
 where
-  collectChildren : List WidgetNode → List ComputedBox → Array SceneNodeRecord
+  collectChildren (focusState : FocusState) (focusVisible : Bool) :
+      List WidgetNode → List ComputedBox → Array SceneNodeRecord
     | [], _ => #[]
     | _, [] => #[]
-    | n :: ns, b :: bs => collectNodeRecords n b ++ collectChildren ns bs
+    | n :: ns, b :: bs =>
+      collectNodeRecords focusState focusVisible n b ++ collectChildren focusState focusVisible ns bs
 
 private def findNodeRecord (records : Array SceneNodeRecord) (id : WidgetId) : Option SceneNodeRecord :=
   records.find? (·.id == id)
@@ -343,9 +407,114 @@ def diffSceneNodes (before after : Array SceneNodeRecord) : SceneDiff :=
 @[inline] def SceneOutput.diff (before after : SceneOutput) : SceneDiff :=
   diffSceneNodes before.nodeRecords after.nodeRecords
 
+/-- Shared pure geometry for a vertical overlay scrollbar in logical `SubPx` coordinates.
+Used as the single source of truth by both `scrollbarPrims` painting and pointer hit-testing/drag math. -/
+structure ScrollbarGeometry where
+  /-- Right-edge pointer hit gutter (`12px` wide, clamped to viewport width) over full viewport height. -/
+  trackRectSub : Rect
+  /-- Painted `6px` overlay thumb rectangle in logical `SubPx`. -/
+  thumbRectSub : Rect
+  /-- Pointer hit rectangle for the thumb (full hit gutter width, thumb vertical span). -/
+  thumbHitRectSub : Rect
+  /-- Top Y of the thumb travel track (`bounds.y + padY`) in logical `SubPx`. -/
+  trackTopSub : Int
+  /-- Maximum vertical thumb travel (`usableH - thumbH`) in logical `SubPx`. -/
+  travelSub : Int
+  /-- Vertical scroll limit (`limitY`) in logical `SubPx`. -/
+  limitY : SubPx
+  deriving DecidableEq, Repr, Inhabited
+
+/-- Compute vertical overlay scrollbar geometry in logical `SubPx` from container `boundsSub`,
+vertical scroll limit `limitY`, and current `offsetY`. Returns `none` when non-scrollable (`limitY == 0`). -/
+def scrollbarGeometry (boundsSub : Rect) (limitY offsetY : SubPx) : Option ScrollbarGeometry :=
+  if limitY == 0 || boundsSub.w ≤ 0 || boundsSub.h ≤ 0 then none
+  else
+    let viewH := boundsSub.h
+    let limitInt : Int := Int.ofNat limitY
+    let contentH := viewH + limitInt
+    let offInt : Int := min (Int.ofNat offsetY) limitInt
+    let padY : Int := Int.ofNat (pxToSub 4)
+    let minThumb : Int := Int.ofNat (pxToSub 28)
+    let usableH : Int := max 1 (viewH - 2 * padY)
+    let thumbH : Int := min usableH (max minThumb ((usableH * viewH) / max 1 contentH))
+    let travel : Int := max 0 (usableH - thumbH)
+    let trackTop : Int := boundsSub.y + padY
+    let thumbY : Int := trackTop + (offInt * travel) / limitInt
+    let thumbW : Int := Int.ofNat (pxToSub 6)
+    let rightInset : Int := Int.ofNat (pxToSub 3)
+    let thumbX : Int := boundsSub.right - thumbW - rightInset
+    let gutterW : Int := min boundsSub.w (Int.ofNat (pxToSub 12))
+    let trackRectSub : Rect :=
+      { x := boundsSub.right - gutterW, y := boundsSub.y, w := gutterW, h := boundsSub.h }
+    let thumbRectSub : Rect :=
+      { x := thumbX, y := thumbY, w := thumbW, h := thumbH }
+    let thumbHitRectSub : Rect :=
+      { x := trackRectSub.x, y := thumbY, w := trackRectSub.w, h := thumbH }
+    some { trackRectSub, thumbRectSub, thumbHitRectSub, trackTopSub := trackTop, travelSub := travel, limitY }
+
+namespace ScrollbarGeometry
+
+/-- Compute clamped vertical scroll offset (`[0, limitY]`) for a desired thumb top coordinate. -/
+def offsetForThumbTop (g : ScrollbarGeometry) (desiredThumbTopSub : Int) : SubPx :=
+  if g.limitY == 0 || g.travelSub ≤ 0 then 0
+  else
+    let clampedPos := max 0 (min g.travelSub (desiredThumbTopSub - g.trackTopSub))
+    let num := clampedPos * Int.ofNat g.limitY + g.travelSub / 2
+    min g.limitY (num / g.travelSub).toNat
+
+/-- Compute thumb top Y coordinate in `SubPx` corresponding to a given `offsetY`. -/
+def thumbTopForOffset (g : ScrollbarGeometry) (offsetY : SubPx) : Int :=
+  if g.limitY == 0 then g.trackTopSub
+  else
+    let offInt : Int := min (Int.ofNat offsetY) (Int.ofNat g.limitY)
+    g.trackTopSub + (offInt * g.travelSub) / Int.ofNat g.limitY
+
+/-- Compute `(targetOffsetY, grabOffsetSub)` for a pointer press at `(px, py)` inside `g.trackRectSub`:
+- On the thumb: keeps `currentOffsetY` (clamped) and anchors `grabOffsetSub = py - thumbY`.
+- On the track above/below the thumb: jumps thumb center to `py` (clamped to `[0, limitY]`)
+  and anchors `grabOffsetSub` at the jumped thumb top so holding and dragging works seamlessly. -/
+def pointerPress (g : ScrollbarGeometry) (currentOffsetY : SubPx) (px py : Int) : SubPx × Int :=
+  if g.thumbHitRectSub.contains px py then
+    (min g.limitY currentOffsetY, py - g.thumbRectSub.y)
+  else
+    let desiredTop := py - g.thumbRectSub.h / 2
+    let nextOff := g.offsetForThumbTop desiredTop
+    let jumpedTop := g.thumbTopForOffset nextOff
+    (nextOff, py - jumpedTop)
+
+end ScrollbarGeometry
+
+/-- Device-pixel distance a node may paint above or below its layout box: shadows (offset,
+spread and blur support), plus a scale-aware allowance for focus rings, glyph overhang and
+tree rails, which all stay within a few logical pixels of the box. -/
+def nodeInkOverhangY (scale120 : Nat) (style : BoxStyle) (payload : WidgetPayload) : Int :=
+  let shadowExt (sh : ShadowStyle) : Int :=
+    (if sh.offsetY < 0 then -sh.offsetY else sh.offsetY) + max 0 sh.spread + 2 * (sh.blur : Int)
+  let sub : Int :=
+    (if style.shadow.isVisible then shadowExt style.shadow else 0) +
+    (match payload with | .shadow sh _ => shadowExt sh | _ => 0)
+  Int.ofNat (scaleSubPx scale120 (pxToSub 48)) + (roundDev scale120 sub)
+
+/-- True when neither `box` nor any descendant can paint or hit-test inside the vertical span
+of `clipDev`: every prim they emit would be scissored away by an ancestor clip. -/
+partial def subtreeOutsideClipY (scale120 : Nat) (clipDev : Rect) : WidgetNode → ComputedBox → Bool
+  | .mk _ _ _ style payload children, box =>
+    let m := nodeInkOverhangY scale120 style payload
+    let r := box.rectDev
+    (r.y + r.h + m ≤ clipDev.y || r.y - m ≥ clipDev.y + clipDev.h) &&
+      (children.zip box.children).all fun (w, b) => subtreeOutsideClipY scale120 clipDev w b
+
+/-- Tab order of a subtree, identical to what lowering it would produce. -/
+partial def subtreeFocusOrder (focusState : FocusState) : WidgetNode → ComputedBox → List WidgetId
+  | .mk id focusable _ _ _ children, box =>
+    let self := match id with
+      | some wid => if focusable && focusState.admits wid then [wid] else []
+      | none => []
+    self ++ (children.zip box.children).flatMap fun (w, b) => subtreeFocusOrder focusState w b
+
 /-- Lower a widget node and its paired `ComputedBox` into balanced `Prim` list, focusable tab order, and hit regions. -/
 def lowerWidgetPair (scale120 : Nat) (focusState : FocusState) (theme : Theme)
-    (clipSub : Option Rect) (clipDev : Option Rect) :
+    (clipSub : Option Rect) (clipDev : Option Rect) (focusVisible : Bool := true) :
     WidgetNode → ComputedBox →
     List Prim × List WidgetId × List (WidgetId × Rect) × List (WidgetId × Rect)
   | .mk id focusable hitTestable style payload children, box =>
@@ -383,12 +552,14 @@ def lowerWidgetPair (scale120 : Nat) (focusState : FocusState) (theme : Theme)
     let clipPopPrims : List Prim :=
       if needsRoundedClip || needsRectClip then [.clipPop] else []
     let selfBoxPrims := emitBoxStylePrims scale120 box.rectDev style
-    let selfPayloadPrims := emitPayloadPrims scale120 box payload
+    let selfPayloadPrims := emitPayloadPrims scale120 focusState box payload
     let (childPrims, childFocusOrder, childHitsSub, childHitsDev) :=
-      lowerWidgetChildren scale120 focusState theme nextClipSub nextClipDev children box.children
-    let isFocused := match id, focusState.owner with
-      | some wid, some owner => wid == owner
-      | _, _ => false
+      lowerWidgetChildren scale120 focusState theme nextClipSub nextClipDev focusVisible children box.children
+    -- Cursor-style quiet focus (`AGENTS.md`): buttons/pills/dropdowns/tabs show `focusRing`
+    -- only on keyboard `:focus-visible`; bordered text inputs step their 1px border while
+    -- borderless text inputs (e.g. search bar `701`) rely on their vertical text caret.
+    let showFocusRing : Bool :=
+      nodeShowsFocusRing id style payload focusState focusVisible
     let focusRadius : SubPx :=
       match payload with
       | .rrect _ radii _ => radii.topLeft
@@ -396,8 +567,8 @@ def lowerWidgetPair (scale120 : Nat) (focusState : FocusState) (theme : Theme)
       | _ => style.radii.topLeft
     -- `Kernel.focusBorder`, following the corner radius of the widget it outlines.
     let focusPrim : List Prim :=
-      if focusable || isFocused then
-        [match focusBorder isFocused box.rectDev theme.palette.focusRing with
+      if focusable || showFocusRing then
+        [match focusBorder showFocusRing box.rectDev theme.palette.focusRing with
           | .quad r fill _ bw col => .quad r fill (scaleSubPx scale120 focusRadius) bw col
           | p => p]
       else []
@@ -425,6 +596,19 @@ def lowerWidgetPair (scale120 : Nat) (focusState : FocusState) (theme : Theme)
           if hitR.isEmpty then [] else [(wid, hitR)]
         else []
       | none => []
+    let scrollbarPrims : List Prim :=
+      match payload, box.scrollLimitXY with
+      | .scrollClip sc, some (_, limitY) =>
+        if !sc.showScrollbar then [] else
+        match scrollbarGeometry box.contentRectSub limitY (box.scrollOffset.getD (0, 0)).2 with
+        | none => []
+        | some geom =>
+          let thumbDev := roundRect scale120 geom.thumbRectSub
+          let alpha : Nat := (if theme.isDark then 0x38 else 0x30) * min 255 sc.scrollbarOpacity / 255
+          let thumbCol : Color := (if theme.isDark then 0xFFFFFF00 else 0x00000000) ||| alpha.toUInt32
+          if alpha == 0 then [] else
+          [Prim.quad thumbDev thumbCol (scaleSubPx scale120 (pxToSub 3)) 0 0]
+      | _, _ => []
     let allPrims :=
       layerPushPrims ++
         selfBoxPrims ++
@@ -432,6 +616,7 @@ def lowerWidgetPair (scale120 : Nat) (focusState : FocusState) (theme : Theme)
         (match payload with
          | .iconMask _ _ _ (some _) => childPrims ++ selfPayloadPrims
          | _ => selfPayloadPrims ++ childPrims) ++
+        scrollbarPrims ++
         clipPopPrims ++
         focusPrim ++
         layerPopPrims
@@ -441,36 +626,45 @@ def lowerWidgetPair (scale120 : Nat) (focusState : FocusState) (theme : Theme)
      selfHitDev ++ childHitsDev)
 where
   lowerWidgetChildren (scale120 : Nat) (focusState : FocusState) (theme : Theme)
-      (clipSub : Option Rect) (clipDev : Option Rect) :
+      (clipSub : Option Rect) (clipDev : Option Rect) (focusVisible : Bool) :
       List WidgetNode → List ComputedBox →
       List Prim × List WidgetId × List (WidgetId × Rect) × List (WidgetId × Rect)
     | [], _ => ([], [], [], [])
     | _, [] => ([], [], [], [])
     | w :: ws, b :: bs =>
-      let (p1, f1, hs1, hd1) := lowerWidgetPair scale120 focusState theme clipSub clipDev w b
-      let (p2, f2, hs2, hd2) := lowerWidgetChildren scale120 focusState theme clipSub clipDev ws bs
+      -- Rows scrolled out of a clipped viewport emit nothing visible and no hit regions:
+      -- skip lowering them (keeping their tab order) instead of emitting prims to scissor away.
+      let culled := match clipDev with
+        | some c => subtreeOutsideClipY scale120 c w b
+        | none => false
+      let (p1, f1, hs1, hd1) :=
+        if culled then ([], subtreeFocusOrder focusState w b, [], [])
+        else lowerWidgetPair scale120 focusState theme clipSub clipDev focusVisible w b
+      let (p2, f2, hs2, hd2) := lowerWidgetChildren scale120 focusState theme clipSub clipDev focusVisible ws bs
       (p1 ++ p2, f1 ++ f2, hs1 ++ hs2, hd1 ++ hd2)
 
 /-- Lower a laid-out widget tree (`WidgetNode` + `ComputedBox`) into a `SceneOutput`. -/
 def buildSceneFromLayout (scale120 : Nat) (focusState : FocusState) (theme : Theme)
-    (rootWidget : WidgetNode) (rootBox : ComputedBox) (recordNodes := true) : SceneOutput :=
+    (rootWidget : WidgetNode) (rootBox : ComputedBox) (recordNodes := true)
+    (focusVisible : Bool := true) : SceneOutput :=
   let (primsList, focusOrder, hitsSub, hitsDev) :=
-    lowerWidgetPair scale120 focusState theme none none rootWidget rootBox
+    lowerWidgetPair scale120 focusState theme none none focusVisible rootWidget rootBox
   let dmg := Damage.add none rootBox.damageRectDev
   { prims := primsList.toArray,
     focusableOrder := focusOrder,
     hitRegionsSub := hitsSub,
     hitRegionsDev := hitsDev,
     boundsDamage := dmg,
-    nodeRecords := if recordNodes then collectNodeRecords rootWidget rootBox else #[] }
+    nodeRecords := if recordNodes then collectNodeRecords focusState focusVisible rootWidget rootBox else #[] }
 
 /-- Perform layout and scene lowering in one pure pass from a declarative `WidgetNode` root. -/
 def renderWidgetTree (scale120 : Nat) (availW availH : SubPx)
-    (focusState : FocusState) (theme : Theme) (rootWidget : WidgetNode) :
+    (focusState : FocusState) (theme : Theme) (rootWidget : WidgetNode)
+    (focusVisible : Bool := true) :
     ComputedBox × SceneOutput :=
   let layoutRoot := rootWidget.toLayoutNode
   let rootBox := layoutNode scale120 focusState.owner theme.palette.focusRing 0 0 availW availH layoutRoot
-  let sceneOut := buildSceneFromLayout scale120 focusState theme rootWidget rootBox
+  let sceneOut := buildSceneFromLayout scale120 focusState theme rootWidget rootBox (focusVisible := focusVisible)
   (rootBox, sceneOut)
 
 /-- Hit-test a `SceneOutput` at `(x, y)` (in logical `SubPx` coordinates) using `Kernel.hitTest`. -/

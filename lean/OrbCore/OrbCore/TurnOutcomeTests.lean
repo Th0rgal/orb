@@ -896,6 +896,83 @@ private def verifyAdminDirectAntigravityStaticTarget (root : String) : IO Unit :
         store workRoot "ashur" "u-admin" "u-admin" none .unrestricted false staticNodes
       check (denyVpn == none) "VPN-routed admin account never bypasses VPN"
 
+      -- 5b. Multiple Direct Antigravity accounts follow provider sort_order (Ben ahead of Thomas)
+      --     and fall back automatically when the top-priority account is at 100% quota exhaustion.
+      execute "UPDATE account_vpn_routes SET country='', generation=3 WHERE account_id='ag-admin';"
+      IO.ofExcept (← upsertAIProvider store {
+        id := "ag-ben", name := "Antigravity (Ben)", providerType := "antigravity",
+        apiKey := "cli-proxy-managed", enabled := true
+      })
+      IO.FS.writeFile s!"{authDir}/antigravity-ben.json" (renderCompact (.obj #[
+        ("type", .str "antigravity"), ("prefix", .str "ag-ben"),
+        ("access_token", .str "tok-ben"), ("refresh_token", .str "ref-ben"),
+        ("email", .str "ben@example.test"), ("disabled", .bool false)
+      ]))
+      IO.ofExcept (← OrbCore.AccountVpnRoutes.set db "ag-ben" none)
+      execute "UPDATE ai_providers SET sort_order=0 WHERE id='ag-ben';"
+      execute "UPDATE ai_providers SET sort_order=1 WHERE id='ag-admin';"
+      IO.FS.writeFile s!"{workRoot}/.sandboxed-sh/provider_order.json"
+        "{\"ag-ben\":0,\"ag-admin\":1}"
+      let preferBen ← OrbCore.RemoteDispatch.adminDirectAntigravityStaticTarget?
+        store workRoot "ashur" "u-admin" "u-admin" none .unrestricted false staticNodes none 1000
+      check (preferBen == some "antigravity-ben.json")
+        s!"expected priority-0 account antigravity-ben.json, got {reprStr preferBen}"
+      IO.FS.writeFile s!"{authDir}/antigravity-ben.json" (renderCompact (.obj #[
+        ("type", .str "antigravity"), ("prefix", .str "ag-ben"),
+        ("access_token", .str "tok-ben"), ("refresh_token", .str "ref-ben"),
+        ("email", .str "ben@example.test"), ("disabled", .bool false),
+        ("sandboxed_gemini_windows", .arr #[.obj #[("used_percent", .num "100.0"), ("reset_at", .num "2000")]])
+      ]))
+      let fallbackAdmin ← OrbCore.RemoteDispatch.adminDirectAntigravityStaticTarget?
+        store workRoot "ashur" "u-admin" "u-admin" none .unrestricted false staticNodes none 1000
+      check (fallbackAdmin == some "antigravity-admin.json")
+        s!"expected fallback to antigravity-admin.json when priority-0 is at 100%, got {reprStr fallbackAdmin}"
+
+      -- 5c. Cross-harness migration (`session_id = NULL` on a mission with prior assistant turns)
+      --     carries over mission board + recent conversation history without altering brand-new missions.
+      execute "INSERT INTO missions(id,status,title,backend,created_at,updated_at) VALUES('m-handoff','awaiting_user','Pareto','antigravity','2026-11-26T00:00:00Z','2026-11-26T00:00:00Z');"
+      let freshOnly ← OrbCore.RemoteDispatch.buildFreshSessionTranscriptHandoff store "m-handoff" "Initial prompt."
+      check (freshOnly == "Initial prompt.") "brand-new mission prompt is unchanged"
+      discard <| appendMissionEvent store "m-handoff" "user_message" "{\"content\":\"Prove B0 backing.\"}" "2026-11-26T00:01:00Z"
+      discard <| appendMissionEvent store "m-handoff" "assistant_message" "{\"content\":\"Tick 38 complete on integ2.\"}" "2026-11-26T00:02:00Z"
+      discard <| appendMissionEvent store "m-handoff" "user_message" "{\"content\":\"Continue on Gemini 4 Neon.\"}" "2026-11-26T00:03:00Z"
+      let handedOff ← OrbCore.RemoteDispatch.buildFreshSessionTranscriptHandoff store "m-handoff" "Continue on Gemini 4 Neon."
+      check ((handedOff.splitOn "Tick 38 complete on integ2.").length > 1 &&
+             (handedOff.splitOn "Prove B0 backing.").length > 1 &&
+             handedOff.endsWith "Continue on Gemini 4 Neon." &&
+             handedOff.utf8ByteSize ≤ 14000)
+        "migrated fresh session carries prior user/assistant turns into new harness prompt within 16 KiB limit"
+
+      -- 5d. Flapping `observeNodeApi` incidents without intervening mission events do not append
+      --     duplicate consecutive `hung_node` error rows; after new turn progress, a later hang does.
+      execute "CREATE TABLE IF NOT EXISTS remote_node_jobs (job_id TEXT PRIMARY KEY, mission_id TEXT NOT NULL DEFAULT '', node_id TEXT NOT NULL DEFAULT '', state TEXT NOT NULL DEFAULT 'queued', payload_json TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL DEFAULT '');"
+      execute "INSERT INTO remote_node_jobs(job_id,mission_id,node_id,state,created_at,updated_at) VALUES('j-flap','m-handoff','ashur','running','2026-11-26T00:00:00Z','2026-11-26T00:00:00Z');"
+      OrbCore.RemoteFleetAndRelay.observeNodeApi store "ashur" "offline" "2026-11-26T01:00:00Z" (pure true)
+      OrbCore.RemoteFleetAndRelay.observeNodeApi store "ashur" "offline" "2026-11-26T01:00:30Z" (pure true)
+      OrbCore.RemoteFleetAndRelay.observeNodeApi store "ashur" "online"  "2026-11-26T01:01:00Z" (pure true)
+      OrbCore.RemoteFleetAndRelay.observeNodeApi store "ashur" "offline" "2026-11-26T01:02:00Z" (pure true)
+      OrbCore.RemoteFleetAndRelay.observeNodeApi store "ashur" "offline" "2026-11-26T01:02:30Z" (pure true)
+      let .ok flapRows ← execParamQuery db "SELECT COUNT(*) FROM mission_events WHERE mission_id='m-handoff' AND event_type='error';" #[]
+        | throw (IO.userError "flapRows query failed")
+      check ((flapRows[1]?.bind (·[0]?)).getD "" == "1")
+        s!"expected 1 hung_node error across flapping incidents without progress, got {reprStr flapRows}"
+      let .ok pgWhileHung ← queryMissionEventsPage store "m-handoff" none none 50 #["error"] none none
+        | throw (IO.userError "pgWhileHung failed")
+      check ((pgWhileHung.eventsJson.splitOn "answers ping").length == 2)
+        s!"expected active hang to surface in queryMissionEventsPage, got {pgWhileHung.eventsJson}"
+      discard <| appendMissionEvent store "m-handoff" "tool_result" "{\"id\":\"t1\",\"done\":true}" "2026-11-26T01:03:00Z"
+      OrbCore.RemoteFleetAndRelay.observeNodeApi store "ashur" "online"  "2026-11-26T01:03:10Z" (pure true)
+      let .ok pgAfterOnline ← queryMissionEventsPage store "m-handoff" none none 50 #["error"] none none
+        | throw (IO.userError "pgAfterOnline failed")
+      check (pgAfterOnline.eventsJson == "[]")
+        s!"expected resolved hang to be omitted from queryMissionEventsPage once node recovers, got {pgAfterOnline.eventsJson}"
+      OrbCore.RemoteFleetAndRelay.observeNodeApi store "ashur" "offline" "2026-11-26T01:04:00Z" (pure true)
+      OrbCore.RemoteFleetAndRelay.observeNodeApi store "ashur" "offline" "2026-11-26T01:04:30Z" (pure true)
+      let .ok flapRows2 ← execParamQuery db "SELECT COUNT(*) FROM mission_events WHERE mission_id='m-handoff' AND event_type='error';" #[]
+        | throw (IO.userError "flapRows2 query failed")
+      check ((flapRows2[1]?.bind (·[0]?)).getD "" == "2")
+        s!"expected 2nd hung_node error after intervening tool progress, got {reprStr flapRows2}"
+
       -- 6. Cloud owner alias (`HERMES_CLOUD_OWNER="prod"`) binds uniquely to bootstrapAdminId
       --    even when active members exist, while strictly denying members and non-bootstrap users.
       let hermesAdminOk ← OrbCore.CloudHttpAndWorker.matchesCloudOwner
@@ -908,6 +985,39 @@ private def verifyAdminDirectAntigravityStaticTarget (root : String) : IO Unit :
         store "prod" "u-admin-2" "admin2" "u-admin" true false
       check (hermesAdminOk && !hermesMemberDeny && !hermesMemberProdNameDeny && !hermesOtherAdmDeny)
         "HERMES_CLOUD_OWNER=prod binds uniquely to bootstrapAdminId in multi-user mode"
+      let nowSec ← nowEpoch
+      OrbCore.Proxy.recordNativeHarnessUsage store nowSec "antigravity" "gemini-4-neon" "m-agy-res" "" "gemini-4-neon" 12000 3500 8000
+      OrbCore.Proxy.recordNativeHarnessUsage store nowSec "antigravity" "gemini-4-neon" "m-agy-zero" "" "gemini-4-neon" 0 0 0
+      let .ok agRows ← execParamQuery store.missionsDb
+        "SELECT provider, model, input_tokens, output_tokens, cache_read_tokens, account_id FROM proxy_usage WHERE mission_id='m-agy-res';" #[]
+        | throw (IO.userError "proxy_usage query failed")
+      check (agRows.size == 2 &&
+             (agRows[1]![0]?).getD "" == "antigravity" &&
+             (agRows[1]![1]?).getD "" == "gemini-4-neon" &&
+             (agRows[1]![2]?).getD "" == "12000" &&
+             (agRows[1]![3]?).getD "" == "3500" &&
+             (agRows[1]![4]?).getD "" == "8000" &&
+             (agRows[1]![5]?).getD "" == "native:antigravity")
+        s!"unexpected native antigravity proxy_usage row: {reprStr agRows}"
+      let .ok zRows ← execParamQuery store.missionsDb
+        "SELECT COUNT(*) FROM proxy_usage WHERE mission_id='m-agy-zero';" #[]
+        | throw (IO.userError "proxy_usage zero query failed")
+      check ((zRows[1]?.bind (·[0]?)).getD "" == "0") "zero-token native turn must not insert proxy_usage row"
+      -- Price-adjusted tokens: Antigravity (6x out, 0.1x cache_read): 12000 + 3500*6 + 8000*0.1 = 33800
+      -- Anthropic Claude (5x out, 0.1x cache_read, 1.25x cache_write): 1000 + 1000*5 + 10000*0.1 + 400*1.25 = 7500
+      -- OpenAI GPT-6 (8x out, 0.1x cache_read): 1000 + 1000*8 + 5000*0.1 = 9500
+      OrbCore.Proxy.recordProxyUsage store nowSec "claude-opus-5-5" "anthropic" "acct-c" "" "m-adj-claude" "mission"
+        { input := 1000, output := 1000, cacheCreate := 400, cacheRead := 10000 }
+      OrbCore.Proxy.recordProxyUsage store nowSec "gpt-6-astra" "openai" "acct-o" "" "m-adj-gpt6" "mission"
+        { input := 1000, output := 1000, cacheCreate := 0, cacheRead := 5000 }
+      let .ok adjRows ← execParamQuery store.missionsDb
+        s!"SELECT mission_id, SUM({OrbCore.ResourcesAndSystem.adjustedTokenSumSql}) FROM proxy_usage WHERE mission_id IN ('m-agy-res','m-adj-claude','m-adj-gpt6') GROUP BY 1 ORDER BY 1;" #[]
+        | throw (IO.userError "adjustedTokenSumSql query failed")
+      check (adjRows.size == 4 &&
+             (adjRows[1]![0]?).getD "" == "m-adj-claude" && (adjRows[1]![1]?).getD "" == "7500" &&
+             (adjRows[2]![0]?).getD "" == "m-adj-gpt6" && (adjRows[2]![1]?).getD "" == "9500" &&
+             (adjRows[3]![0]?).getD "" == "m-agy-res" && (adjRows[3]![1]?).getD "" == "33800")
+        s!"unexpected adjustedTokenSumSql results: {reprStr adjRows}"
     finally
       closeCoreStore store
   finally

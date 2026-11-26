@@ -118,6 +118,14 @@ def buildNewAgentBody (st : DesktopState) (mainW bodyH : SubPx) : WidgetNode :=
       , sendBtn
       ]
 
+  let newAgentCaretPos :=
+    if hasText then ComposerBuffer.clampCursor st.composer.text st.composer.cursorOffset + st.composer.imePreeditText.length
+    else 0
+  let newAgentCaretLen := if hasText then composedText.length else 0
+  let newAgentRun :=
+    let stRun : TextStyle := { Theme.bodyText theme with sizeSub := pxToSub 13, lineHeightSub := pxToSub 20, color := txtCol, weight := 400 }
+    let baseRun := overlaySynthRun stRun dispText
+    if hasText then { baseRun with editorStart := some 0 } else baseRun
   let tallComposer : WidgetNode :=
     WidgetNode.rrect
       (BoxStyle.col (pxToSub 6)
@@ -130,7 +138,9 @@ def buildNewAgentBody (st : DesktopState) (mainW bodyH : SubPx) : WidgetNode :=
           WidgetNode.box
             (BoxStyle.col 0 |>.withPadding (Edges.trbl (pxToSub 2) 0 0 (pxToSub 2))
               |>.withFixedSize (pxToSub 582) (pxToSub 48))
-            [screenTextLine theme (pxToSub 580) (pxToSub 20) (pxToSub 13) (pxToSub 20) txtCol dispText]
+            [WidgetNode.text (BoxStyle.row 0 |>.withFixedSize (pxToSub 580) (pxToSub 20)) (pxToSub 20)
+              [newAgentRun] none
+              (some { owner := 1, pos := newAgentCaretPos, length := newAgentCaretLen, color := pal.textPrimary })]
       , bottomRow
       ]
 
@@ -704,7 +714,8 @@ def buildMachinesFleetBody (st : DesktopState) (mainW bodyH : SubPx) : WidgetNod
 /-- Build one `.s-row` inside a Settings `.s-card`. -/
 def buildSettingsRow (theme : Theme) (rowW h : SubPx) (title desc rightLabel : String)
     (isButton : Bool := false) (isCode : Bool := false) (hasBottomBorder : Bool := false)
-    (isInput : Bool := false) (isSelect : Bool := false) (controlId : Option WidgetId := none) : WidgetNode :=
+    (isInput : Bool := false) (isSelect : Bool := false) (controlId : Option WidgetId := none)
+    (caret : Option TextCaretSpec := none) : WidgetNode :=
   let pal := theme.palette
   let bdr := theme.borderWidth
   let inputBg : Color := if theme.isDark then 0x202020FF else 0xFFFFFFFF
@@ -717,12 +728,15 @@ def buildSettingsRow (theme : Theme) (rowW h : SubPx) (title desc rightLabel : S
     | none => n
   let rightNode : WidgetNode :=
     if isInput then
+      let txtSt : TextStyle := { Theme.bodyText theme with sizeSub := pxToSub 12, lineHeightSub := pxToSub 16, color := pal.textPrimary, weight := 400 }
+      let baseRun := overlaySynthRun txtSt rightLabel
+      let run := if caret.isSome && !rightLabel.isEmpty then { baseRun with editorStart := some 0 } else baseRun
       wrapCtrl <| WidgetNode.rrect
         (BoxStyle.row 0 |>.withAlign .center |>.withPadding (Edges.xy (pxToSub 10) 0) |>.withFixedSize (pxToSub 260) (pxToSub 32))
         inputBg
         (CornerRadii.uniform (pxToSub 6))
         (BorderStyle.uniform bdr inputBdr)
-        [screenTextLine theme (pxToSub 240) (pxToSub 16) (pxToSub 12) (pxToSub 16) pal.textPrimary rightLabel]
+        [WidgetNode.text (BoxStyle.row 0 |>.withFixedSize (pxToSub 240) (pxToSub 16)) (pxToSub 16) [run] none caret]
     else if isSelect then
       wrapCtrl <| WidgetNode.rrect
         (BoxStyle.row 0 |>.withAlign .center |>.withPadding (Edges.xy (pxToSub 10) 0) |>.withFixedSize (pxToSub 80) (pxToSub 32))
@@ -911,12 +925,17 @@ def buildSettingsGeneralBody (st : DesktopState) (mainW bodyH : SubPx) : WidgetN
       (BoxStyle.row 0 |>.withPadding (Edges.trbl (pxToSub 26) (pxToSub 8) (pxToSub 8) (pxToSub 8)) |>.withFixedSize colW (pxToSub 51))
       [screenTextLine theme (pxToSub 584) (pxToSub 17) (pxToSub 12) (pxToSub 17) pal.textSecondary txt]
 
-  let apiUrlText := st.settingsApiUrl.text ++ st.settingsApiUrl.imePreeditText
+  let apiUrlText := st.settingsApiUrl.displayText
+  let apiUrlCaret : Option TextCaretSpec :=
+    some { owner := settingsApiUrlId
+           pos := ComposerBuffer.clampCursor st.settingsApiUrl.text st.settingsApiUrl.cursorOffset + st.settingsApiUrl.imePreeditText.length
+           length := apiUrlText.length
+           color := pal.textPrimary }
   let connectedDesc :=
     if st.settingsActionNote.isEmpty then "Signed in to http://127.0.0.1:14470."
     else "Status: " ++ st.settingsActionNote
   let backendCard := sCard (pxToSub 125)
-    [ buildSettingsRow theme rowW (pxToSub 63) "API URL" "Base URL of the Core backend." apiUrlText false false true true false (some settingsApiUrlId)
+    [ buildSettingsRow theme rowW (pxToSub 63) "API URL" "Base URL of the Core backend." apiUrlText false false true true false (some settingsApiUrlId) apiUrlCaret
     , buildSettingsRow theme rowW (pxToSub 62) "Connected" connectedDesc "Disconnect" true false false false false (some settingsDisconnectId)
     ]
 
@@ -973,7 +992,8 @@ def buildSearchModalOverlay (theme : Theme) (availW availH : SubPx)
     (projectFilter : String := "All projects")
     (timeFilter : String := "Any time")
     (sortOrder : String := "Relevance")
-    (useReferenceList : Bool := true) : WidgetNode :=
+    (useReferenceList : Bool := true)
+    (searchBuf : ComposerBuffer := {}) : WidgetNode :=
   let pal := theme.palette
   let bdr := theme.borderWidth
   let scrimCol : Color := if theme.isDark then 0x0000006B else 0x1E1E1C40
@@ -985,6 +1005,11 @@ def buildSearchModalOverlay (theme : Theme) (availW availH : SubPx)
   let innerW : SubPx := pxToSub 878
   let queryDisplay := if spec.query.isEmpty then spec.placeholder else spec.query
   let queryColor := if spec.query.isEmpty then pal.textMuted else pal.textStrong
+  let searchCaretPos :=
+    if spec.query.isEmpty then 0
+    else if searchBuf.displayText == spec.query then
+      ComposerBuffer.clampCursor searchBuf.text searchBuf.cursorOffset + searchBuf.imePreeditText.length
+    else spec.query.length
 
   let searchBar : WidgetNode :=
     WidgetNode.box
@@ -994,7 +1019,14 @@ def buildSearchModalOverlay (theme : Theme) (availW availH : SubPx)
         |>.withFixedSize innerW (pxToSub 46))
       [ chromeIcon "search" pal.textSecondary 16
       , WidgetNode.focusable spec.inputWidgetId <|
-          screenTextLine theme (pxToSub 748) (pxToSub 22) (pxToSub 15) (pxToSub 22) queryColor queryDisplay
+          let stRun : TextStyle := { Theme.bodyText theme with
+            sizeSub := pxToSub 15, lineHeightSub := pxToSub 22, color := queryColor, weight := 400 }
+          let baseRun := overlaySynthRun stRun queryDisplay
+          let run := if spec.query.isEmpty then baseRun else { baseRun with editorStart := some 0 }
+          WidgetNode.text
+            ({ BoxStyle.row 0 |>.withFixedSize (pxToSub 748) (pxToSub 22) with clip := true })
+            (pxToSub 22) [run] none
+            (some { owner := spec.inputWidgetId, pos := searchCaretPos, length := spec.query.length, color := pal.textPrimary })
       , WidgetNode.focusable searchClearId <|
           WidgetNode.box
             (BoxStyle.row 0 |>.withAlign .center |>.withJustify .center |>.withFixedSize (pxToSub 22) (pxToSub 22))
@@ -1268,14 +1300,22 @@ def buildDesktopScreen (st : DesktopState) (availW availH : SubPx)
         else []
       let editor := if create || st.cloudAllows "send" then
         let placeholder := if create then "Describe a task for your cloud agent" else "Send follow-up"
-        let runs := buildComposerInlineRuns theme { st.cloudDraft with placeholder }
+        let hasText := !st.cloudDraft.text.isEmpty || !st.cloudDraft.imePreeditText.isEmpty
+        let rawRuns := buildComposerInlineRuns theme { st.cloudDraft with placeholder }
+        let runs := if hasText then buildComposerEditorRuns rawRuns else rawRuns
         let innerW := w - pxToSub 32
         let editorH := max (pxToSub (if create then 74 else 50)) (min (pxToSub 150) ((wrapInlineRuns innerW (pxToSub 20) runs).2.2 + pxToSub 20))
-        let field := WidgetNode.rrect
+        let caretPos := ComposerBuffer.clampCursor st.cloudDraft.text st.cloudDraft.cursorOffset + st.cloudDraft.imePreeditText.length
+        let caretLen := st.cloudDraft.text.length + st.cloudDraft.imePreeditText.length
+        let caretSpec : Option TextCaretSpec :=
+          some { owner := 1, pos := caretPos, length := caretLen, color := pal.textPrimary }
+        let fieldBg := if hoverRow == some 1 then pal.plusBg else pal.elevatedSurface
+        let field := WidgetNode.focusable 1 <| WidgetNode.rrect
           (BoxStyle.col 0 |>.withPadding (Edges.xy (pxToSub 16) (pxToSub 10)) |>.withFixedSize w editorH)
-          pal.elevatedSurface (CornerRadii.uniform (pxToSub 12)) (BorderStyle.uniform theme.borderWidth pal.border)
-          [WidgetNode.text (BoxStyle.row 0 |>.withFixedSize innerW (editorH - pxToSub 20)) (pxToSub 20) runs]
-        [inventoryTarget theme hoverRow 1 w editorH field] ++
+          fieldBg (CornerRadii.uniform (pxToSub 12)) (BorderStyle.uniform theme.borderWidth pal.border)
+          [WidgetNode.text (BoxStyle.row 0 |>.withFixedSize innerW (editorH - pxToSub 20)) (pxToSub 20) runs none caretSpec]
+          (some 1)
+        [field] ++
           (if st.cloudDraft.text.trimAscii.isEmpty || !st.cloudDraft.imePreeditText.isEmpty then [] else [button 968 (w / 3) (if create then "Create cloud agent" else "Send")])
         else []
       let actions := picks ++ editor ++ (if st.cloudAllows "cancel" then [button 969 (w / 3) "Stop"] else [])
@@ -1435,16 +1475,24 @@ def buildDesktopScreen (st : DesktopState) (availW availH : SubPx)
            let v := currentSettings st ""
            let machine := ((st.launchMachines.getD []).lookup v.machine).getD <|
              ((st.fleetMachines.find? (·.machineId == v.machine)).map (·.name)).getD (if v.machine.isEmpty then "Choose machine" else v.machine)
-           let projectPicker := WidgetNode.focusable draftProjectPickerId <| WidgetNode.box (BoxStyle.row (pxToSub 4) |>.withAlign .center)
-             [chromeLabel (pxToSub 18) [overlaySynthRun (Theme.mutedText theme) project],
+           let pillStyle := BoxStyle.row (pxToSub 5)
+             |>.withAlign .center
+             |>.withPadding (Edges.xy (pxToSub 7) (pxToSub 2))
+             |>.withRadius (pxToSub 6)
+           let pillTextStyle : TextStyle := { Theme.mutedText theme with weight := 500 }
+           let pillLabel (txt : String) : WidgetNode :=
+             WidgetNode.text ({ BoxStyle.row 0 with maxWidth := pxToSub 170, maxHeight := pxToSub 18, clip := true })
+               (pxToSub 18) [overlaySynthRun pillTextStyle txt]
+           let projectPicker := WidgetNode.focusable draftProjectPickerId <| WidgetNode.box pillStyle
+             [pillLabel project,
               chromeIcon "chevron-down" pal.textMuted 10] (some draftProjectPickerId)
-           let destination := WidgetNode.focusable 720 <| WidgetNode.box (BoxStyle.row (pxToSub 4) |>.withAlign .center)
-             [chromeIcon "server" pal.textMuted 14, chromeLabel (pxToSub 18) [overlaySynthRun (Theme.mutedText theme) machine],
+           let destination := WidgetNode.focusable 720 <| WidgetNode.box pillStyle
+             [chromeIcon "server" pal.textMuted 14, pillLabel machine,
               chromeIcon "chevron-down" pal.textMuted 10] (some 720)
            let folderLabel := ((st.draftDirectory.splitOn "/").filter (!·.isEmpty)).getLast?.getD (if st.draftDirectory.isEmpty then "Folder" else "/")
-           let folderPicker := WidgetNode.focusable draftDirectoryPickerId <| WidgetNode.box (BoxStyle.row (pxToSub 4) |>.withAlign .center)
-             [chromeIcon "folder" pal.textMuted 14, chromeLabel (pxToSub 18) [overlaySynthRun (Theme.mutedText theme) folderLabel]] (some draftDirectoryPickerId)
-           let header := WidgetNode.box (BoxStyle.row (pxToSub 16) |>.withAlign .center |>.withFixedSize width (pxToSub 24))
+           let folderPicker := WidgetNode.focusable draftDirectoryPickerId <| WidgetNode.box pillStyle
+             [chromeIcon "folder" pal.textMuted 14, pillLabel folderLabel] (some draftDirectoryPickerId)
+           let header := WidgetNode.box (BoxStyle.row (pxToSub 10) |>.withAlign .center |>.withFixedSize width (pxToSub 26))
              ([projectPicker, destination] ++ if v.machine.startsWith "auto-managed" then [] else [folderPicker])
            let voiceButton (id : Nat) (icon : String) :=
              WidgetNode.focusable id <| WidgetNode.box

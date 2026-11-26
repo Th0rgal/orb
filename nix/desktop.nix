@@ -1,4 +1,4 @@
-{lib, stdenv, callPackage, clang, pkg-config, nodejs, pnpm, fetchPnpmDeps, pnpmConfigHook, gtk3, webkitgtk_4_1, makeBinaryWrapper, python3, pulseaudio, wl-clipboard, zenity, revision ? "local checkout", turbo-lean ? null}:
+{lib, stdenv, callPackage, clang, pkg-config, nodejs, pnpm, fetchPnpmDeps, pnpmConfigHook, gtk3, webkitgtk_4_1, wayland ? null, vulkan-loader ? null, makeBinaryWrapper, python3, pulseaudio, wl-clipboard, zenity, revision ? "local checkout", turbo-lean ? null}:
 
 let
   core = callPackage ./package.nix {inherit turbo-lean; buildDesktop = true;};
@@ -26,7 +26,7 @@ stdenv.mkDerivation {
   passthru = {inherit core webUi;};
   dontConfigure = true;
   nativeBuildInputs = [clang pkg-config makeBinaryWrapper];
-  buildInputs = [gtk3 webkitgtk_4_1];
+  buildInputs = [gtk3 webkitgtk_4_1] ++ lib.optional (wayland != null) wayland;
   buildPhase = ''
     runHook preBuild
     ${clang}/bin/clang -std=gnu11 -O2 -Wall -Wextra -Werror -fstack-protector-strong -D_FORTIFY_SOURCE=2 -fPIE \
@@ -40,7 +40,8 @@ stdenv.mkDerivation {
     mkdir -p "$out/bin" "$out/share/applications" "$out/share/orb-desktop"
     makeBinaryWrapper "${core}/bin/orb-desktop-native" "$out/bin/orb-desktop-native" \
       --set ORB_ACCOUNT_LAUNCHER "$out/bin/orb-desktop" \
-      --prefix PATH : "${lib.makeBinPath [python3 pulseaudio wl-clipboard zenity]}"
+      --prefix PATH : "${lib.makeBinPath [python3 pulseaudio wl-clipboard zenity]}" \
+      --suffix LD_LIBRARY_PATH : "${lib.optionalString (vulkan-loader != null) "${lib.makeLibraryPath [vulkan-loader]}:"}/run/opengl-driver/lib"
     install -Dm0755 linux_shell/orb-sidebar-host.so "$out/lib/orb-sidebar-host.so"
     makeBinaryWrapper "${core}/bin/orb-desktop-native" "$out/bin/orb-desktop-hybrid" \
       --add-flags "--gtk-sidebar-host" --add-flags "$out/lib/orb-sidebar-host.so" \

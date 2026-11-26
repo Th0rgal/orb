@@ -202,3 +202,67 @@ test('moving the visible anchor to another tree preserves its neighbors', async 
   await page.waitForTimeout(100);
   expect(await row.evaluate(el=>el.getBoundingClientRect().top)).toBe(before);
 });
+
+test('mission delete dismisses dialog and hides row immediately, rolling back on failure', async ({page}) => {
+  await page.addInitScript(() => {localStorage.setItem('orb.apiUrl',location.origin);localStorage.setItem('orb.jwt','test');});
+  let missions = [
+    {id:'m-keep',title:'Keep me',status:'completed',project:'one',tags:[],history:[],updated_at:'2026-11-26T10:01:00Z'},
+    {id:'m-del',title:'Delete me',status:'completed',project:'one',tags:[],history:[],updated_at:'2026-11-26T10:00:00Z'},
+  ];
+  let releaseDelete: (() => void) | null = null;
+  let failNext = true;
+  await page.route('**/api/**', async route => {
+    const req = route.request(), url = new URL(req.url()), path = url.pathname, id = path.split('/')[4];
+    if (req.method() === 'DELETE' && path === '/api/control/missions/m-del') {
+      await new Promise<void>(resolve => { releaseDelete = resolve; });
+      releaseDelete = null;
+      if (failNext) {
+        failNext = false;
+        return route.fulfill({status: 500, body: 'Server unavailable'});
+      }
+      missions = missions.filter(m => m.id !== id);
+      return route.fulfill({json: {deleted_ids: [id]}});
+    }
+    const json = path === '/api/projects' ? {projects: [{slug: 'one', title: 'One'}]}
+      : path === '/api/control/missions' ? missions
+      : path.startsWith('/api/control/missions/') ? missions.find(m => m.id === id) ?? {}
+      : path.endsWith('/files') ? {entries: []}
+      : path.endsWith('/crons') ? {jobs: []}
+      : path.endsWith('/controller') ? {job: null, runs: []}
+      : [];
+    await route.fulfill({json});
+  });
+
+  await page.goto('/');
+  await page.getByRole('button', {name: 'One', exact: true}).click();
+  const tree = page.getByRole('tree', {name: 'Projects', exact: true});
+  const target = tree.getByRole('button', {name: 'Delete me', exact: true});
+  await expect(target).toBeVisible();
+
+  await target.click({button: 'right'});
+  await page.getByRole('menuitem', {name: 'Delete agent…', exact: true}).click();
+  const dialog = page.getByRole('dialog');
+  await dialog.getByRole('button', {name: 'Delete', exact: true}).click();
+
+  // Dialog closes and row vanishes immediately while DELETE is still in flight.
+  await expect(dialog).toHaveCount(0);
+  await expect(target).toHaveCount(0);
+  await expect.poll(() => releaseDelete !== null).toBe(true);
+
+  // When DELETE fails, the row reappears in place and an error toast explains why.
+  releaseDelete!();
+  await expect(target).toBeVisible();
+  await expect(page.getByRole('alert')).toContainText('Couldn’t delete 1 agent');
+
+  // Second attempt succeeds optimistically and stays gone.
+  await target.click({button: 'right'});
+  await page.getByRole('menuitem', {name: 'Delete agent…', exact: true}).click();
+  await page.getByRole('dialog').getByRole('button', {name: 'Delete', exact: true}).click();
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  await expect(target).toHaveCount(0);
+  await expect.poll(() => releaseDelete !== null).toBe(true);
+  releaseDelete!();
+  await page.waitForTimeout(100);
+  await expect(target).toHaveCount(0);
+  await expect(tree.getByRole('button', {name: 'Keep me', exact: true})).toBeVisible();
+});

@@ -73,7 +73,7 @@ static char *build_init_script(unsigned port, const char *token, int native_chro
         "  async function listen(n, h) { if (!listeners.has(n)) listeners.set(n, new Set()); listeners.get(n).add(h); ensureStream(); return () => { listeners.get(n)?.delete(h); if (!listeners.get(n)?.size) listeners.delete(n); if (!channels.size && !listeners.size) stopStream(); }; }\n"
         "  window.__TAURI_INTERNALS__ = { invoke }; window.__ORB_DESKTOP__ = window.__TAURI__ = { core: { invoke, Channel }, event: { listen }, window: { getCurrentWindow: () => ({ innerSize: async () => { const s = window.devicePixelRatio || 1; return { width: Math.round(window.innerWidth * s), height: Math.round(window.innerHeight * s) }; }, scaleFactor: async () => window.devicePixelRatio || 1 }) }, webview: { getCurrentWebview: () => ({ label: 'main' }) } }; })();\n";
     /* Drag regions (same selectors as macos_shell) ask the shell to start a compositor window move. */
-    const char *nc_js = native_chrome ? "window.__ORB_NATIVE_CHROME__ = true; window.addEventListener('mousedown', (ev) => { const t = ev.target instanceof Element ? ev.target : null; if (ev.button !== 0 || ev.defaultPrevented || ev.detail === 2 || !t || !t.closest('[data-orb-drag-region], [data-tauri-drag-region], .titlebar, .file-tabs') || t.closest('button, a, input, select, textarea, summary, [role=\"button\"], [contenteditable=\"true\"], .no-drag')) return; try { window.webkit.messageHandlers.orbNative.postMessage({ command: 'window_drag', args: { x: ev.screenX, y: ev.screenY } }); } catch {} }, true); " : "";
+    const char *nc_js = native_chrome ? "window.__ORB_NATIVE_CHROME__ = true; window.__ORB_NATIVE_SYNC_BRIDGE__ = true; window.addEventListener('mousedown', (ev) => { const t = ev.target instanceof Element ? ev.target : null; if (ev.button !== 0 || ev.defaultPrevented || ev.detail === 2 || !t || !t.closest('[data-orb-drag-region], [data-tauri-drag-region], .titlebar, .file-tabs') || t.closest('button, a, input, select, textarea, summary, [role=\"button\"], [contenteditable=\"true\"], .no-drag')) return; try { window.webkit.messageHandlers.orbNative.postMessage({ command: 'window_drag', args: { x: ev.screenX, y: ev.screenY } }); } catch {} }, true); " : "";
     size_t need = sizeof(tmpl) + strlen(tok_lit) + strlen(nc_js) + 64; char *buf = malloc(need);
     if (buf) snprintf(buf, need, tmpl, nc_js, port, port, tok_lit);
     return free(tok_lit), buf;
@@ -110,6 +110,7 @@ static void on_zoom_scale(GtkGestureZoom *z, gdouble scale, gpointer ud) {
 }
 static gboolean on_wv_event(GtkWidget *wv, GdkEvent *ev, gpointer ud) {
     (void)ud; guint *st = (ev->type == GDK_KEY_PRESS || ev->type == GDK_KEY_RELEASE) ? &ev->key.state : (ev->type == GDK_BUTTON_PRESS || ev->type == GDK_BUTTON_RELEASE) ? &ev->button.state : (ev->type == GDK_SCROLL) ? &ev->scroll.state : NULL;
+    if (st && (ev->type == GDK_KEY_PRESS || ev->type == GDK_KEY_RELEASE) && (*st & GDK_CONTROL_MASK) && (*st & (GDK_SUPER_MASK | GDK_MOD4_MASK)) && !(*st & GDK_MOD1_MASK)) { guint k = gdk_keyval_to_lower(ev->key.keyval); if (k == GDK_KEY_a || k == GDK_KEY_c || k == GDK_KEY_v || k == GDK_KEY_x || k == GDK_KEY_z) *st &= ~(guint)(GDK_SUPER_MASK | GDK_MOD4_MASK | GDK_META_MASK); }
     if (st && (*st & (GDK_SUPER_MASK | GDK_MOD4_MASK)) && !(*st & GDK_CONTROL_MASK)) *st |= GDK_META_MASK;
     if (ev->type != GDK_TOUCHPAD_PINCH) return FALSE;
     const GdkEventTouchpadPinch *p = &ev->touchpad_pinch;
@@ -148,7 +149,7 @@ int main(int argc, char **argv) {
     if (!(init_js = build_init_script(port, token, native_chrome))) return 1;
     if (argc > 1 && strcmp(argv[1], "--self-test") == 0) {
         char *nc_js = build_init_script(port, token, 1), *legacy_js = build_init_script(port, token, 0);
-        int ok = nc_js && legacy_js && strstr(nc_js, "__ORB_NATIVE_CHROME__ = true") && !strstr(legacy_js, "__ORB_NATIVE_CHROME__ = true") && orb_gtk_chrome_self_test() && strstr(init_js, "__ORB_DESKTOP__") && strstr(init_js, "dataset.platform = 'linux'") && strstr(init_js, "__ORB_EMIT__") && strstr(init_js, "__ORB_PINCH__") && strstr(init_js, "/__orb_events") && !strstr(init_js, "setInterval") && strstr(init_js, "const _fetch = window.fetch.bind(window)") && is_confined_shell_uri("orb://localhost/") && is_confined_shell_uri("tauri://localhost/") && !is_confined_shell_uri("orb://evil.example/") && is_confined_shell_uri("http://127.0.0.1:1430") && is_confined_shell_uri("http://localhost/") && !is_confined_shell_uri("http://127.0.0.1:80@evil.com/") && !is_confined_shell_uri("https://evil.example");
+        int ok = nc_js && legacy_js && strstr(nc_js, "__ORB_NATIVE_CHROME__ = true") && strstr(nc_js, "__ORB_NATIVE_SYNC_BRIDGE__ = true") && !strstr(legacy_js, "__ORB_NATIVE_CHROME__ = true") && orb_gtk_chrome_self_test() && strstr(init_js, "__ORB_DESKTOP__") && strstr(init_js, "dataset.platform = 'linux'") && strstr(init_js, "__ORB_EMIT__") && strstr(init_js, "__ORB_PINCH__") && strstr(init_js, "/__orb_events") && !strstr(init_js, "setInterval") && strstr(init_js, "const _fetch = window.fetch.bind(window)") && is_confined_shell_uri("orb://localhost/") && is_confined_shell_uri("tauri://localhost/") && !is_confined_shell_uri("orb://evil.example/") && is_confined_shell_uri("http://127.0.0.1:1430") && is_confined_shell_uri("http://localhost/") && !is_confined_shell_uri("http://127.0.0.1:80@evil.com/") && !is_confined_shell_uri("https://evil.example");
         return free(legacy_js), free(nc_js), free(init_js), ok ? (printf("orb-linux-shell self-test: ok\n"), 0) : 1;
     }
     pid_t parent_pid = getpid(), locald_pid = -1; const char *locald_bin = getenv("ORB_LOCALD_BIN");
@@ -178,6 +179,11 @@ int main(int argc, char **argv) {
     WebKitUserScript *script = webkit_user_script_new(init_js, WEBKIT_USER_CONTENT_INJECT_TOP_FRAME, WEBKIT_USER_SCRIPT_INJECT_AT_DOCUMENT_START, allow_list, NULL); webkit_user_content_manager_add_script(ucm, script); webkit_user_script_unref(script);
     GtkWidget *wv = g_object_new(WEBKIT_TYPE_WEB_VIEW, "web-context", ctx, "user-content-manager", ucm, NULL); g_object_unref(ctx);
     WebKitSettings *wks = webkit_web_view_get_settings(WEBKIT_WEB_VIEW(wv)); webkit_settings_set_hardware_acceleration_policy(wks, WEBKIT_HARDWARE_ACCELERATION_POLICY_ALWAYS); g_object_set(wks, "enable-media-stream", TRUE, "enable-webaudio", TRUE, "media-playback-requires-user-gesture", FALSE, NULL);
+#if WEBKIT_CHECK_VERSION(2, 42, 0)
+    WebKitFeatureList *fl = webkit_settings_get_all_features();
+    for (gsize i = 0, fn = fl ? webkit_feature_list_get_length(fl) : 0; i < fn; ++i) { WebKitFeature *f = webkit_feature_list_get(fl, i); if (f && strcmp(webkit_feature_get_identifier(f), "CSSCornerShape") == 0) webkit_settings_set_feature_enabled(wks, f, TRUE); }
+    if (fl) webkit_feature_list_unref(fl);
+#endif
     const GdkRGBA bg = rgba ? (GdkRGBA){ 0, 0, 0, 0 } : (GdkRGBA){ 0.078, 0.078, 0.078, 1 }; webkit_web_view_set_background_color(WEBKIT_WEB_VIEW(wv), &bg);
     GtkGesture *zg = gtk_gesture_zoom_new(wv); gtk_event_controller_set_propagation_phase(GTK_EVENT_CONTROLLER(zg), GTK_PHASE_CAPTURE);
     g_signal_connect(zg, "begin", G_CALLBACK(on_zoom_begin), wv); g_signal_connect(zg, "scale-changed", G_CALLBACK(on_zoom_scale), wv); g_object_set_data_full(G_OBJECT(wv), "orb-zg", zg, g_object_unref);

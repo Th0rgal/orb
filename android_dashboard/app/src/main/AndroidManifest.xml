@@ -16,10 +16,19 @@
         android:icon="@mipmap/ic_launcher"
         android:label="${orbAppLabel}"
         android:networkSecurityConfig="@xml/network_security_config"
+        android:resizeableActivity="true"
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
         android:theme="@style/Theme.SandboxedDashboard"
         android:usesCleartextTraffic="true">
+
+        <!-- Motorola Razr external cover screen (CLI) full-bleed around twin camera lenses -->
+        <meta-data
+            android:name="moto_cli_fullscreen_mode"
+            android:value="true" />
+        <meta-data
+            android:name="moto_cli_default_display_mode"
+            android:value="fullscreen" />
 
         <provider
             android:name="androidx.core.content.FileProvider"
@@ -35,11 +44,18 @@
             android:name=".MainActivity"
             android:exported="true"
             android:launchMode="singleTask"
+            android:resizeableActivity="true"
             android:showWhenLocked="true"
             android:turnScreenOn="true"
-            android:configChanges="screenSize|smallestScreenSize|screenLayout|orientation|keyboard|keyboardHidden|navigation|uiMode"
+            android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|density|keyboard|keyboardHidden|navigation|uiMode"
             android:theme="@style/Theme.SandboxedDashboard"
             android:windowSoftInputMode="adjustResize">
+            <meta-data
+                android:name="moto_cli_fullscreen_mode"
+                android:value="true" />
+            <meta-data
+                android:name="moto_cli_default_display_mode"
+                android:value="fullscreen" />
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />

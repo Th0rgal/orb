@@ -557,7 +557,8 @@ def probeStaticNodeHeartbeat
     (sn : StaticRemoteNode)
     (persistedCordons : Array String := #[])
     (nowIso : String := "")
-    (isAdmin : Bool := false) : IO JVal := do
+    (isAdmin : Bool := false)
+    (timeoutMs : UInt32 := 2500) : IO JVal := do
   let persistedCordoned := persistedCordons.contains sn.id
   let baseColocated :=
     sn.id == "sepolia" || sn.id == "agent-core" || sn.id == "orb-core" ||
@@ -571,7 +572,7 @@ def probeStaticNodeHeartbeat
   | none =>
     return mkOfflineOrDegraded "degraded" s!"missing token env {sn.tokenEnv}"
   | some tok =>
-    match ← sendJsonRequest "GET" (sn.baseUrl ++ "/heartbeat") (some tok) none #[] 2500 with
+    match ← sendJsonRequest "GET" (sn.baseUrl ++ "/heartbeat") (some tok) none #[] timeoutMs with
     | .ok (200, _, some hb) =>
       let cap := (hb.fieldNat? "capacity_total").orElse (fun _ => hb.fieldNat? "capacity") |>.getD 4
       let act := (hb.fieldNat? "active_jobs").orElse (fun _ => hb.fieldNat? "running_jobs") |>.getD 0
@@ -659,12 +660,26 @@ def probeStaticNodeHeartbeat
       return mkOfflineOrDegraded "offline" err
 
 def nodeApiHangCause? (store : CoreStore) (node : String) : IO (Option String) := do
-  let .ok rows ← execParamQuery store.missionsDb "SELECT node_id FROM node_api_hangs WHERE node_id=?1" #[node]
+  let .ok rows ← execParamQuery store.missionsDb "SELECT node_id FROM node_api_hangs WHERE node_id=?1 AND strikes>=2" #[node]
     | throw (IO.userError "node health read failed")
   return rows[1]?.map fun r => s!"Node `{cell r 0}` answers ping but its API is unresponsive."
 
+/-- True when an active job observer on `node` recorded a successful HTTP status poll
+    within the last 20 seconds, proving the node API is serving requests right now. -/
+private def nodeHasFreshApiActivity (store : CoreStore) (node now : String) : IO Bool := do
+  let some nowSec := parseIso8601EpochU64? now | return false
+  let .ok rows ← execParamQuery store.missionsDb
+    ("SELECT updated_at FROM remote_node_jobs WHERE node_id=?1 COLLATE NOCASE " ++
+     "AND state IN ('running','queued','launching') AND updated_at<>'' ORDER BY updated_at DESC LIMIT 1;") #[node]
+    | return false
+  let some r := rows[1]? | return false
+  let some jobSec := parseIso8601EpochU64? (cell r 0) | return false
+  return jobSec + 20 ≥ nowSec && jobSec ≤ nowSec + 5
+
 /-- The monitor owns its cordon independently of operator cordons. A successful
-    heartbeat ends the incident; an unreachable host alone never starts one. -/
+    heartbeat ends the incident; an unreachable host alone or a single transient
+    timeout never starts one. Two consecutive pingable API misses without fresh
+    job-poll activity confirm the hang. -/
 def observeNodeApi (store : CoreStore) (node status now : String) (ping : IO Bool) : IO Unit := do
   let query := fun q args => do
     match ← execParamQuery store.missionsDb q args with
@@ -673,14 +688,21 @@ def observeNodeApi (store : CoreStore) (node status now : String) (ping : IO Boo
   if status == "online" then
     discard <| query "DELETE FROM node_api_hangs WHERE node_id=?1" #[node]
   else if status == "offline" then
+    if ← nodeHasFreshApiActivity store node now then
+      discard <| query "DELETE FROM node_api_hangs WHERE node_id=?1" #[node]
+      return
     unless ← ping do return
-    discard <| query "INSERT OR IGNORE INTO node_api_hangs VALUES(?1,?2)" #[node, ← OrbBin.PosixExt.newUuidV4]
+    discard <| query
+      ("INSERT INTO node_api_hangs(node_id,incident_id,strikes) VALUES(?1,?2,1) " ++
+       "ON CONFLICT(node_id) DO UPDATE SET strikes=node_api_hangs.strikes+1")
+      #[node, ← OrbBin.PosixExt.newUuidV4]
     -- The single monitor processes observations sequentially. The committed
     -- event is also its restart receipt; never flag twice for two live jobs.
     let pending ← query ("SELECT m.id,h.incident_id " ++
-      "FROM missions m JOIN node_api_hangs h ON h.node_id=?1 WHERE EXISTS (SELECT 1 FROM remote_node_jobs j WHERE j.node_id=?1 AND j.mission_id=m.id " ++
+      "FROM missions m JOIN node_api_hangs h ON h.node_id=?1 AND h.strikes>=2 WHERE EXISTS (SELECT 1 FROM remote_node_jobs j WHERE j.node_id=?1 AND j.mission_id=m.id " ++
       "AND j.state NOT IN ('terminal','completed','succeeded','failed','aborted','cancelled','lost')) AND NOT EXISTS " ++
-      "(SELECT 1 FROM mission_events e WHERE e.mission_id=m.id AND e.event_type='error' AND CASE WHEN json_valid(e.payload) THEN json_extract(e.payload,'$.incident_id') END=h.incident_id)") #[node]
+      "(SELECT 1 FROM mission_events e WHERE e.mission_id=m.id AND e.event_type='error' AND CASE WHEN json_valid(e.payload) THEN json_extract(e.payload,'$.incident_id') END=h.incident_id) " ++
+      "AND COALESCE((SELECT CASE WHEN le.event_type='error' AND json_valid(le.payload) AND json_extract(le.payload,'$.reason')='hung_node' AND json_extract(le.payload,'$.node_id')=?1 THEN 1 ELSE 0 END FROM mission_events le WHERE le.mission_id=m.id ORDER BY le.id DESC LIMIT 1),0)=0") #[node]
     for r in pending.extract 1 pending.size do
       let payload := renderCompact (.obj #[("reason", .str "hung_node"), ("node_id", .str node),
         ("incident_id", .str (cell r 1)), ("message", .str s!"Node `{node}` answers ping but its API is unresponsive.")])
@@ -690,7 +712,13 @@ def monitorStaticNodeApis (store : CoreStore) : IO Unit := do
   let (enabled, nodes) ← loadStaticRemoteNodes
   if !enabled then return
   for sn in nodes do
-    let hb ← probeStaticNodeHeartbeat sn
+    let firstHb ← probeStaticNodeHeartbeat sn
+    let hb ←
+      if (firstHb.fieldStr? "status").getD "" == "offline" then do
+        IO.sleep 300
+        probeStaticNodeHeartbeat sn #[] "" false 5000
+      else
+        pure firstHb
     observeNodeApi store sn.id ((hb.fieldStr? "status").getD "") (formatEpochIso8601Utc (← nowEpoch)) do
       let .ok url := OrbBin.HttpClient.parseUrl sn.baseUrl | return false
       try return (← IO.Process.output {cmd := "ping", args := #["-n", "-c", "1", "-W", "1", "--", url.connectHost]}).exitCode == 0
@@ -785,7 +813,7 @@ def buildComputeFleetJVal
   let effIso := if nowIso.isEmpty then formatEpochIso8601Utc nowSec else nowIso
   let mut persistedCordons ← loadPersistedNodeCordons dataRoot
   if let some st := store? then
-    if let .ok rows ← execParamQuery st.missionsDb "SELECT node_id FROM node_api_hangs" #[] then
+    if let .ok rows ← execParamQuery st.missionsDb "SELECT node_id FROM node_api_hangs WHERE strikes>=2" #[] then
       persistedCordons := persistedCordons ++ (rows.extract 1 rows.size).map (fun r => cell r 0)
   let probed ← probeAllStaticNodesParallel staticNodes persistedCordons effIso probeDeadlineMs isAdmin
   -- A node that did not answer keeps what its last heartbeat reported.
@@ -1466,7 +1494,25 @@ def runConfiguredManagedLifecycle (mc : ManagedComputeStore) (ctx : ManagedLifec
   if Orb.ManagedNode.verifyVmLifecycleAdmit slice.phaseCode op 0 1
       slice.nodeBootEpoch slice.nodeBootEpoch nowEpoch slice.deletableAt != 1 then
     return .error "vm_lifecycle_rejected"
-  if slice.phaseCode == 0 && m.providerId.isEmpty then return .error "managed_provider_identity_pending"
+  if slice.phaseCode == 0 && m.providerId.isEmpty then
+    if action != "destroy" || nowEpoch < m.createdAtSec + 120 then
+      return .error "managed_provider_identity_pending"
+    let inventory ← match ← provider.list with
+      | .ok items => pure items
+      | .error e => return .error e.code
+    let hits := inventory.filter (fun r => r.name == m.sandboxName)
+    if hits.size > 1 then return .error "ambiguous_provider_name"
+    if let some remote := hits[0]? then
+      discard <| backfillManagedProviderIdentity mc m.id m.provider remote.providerId
+      if let .error e ← provider.destroy remote.providerId then return .error e.code
+    let .ok _ ← applyVmLifecycle mc m.id {
+        opCode := op, ownerLive := 0, idleElapsed := 1,
+        presentedBootEpoch := m.nodeBootEpoch, nowEpoch
+      } (some (hits[0]?.map (·.providerId) |>.getD ""))
+      | return .error "managed_lifecycle_commit_failed"
+    let some (saved, _) ← getManagedMachine? mc m.id
+      | return .error "managed_machine_missing"
+    return .ok (managedLifecycleResult saved)
   let outcome ← if action == "stop" then provider.stop m.effectiveProviderId else provider.destroy m.effectiveProviderId
   if let .error e := outcome then return .error e.code
   let .ok _ ← applyVmLifecycle mc m.id {

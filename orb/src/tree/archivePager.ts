@@ -1,6 +1,7 @@
 import { createSignal } from "solid-js";
 import { createStore } from "solid-js/store";
 import { connectionVersion, excludeBtwMissions, listArchivedMissions, type Mission } from "../api";
+import { withArchiveStatuses } from "../archiveState";
 import { seedKnownMissions } from "../missionLookup";
 
 /** Page size of `GET` archived missions; a full page means there may be more. */
@@ -9,11 +10,10 @@ export const ARCHIVE_PAGE_SIZE = 100;
 /**
  * Paginated "Archived" section of the sidebar. `revision` is bumped by the
  * owner whenever local mission state changes, so a stale page is dropped;
- * `archiving` holds optimistic statuses; `deleted` ids are never shown again.
+ * `deleted` ids are never shown again.
  */
 export function createArchivePager(deps: {
   revision: () => number;
-  archiving: ReadonlyMap<string, string>;
   deleted: ReadonlySet<string>;
   currentConnection: (version: number) => boolean;
 }) {
@@ -35,7 +35,7 @@ export function createArchivePager(deps: {
       try {
         const rows = await listArchivedMissions(more ? offset : 0);
         if (!deps.currentConnection(version) || revision !== deps.revision()) return;
-        const projected = excludeBtwMissions(rows).filter(m => !deps.deleted.has(m.id)).map(m => deps.archiving.has(m.id) ? {...m,status:deps.archiving.get(m.id)!} : m);
+        const projected = withArchiveStatuses(excludeBtwMissions(rows).filter(m => !deps.deleted.has(m.id)));
         seedKnownMissions(projected);
         setArchivedMissions(previous => { if (!more) return projected; const known = new Set(previous.map(old => old.id)); return [...previous, ...projected.filter(m => !known.has(m.id))]; });
         offset = (more ? offset : 0) + rows.length;

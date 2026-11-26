@@ -2,6 +2,39 @@
 #define ORB_GTK_DISCLOSURE_H
 
 #include "gtk_icons.h"
+#include <jsc/jsc.h>
+
+static inline char *orb_jsc_join_strings(JSCValue *obj, const char *prop) {
+    JSCValue *arr = jsc_value_object_get_property(obj, prop);
+    if (!arr || !jsc_value_is_array(arr)) { if (arr) g_object_unref(arr); return g_strdup(""); }
+    JSCValue *lv = jsc_value_object_get_property(arr, "length");
+    gint32 n = (lv && jsc_value_is_number(lv)) ? jsc_value_to_int32(lv) : 0;
+    if (lv) g_object_unref(lv);
+    GString *s = g_string_new("");
+    for (gint32 i = 0; i < n; ++i) {
+        JSCValue *it = jsc_value_object_get_property_at_index(arr, (guint)i);
+        if (it && jsc_value_is_string(it)) {
+            g_autofree char *v = jsc_value_to_string(it);
+            if (*v) g_string_append_printf(s, "%s%s", s->len ? "\n" : "", v);
+        }
+        if (it) g_object_unref(it);
+    }
+    g_object_unref(arr);
+    return g_string_free(s, FALSE);
+}
+
+static inline gboolean orb_overlay_child_pos(GtkOverlay *ov, GtkWidget *child, GdkRectangle *rect, gpointer ud) {
+    (void)ov; (void)ud;
+    GdkRectangle *hit = g_object_get_data(G_OBJECT(child), "orb-hit");
+    return hit ? (*rect = *hit, TRUE) : FALSE;
+}
+
+static inline GtkWidget *orb_wrap_overlay(GtkWidget *child) {
+    GtkWidget *ov = gtk_overlay_new();
+    gtk_container_add(GTK_CONTAINER(ov), child);
+    g_signal_connect(ov, "get-child-position", G_CALLBACK(orb_overlay_child_pos), NULL);
+    return ov;
+}
 
 static inline void orb_disclosure_bind(GtkWidget *row, GtkWidget *button) {
     g_object_set_data(G_OBJECT(row), "orb-disclosure", button);

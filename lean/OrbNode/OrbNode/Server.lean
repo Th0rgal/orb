@@ -1368,6 +1368,71 @@ def handleRequest (rt0 : NodeRuntime) (req : HttpRequest) : IO (NodeRuntime × H
 def handleRequestConcurrent
     (mtx : Std.Mutex NodeRuntime) (transferMtx : Std.Mutex Unit) (req : HttpRequest) : IO HttpResponse := do
   let segs := (req.path.splitOn "/").filter (fun s => !s.isEmpty)
+  if req.method == "GET" && segs == ["heartbeat"] then
+    let (snapRes, preLaunches) ← mtx.atomically do
+      let (rt, preL) ← tickRuntimeReserve (← get)
+      set rt
+      if !verifyBearerHeader (req.header? "authorization") rt.cfg.token rt.cfg.tokenPrevious? then
+        return (Except.error (textResp 401 "invalid node token"), preL)
+      return (Except.ok rt, preL)
+    if !preLaunches.isEmpty then
+      spawnAsyncLaunches mtx preLaunches
+    match snapRes with
+    | .error errResp => return errResp
+    | .ok rtSnap =>
+      let hb ← buildHeartbeatJson rtSnap
+      return jsonResp 200 hb
+  if req.method == "GET" && (segs == ["health"] || segs == ["api", "health"]) then
+    let (snapRes, preLaunches) ← mtx.atomically do
+      let (rt, preL) ← tickRuntimeReserve (← get)
+      set rt
+      if !verifyBearerHeader (req.header? "authorization") rt.cfg.token rt.cfg.tokenPrevious? then
+        return (Except.error (textResp 401 "invalid node token"), preL)
+      return (Except.ok rt.cfg.nodeId, preL)
+    if !preLaunches.isEmpty then
+      spawnAsyncLaunches mtx preLaunches
+    match snapRes with
+    | .error errResp => return errResp
+    | .ok nodeId =>
+      let buildSha ← resolveNodeBuildSha
+      let binShas ← collectNodeBinaryShas
+      let buildVal : JVal := if buildSha.isEmpty then .null else .str buildSha
+      return jsonResp 200 (.obj #[
+        ("status", .str "ok"),
+        ("node_id", .str nodeId),
+        ("version", .str "1.3.0-lean4"),
+        ("build", buildVal),
+        ("build_sha", buildVal),
+        ("binary_sha256", binShas)
+      ])
+  if req.method == "POST" then
+    if let ["jobs", jid, "files"] := segs then
+      let (lookupRes, preLaunches) ← mtx.atomically do
+        let (rt, preL) ← tickRuntimeReserve (← get)
+        set rt
+        if !verifyBearerHeader (req.header? "authorization") rt.cfg.token rt.cfg.tokenPrevious? then
+          return (Except.error (textResp 401 "invalid node token"), preL)
+        let key := (parseUuidCanonical? jid).getD jid
+        let some rec := rt.ledger.jobs.get? key
+          | return (Except.error (textResp 404 "Job not found"), preL)
+        return (Except.ok (rt.cfg.privdSocket, rt.cfg.workDir, rec.execUnixUser, rec.missionId), preL)
+      if !preLaunches.isEmpty then
+        spawnAsyncLaunches mtx preLaunches
+      match lookupRes with
+      | .error errResp => return errResp
+      | .ok (privdSocket, workDir, execUnixUser, missionId) =>
+        let some bodyStr := String.fromUTF8? req.body
+          | return textResp 400 "invalid UTF-8 body"
+        let .ok reqJson := OrbBin.Json.parse bodyStr
+          | return textResp 400 "invalid JSON body"
+        if !execUnixUser.isEmpty then
+          match ← userFileBrowser privdSocket execUnixUser missionId reqJson with
+          | .ok v => return jsonResp 200 v
+          | .error msg => return textResp 400 msg
+        let missionDir := (System.FilePath.mk workDir / missionId).toString
+        match ← executeFileBrowser missionDir reqJson with
+        | .ok v => return jsonResp 200 v
+        | .error msg => return textResp 400 msg
   if req.method == "POST" then
     if let ["jobs", jid, "native-file"] := segs then
       -- File I/O under the member UID must never hold the scheduler mutex.

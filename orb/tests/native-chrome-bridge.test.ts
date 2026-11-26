@@ -7,6 +7,7 @@ import {
   serializeNativeChromeMission,
   withLiveExecution,
   nativeActionTargets,
+  parseNativeDestination,
   type NativeChromeSyncSnapshot,
 } from "../src/nativeChromeBridge";
 import type { Mission, ProjectSummary } from "../src/api";
@@ -297,6 +298,44 @@ describe("nativeChromeBridge", () => {
     expect(fakeWin.__ORB_NATIVE_PROJECT_ACTION__).toBeUndefined();
   });
 
+  it("parses folder destinations and routes cut/paste, move-picker, and inline folder/project rename", () => {
+    expect(parseNativeDestination("perso")).toEqual({ slug: "perso", folder: "" });
+    expect(parseNativeDestination("proj:perso")).toEqual({ slug: "perso", folder: "" });
+    expect(parseNativeDestination("folder:perso:pareto/v2")).toEqual({ slug: "perso", folder: "pareto/v2" });
+    expect(parseNativeDestination("perso:/pareto//../v2/")).toEqual({ slug: "perso", folder: "pareto/v2" });
+    expect(nativeActionTargets("cut", "m:m-1 m:m-2", "", null)).toEqual(["m-1", "m-2"]);
+    expect(nativeActionTargets("move-picker", "m:m-3", "", null)).toEqual(["m-3"]);
+
+    const mCalls: Array<[string, string, string]> = [];
+    const pCalls: Array<[string, string, string | undefined]> = [];
+    const fakeWin = { dispatchEvent: () => true } as unknown as Window & {
+      __ORB_NATIVE_MISSION_ACTION__?: (a: string, id: string, arg?: string) => boolean;
+      __ORB_NATIVE_PROJECT_ACTION__?: (a: string, slug: string, arg?: string) => boolean;
+    };
+    const cleanup = installNativeChromeWindowHandlers({
+      open: () => true, leaveSettings: () => {}, getSidebarOpen: () => true, setSidebarOpen: () => {},
+      missionAction: (action, id, arg) => { mCalls.push([action, id, arg]); return true; },
+      projectAction: (action, slug, arg) => { pCalls.push([action, slug, arg]); return true; },
+    }, fakeWin);
+    expect(fakeWin.__ORB_NATIVE_MISSION_ACTION__?.("move", "m-1 m-2", "perso:pareto/v2")).toBe(true);
+    expect(fakeWin.__ORB_NATIVE_MISSION_ACTION__?.("cut", "m:m-1 m:m-2", "")).toBe(true);
+    expect(fakeWin.__ORB_NATIVE_MISSION_ACTION__?.("move-picker", "m:m-1", "")).toBe(true);
+    expect(fakeWin.__ORB_NATIVE_PROJECT_ACTION__?.("rename", "folder:perso:pareto", "  pareto-next ")).toBe(true);
+    expect(fakeWin.__ORB_NATIVE_PROJECT_ACTION__?.("paste", "folder:perso:pareto/v2")).toBe(true);
+    expect(fakeWin.__ORB_NATIVE_PROJECT_ACTION__?.("cut", "folder:perso:pareto")).toBe(true);
+    expect(mCalls).toEqual([
+      ["move", "m-1 m-2", "perso:pareto/v2"],
+      ["cut", "m-1 m-2", ""],
+      ["move-picker", "m-1", ""],
+    ]);
+    expect(pCalls).toEqual([
+      ["rename", "perso:pareto", "pareto-next"],
+      ["paste", "perso:pareto/v2", undefined],
+      ["cut", "perso:pareto", undefined],
+    ]);
+    cleanup();
+  });
+
   it("coalesces rapid schedule calls with strictly monotonic revisions", async () => {
     vi.useFakeTimers();
     try {
@@ -320,19 +359,27 @@ describe("nativeChromeBridge", () => {
         completedMissions: [],
         projectMissions: {},
       };
+      // Cold-start snapshot flushes immediately without waiting 16ms.
       syncer.schedule({ ...baseSnap, inboxUnread: 1 });
-      syncer.schedule({ ...baseSnap, inboxUnread: 2 });
-      expect(calls).toHaveLength(0);
-      await vi.advanceTimersByTimeAsync(20);
       expect(calls).toHaveLength(1);
       expect(calls[0]?.args.revision).toBe(1);
-      expect(calls[0]?.args.inbox_unread).toBe(2);
+      expect(calls[0]?.args.inbox_unread).toBe(1);
+      await Promise.resolve();
+
+      // Subsequent non-urgent updates coalesce within the 16ms debounce window.
+      syncer.schedule({ ...baseSnap, inboxUnread: 2 });
+      syncer.schedule({ ...baseSnap, inboxUnread: 3 });
+      expect(calls).toHaveLength(1);
+      await vi.advanceTimersByTimeAsync(20);
+      expect(calls).toHaveLength(2);
+      expect(calls[1]?.args.revision).toBe(2);
+      expect(calls[1]?.args.inbox_unread).toBe(3);
 
       syncer.schedule({ ...baseSnap, inboxUnread: 5 }, true);
       await Promise.resolve();
-      expect(calls).toHaveLength(2);
-      expect(calls[1]?.args.revision).toBe(2);
-      expect(calls[1]?.args.inbox_unread).toBe(5);
+      expect(calls).toHaveLength(3);
+      expect(calls[2]?.args.revision).toBe(3);
+      expect(calls[2]?.args.inbox_unread).toBe(5);
       syncer.dispose();
 
       // A fresh syncer created after a WebView reload starts strictly above prior wall-clock revisions.
@@ -340,7 +387,7 @@ describe("nativeChromeBridge", () => {
       const reloadedA = createNativeChromeSyncer(invoke);
       reloadedA.schedule(baseSnap, true);
       await Promise.resolve();
-      const revBeforeReload = calls[2]?.args.revision as number;
+      const revBeforeReload = calls[3]?.args.revision as number;
       expect(revBeforeReload).toBeGreaterThan(1_000_000_000_000);
       reloadedA.dispose();
 
@@ -348,7 +395,7 @@ describe("nativeChromeBridge", () => {
       const reloadedB = createNativeChromeSyncer(invoke);
       reloadedB.schedule(baseSnap, true);
       await Promise.resolve();
-      const revAfterReload = calls[3]?.args.revision as number;
+      const revAfterReload = calls[4]?.args.revision as number;
       expect(revAfterReload).toBeGreaterThan(revBeforeReload);
       reloadedB.dispose();
     } finally {

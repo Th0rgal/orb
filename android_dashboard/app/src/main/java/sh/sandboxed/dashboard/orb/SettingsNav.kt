@@ -9,7 +9,7 @@ package sh.sandboxed.dashboard.orb
  */
 enum class OrbSettingsSection(val id: String, val label: String, val subtitle: String) {
     Account("account", "Account", "Your server connection, connected accounts, how Orb looks and usage telemetry."),
-    Models("models", "Models", "Fallback order, provider health, usage over time and API keys."),
+    Models("models", "Models", "Fallback order, provider health, AirVPN routing, usage over time and API keys."),
     Agents("agents", "Agents", "What agents know and can do, the Assistant, and the agents on this computer."),
     Security("security", "Security", "Who can approve risky actions, Fleet Bunker Mode, privileged access and secrets."),
     Notifications("notifications", "Notifications", "What reaches your Inbox and when Orb tells you.");
@@ -18,7 +18,7 @@ enum class OrbSettingsSection(val id: String, val label: String, val subtitle: S
     val mobileSummary: String
         get() = when (this) {
             Account -> "Server, sign-in & diagnostics"
-            Models -> "Providers, routing, usage & keys"
+            Models -> "Providers, AirVPN, routing, usage & keys"
             Agents -> "Skills, Assistant, Inbox & machines"
             Security -> "Approvals, Bunker Mode & secrets"
             Notifications -> "Inbox & alert preferences"
@@ -37,6 +37,7 @@ enum class OrbSettingsSection(val id: String, val label: String, val subtitle: S
             Models -> listOf(
                 Triple("routing", "Fallback Chains", OrbSettingsRoute.FallbackChains),
                 Triple("routing-providers", "Providers", OrbSettingsRoute.Providers),
+                Triple("airvpn-settings", "AirVPN", OrbSettingsRoute.AirVpn),
                 Triple("usage-settings", "Usage", OrbSettingsRoute.Usage),
                 Triple("routing-keys", "API Keys", OrbSettingsRoute.ProxyKeys),
             )

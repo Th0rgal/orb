@@ -1,6 +1,7 @@
 package sh.sandboxed.dashboard.orb
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Test
 
 /** Same five sections, names, subtitles and tab labels as desktop (settings-nav.json). */
@@ -25,6 +26,55 @@ class OrbSettingsNavTest {
             val s = OrbJSON.dict(c["state"])!!
             val got = OrbSettingsSection.attention(s["bunkerActive"] as Boolean, s["deviceEnrolled"] as Boolean)
             assertEquals(c["name"] as String, (c["expected"] as List<*>).toSet(), got.map { it.id }.toSet())
+        }
+    }
+
+    @Test
+    fun airVpnSettingsModelMatchesSharedFixture() {
+        val airSpec = OrbSpec.dict("fixtures/airvpn-settings.json")
+        for (c in OrbJSON.dictList(airSpec["status"])) {
+            val name = c["name"] as String
+            val got = OrbAirVpnModel.parseStatus(c["input"])
+            val exp = OrbJSON.dict(c["expected"])
+            if (exp == null) {
+                assertNull(name, got)
+            } else {
+                val unwrapped = requireNotNull(got) { name }
+                assertEquals(name, exp["apiKeyConfigured"], unwrapped.apiKeyConfigured)
+                assertEquals(name, (exp["sessionLimit"] as Number).toInt(), unwrapped.sessionLimit)
+                assertEquals(name, (exp["activeTunnelsCount"] as Number).toInt(), unwrapped.activeTunnels.size)
+                val expProfiles = OrbJSON.dictList(exp["profiles"]).map { p ->
+                    OrbAirVpnModel.ProfileView(
+                        device = p["device"] as String,
+                        country = p["country"] as String,
+                        server = p["server"] as String,
+                        active = p["active"] as Boolean,
+                        exits = (p["exits"] as List<*>).filterIsInstance<String>(),
+                        accounts = (p["accounts"] as Number).toInt(),
+                    )
+                }
+                assertEquals(name, expProfiles, unwrapped.profiles)
+            }
+        }
+        for (c in OrbJSON.dictList(airSpec["filename_hints"])) {
+            val filename = c["filename"] as String
+            val exp = OrbJSON.dict(c["expected"])!!
+            assertEquals(
+                filename,
+                OrbAirVpnModel.FilenameHint(
+                    country = exp["country"] as String,
+                    server = exp["server"] as String,
+                    device = exp["device"] as String,
+                ),
+                OrbAirVpnModel.parseFilenameHint(filename),
+            )
+        }
+        for (c in OrbJSON.dictList(airSpec["session_summaries"])) {
+            val name = c["name"] as String
+            val active = (c["activeSessions"] as? Number)?.toInt()
+            val orb = (c["orbTunnels"] as Number).toInt()
+            val limit = (c["sessionLimit"] as Number).toInt()
+            assertEquals(name, c["expected"] as String, OrbAirVpnModel.sessionSummary(active, orb, limit))
         }
     }
 }
@@ -86,5 +136,18 @@ class OrbInboxSummaryChoiceTest {
             )
             assertEquals(name, g["expected"] as Boolean, got)
         }
+    }
+
+    @Test fun providerDirectoryHintMatchesSharedFixture() {
+        val spec = OrbSpec.dict("fixtures/provider-directory-hint.json")
+        assertEquals(spec["storage_key"], OrbProviderDirectoryHint.STORAGE_KEY)
+        assertEquals(spec["default_enabled"], OrbProviderDirectoryHint.DEFAULT_ENABLED)
+        assertEquals(spec["url"], OrbProviderDirectoryHint.URL)
+        assertEquals(spec["copy"], OrbProviderDirectoryHint.COPY)
+        assertEquals(spec["setting_title"], OrbProviderDirectoryHint.SETTING_TITLE)
+        assertEquals(spec["setting_description"], OrbProviderDirectoryHint.SETTING_DESCRIPTION)
+        assertEquals(true, OrbProviderDirectoryHint.resolveEnabled(null))
+        assertEquals(false, OrbProviderDirectoryHint.resolveEnabled(false))
+        assertEquals(true, OrbProviderDirectoryHint.resolveEnabled(true))
     }
 }

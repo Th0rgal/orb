@@ -20,7 +20,9 @@ OS_NAME="$(uname -s)"
 USE_WEBKIT=1
 if [[ "$OS_NAME" == "Linux" && ( "${1:-}" == "--native" || "${1:-}" == "--leanui" ) ]]; then
   shift
-  "$ROOT_DIR/scripts/build_orb_bins.sh" --only orb-desktop-native --out-dir "$ROOT_DIR/target/native"
+  if [[ "${ORB_DESKTOP_SKIP_BUILD:-0}" != "1" || ! -x "$ROOT_DIR/target/native/orb-desktop-native" ]]; then
+    "$ROOT_DIR/scripts/build_orb_bins.sh" --only orb-desktop-native --out-dir "$ROOT_DIR/target/native"
+  fi
   exec "$ROOT_DIR/target/native/orb-desktop-native" "$@"
 fi
 if [[ "$OS_NAME" == "Linux" && "${1:-}" == "--webkit" ]]; then

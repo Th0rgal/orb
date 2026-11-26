@@ -269,7 +269,18 @@ def run (root : String) : IO Unit := do
   check (readStatus == 200 && summary.fieldBool? "api_key_configured" == some true &&
       ((summary.fieldArr? "devices").getD #[]).map JVal.asStr? == #[some "device"])
     "settings report configured device names"
+  let profiles := (summary.fieldArr? "profiles").getD #[]
+  check (profiles.size == 1 && profiles[0]!.fieldStr? "device" == some "device" &&
+      profiles[0]!.fieldStr? "country" == some "NL" && profiles[0]!.fieldStr? "server" == some "west")
+    "settings report non-secret profile metadata"
   check (!(renderCompact summary).contains "synthetic-api-key" && !(renderCompact summary).contains key)
     "settings omit key and profile material"
+  let (badDelete, _) ← settings dir "DELETE" "{\"device_id\":\"../boat\"}".toUTF8
+  check (badDelete == 400) "invalid device delete rejected"
+  let (delStatus, _) ← settings dir "DELETE" "{\"device_id\":\"device\"}".toUTF8
+  let (_, afterDelete) ← settings dir "GET" ByteArray.empty
+  check (delStatus == 200 && ((afterDelete.fieldArr? "devices").getD #[]).isEmpty &&
+      ((afterDelete.fieldArr? "profiles").getD #[]).isEmpty)
+    "device deletion clears sealed profile and summary"
 
 end OrbCore.AirVpnSettingsTests

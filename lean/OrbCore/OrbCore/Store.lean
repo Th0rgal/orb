@@ -201,7 +201,7 @@ private def revokeMissionTethersSql : String :=
   "UPDATE tether_lifecycle_epoch SET epoch=epoch+1 WHERE changes()>0;"
 
 def missionsSchemaSql : String :=
-  "CREATE TABLE IF NOT EXISTS node_api_hangs(node_id TEXT PRIMARY KEY COLLATE NOCASE,incident_id TEXT NOT NULL);" ++
+  "CREATE TABLE IF NOT EXISTS node_api_hangs(node_id TEXT PRIMARY KEY COLLATE NOCASE,incident_id TEXT NOT NULL,strikes INTEGER NOT NULL DEFAULT 1);" ++
   "CREATE TABLE IF NOT EXISTS missions (id TEXT PRIMARY KEY, title TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'awaiting_user', backend TEXT NOT NULL DEFAULT 'codex', model_override TEXT, model_effort TEXT, working_directory TEXT NOT NULL DEFAULT '', project TEXT NOT NULL DEFAULT '', folder TEXT NOT NULL DEFAULT '', placement_revision INTEGER NOT NULL DEFAULT 0, parent_mission_id TEXT, created_at TEXT NOT NULL DEFAULT '', metadata_updated_at TEXT, short_description TEXT, github_pr TEXT, origin TEXT, origin_session_id TEXT, workspace_name TEXT, resumable INTEGER NOT NULL DEFAULT 0, requires_local_disk INTEGER NOT NULL DEFAULT 0, tags TEXT NOT NULL DEFAULT '[]', session_id TEXT, deferred_goal TEXT, goal_mode INTEGER NOT NULL DEFAULT 0, goal_objective TEXT NOT NULL DEFAULT '', workspace_id TEXT NOT NULL DEFAULT '00000000-0000-0000-0000-000000000000', terminal_reason TEXT, updated_at TEXT NOT NULL DEFAULT '', opened_at TEXT, agent TEXT, config_profile TEXT, total_cost_cents INTEGER NOT NULL DEFAULT 0, history_json TEXT NOT NULL DEFAULT '[]', authority_mode TEXT NOT NULL DEFAULT 'writer' CHECK(authority_mode IN ('readonly','writer')), placement_kind TEXT NOT NULL DEFAULT 'managed', superseded_by_mission_id TEXT NOT NULL DEFAULT '', orphaned_at TEXT NOT NULL DEFAULT '', reserved_disk_gib INTEGER NOT NULL DEFAULT 0, state_revision INTEGER NOT NULL DEFAULT 1, owner_epoch INTEGER NOT NULL DEFAULT 1, run_generation INTEGER NOT NULL DEFAULT 1, node_boot_epoch INTEGER NOT NULL DEFAULT 1, track TEXT NOT NULL DEFAULT '', repo TEXT NOT NULL DEFAULT '', owner_user_id TEXT NOT NULL DEFAULT '');" ++
   "CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, username TEXT NOT NULL UNIQUE COLLATE NOCASE, password_hash TEXT NOT NULL, role TEXT NOT NULL CHECK(role IN ('admin','member')), unix_username TEXT UNIQUE, session_epoch INTEGER NOT NULL DEFAULT 1, disabled INTEGER NOT NULL DEFAULT 0, daily_spend_cap_cents INTEGER, created_at TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL DEFAULT '', password_seeded INTEGER NOT NULL DEFAULT 0);" ++
   "CREATE TABLE IF NOT EXISTS mission_shares (mission_id TEXT NOT NULL, user_id TEXT NOT NULL, role TEXT NOT NULL DEFAULT 'participant' CHECK(role IN ('participant')), granted_by TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL DEFAULT '', PRIMARY KEY (mission_id, user_id));" ++
@@ -350,6 +350,7 @@ def idempotencySchemaSql : String :=
   "CREATE TABLE IF NOT EXISTS idempotency_keys (scope TEXT NOT NULL, request_key TEXT NOT NULL, response_json TEXT NOT NULL, status_code INTEGER NOT NULL DEFAULT 200, committed_oversize INTEGER NOT NULL DEFAULT 0, body_bytes INTEGER NOT NULL DEFAULT 0, phase TEXT NOT NULL DEFAULT 'committed', created_at TEXT NOT NULL DEFAULT '', PRIMARY KEY(scope, request_key));"
 
 def missionsAdditiveAlters : Array String := #[
+  "ALTER TABLE node_api_hangs ADD COLUMN strikes INTEGER NOT NULL DEFAULT 2;",
   "ALTER TABLE mission_continuations ADD COLUMN dispatch_job_id TEXT NOT NULL DEFAULT '';",
   -- NULL means "never set": the stock default applies (see `chainResponse`).
   "ALTER TABLE model_routing_chains ADD COLUMN is_default INTEGER;",
@@ -1041,6 +1042,15 @@ def insertMissionRunUnlocked
       sqliteQueryRowsRaw db.handle
         s!"{verb} INTO mission_runs(id,mission_id,generation,execution_state,terminal_reason,remote_job_id,updated_at) VALUES(?1,?2,?3,?4,?5,?6,?7);"
         #[runId, missionId, generation, executionState, terminalReason, remoteJobId, updatedAt]
+
+/-- Thread-safe wrapper around `insertMissionRunUnlocked` acquiring `db.mu`. -/
+def insertMissionRun
+    (db : SqliteDb)
+    (runId missionId generation executionState terminalReason remoteJobId updatedAt : String)
+    (orReplace : Bool := false)
+    (ownerActorId : String := "orb-core")
+    (scopeUnit : String := "") : IO (Except String (Array (Array String))) :=
+  db.mu.atomically (insertMissionRunUnlocked db runId missionId generation executionState terminalReason remoteJobId updatedAt orReplace ownerActorId scopeUnit)
 
 /-- Normalize a legacy single-tenant `mission_runs` table (`run_id TEXT PRIMARY KEY NOT NULL`)
     by backfilling `id` and `updated_at` from `run_id` and `started_at`. -/
@@ -4904,7 +4914,10 @@ def queryMissionEventsPage
         pure s!"CASE WHEN event_type IN ('tool_call','tool_result') AND LENGTH(COALESCE(content,'')) > CAST(?{pCCut} AS INTEGER) THEN SUBSTR(COALESCE(content,''),1,CAST(?{pCMax} AS INTEGER)) ELSE COALESCE(content,'') END"
       else pure "COALESCE(content,'')"
     | none => pure "COALESCE(content,'')"
-  let mut whereSql := "WHERE mission_id=?1"
+  let resolvedHungNodeFilter :=
+    "NOT (event_type='error' AND CASE WHEN json_valid(payload) THEN json_extract(payload,'$.reason') END='hung_node' " ++
+    "AND NOT EXISTS (SELECT 1 FROM node_api_hangs h WHERE h.node_id=json_extract(payload,'$.node_id') AND h.strikes>=2))"
+  let mut whereSql := s!"WHERE mission_id=?1 AND {resolvedHungNodeFilter}"
   let forwardOrder ← do
     match sinceSeq?, beforeSeq? with
     | some s, _ =>
@@ -4990,7 +5003,8 @@ def queryMissionSyncReplayFrames
     let res ← execParamQuery st.missionsDb
       (s!"SELECT {effSeqExpr} AS eff_seq,event_type,COALESCE(payload,''),COALESCE(NULLIF(created_at,''),timestamp,'')," ++
        "COALESCE(event_id,''),COALESCE(tool_call_id,''),COALESCE(tool_name,''),COALESCE(content,''),COALESCE(content_file,''),COALESCE(metadata,'') " ++
-       s!"FROM mission_events WHERE mission_id=?1 AND {effSeqExpr}>CAST(?2 AS INTEGER) ORDER BY eff_seq ASC, id ASC LIMIT CAST(?3 AS INTEGER);")
+       "FROM mission_events WHERE mission_id=?1 AND NOT (event_type='error' AND CASE WHEN json_valid(payload) THEN json_extract(payload,'$.reason') END='hung_node' AND NOT EXISTS (SELECT 1 FROM node_api_hangs h WHERE h.node_id=json_extract(payload,'$.node_id') AND h.strikes>=2)) " ++
+       s!"AND {effSeqExpr}>CAST(?2 AS INTEGER) ORDER BY eff_seq ASC, id ASC LIMIT CAST(?3 AS INTEGER);")
       #[missionId, s!"{s}", s!"{fetchLim}"]
     let .ok rs := res | return .error "mission_events_replay_failed"
     let cnt := if rs.size > 0 then rs.size - 1 else 0

@@ -264,6 +264,11 @@ jobs:
           gtk_menu_lines=$(wc -l < linux_shell/gtk_menu.c)
           echo "linux_shell/gtk_menu.c LOC: $gtk_menu_lines"
           test "$gtk_menu_lines" -le 220
+          for ui_c in lean/OrbDesktop/c/lean_ui_wayland.c lean/OrbDesktop/c/lean_ui_text.c lean/OrbDesktop/c/lean_ui_vulkan.c lean/OrbDesktop/c/lean_ui_vk_bridge.c lean/OrbDesktop/c/lean_ui_sidebar.c; do
+            ui_lines=$(wc -l < "$ui_c")
+            echo "$ui_c LOC: $ui_lines"
+            test "$ui_lines" -le 220
+          done
           # One turbo-lean run per package builds its binaries and tests together, then the
           # tests run; building the test targets separately rebuilt each package.
           ./scripts/build_orb_bins.sh --with-tests --out-dir target/debug
@@ -328,6 +333,10 @@ jobs:
           python3 scripts/check_spec_audit.py audit-results/orb-client-spec-audit.json
           ./scripts/turbo_lean.sh --json audit-spec lean/OrbClient/OrbClient/MutantSuite.lean > audit-results/orb-client-mutant-audit.json
           python3 scripts/check_spec_audit.py audit-results/orb-client-mutant-audit.json
+          (cd lean/OrbDesktop && "$GITHUB_WORKSPACE/scripts/turbo_lean.sh" --json audit-spec LeanUI/Spec/SwapchainSpec.lean) > audit-results/leanui-swapchain-spec-audit.json
+          python3 scripts/check_spec_audit.py audit-results/leanui-swapchain-spec-audit.json
+          (cd lean/OrbDesktop && "$GITHUB_WORKSPACE/scripts/turbo_lean.sh" --json audit-spec LeanUI/Spec/MutantSuite.lean) > audit-results/leanui-mutant-audit.json
+          python3 scripts/check_spec_audit.py audit-results/leanui-mutant-audit.json
           ./scripts/turbo_lean.sh --json audit-spec lean/OrbClient/OrbClient/Reducers.lean > audit-results/orb-client-reducers-audit.json
           python3 scripts/check_spec_audit.py audit-results/orb-client-reducers-audit.json
           ./scripts/turbo_lean.sh --json audit-spec lean/OrbCore/OrbCore/Spec.lean > audit-results/orb-core-spec-audit.json

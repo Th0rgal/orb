@@ -1,5 +1,6 @@
 import LeanUI.Defs
 import LeanUI.Kernel
+import LeanUI.Scene
 import LeanUI.FFI
 import LeanUI.Wayland
 import LeanUI.Text
@@ -15,11 +16,8 @@ runner.
 -/
 namespace LeanUI.Runtime
 
-/-- Widget IDs that host editable text and Wayland `zwp-text-input-v3` IME sessions:
-    composer / inline rename / directory editor (`1`), search palette input (`701`),
-    and settings URL input (`604`). -/
-@[inline] def isTextInputEntity (id : EntityId) : Bool :=
-  id == 1 || id == 701 || id == 604
+/-- Re-export shared text-input entity predicate from `LeanUI.Defs`. -/
+@[inline] abbrev isTextInputEntity := LeanUI.isTextInputEntity
 
 def cycleFocusRuntime (focusState : FocusState) (order : List EntityId) : FocusState :=
   let admitted := order.filter focusState.admits
@@ -40,23 +38,42 @@ structure RuntimeConfig where
   headlessGolden : Option System.FilePath := none
   /-- Render offscreen without connecting to a compositor. -/
   headless : Bool := false
+  /-- Requested GPU backend mode (`auto`, `disabled`, `present`, `instanced`, `lavapipe`). -/
+  gpuMode : Vulkan.GpuModeRequest := .auto
+  /-- Offscreen Vulkan readback directory (CI differential parity harness only). -/
+  gpuReadbackDir : Option System.FilePath := none
   width : Nat := 1280
   height : Nat := 800
   scale120 : Nat := 120
   darkTheme : Bool := true
   maxFrames : Nat := 1
-  fontPattern : String := "Inter"
+  fontPattern : String := "IBM Plex Sans,Inter,sans-serif"
   title : String := "Orb Desktop"
   deriving Repr, Inhabited
 
-/-- Parse CLI arguments (`--headless-golden <path>`, `--width <px>`, `--height <px>`,
-`--scale120 <n>`, `--light`, `--dark`, `--frames <n>`). -/
+/-- Parse CLI arguments (`--headless-golden <path>`, `--headless`, `--no-gpu`, `--gpu`,
+`--gpu=present`, `--gpu=instanced`, `--gpu=lavapipe`, `--gpu-readback <dir>`, `--width <px>`,
+`--height <px>`, `--scale120 <n>`, `--light`, `--dark`, `--frames <n>`). -/
 def parseRuntimeArgs (args : List String) : RuntimeConfig :=
   let rec loop (rem : List String) (cfg : RuntimeConfig) : RuntimeConfig :=
     match rem with
     | [] => cfg
     | "--headless-golden" :: path :: rest =>
       loop rest { cfg with headlessGolden := some path }
+    | "--headless" :: rest =>
+      loop rest { cfg with headless := true }
+    | "--no-gpu" :: rest =>
+      loop rest { cfg with gpuMode := .disabled }
+    | "--gpu" :: rest =>
+      loop rest { cfg with gpuMode := .instanced }
+    | "--gpu=present" :: rest =>
+      loop rest { cfg with gpuMode := .present }
+    | "--gpu=instanced" :: rest =>
+      loop rest { cfg with gpuMode := .instanced }
+    | "--gpu=lavapipe" :: rest =>
+      loop rest { cfg with gpuMode := .lavapipe }
+    | "--gpu-readback" :: dir :: rest =>
+      loop rest { cfg with gpuReadbackDir := some dir }
     | "--width" :: w :: rest =>
       loop rest { cfg with width := w.toNat?.getD cfg.width }
     | "--height" :: h :: rest =>
@@ -81,6 +98,31 @@ structure ScrollRegion where
   textLines : List WrappedLine := []
   deriving Inhabited
 
+/-- Active pointer drag state for an overlay scrollbar thumb or track-jump drag. -/
+structure ScrollbarDragState where
+  regionId : EntityId
+  grabOffsetSub : Int
+  lastPy : Int
+  geom : ScrollbarGeometry
+  deriving DecidableEq, Repr, Inhabited
+
+/-- Refresh an active scrollbar drag's geometry against the latest `scrollRegions` produced by
+`view`, clearing the drag if its region vanished or became non-scrollable (`limitY == 0`). -/
+def reconcileScrollbarDrag (drag? : Option ScrollbarDragState)
+    (scrollRegions : List ScrollRegion) : Option ScrollbarDragState :=
+  drag?.bind fun drag =>
+    (scrollRegions.find? (·.id == drag.regionId)).bind fun r =>
+      (scrollbarGeometry r.bounds r.limitY r.offsetY).map fun geom =>
+        { drag with geom }
+
+/-- Find the topmost scrollable `ScrollRegion` whose right-edge scrollbar gutter contains `(px, py)`. -/
+def hitTestScrollbar (regions : List ScrollRegion) (px py : Int) :
+    Option (ScrollRegion × ScrollbarGeometry) :=
+  regions.foldl (fun acc r =>
+    match scrollbarGeometry r.bounds r.limitY r.offsetY with
+    | some g => if g.trackRectSub.contains px py then some (r, g) else acc
+    | none => acc) none
+
 abbrev FrameView := Text.GlyphAtlasCache × Color × Scene × List (EntityId × Rect) × List EntityId
 
 /-- Single-owner UI state store driving layout, focus, scroll, damage, text atlas, and Vulkan. -/
@@ -89,17 +131,20 @@ structure RuntimeState (σ : Type) where
   wayland : Wayland.WaylandClient := {}
   vulkan : Vulkan.VulkanContext := {}
   atlas : Text.GlyphAtlasCache := {}
-  primaryFont : Text.FontHandle := { fontId := 1, facePtr := 0, pattern := "sans-serif" }
-  monoFont : Text.FontHandle := { fontId := 2, facePtr := 0, pattern := "DejaVu Sans Mono" }
-  boldFont : Text.FontHandle := { fontId := 3, facePtr := 0, pattern := "Inter:weight=bold" }
-  mediumFont : Text.FontHandle := { fontId := 4, facePtr := 0, pattern := "Inter:weight=medium" }
-  semiboldFont : Text.FontHandle := { fontId := 5, facePtr := 0, pattern := "Inter:weight=demibold" }
+  primaryFont : Text.FontHandle := { fontId := 1, facePtr := 0, pattern := "IBM Plex Sans,Inter,sans-serif" }
+  monoFont : Text.FontHandle := { fontId := 2, facePtr := 0, pattern := "Lilex Nerd Font,Lilex,IBM Plex Mono,DejaVu Sans Mono,monospace" }
+  boldFont : Text.FontHandle := { fontId := 3, facePtr := 0, pattern := "IBM Plex Sans,Inter,sans-serif:weight=bold" }
+  mediumFont : Text.FontHandle := { fontId := 4, facePtr := 0, pattern := "IBM Plex Sans,Inter,sans-serif:weight=medium" }
+  semiboldFont : Text.FontHandle := { fontId := 5, facePtr := 0, pattern := "IBM Plex Sans,Inter,sans-serif:weight=demibold" }
   focus : FocusState := {}
+  /-- Keyboard-initiated focus ring visibility (`:focus-visible`). True on Tab/Shift+Tab, false on pointer click. -/
+  focusVisible : Bool := true
   windowFocused : Bool := true
   lastImeOwner : Option EntityId := none
   hoveredEntity : Option EntityId := none
   hitRegions : List (EntityId × Rect) := []
   scrollRegions : List ScrollRegion := []
+  activeScrollbarDrag : Option ScrollbarDragState := none
   focusableOrder : List EntityId := []
   pressedEntity : Option EntityId := none
   scrollOffsetSub : Nat := 0
@@ -107,6 +152,9 @@ structure RuntimeState (σ : Type) where
   damage : Damage := none
   framesRendered : Nat := 0
   quiescentSkips : Nat := 0
+  presentCount : Nat := 0
+  frameCallbackSkips : Nat := 0
+  lastFrameTotalNs : UInt64 := 0
   running : Bool := true
 
 namespace RuntimeState
@@ -126,137 +174,230 @@ def viewportDeviceRect (rt : RuntimeState σ) : Rect :=
 @[inline] def markFullDamage (rt : RuntimeState σ) : RuntimeState σ :=
   rt.markDirty rt.viewportDeviceRect
 
-/-- Request focus for `entityId` via `FocusState.request` and accumulate `focusBorderDamage`
-over `focusRect` when focus ownership changes. -/
-def requestFocus (rt : RuntimeState σ) (entityId : EntityId) (focusRect : Rect) : RuntimeState σ :=
-  let wasFocused := rt.focus.owner == some entityId
+/-- Device-pixel rect for a hit-testable entity, falling back to `viewportDeviceRect`. -/
+def entityDeviceRect (rt : RuntimeState σ) (id : EntityId) : Rect :=
+  match rt.hitRegions.find? (·.1 == id) with
+  | some (_, r) => roundRectOut rt.wayland.scale120 r
+  | none => rt.viewportDeviceRect
+
+/-- Update modal focus traps; whenever traps change (e.g. a modal/menu opens or closes),
+cancel any active scrollbar drag and pressed entity and damage the viewport. -/
+def applyFocusTraps (rt : RuntimeState σ) (traps' : List (List EntityId)) : RuntimeState σ :=
+  if traps' != rt.focus.traps then
+    { rt with
+      focus := { rt.focus with traps := traps' }
+      activeScrollbarDrag := none
+      pressedEntity := none
+      damage := Damage.add rt.damage rt.viewportDeviceRect }
+  else rt
+
+/-- Clear keyboard `:focus-visible` modality (e.g. on pointer interaction), damaging any previously
+visible non-text focus ring so it disappears cleanly. -/
+def clearFocusVisible (rt : RuntimeState σ) : RuntimeState σ :=
+  if !rt.focusVisible then rt
+  else
+    let dmg' := match rt.focus.owner with
+      | some old =>
+        if isTextInputEntity old then rt.damage
+        else Damage.add rt.damage (rt.entityDeviceRect old)
+      | none => rt.damage
+    { rt with focusVisible := false, damage := dmg' }
+
+/-- Request focus for `entityId` with explicit `:focus-visible` modality and minimal border damage. -/
+def requestFocusWithVisibility (rt : RuntimeState σ) (entityId : EntityId) (focusRect : Rect)
+    (visible : Bool) : RuntimeState σ :=
+  let wasOwner := rt.focus.owner == some entityId
   let focus' := rt.focus.request entityId
-  let nowFocused := focus'.owner == some entityId
-  let borderDmg := focusBorderDamage wasFocused nowFocused focusRect
+  let nowOwner := focus'.owner == some entityId
+  let wasShown := wasOwner && (isTextInputEntity entityId || rt.focusVisible)
+  let nowShown := nowOwner && (isTextInputEntity entityId || visible)
+  let borderDmg := focusBorderDamage wasShown nowShown focusRect
   let dmg' := match borderDmg with
     | none => rt.damage
     | some r => Damage.add rt.damage r
-  let dmg' := if focus'.owner != rt.focus.owner then
-      match rt.focus.owner with
-      | none => dmg'
-      | some old =>
-        let oldRect := (rt.hitRegions.find? (·.1 == old)).map (fun p => roundRectOut rt.wayland.scale120 p.2)
-        Damage.add dmg' (oldRect.getD rt.viewportDeviceRect)
-    else dmg'
-  { rt with focus := focus', damage := dmg' }
+  let dmg' :=
+    match rt.focus.owner with
+    | none => dmg'
+    | some old =>
+      if old != entityId && focus'.owner != rt.focus.owner && (isTextInputEntity old || rt.focusVisible) then
+        Damage.add dmg' (rt.entityDeviceRect old)
+      else if old != entityId && focus'.owner == rt.focus.owner && rt.focusVisible && !visible && !isTextInputEntity old then
+        Damage.add dmg' (rt.entityDeviceRect old)
+      else dmg'
+  { rt with focus := focus', focusVisible := visible, damage := dmg' }
+
+/-- Request focus for `entityId` via `FocusState.request` preserving current `focusVisible` modality
+and accumulating `focusBorderDamage` over `focusRect` when visible focus changes. -/
+def requestFocus (rt : RuntimeState σ) (entityId : EntityId) (focusRect : Rect) : RuntimeState σ :=
+  rt.requestFocusWithVisibility entityId focusRect rt.focusVisible
 
 /-- Apply one `Event` to the runtime state and invoke the application's event reducer `onEvent`. -/
 def stepEvent (rt : RuntimeState σ) (onEvent : σ → Event → σ × Damage) (ev : Event) :
     RuntimeState σ :=
-  let rt1 : RuntimeState σ :=
-    match ev with
-    | .resize w h =>
-      let w1 := if w > 0 then w else rt.wayland.pendingW
-      let h1 := if h > 0 then h else rt.wayland.pendingH
-      let wl' := { rt.wayland with pendingW := w1, pendingH := h1 }
-      let (bw, bh) := wl'.deviceBufferSize
-      { rt with wayland := wl', damage := Damage.add rt.damage { x := 0, y := 0, w := (bw : Int), h := (bh : Int) } }
-    | .scale s120 =>
-      let sc := if s120 > 0 then s120 else 120
-      let wl' := { rt.wayland with scale120 := sc }
-      let (bw, bh) := wl'.deviceBufferSize
-      { rt with wayland := wl', damage := Damage.add rt.damage { x := 0, y := 0, w := (bw : Int), h := (bh : Int) } }
-    | .windowFocus f =>
-      let dmg := focusBorderDamage rt.windowFocused f rt.viewportDeviceRect
-      let d' := match dmg with | none => rt.damage | some r => Damage.add rt.damage r
-      { rt with windowFocused := f, damage := d' }
-    | .pointerMove px py =>
-      let hit := hitTest rt.hitRegions px py
-      { rt with hoveredEntity := hit }
-    | .pointerLeave =>
-      { rt with hoveredEntity := none }
-    | .pointerButton px py button down =>
-      if button != 0x110 then rt
-      else if down then
-        match hitTest rt.hitRegions px py with
-        | some id =>
-          let r := (rt.hitRegions.find? (·.1 == id)).map (·.2) |>.getD rt.viewportDeviceRect
-          let devR := roundRectOut rt.wayland.scale120 r
-          let focused := if rt.focusableOrder.isEmpty || rt.focusableOrder.contains id then
-              rt.requestFocus id devR
-            else rt
-          { focused with pressedEntity := some id }
-        | none => rt
+  -- Consume pointer press/move/release when interacting with an overlay scrollbar so
+  -- dragging never clicks, focuses, or activates underlying rows/widgets.
+  match ev with
+  | .pointerButton px py 0x110 true =>
+    if let some (region, geom) := hitTestScrollbar rt.scrollRegions px py then
+      let (nextOff, grabOffsetSub) := geom.pointerPress region.offsetY px py
+      let drag : ScrollbarDragState :=
+        { regionId := region.id, grabOffsetSub, lastPy := py, geom }
+      let rt0 := { rt.clearFocusVisible with pressedEntity := none, activeScrollbarDrag := some drag }
+      let (app', appDmg) := onEvent rt0.app (.scrollTo region.id nextOff)
+      let finalDmg := appDmg.elim rt0.damage (Damage.add rt0.damage)
+      { rt0 with app := app', damage := finalDmg }
+    else
+      stepEventNormal rt onEvent ev
+  | .pointerMove _px py =>
+    if let some drag := rt.activeScrollbarDrag then
+      if py == drag.lastPy then rt
       else
-        match hitTest rt.hitRegions px py, rt.pressedEntity with
-        | some id, some pressed =>
-          let rt' := { rt with pressedEntity := none }
-          if id == pressed then
-            let (app', appDmg) := onEvent rt'.app (.activate id)
-            let finalDmg := match appDmg with
-              | none => rt'.damage
-              | some r => Damage.add rt'.damage r
-            { rt' with app := app', damage := finalDmg }
-          else rt'
-        | _, _ => { rt with pressedEntity := none }
-    | .scroll _px _py _dx dy =>
-      if !rt.scrollRegions.isEmpty then rt else
-      let (_, vhSub) := rt.wayland.logicalSubSize
-      let nextOff := scrollStep rt.contentHeightSub vhSub rt.scrollOffsetSub dy
-      if nextOff == rt.scrollOffsetSub then rt
-      else { (rt.markFullDamage) with scrollOffsetSub := nextOff }
-    | .closeRequested =>
-      { rt with running := false }
-    | .key keysym mods state =>
-      if state == .pressed || state == .repeated then
-        -- Tab is handled here so every screen shares one focus traversal policy.
-        if keysym == 0xff09 || keysym == 0xfe20 then
-          let reverse := keysym == 0xfe20 || mods &&& 1 != 0
-          let focus' := cycleFocusRuntime rt.focus (if reverse then rt.focusableOrder.reverse else rt.focusableOrder)
-          let dmg' := if focus'.owner == rt.focus.owner then rt.damage else Damage.add rt.damage rt.viewportDeviceRect
-          { rt with focus := focus', damage := dmg' }
-        else if keysym == 0xff0d || keysym == 0xff8d || keysym == 0x20 then
-          match rt.focus.owner with
+        let nextOff := drag.geom.offsetForThumbTop (py - drag.grabOffsetSub)
+        let (app', appDmg) := onEvent rt.app (.scrollTo drag.regionId nextOff)
+        let finalDmg := appDmg.elim rt.damage (Damage.add rt.damage)
+        { rt with
+          app := app'
+          activeScrollbarDrag := some { drag with lastPy := py }
+          damage := finalDmg }
+    else
+      stepEventNormal rt onEvent ev
+  | .pointerButton _px _py 0x110 false =>
+    if rt.activeScrollbarDrag.isSome then
+      { rt with activeScrollbarDrag := none, pressedEntity := none }
+    else
+      stepEventNormal rt onEvent ev
+  | _ => stepEventNormal rt onEvent ev
+where
+  stepEventNormal (rt : RuntimeState σ) (onEvent : σ → Event → σ × Damage) (ev : Event) :
+      RuntimeState σ :=
+    let rt1 : RuntimeState σ :=
+      match ev with
+      | .resize w h =>
+        let w1 := if w > 0 then w else rt.wayland.pendingW
+        let h1 := if h > 0 then h else rt.wayland.pendingH
+        let wl' := { rt.wayland with pendingW := w1, pendingH := h1 }
+        let (bw, bh) := wl'.deviceBufferSize
+        { rt with
+          wayland := wl'
+          activeScrollbarDrag := none
+          damage := Damage.add rt.damage { x := 0, y := 0, w := (bw : Int), h := (bh : Int) } }
+      | .scale s120 =>
+        let sc := if s120 > 0 then s120 else 120
+        let wl' := { rt.wayland with scale120 := sc }
+        let (bw, bh) := wl'.deviceBufferSize
+        { rt with wayland := wl', damage := Damage.add rt.damage { x := 0, y := 0, w := (bw : Int), h := (bh : Int) } }
+      | .windowFocus f =>
+        let dmg := focusBorderDamage rt.windowFocused f rt.viewportDeviceRect
+        let d' := match dmg with | none => rt.damage | some r => Damage.add rt.damage r
+        { rt with
+          windowFocused := f
+          activeScrollbarDrag := if f then rt.activeScrollbarDrag else none
+          damage := d' }
+      | .pointerMove px py =>
+        let hit := hitTest rt.hitRegions px py
+        { rt with hoveredEntity := hit }
+      | .pointerLeave =>
+        { rt with hoveredEntity := none }
+      | .pointerButton px py button down =>
+        if button != 0x110 then
+          if down then rt.clearFocusVisible else rt
+        else if down then
+          match hitTest rt.hitRegions px py with
           | some id =>
-            let isInput := isTextInputEntity id && (rt.focusableOrder.isEmpty || rt.focusableOrder.contains id)
-            -- Space inserts a space character into focused text inputs rather than activating them.
-            if isInput && keysym == 0x20 then rt
-            else
-              let editorReturn := isInput && keysym != 0x20
-              if state == .repeated then rt else
-              let action := if editorReturn then
-                  Event.composerReturn (mods &&& 1 != 0)
-                else Event.activate id
-              let (app', appDmg) := onEvent rt.app action
+            let r := (rt.hitRegions.find? (·.1 == id)).map (·.2) |>.getD rt.viewportDeviceRect
+            let devR := roundRectOut rt.wayland.scale120 r
+            let focused := if rt.focusableOrder.isEmpty || rt.focusableOrder.contains id then
+                rt.requestFocusWithVisibility id devR false
+              else rt.clearFocusVisible
+            { focused with pressedEntity := some id }
+          | none => rt.clearFocusVisible
+        else
+          match hitTest rt.hitRegions px py, rt.pressedEntity with
+          | some id, some pressed =>
+            let rt' := { rt with pressedEntity := none }
+            if id == pressed then
+              let (app', appDmg) := onEvent rt'.app (.activate id)
               let finalDmg := match appDmg with
-                | none => rt.damage
-                | some r => Damage.add rt.damage r
-              { rt with app := app', damage := finalDmg }
-          | none => rt
+                | none => rt'.damage
+                | some r => Damage.add rt'.damage r
+              { rt' with app := app', damage := finalDmg }
+            else rt'
+          | _, _ => { rt with pressedEntity := none }
+      | .scroll _px _py _dx dy =>
+        if !rt.scrollRegions.isEmpty then rt else
+        let (_, vhSub) := rt.wayland.logicalSubSize
+        let nextOff := scrollStep rt.contentHeightSub vhSub rt.scrollOffsetSub dy
+        if nextOff == rt.scrollOffsetSub then rt
+        else { (rt.markFullDamage) with scrollOffsetSub := nextOff }
+      | .closeRequested =>
+        { rt with running := false, activeScrollbarDrag := none }
+      | .key keysym mods state =>
+        if state == .pressed || state == .repeated then
+          -- Tab is handled here so every screen shares one focus traversal policy.
+          if keysym == 0xff09 || keysym == 0xfe20 then
+            let reverse := keysym == 0xfe20 || mods &&& 1 != 0
+            let focus' := cycleFocusRuntime rt.focus (if reverse then rt.focusableOrder.reverse else rt.focusableOrder)
+            let dmg' :=
+              if focus'.owner == rt.focus.owner && rt.focusVisible then rt.damage
+              else
+                let d0 := match rt.focus.owner with
+                  | some old =>
+                    if isTextInputEntity old || rt.focusVisible then
+                      Damage.add rt.damage (rt.entityDeviceRect old)
+                    else rt.damage
+                  | none => rt.damage
+                match focus'.owner with
+                | some nextId => Damage.add d0 (rt.entityDeviceRect nextId)
+                | none => d0
+            { rt with focus := focus', focusVisible := true, damage := dmg' }
+          else if keysym == 0xff0d || keysym == 0xff8d || keysym == 0x20 then
+            match rt.focus.owner with
+            | some id =>
+              let isInput := isTextInputEntity id && (rt.focusableOrder.isEmpty || rt.focusableOrder.contains id)
+              -- Space inserts a space character into focused text inputs rather than activating them.
+              if isInput && keysym == 0x20 then rt
+              else
+                let editorReturn := isInput && keysym != 0x20
+                if state == .repeated then rt else
+                let action := if editorReturn then
+                    Event.composerReturn (mods &&& 1 != 0)
+                  else Event.activate id
+                let (app', appDmg) := onEvent rt.app action
+                let finalDmg := match appDmg with
+                  | none => rt.damage
+                  | some r => Damage.add rt.damage r
+                { rt with app := app', damage := finalDmg }
+            | none => rt
+          else rt
         else rt
-      else rt
-    | _ => rt
-  let isActiveInput (st : RuntimeState σ) : Bool :=
-    st.focus.owner.any (fun id => isTextInputEntity id && (st.focusableOrder.isEmpty || st.focusableOrder.contains id))
-  let wasInput := isActiveInput rt
-  let isInputNow := isActiveInput rt1
-  let lostEditor := wasInput &&
-    (!isInputNow || rt1.focus.owner != rt.focus.owner || (rt.windowFocused && !rt1.windowFocused))
-  let rt1 := if lostEditor then
-      let (app, dmg) := onEvent rt1.app (.preedit "" 0 0)
-      { rt1 with app, damage := dmg.elim rt1.damage (Damage.add rt1.damage) }
-    else rt1
-  let isText := match ev with
-    | .text _ | .preedit .. | .imeBatch .. => true
-    | _ => false
-  if isText && !isInputNow then rt1 else
-  let (app', appDmg) := onEvent rt1.app ev
-  let finalDmg := match appDmg with
-    | none => rt1.damage
-    | some r => Damage.add rt1.damage r
-  { rt1 with app := app', damage := finalDmg }
+      | _ => rt
+    let isActiveInput (st : RuntimeState σ) : Bool :=
+      st.focus.owner.any (fun id => isTextInputEntity id && (st.focusableOrder.isEmpty || st.focusableOrder.contains id))
+    let wasInput := isActiveInput rt
+    let isInputNow := isActiveInput rt1
+    let lostEditor := wasInput &&
+      (!isInputNow || rt1.focus.owner != rt.focus.owner || (rt.windowFocused && !rt1.windowFocused))
+    let rt1 := if lostEditor then
+        let (app, dmg) := onEvent rt1.app (.preedit "" 0 0)
+        { rt1 with app, damage := dmg.elim rt1.damage (Damage.add rt1.damage) }
+      else rt1
+    let isText := match ev with
+      | .text _ | .preedit .. | .imeBatch .. => true
+      | _ => false
+    if isText && !isInputNow then rt1 else
+    let (app', appDmg) := onEvent rt1.app ev
+    let finalDmg := match appDmg with
+      | none => rt1.damage
+      | some r => Damage.add rt1.damage r
+    { rt1 with app := app', damage := finalDmg }
 
 /-- Return the synthesized activation event (`.activate id` or `.composerReturn`) that
 `stepEvent` dispatches for `ev`, or `ev` itself when no activation occurs. -/
 def effectiveEvent (rt : RuntimeState σ) (ev : Event) : Event :=
   match ev with
   | .pointerButton px py 0x110 false =>
-    match hitTest rt.hitRegions px py, rt.pressedEntity with
+    if rt.activeScrollbarDrag.isSome then ev
+    else match hitTest rt.hitRegions px py, rt.pressedEntity with
     | some id, some pressed => if id == pressed then .activate id else ev
     | _, _ => ev
   | .key keysym mods state =>
@@ -264,9 +405,10 @@ def effectiveEvent (rt : RuntimeState σ) (ev : Event) : Event :=
         (keysym == 0xff0d || keysym == 0xff8d || keysym == 0x20) then
       match rt.focus.owner with
       | some id =>
-        let editorReturn := id == 1 && keysym != 0x20
-        if (editorReturn || id != 1) && state == .repeated then ev
-        else if editorReturn then .composerReturn (mods &&& 1 != 0)
+        let isInput := isTextInputEntity id && (rt.focusableOrder.isEmpty || rt.focusableOrder.contains id)
+        if isInput && keysym == 0x20 then ev
+        else if state == .repeated then ev
+        else if isInput then .composerReturn (mods &&& 1 != 0)
         else .activate id
       | none => ev
     else ev
@@ -285,6 +427,35 @@ def stepEventWithFocus (rt : RuntimeState σ) (onEvent : σ → Event → σ × 
 
 end RuntimeState
 
+/-- Coalesce adjacent `.scroll` events in the same Wayland frame (absorbing interleaved `.time`
+stamps emitted by `wl_pointer.axis`) so high-rate touchpad bursts update layout and repaint
+once per frame. Only merges matching pointer coordinates and same-sign axis deltas to preserve
+cross-container routing, clamping, and `Orb.Scroll` unpinning transitions. -/
+def coalesceScrollEvents (evs : Array Event) : Array Event :=
+  evs.foldl (init := #[]) fun acc ev =>
+    match ev with
+    | .scroll x2 y2 dx2 dy2 =>
+      if dx2 == 0 && dy2 == 0 then acc
+      else
+        let canMerge (x1 y1 dx1 dy1 : Int) : Bool :=
+          x1 == x2 && y1 == y2 && dx1 * dx2 ≥ 0 && dy1 * dy2 ≥ 0
+        match acc.back? with
+        | some (.scroll x1 y1 dx1 dy1) =>
+          if canMerge x1 y1 dx1 dy1 then
+            acc.pop.push (.scroll x1 y1 (dx1 + dx2) (dy1 + dy2))
+          else acc.push ev
+        | some (.time t) =>
+          match acc[acc.size - 2]? with
+          | some (.scroll x1 y1 dx1 dy1) =>
+            if canMerge x1 y1 dx1 dy1 then
+              let base := acc.pop.pop
+              let base := match base.back? with | some (.time _) => base.pop | _ => base
+              base.push (.time t) |>.push (.scroll x1 y1 (dx1 + dx2) (dy1 + dy2))
+            else acc.push ev
+          | _ => acc.push ev
+        | _ => acc.push ev
+    | _ => acc.push ev
+
 /-- Execute one frame tick:
 1. Pump Wayland events (`Wayland.pumpEvents`) and reduce them through `stepEvent`.
 2. Check `needsRedraw rt.damage`: if `false`, skip rendering completely (`quiescentSkips + 1`).
@@ -297,15 +468,14 @@ def stepFrameWithRegions {σ : Type} (rt : RuntimeState σ)
     (focusTraps : σ → List (List EntityId) := fun _ => []) :
     IO (RuntimeState σ) := do
   let (wl1, evs) ← Wayland.pumpEvents rt.wayland
+  let evs := coalesceScrollEvents evs
   let mut st := { rt with wayland := wl1 }
   for ev in evs do
     let before := st.app
     let prevOwner := st.focus.owner
     let dispatched := st.effectiveEvent ev
     st := st.stepEvent (onEvent st) ev
-    let traps' := focusTraps st.app
-    if traps' != st.focus.traps then
-      st := { st with focus := { st.focus with traps := traps' }, damage := Damage.add st.damage st.viewportDeviceRect }
+    st := st.applyFocusTraps (focusTraps st.app)
     if let some target := focusChange before st.app dispatched then
       st := st.requestFocus target st.viewportDeviceRect
       if prevOwner.any isTextInputEntity && st.focus.owner != prevOwner then
@@ -313,6 +483,9 @@ def stepFrameWithRegions {σ : Type} (rt : RuntimeState σ)
         st := { st with app := app', damage := dmg'.elim st.damage (Damage.add st.damage) }
   if !needsRedraw st.damage then
     return { st with quiescentSkips := st.quiescentSkips + 1 }
+  if !st.wayland.headless && st.wayland.frameCallbackPending && !st.wayland.configurePendingCommit then
+    return { st with frameCallbackSkips := st.frameCallbackSkips + 1 }
+  let frameT0 ← IO.monoNanosNow
   let (bw, bh) := st.wayland.deviceBufferSize
   let vk0 :=
     if st.vulkan.width != bw || st.vulkan.height != bh then
@@ -322,21 +495,86 @@ def stepFrameWithRegions {σ : Type} (rt : RuntimeState σ)
         framebuffer := ByteArray.empty }
     else st.vulkan
   let ((atlas', clearColor, scene, regions, focusOrder), scrollRegions) ← view { st with vulkan := vk0 }
+  let activeScrollbarDrag := reconcileScrollbarDrag st.activeScrollbarDrag scrollRegions
   -- Transfer the old surface into the painter; retaining it in `st` forces
   -- a framebuffer-sized copy even for a small in-place repaint.
   st := { st with vulkan := default }
+  if !st.wayland.headless && vk0.backend != .cpuShm then
+    let wlRef ← IO.mkRef st.wayland
+    let prePresent : IO Unit := do
+      let wlA ← Wayland.syncViewportDestination (← wlRef.get)
+      let wlB ← Wayland.requestFrameCallback wlA
+      wlRef.set wlB
+    let onAborted : IO Unit := do
+      let wlC ← Wayland.cancelFrameCallback (← wlRef.get)
+      wlRef.set wlC
+    let (vkGpu, atlasGpu, handledByVk, didPresent) ←
+      Vulkan.renderAndPresentGpu vk0 clearColor atlas' scene st.damage prePresent onAborted
+    let wlAfter ← wlRef.get
+    if handledByVk then
+      let frameT1 ← IO.monoNanosNow
+      if didPresent then
+        return {
+          st with
+          wayland := wlAfter
+          vulkan := vkGpu
+          atlas := atlasGpu
+          hitRegions := regions
+          scrollRegions
+          activeScrollbarDrag
+          focusableOrder := focusOrder
+          damage := none
+          framesRendered := st.framesRendered + 1
+          presentCount := st.presentCount + 1
+          lastFrameTotalNs := (frameT1 - frameT0).toUInt64
+        }
+      else
+        -- Swapchain recreation / zero-extent suspension: preserve damage so next frame retries
+        let retainedDamage :=
+          if bw > 0 && bh > 0 then some ⟨0, 0, bw, bh⟩ else st.damage
+        return {
+          st with
+          wayland := wlAfter
+          vulkan := vkGpu
+          atlas := atlasGpu
+          hitRegions := regions
+          scrollRegions
+          activeScrollbarDrag
+          focusableOrder := focusOrder
+          damage := retainedDamage
+          lastFrameTotalNs := (frameT1 - frameT0).toUInt64
+        }
+    -- Runtime DEVICE_LOST fallback: render CPU frame so `runWindow` presents via `wl_shm`.
+    let vkCpu ← Vulkan.renderFrame vkGpu clearColor atlasGpu scene
+    let frameT1 ← IO.monoNanosNow
+    return {
+      st with
+      wayland := wlAfter
+      vulkan := vkCpu
+      atlas := atlasGpu
+      hitRegions := regions
+      scrollRegions
+      activeScrollbarDrag
+      focusableOrder := focusOrder
+      damage := none
+      framesRendered := st.framesRendered + 1
+      lastFrameTotalNs := (frameT1 - frameT0).toUInt64
+    }
   let vk' ← match st.damage with
     | some dirty => Vulkan.renderFrameDamage vk0 clearColor atlas' dirty scene
     | none => Vulkan.renderFrame vk0 clearColor atlas' scene
+  let frameT1 ← IO.monoNanosNow
   return {
     st with
     vulkan := vk'
     atlas := atlas'
     hitRegions := regions
     scrollRegions
+    activeScrollbarDrag
     focusableOrder := focusOrder
     damage := none
     framesRendered := st.framesRendered + 1
+    lastFrameTotalNs := (frameT1 - frameT0).toUInt64
   }
 
 /-- Frame tick for views without independently scrollable input regions. -/
@@ -429,12 +667,18 @@ def buildCanaryScene (rt : RuntimeState Unit) :
 def initRuntimeOn {σ : Type} (cfg : RuntimeConfig) (wl : Wayland.WaylandClient) (initialApp : σ) :
     IO (RuntimeState σ) := do
   let (bw, bh) := wl.deviceBufferSize
-  let vk ← Vulkan.initVulkan bw bh
-  let font ← Text.openFont 1 cfg.fontPattern
-  let mono ← Text.openFont 2 "DejaVu Sans Mono"
-  let bold ← Text.openFont 3 "Inter:weight=bold"
-  let medium ← Text.openFont 4 "Inter:weight=medium"
-  let semibold ← Text.openFont 5 "Inter:weight=demibold"
+  let useCpuOnly := wl.headless || cfg.headless || cfg.headlessGolden.isSome
+  let vk ←
+    if useCpuOnly then Vulkan.initVulkan bw bh
+    else Vulkan.initVulkanSurface bw bh wl.display wl.window.surface cfg.gpuMode wl.hasLinuxDmabuf
+  let primaryPat := if cfg.headlessGolden.isSome then "Inter" else cfg.fontPattern
+  let monoPat := if cfg.headlessGolden.isSome then "DejaVu Sans Mono"
+    else "Lilex Nerd Font,Lilex,IBM Plex Mono,DejaVu Sans Mono,monospace"
+  let font ← Text.openFont 1 primaryPat
+  let mono ← Text.openFont 2 monoPat
+  let bold ← Text.openFont 3 s!"{primaryPat}:weight=bold"
+  let medium ← Text.openFont 4 s!"{primaryPat}:weight=medium"
+  let semibold ← Text.openFont 5 s!"{primaryPat}:weight=demibold"
   let focus0 : FocusState := { owner := some 1, traps := [] }
   let initDmg : Damage := some { x := 0, y := 0, w := (bw : Int), h := (bh : Int) }
   return {
@@ -534,21 +778,19 @@ def runWindow {σ : Type} (rt0 : RuntimeState σ)
     else
       let before := rt.app
       let (app, damage) ← pollFrame rt
-      let traps' := focusTraps app
-      let rtTraps := if traps' != rt.focus.traps then
-          { rt with app, focus := { rt.focus with traps := traps' }, damage := Damage.add rt.damage rt.viewportDeviceRect }
-        else { rt with app }
-      rt := rtTraps
+      rt := ({ rt with app }).applyFocusTraps (focusTraps app)
       if let some rect := damage then rt := rt.markDirty rect
       if let some target := focusChange before app (.time 0) then
         rt := rt.requestFocus target rt.viewportDeviceRect
       let rendered := rt.framesRendered
       rt ← stepFrameWithRegions rt onEvent view focusChange focusTraps
-      let shape : UInt32 := match rt.hoveredEntity with
-        | some id =>
-          if isTextInputEntity id && rt.focusableOrder.contains id then 9  -- text cursor in editable fields
-          else if rt.focusableOrder.contains id then 4 else 1
-        | none => 1
+      let shape : UInt32 :=
+        if rt.activeScrollbarDrag.isSome then 1
+        else match rt.hoveredEntity with
+          | some id =>
+            if isTextInputEntity id && rt.focusableOrder.contains id then 9  -- text cursor in editable fields
+            else if rt.focusableOrder.contains id then 4 else 1
+          | none => 1
       let wl ← Wayland.syncCursor rt.wayland shape
       let textOwner : Option EntityId :=
         if rt.windowFocused then
@@ -559,12 +801,19 @@ def runWindow {σ : Type} (rt0 : RuntimeState σ)
         else pure wl
       let wl ← Wayland.syncTextFocus wl textOwner.isSome
       rt := { rt with wayland := wl, lastImeOwner := textOwner }
-      if rt.framesRendered != rendered then
+      if rt.framesRendered != rendered && rt.vulkan.backend == .cpuShm then
         let wl ← Wayland.present rt.wayland rt.vulkan.framebuffer
-        rt := { rt with wayland := wl }
-      else if rt.running && !workPending rt.app then
-        if animationVisible rt then timedWait (100 - (← IO.monoMsNow) % 100).toUInt64
-        else if hasProducer rt.app then timedWait 0xffffffff else Wayland.waitEvents rt.wayland
+        rt := { rt with wayland := wl, presentCount := rt.presentCount + 1 }
+      else if rt.running then
+        -- Anti-busy-spin rule: when redraw is deferred awaiting `wl_callback.done`, block on
+        -- Wayland fd + `wakeFd` even when `workPending rt.app == true`!
+        let deferredByFrameCb := rt.wayland.frameCallbackPending && !rt.wayland.configurePendingCommit
+        if deferredByFrameCb then
+          if animationVisible rt then timedWait (100 - (← IO.monoMsNow) % 100).toUInt64
+          else timedWait 0xffffffff
+        else if !workPending rt.app then
+          if animationVisible rt then timedWait (100 - (← IO.monoMsNow) % 100).toUInt64
+          else if hasProducer rt.app then timedWait 0xffffffff else Wayland.waitEvents rt.wayland
   return rt
 
 /-- Cleanly release font and Vulkan scratch resources owned by `RuntimeState`. -/

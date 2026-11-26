@@ -509,6 +509,7 @@ structure ClientLinkState where
   lastAckedSeq       : UInt64 := 0
   headSeq            : UInt64 := 0
   unackedFrames      : Array ClientLinkJournalFrame := #[]
+  carriedMissions    : Array String := #[]
   harnesses          : JVal := .arr #[]
   startReceipts      : Array ClientLinkStartReceipt := #[]
   deriving Repr, Inhabited
@@ -546,7 +547,8 @@ def ClientLinkState.stepEndpointEpoch
       endpoint := if nextEp.isEmpty then cl.endpoint else nextEp
       serverBuild := nextBuild
       unsupportedLatched := latchedNext
-      connected := nextConnected }
+      connected := nextConnected
+      carriedMissions := if sameEp == 0 then #[] else cl.carriedMissions }
 
 /-- Enqueue one outbound client-link journal frame gated by `verifyJournalRingStep` (`op = 0`).
     Returns `"client_link_journal_backpressure"` at 256 unacked frames instead of overwriting. -/
@@ -560,13 +562,17 @@ def ClientLinkState.enqueueFrame
   let targetSeq := if cl.headSeq < 0xFFFFFFFFFFFFFFFF then cl.headSeq + 1 else cl.headSeq
   if verifyJournalRingStep 0 unackedU16 cl.maxCap cl.lastAckedSeq cl.headSeq targetSeq != 1 then
     throw "client_link_journal_backpressure"
+  let cleanMission := missionId.trimAscii.toString
   let frame : ClientLinkJournalFrame := {
     seq := targetSeq
-    missionId := missionId.trimAscii.toString
+    missionId := cleanMission
     payload := payload
   }
   let nextFrames := cl.unackedFrames.push frame
-  return (frame, { cl with headSeq := targetSeq, unackedFrames := nextFrames })
+  let nextCarried :=
+    if cleanMission.isEmpty || cl.carriedMissions.contains cleanMission then cl.carriedMissions
+    else cl.carriedMissions.push cleanMission
+  return (frame, { cl with headSeq := targetSeq, unackedFrames := nextFrames, carriedMissions := nextCarried })
 
 /-- Apply cumulative `ackSeq` gated by `verifyJournalRingStep` (`op = 1`). -/
 def ClientLinkState.ackUpTo
@@ -593,6 +599,11 @@ def ClientLinkState.hasPendingForMission (cl : ClientLinkState) (missionId : Str
   let clean := missionId.trimAscii.toString
   if clean.isEmpty then !cl.unackedFrames.isEmpty
   else cl.unackedFrames.any (fun f => f.missionId == clean)
+
+def ClientLinkState.hasCarriedMission (cl : ClientLinkState) (missionId : String) : Bool :=
+  let clean := missionId.trimAscii.toString
+  if clean.isEmpty then !cl.carriedMissions.isEmpty
+  else cl.carriedMissions.contains clean
 
 def ClientLinkState.toSummaryJson (cl : ClientLinkState) : JVal :=
   .obj #[
@@ -1679,9 +1690,9 @@ private def readUiPrefsFromDisk (path? : Option System.FilePath) : IO (Except St
 private def logsDirPath? (st : LocaldState) : Option System.FilePath :=
   (resolveOrbStateDir st).map (· / "logs")
 
-def ensurePersistedBindingsLoaded (stRef : IO.Ref LocaldState) : IO Unit := do
+def ensurePersistedBindingsLoaded (stRef : IO.Ref LocaldState) (forceReload : Bool := false) : IO Unit := do
   let st ← stRef.get
-  if st.bindingsLoaded then return ()
+  if st.bindingsLoaded && !forceReload then return ()
   match bindingsFilePath? st with
   | none =>
     stRef.modify fun s => { s with bindingsLoaded := true }
@@ -1720,14 +1731,28 @@ def ensurePersistedBindingsLoaded (stRef : IO.Ref LocaldState) : IO Unit := do
             else
               diskEntries := diskEntries.push (k, v)
           let stLoaded ← stRef.modifyGet fun s =>
-            if s.bindingsLoaded then (none, s)
+            if s.bindingsLoaded && !forceReload then (none, s)
             else
-              let merged := diskEntries.foldl (fun acc (k, v) =>
-                if acc.any (fun (ek, _) => ek == k) then acc else acc.push (k, v)) s.bindingsEntries
+              let diskNewer := diskRev > s.bindingsRevision
+              let (merged, mergedChanged) := diskEntries.foldl (fun (acc, ch) (k, v) =>
+                match acc.findIdx? (fun (ek, _) => ek == k) with
+                | none => (acc.push (k, v), true)
+                | some idx =>
+                  if diskNewer && renderCompact acc[idx]!.2 != renderCompact v then
+                    (acc.set! idx (k, v), true)
+                  else
+                    (acc, ch)) (s.bindingsEntries, false)
               let baseRev := max s.bindingsRevision (max diskRev merged.size)
-              let rev := if repairedAny then baseRev + 1 else baseRev
-              let s' := { s with bindingsLoaded := true, bindingsRevision := rev, bindingsEntries := merged }
-              (if repairedAny then some s' else none, s')
+              let rev :=
+                if repairedAny then baseRev + 1
+                else if mergedChanged && baseRev == s.bindingsRevision then s.bindingsRevision + 1
+                else baseRev
+              let s1 := { s with bindingsLoaded := true, bindingsRevision := rev, bindingsEntries := merged }
+              let s2 :=
+                if s.bindingsLoaded && mergedChanged then
+                  s1.publishChannelEvent "local_bindings" s1.bindingsSnapshotJson
+                else s1
+              (if repairedAny then some s2 else none, s2)
           if let some stToSave := stLoaded then
             let payload := (renderCompact stToSave.bindingsSnapshotJson ++ "\n").toUTF8
             discard <| OrbBin.PosixExt.writeAtomicPrivate0600 path payload
@@ -5878,7 +5903,7 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
         ])
     | _ =>
       let activeOk := st.clientLink.connected && !st.clientLink.unsupportedLatched
-      let drained := activeOk && !st.clientLink.hasPendingForMission missionId
+      let drained := activeOk && st.clientLink.hasCarriedMission missionId && !st.clientLink.hasPendingForMission missionId
       return .ok (.bool drained)
   | "client_link_set_capabilities" =>
     let connObj := (args.field? "connection").getD args
@@ -5904,11 +5929,11 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
         { s with clientLink := { s.clientLink with startReceipts := nextRecs } }
     return .ok .null
   | "local_bindings_refresh" =>
-    ensurePersistedBindingsLoaded stRef
+    ensurePersistedBindingsLoaded stRef true
     let cur ← stRef.get
     return .ok cur.bindingsSnapshotJson
   | "local_binding_set" =>
-    ensurePersistedBindingsLoaded stRef
+    ensurePersistedBindingsLoaded stRef true
     let bid := (args.fieldStr? "id").getD ""
     let bval := (args.field? "binding").getD (.obj #[])
     let ifAbsent := (args.fieldBool? "ifAbsent").getD false

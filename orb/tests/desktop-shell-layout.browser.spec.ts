@@ -335,8 +335,8 @@ test("desktop shell layout: translucent titlebar, pinned Settings footer, scroll
   });
   const linuxDark = await readSurfaceAlphas();
   expect(linuxDark.sidebar).toBeCloseTo(0.78, 2);
-  expect(linuxDark.main).toBeCloseTo(0.94, 2);
-  expect(linuxDark.titlebar).toBeCloseTo(0.94, 2);
+  expect(linuxDark.main).toBeCloseTo(1, 2);
+  expect(linuxDark.titlebar).toBeCloseTo(1, 2);
   if (linuxDark.activeRow !== null) {
     await expect.poll(async () => (await readSurfaceAlphas()).activeRow).toBeCloseTo(0.075, 2);
   }
@@ -365,9 +365,9 @@ test("desktop shell layout: translucent titlebar, pinned Settings footer, scroll
   });
   const linuxLight = await readSurfaceAlphas();
   expect(linuxLight.sidebar).toBeCloseTo(0.72, 2);
-  expect(linuxLight.main).toBeCloseTo(0.955, 2);
+  expect(linuxLight.main).toBeCloseTo(1, 2);
 
-  // Settings view keeps the sidebar and main surface subtly translucent on Linux.
+  // Settings view keeps the sidebar translucent and the main surface solid on Linux.
   await page.evaluate(() => {
     document.documentElement.dataset.platform = "linux";
     document.documentElement.dataset.theme = "dark";
@@ -376,7 +376,7 @@ test("desktop shell layout: translucent titlebar, pinned Settings footer, scroll
   await expect(page.locator(".app.settings-view")).toBeVisible();
   const linuxSettings = await readSurfaceAlphas();
   expect(linuxSettings.sidebar).toBeCloseTo(0.78, 2);
-  expect(linuxSettings.main).toBeCloseTo(0.94, 2);
+  expect(linuxSettings.main).toBeCloseTo(1, 2);
 
   // 7. Sidebar tooltip overlay (.overlay-popover.row-tip) is frosted translucent (< 1 alpha)
   // and queue hover geometry (.followup-queue / .queue-row) has symmetric 4px insets.

@@ -2209,14 +2209,18 @@ struct OrbProjectPage: View {
     }
     private func deleteFolder(_ folder: String) async {
         guard !pendingFolderDeletes.contains(folder) else { return }
-        let hasMissions = missions.contains { $0.state != "acknowledged" && ($0.folder == folder || $0.folder.hasPrefix(folder + "/")) }
-        if hasMissions {
+        if OrbMissionTree.hasBlockingFolderMissions(missions, folder: folder) {
             self.error = "Move or archive the agents in \"\(folder)\" before deleting it."
             return
         }
         pendingFolderDeletes.insert(folder)
         defer { pendingFolderDeletes.remove(folder) }
         do {
+            let check = try await api.call("/api/control/missions?project=\(OrbCore.escape(project.id))&folder_prefix=\(OrbCore.escape(folder))&limit=200")
+            if OrbMissionTree.hasBlockingFolderMissions(check.items.map { OrbRow($0) }, folder: folder) {
+                self.error = "Move or archive the agents in \"\(folder)\" before deleting it."
+                return
+            }
             _ = try await api.call("/api/projects/\(OrbCore.escape(project.id))/file?path=\(OrbCore.escape(folder))", method: "DELETE")
             folders.removeAll { $0 == folder || $0.hasPrefix(folder + "/") }
             OrbReadCache.invalidate("project:\(project.id)")

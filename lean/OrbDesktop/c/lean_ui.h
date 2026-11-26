@@ -78,13 +78,10 @@ lean_obj_res lean_ui_memfd(uint32_t size, lean_obj_arg w);
 /* dlopen + dlsym. Returns function address or 0. */
 lean_obj_res lean_ui_dl_sym(b_lean_obj_arg lib, b_lean_obj_arg sym, lean_obj_arg w);
 /* Call fn(a0..a5) with integer/pointer arguments (SysV / AAPCS64 integer class only).
- * `args` is 6 * u64. Returns u64 (VkResult is its low 32 bits).
- * Consequence for the Lean side: only Vulkan entry points with <= 6 integer-class
- * arguments are reachable. Use the Vulkan 1.3 `*2` forms (vkCmdPipelineBarrier2,
- * vkCmdCopyImageToBuffer2, vkCmdBlitImage2), push descriptors instead of
- * vkCmdBindDescriptorSets, and no float-argument commands (line width, depth bias).
- * Resolve instance/device functions through vkGetInstanceProcAddr / vkGetDeviceProcAddr,
- * which are themselves called through this bridge; only vkGetInstanceProcAddr uses dlsym. */
+ * `args` is 6 * u64. Returns u64 (used for 64-bit pointer returns like vkGet*ProcAddr).
+ * Entry points taking up to 8 integer-class arguments (e.g. vkCmdBindDescriptorSets,
+ * vkUpdateDescriptorSets) use lean_ui_vk_call_void8 / lean_ui_vk_call_res8 in
+ * lean_ui_vk_bridge.c; only vkGetInstanceProcAddr uses dlsym. */
 lean_obj_res lean_ui_call(size_t fn, b_lean_obj_arg args, lean_obj_arg w);
 /* Native scratch memory for structs that must outlive one call. Zero-filled. */
 lean_obj_res lean_ui_mem_alloc(size_t size, lean_obj_arg w);
@@ -97,6 +94,15 @@ lean_obj_res lean_ui_icon_mask(b_lean_obj_arg segments, size_t size);
 lean_obj_res lean_ui_box_axis(b_lean_obj_arg src, size_t w, size_t h, size_t r, uint8_t horizontal);
 uint8_t lean_ui_same_rows(b_lean_obj_arg a, b_lean_obj_arg b, size_t off,
                           size_t stride, size_t bytes, size_t rows);
+
+/* ---- lean_ui_vk_bridge.c : Vulkan 1.3 8-arg trampolines & strided staging/readback - */
+lean_obj_res lean_ui_vk_call_void8(size_t fn, b_lean_obj_arg args, lean_obj_arg w);
+lean_obj_res lean_ui_vk_call_res8(size_t fn, b_lean_obj_arg args, lean_obj_arg w);
+lean_obj_res lean_ui_vk_copy_rect(size_t dst_ptr, size_t dst_cap, b_lean_obj_arg src,
+                                  size_t src_off, size_t src_stride, size_t row_bytes,
+                                  size_t rows, lean_obj_arg w);
+lean_obj_res lean_ui_vk_read_rect(size_t src_ptr, size_t src_stride, size_t row_bytes,
+                                  size_t rows, lean_obj_arg w);
 
 /* ---- lean_ui_text.c : Fontconfig + FreeType 2 + HarfBuzz -------------------------- */
 /* Single-threaded: FT_Face is not thread-safe. */

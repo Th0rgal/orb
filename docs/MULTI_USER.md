@@ -63,16 +63,17 @@ it serves every user's missions through routing exactly like the operator's acco
 | Action | Admin | Member |
 | --- | --- | --- |
 | Add an API-key account (`POST /api/ai/providers`) | yes | yes; Core picks the id (a client `id` is ignored, so an existing account is never overwritten) |
-| Start / poll / complete / cancel a subscription login (`/api/ai/providers/cli-proxy-login*`) | yes | yes; a login session is visible only to the user who started it (`404` otherwise); re-login with `provider_id` only for accounts they added (`403 not_account_owner`) |
+| Start / poll / complete / cancel a subscription login (`/api/ai/providers/cli-proxy-login*`) | yes | yes; new sign-ins register a durable `ai_providers` row owned by the caller; a login session is visible only to the user who started it (`404` otherwise); re-login with `provider_id` only for accounts they added (`403 not_account_owner`) |
 | Edit name, models, limits (`PUT /api/ai/providers/:id`) | any account | any account |
-| Change global `enabled` | yes | no |
+| Change global `enabled` (`PUT /api/ai/providers/:id`) | any account | only accounts they added (`403 admin_required` on others) |
 | Read or select the VPN route of a configured shared account | yes | yes |
 | Replace the API key | any account | only accounts they added (`403 not_account_owner`) |
 | Set `base_url` | any account | only on `custom` accounts they added, public `https://` hosts only (no loopback, private, link-local, `.local`, `.internal`; `403 base_url_not_allowed`) |
-| Reorder (`POST /api/ai/providers/reorder`) | yes | yes |
+| Reorder (`POST /api/ai/providers/reorder`) & refresh catalog (`POST /api/providers/catalog/refresh`) | yes | yes |
+| Recheck Antigravity quota/eligibility (`POST /api/ai/providers/:id/antigravity/recheck`) | any account | only accounts they added (`403 admin_required` on others) |
 | Delete (`DELETE /api/ai/providers/:id`) | any account | only accounts they added (`403 not_account_owner`) |
 | Read an API key, OAuth access or refresh token | never | never (write-only for everyone) |
-| Default provider, usage reset, Antigravity recheck, health clear, chain tests, routing chains, `/api/settings` | yes | no (`403 admin_required`) |
+| Default provider, usage reset, health clear, chain tests, routing chains, `/api/settings` | yes | no (`403 admin_required`) |
 | Read the audit log (`GET /api/ai/providers/audit`) | yes | no |
 
 Configured accounts appear in the shared inventory even when globally disabled. Global disable excludes an account from inference for everyone. Personal preferences are stored separately per user. A row without credentials is a setup placeholder visible to admins and its creator. Other members can discover the provider type through the type catalog.

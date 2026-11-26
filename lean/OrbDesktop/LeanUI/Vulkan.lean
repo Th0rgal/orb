@@ -2,14 +2,17 @@ import LeanUI.Defs
 import LeanUI.Kernel
 import LeanUI.FFI
 import LeanUI.Text
+import LeanUI.Swapchain
+import LeanUI.VulkanStructs
+import LeanUI.VulkanDevice
+import LeanUI.VulkanSwapchain
+import LeanUI.VulkanPipeline
 /-!
-# LeanUI.Vulkan — Vulkan 1.3 dynamic loader bridge, instanced SDF/glyph renderer & PNG encoder
+# LeanUI.Vulkan — Vulkan 1.3 dynamic loader bridge, swapchain, instanced GPU SDF/glyph renderer & PNG encoder
 
-Wraps `LeanUI.FFI.{dlSym, call, memAlloc, memFree, memWrite, memRead}` (`c/lean_ui_vulkan.c`),
-packs `Prim` batches into 80-byte `PrimInstance` records matching `shaders/scene_sdf.glsl`,
-executes instanced SDF rounded-rect / border / drop-shadow / glyph / gradient / mask / image
-rendering with hierarchical `clipPush`/`clipPop` and `layerPush`/`layerPop` compositing, and
-encodes deterministic RGBA8 PNG files for `--headless-golden`.
+Wraps `LeanUI.FFI` (`c/lean_ui_vulkan.c` + `c/lean_ui_vk_bridge.c`), `LeanUI.Vk` (`VulkanDevice`,
+`VulkanSwapchain`, `VulkanPipeline`), and the deterministic CPU reference rasterizer for
+`--headless-golden*`, `--gtk-sidebar-host`, and graceful `wl_shm` fallback.
 -/
 namespace LeanUI.Vulkan
 
@@ -53,7 +56,28 @@ private structure PaintSnapshot where
   width : Nat
   height : Nat
 
-/-- Dynamic Vulkan 1.3 loader and scratch buffer context backed by `LeanUI.FFI`. -/
+/-- Active presentation / rendering backend owned by `VulkanContext`. -/
+inductive RenderBackend where
+  | cpuShm
+  | vkPresent
+  | vkInstanced
+  deriving DecidableEq, Repr, Inhabited
+
+/-- Requested GPU backend mode from CLI flags and `ORB_LEANUI_GPU`. -/
+inductive GpuModeRequest where
+  | auto
+  | disabled
+  | present
+  | instanced
+  | lavapipe
+  deriving DecidableEq, Repr, Inhabited
+
+/-- Live Vulkan WSI swapchain and optional Phase 2 instanced GPU pipeline. -/
+structure VulkanGpuSession where
+  wsi : Vk.VkWsiState
+  pipe : Option Vk.VkInstancedPipeline := none
+
+/-- Dynamic Vulkan 1.3 loader, GPU swapchain/pipeline session, and CPU reference context. -/
 structure VulkanContext where
   vkGetInstanceProcAddr : USize := 0
   vkCreateInstance : USize := 0
@@ -64,6 +88,23 @@ structure VulkanContext where
   height : Nat := 800
   framebuffer : ByteArray := ByteArray.empty
   previousPaint : Option PaintSnapshot := none
+  /-- Authoritative dirty region modified by `renderFrame` / `renderFrameDamage`. -/
+  lastUploadedDirtyRect : Option Rect := none
+  /-- Active backend (`cpuShm`, Phase 1 `vkPresent`, or Phase 2 `vkInstanced`). -/
+  backend : RenderBackend := .cpuShm
+  icdName : String := ""
+  presentMode : UInt32 := 0
+  fallbackReason : Option String := none
+  swapchainRecreates : Nat := 0
+  gpuAllocatedBytes : Nat := 0
+  lastAcquireNs : UInt64 := 0
+  lastUploadNs : UInt64 := 0
+  lastSubmitNs : UInt64 := 0
+  lastPresentNs : UInt64 := 0
+  lastUploadBytes : Nat := 0
+  lastAtlasUploadBytes : Nat := 0
+  lastSsboBytes : Nat := 0
+  gpuSession : Option VulkanGpuSession := none
   /-- Number of visual primitives submitted by the last frame. -/
   lastDrawnPrims : Nat := 0
   /-- Number of device pixels cleared by the last frame's damage pass. -/
@@ -72,33 +113,99 @@ structure VulkanContext where
   partialFrames : Nat := 0
   deriving Inhabited
 
-/-- Resolve `vkGetInstanceProcAddr` from `libvulkan.so.1` via `FFI.dlSym`, allocate a native
-scratch block for SSBO/struct staging via `FFI.memAlloc`, and initialize the offscreen RGBA8
-framebuffer. Gracefully falls back when no Vulkan ICD or `libvulkan.so.1` is present. -/
-def initVulkan (width height : Nat) : IO VulkanContext := do
-  let getProc ← try FFI.dlSym "libvulkan.so.1" "vkGetInstanceProcAddr" catch _ => pure 0
-  let createInst ←
-    if getProc != 0 then
-      try FFI.dlSym "libvulkan.so.1" "vkCreateInstance" catch _ => pure 0
-    else pure 0
-  let enumDevs ←
-    if getProc != 0 then
-      try FFI.dlSym "libvulkan.so.1" "vkEnumeratePhysicalDevices" catch _ => pure 0
-    else pure 0
-  let scratchCap : USize := 65536
-  let scratchPtr ← try FFI.memAlloc scratchCap catch _ => pure 0
+/-- Initialize the deterministic CPU reference context (headless / `--headless-golden*` /
+`--bench` / `--gtk-sidebar-host` / fallback safe). Avoids eagerly `dlopen`-ing `libvulkan.so.1`
+or allocating native scratch buffers so headless/bench startup stays fast and memory-bounded. -/
+def initVulkan (width height : Nat) : IO VulkanContext :=
   return {
-    vkGetInstanceProcAddr := getProc
-    vkCreateInstance := createInst
-    vkEnumeratePhysicalDevices := enumDevs
-    scratchPtr
-    scratchCap
     width
     height
+    backend := .cpuShm
   }
 
-/-- Free native scratch memory (`FFI.memFree`) owned by `VulkanContext`. -/
+/-- Resolve effective `GpuModeRequest` combining CLI flag and `ORB_LEANUI_GPU` environment variable. -/
+def resolveGpuMode (cliMode : GpuModeRequest) : IO GpuModeRequest := do
+  match cliMode with
+  | .disabled => return .disabled
+  | .present | .instanced | .lavapipe => return cliMode
+  | .auto =>
+    match (← IO.getEnv "ORB_LEANUI_GPU") with
+    | some "0" | some "false" | some "off" => return .disabled
+    | some "present" => return .present
+    | some "lavapipe" | some "force" => return .lavapipe
+    | some "1" | some "instanced" | some "true" => return .instanced
+    | _ => return .auto
+
+/-- Initialize Vulkan 1.3 WSI swapchain (and Phase 2 instanced pipeline when requested/supported)
+on `(wlDisplay, wlSurface)`. Gracefully falls back to `cpuShm` with `fallbackReason` set on any
+missing library, unsupported WSI (e.g. compositor lacking `zwp_linux_dmabuf_v1`), software-only
+ICD (unless `lavapipe`), or `--no-gpu`. -/
+def initVulkanSurface (width height : Nat) (wlDisplay wlSurface : USize)
+    (cliMode : GpuModeRequest := .auto) (wlHasDmabuf : Bool := true) : IO VulkanContext := do
+  let base ← initVulkan width height
+  let mode ← resolveGpuMode cliMode
+  if mode == .disabled then
+    return { base with backend := .cpuShm, fallbackReason := some "GPU disabled via --no-gpu / ORB_LEANUI_GPU=0" }
+  if wlDisplay == 0 || wlSurface == 0 then
+    return { base with backend := .cpuShm, fallbackReason := some "headless session (no Wayland surface)" }
+  let allowSoftware := mode == .lavapipe
+  if !allowSoftware && !wlHasDmabuf then
+    return { base with backend := .cpuShm, fallbackReason := some "Wayland compositor lacks zwp_linux_dmabuf_v1; falling back to wl_shm" }
+  let enableVal := (← IO.getEnv "ORB_LEANUI_VK_VALIDATION") == some "1"
+  let wantInstanced := mode != .present
+  match ← Vk.createWsi wlDisplay wlSurface width height allowSoftware enableVal with
+  | .error reason =>
+    return { base with backend := .cpuShm, fallbackReason := some reason }
+  | .ok wsi =>
+    let allocBytes ← wsi.dev.allocatedBytes.get
+    let pMode := wsi.bundle.map (·.presentMode) |>.getD 0
+    let canDirectInstanced := wsi.bundle.map (fun b => b.canTransferSrc && b.canBlitSrc && b.canBlitDst) |>.getD false
+    if wantInstanced && canDirectInstanced then
+      let fmt := wsi.bundle.map (·.format) |>.getD Vk.VK_FORMAT_B8G8R8A8_UNORM
+      match ← Vk.createInstancedPipeline wsi.dev fmt with
+      | .ok pipe =>
+        let allocBytes2 ← wsi.dev.allocatedBytes.get
+        return { base with
+          vkGetInstanceProcAddr := wsi.dev.fns.getInstanceProcAddr
+          vkCreateInstance := wsi.dev.fns.createInstance
+          vkEnumeratePhysicalDevices := wsi.dev.fns.enumeratePhysicalDevices
+          backend := .vkInstanced
+          icdName := wsi.dev.deviceName
+          presentMode := pMode
+          fallbackReason := none
+          gpuAllocatedBytes := allocBytes2
+          gpuSession := some { wsi, pipe := some pipe } }
+      | .error reason =>
+        -- Graceful degrade from Phase 2 -> Phase 1 (`vkPresent`)
+        return { base with
+          vkGetInstanceProcAddr := wsi.dev.fns.getInstanceProcAddr
+          vkCreateInstance := wsi.dev.fns.createInstance
+          vkEnumeratePhysicalDevices := wsi.dev.fns.enumeratePhysicalDevices
+          backend := .vkPresent
+          icdName := wsi.dev.deviceName
+          presentMode := pMode
+          fallbackReason := some s!"vkInstanced unavailable ({reason}); using vkPresent"
+          gpuAllocatedBytes := allocBytes
+          gpuSession := some { wsi, pipe := none } }
+    else
+      return { base with
+        vkGetInstanceProcAddr := wsi.dev.fns.getInstanceProcAddr
+        vkCreateInstance := wsi.dev.fns.createInstance
+        vkEnumeratePhysicalDevices := wsi.dev.fns.enumeratePhysicalDevices
+        backend := .vkPresent
+        icdName := wsi.dev.deviceName
+        presentMode := pMode
+        fallbackReason := none
+        gpuAllocatedBytes := allocBytes
+        gpuSession := some { wsi, pipe := none } }
+
+/-- Free GPU swapchain/pipeline handles in strict reverse lifecycle order (`vkDeviceWaitIdle`
+first) and native scratch memory (`FFI.memFree`) owned by `VulkanContext`. -/
 def shutdownVulkan (ctx : VulkanContext) : IO Unit := do
+  if let some sess := ctx.gpuSession then
+    if let some pipe := sess.pipe then
+      Vk.destroyInstancedPipeline sess.wsi.dev pipe
+    let _ ← Vk.destroyWsi sess.wsi
   if ctx.scratchPtr != 0 then
     FFI.memFree ctx.scratchPtr
 
@@ -186,12 +293,22 @@ def sdfRoundedRect16 (r : Rect) (radii : CornerRadii) (px py : Int) : Int :=
     else
       if dy16 < 0 then tr else br
   let maxR : Nat := min (rw / 2) (rh / 2)
-  let rad16 : Int := (min rawRad maxR : Int) * 16
+  let rad : Nat := min rawRad maxR
+  let rad16 : Int := (rad : Int) * 16
   let qx16 : Int := (dx16.natAbs : Int) - hx16 + rad16
   let qy16 : Int := (dy16.natAbs : Int) - hy16 + rad16
   let mx16 : Nat := if qx16 > 0 then qx16.toNat else 0
   let my16 : Nat := if qy16 > 0 then qy16.toNat else 0
-  let outLen16 : Int := (isqrt (mx16 * mx16 + my16 * my16) : Int)
+  let isCircleCap : Bool := rad ≤ 1 || rawRad > maxR || (rw == rh && rawRad ≥ maxR)
+  let outLen16 : Int :=
+    if max mx16 my16 ≥ rad * 16 + 16 then
+      (max mx16 my16 : Int)
+    else if isCircleCap then
+      (isqrt (mx16 * mx16 + my16 * my16) : Int)
+    else
+      let sx := mx16 * mx16
+      let sy := my16 * my16
+      (isqrt (isqrt (sx * sx + sy * sy)) : Int)
   let inMax16 : Int := min (max qx16 qy16) 0
   inMax16 + outLen16 - rad16
 
@@ -221,6 +338,58 @@ matching Skia 8-bit premultiplied compositing. -/
   let b := intersectRect (intersectRect vp clip) dst
   (b.x, b.y, b.right, b.bottom)
 
+/-- Premultiplied source-over blend of already-premultiplied `(sr, sg, sb, sa)` modulated by
+`modA` onto premultiplied `(dr, dg, db, da)`. Avoids double-premultiplication on offscreen layers
+and FreeType `FT_PIXEL_MODE_BGRA` color glyphs. -/
+@[inline] private def blendOverPremul (dr dg db da sr sg sb sa modA : UInt8) :
+    UInt8 × UInt8 × UInt8 × UInt8 :=
+  let effA := (sa.toNat * modA.toNat + 127) / 255
+  if effA == 0 then (dr, dg, db, da)
+  else
+    let inv := 255 - effA
+    let r := min 255 ((sr.toNat * modA.toNat + 127) / 255 + (dr.toNat * inv + 127) / 255)
+    let g := min 255 ((sg.toNat * modA.toNat + 127) / 255 + (dg.toNat * inv + 127) / 255)
+    let b := min 255 ((sb.toNat * modA.toNat + 127) / 255 + (db.toNat * inv + 127) / 255)
+    let outA := min 255 (effA + (da.toNat * inv + 127) / 255)
+    (r.toUInt8, g.toUInt8, b.toUInt8, outA.toUInt8)
+
+/-- Compute combined rounded-clip coverage `[0..255]` for pixel `(px, py)` across active rounded clips. -/
+@[inline] private def roundedClipCov (rclips : List (Rect × CornerRadii)) (px py : Int) : Nat :=
+  rclips.foldl (fun cov (cr, radii) =>
+    if cov == 0 then 0
+    else
+      let d16 := sdfRoundedRect16 cr radii px py
+      if d16 ≥ 8 then 0
+      else if d16 ≤ -8 then cov
+      else (cov * (((8 - d16).toNat * 255) / 16) + 127) / 255) 255
+
+/-- Apply rounded clip masks to newly painted pixels inside `region` by blending `painted` over `saved`. -/
+private def applyRoundedClips (vw vh : Nat) (saved painted : ByteArray) (region : Rect)
+    (rclips : List (Rect × CornerRadii)) : ByteArray := Id.run do
+  if rclips.isEmpty then return painted
+  let vp : Rect := ⟨0, 0, vw, vh⟩
+  let b := intersectRect vp region
+  if b.isEmpty then return painted
+  let mut out := painted
+  for py in [b.y.toNat : b.bottom.toNat] do
+    for px in [b.x.toNat : b.right.toNat] do
+      let cov := roundedClipCov rclips (px : Int) (py : Int)
+      if cov < 255 then
+        let idx := (py * vw + px) * 4
+        if cov == 0 then
+          out := out.set! idx (saved.get! idx)
+            |>.set! (idx + 1) (saved.get! (idx + 1))
+            |>.set! (idx + 2) (saved.get! (idx + 2))
+            |>.set! (idx + 3) (saved.get! (idx + 3))
+        else
+          let inv := 255 - cov
+          let mixC (a b : UInt8) : UInt8 := ((a.toNat * cov + b.toNat * inv + 127) / 255).toUInt8
+          out := out.set! idx (mixC (painted.get! idx) (saved.get! idx))
+            |>.set! (idx + 1) (mixC (painted.get! (idx + 1)) (saved.get! (idx + 1)))
+            |>.set! (idx + 2) (mixC (painted.get! (idx + 2)) (saved.get! (idx + 2)))
+            |>.set! (idx + 3) (mixC (painted.get! (idx + 3)) (saved.get! (idx + 3)))
+  return out
+
 /-- Saved offscreen layer state for `Prim.layerPush` / `Prim.layerPop`. -/
 private structure LayerFrame where
   opacity : Nat
@@ -248,6 +417,30 @@ private def drawRoundedBox (vw vh : Nat) (fb : ByteArray) (curClip r : Rect)
     for y in [y0.toNat:y1.toNat] do
       out := row.copySlice 0 out ((y * vw + x0.toNat) * 4) row.size
     return out
+  -- Blend `c` over the part of `[ax0, ax1) × [ay0, ay1)` inside the clamped bounds. `blendRect`
+  -- uses the same arithmetic as `blendOver`, so full-coverage spans match the per-pixel path.
+  let blendSpan (o : ByteArray) (ax0 ay0 ax1 ay1 : Int) (c : Color) : ByteArray :=
+    let bx0 := max x0 ax0
+    let by0 := max y0 ay0
+    let bx1 := min x1 ax1
+    let by1 := min y1 ay1
+    if bx1 ≤ bx0 || by1 ≤ by0 then o
+    else FFI.blendRect o (by0.toNat * vw + bx0.toNat).toUSize vw.toUSize
+      (bx1 - bx0).toNat.toUSize (by1 - by0).toNat.toUSize c
+  if radii == (0, 0, 0, 0) then
+    -- Square corners: every pixel has full coverage, so the fill and the border bands (the
+    -- pixels outside the inner rectangle) are solid spans, painted fill first as below.
+    if fa > 0 then out := blendSpan out x0 y0 x1 y1 fill
+    if hasBorder then
+      let iy0 := min r.bottom (r.y + (bt : Int))
+      let iy1 := max iy0 (r.bottom - (bbW : Int))
+      let ix0 := min r.right (r.x + (blW : Int))
+      let ix1 := max ix0 (r.right - (brW : Int))
+      out := blendSpan out r.x r.y r.right iy0 borderCol
+      out := blendSpan out r.x iy1 r.right r.bottom borderCol
+      out := blendSpan out r.x iy0 ix0 iy1 borderCol
+      out := blendSpan out ix1 iy0 r.right iy1 borderCol
+    return out
   let innerRect : Rect :=
     { x := r.x + (blW : Int)
       y := r.y + (bt : Int)
@@ -267,10 +460,19 @@ private def drawRoundedBox (vw vh : Nat) (fb : ByteArray) (curClip r : Rect)
   let top := if hasBorder then max y0 innerRect.y else y0
   let bottom := if hasBorder then min y1 innerRect.bottom else y1
   let bulk := spanR - spanL ≥ 16 && top < bottom
+  -- Without a border, rows clear of the corner radius have full coverage across the whole width.
+  let sTop := if hasBorder then y0 else min y1 (max y0 (r.y + margin))
+  let sBot := if hasBorder then y0 else max sTop (min y1 (r.bottom - margin))
+  if sBot > sTop then out := blendSpan out x0 sTop x1 sBot fill
   if bulk then
-    out := FFI.blendRect out (top.toNat * vw + spanL.toNat).toUSize vw.toUSize
-      (spanR-spanL).toNat.toUSize (bottom-top).toNat.toUSize fill
+    if sBot > sTop then
+      out := blendSpan out spanL top spanR sTop fill
+      out := blendSpan out spanL sBot spanR bottom fill
+    else
+      out := FFI.blendRect out (top.toNat * vw + spanL.toNat).toUSize vw.toUSize
+        (spanR-spanL).toNat.toUSize (bottom-top).toNat.toUSize fill
   for py in [y0.toNat : y1.toNat] do
+    if (py : Int) ≥ sTop && (py : Int) < sBot then continue
     let y : Int := py
     let straightRow := y ≥ r.y + margin && y < r.bottom - margin
     let innerRow := y ≥ innerRect.y && y < innerRect.bottom
@@ -369,6 +571,8 @@ def rasterizeSceneInto (vw vh : Nat) (clearColor : Color) (atlas : Text.GlyphAtl
       for py in [y0.toNat : y1.toNat] do
         fb := row.copySlice 0 fb ((py * vw + x0.toNat) * 4) row.size
   let mut clipStack : List Rect := [renderClip]
+  let mut rclipStack : List (Option (Rect × CornerRadii)) := [none]
+  let mut activeRClips : List (Rect × CornerRadii) := []
   let mut layerStack : List LayerFrame := []
   let mut instances : Array GpuPrimInstance := #[]
 
@@ -380,11 +584,18 @@ def rasterizeSceneInto (vw vh : Nat) (clearColor : Color) (atlas : Text.GlyphAtl
       fb := blurBackdrop fb vw vh sigma
     | .clipPush r =>
       clipStack := intersectRect curClip r :: clipStack
-    | .clipPushRounded r _radii =>
+      rclipStack := none :: rclipStack
+    | .clipPushRounded r radii =>
       clipStack := intersectRect curClip r :: clipStack
+      rclipStack := some (r, radii) :: rclipStack
+      activeRClips := (r, radii) :: activeRClips
     | .clipPop =>
       if let _ :: tail := clipStack then
         clipStack := if tail.isEmpty then [renderClip] else tail
+      if let top :: rtail := rclipStack then
+        rclipStack := if rtail.isEmpty then [none] else rtail
+        if top.isSome then
+          if let _ :: atail := activeRClips then activeRClips := atail
     | .layerPush opacity =>
       let saved := fb
       fb := Text.AtlasPageBuffer.zeroBytes totalBytes
@@ -396,19 +607,20 @@ def rasterizeSceneInto (vw vh : Nat) (clearColor : Color) (atlas : Text.GlyphAtl
         fb := top.savedBuf
         let (x0, y0, x1, y1) := clampBounds vw vh top.clip renderClip
         if x1 > x0 && y1 > y0 then
+          let modA : UInt8 := top.opacity.toUInt8
           for py in [y0.toNat : y1.toNat] do
             for px in [x0.toNat : x1.toNat] do
               let idx := (py * vw + px) * 4
               let lr := layerBuf.get! idx
               let lg := layerBuf.get! (idx + 1)
               let lb := layerBuf.get! (idx + 2)
-              let la := ((layerBuf.get! (idx + 3)).toNat * top.opacity + 127) / 255
-              if la > 0 then
+              let la := layerBuf.get! (idx + 3)
+              if la > 0 && modA > 0 then
                 let dr := fb.get! idx
                 let dg := fb.get! (idx + 1)
                 let db := fb.get! (idx + 2)
                 let da := fb.get! (idx + 3)
-                let (nr, ng, nb, na) := blendOver dr dg db da lr lg lb la.toUInt8
+                let (nr, ng, nb, na) := blendOverPremul dr dg db da lr lg lb la modA
                 fb := fb.set! idx nr |>.set! (idx + 1) ng |>.set! (idx + 2) nb |>.set! (idx + 3) na
     | .quad r fill rad bw border =>
       let radii : CornerRadii := (rad, rad, rad, rad)
@@ -418,38 +630,61 @@ def rasterizeSceneInto (vw vh : Nat) (clearColor : Color) (atlas : Text.GlyphAtl
       }
       if bw > 0 then
         instances := instances.push {
-          dst := r, uv := { x := 0, y := 0, w := 0, h := 0 }, clip := curClip,
+          dst := r, uv := { x := bw, y := bw, w := bw, h := bw }, clip := curClip,
           radii, colorRGBA := border, kind := 1, aux0 := bw.toUInt32, aux1 := 255
         }
+      let saved := if activeRClips.isEmpty then ByteArray.empty else fb
       fb := drawRoundedBox vw vh fb curClip r radii fill (bw, bw, bw, bw) border
+      if !activeRClips.isEmpty then fb := applyRoundedClips vw vh saved fb (intersectRect curClip r) activeRClips
     | .rrect r fill radii borders border =>
-      let (bt, _, _, _) := borders
+      let (bt, brW, bbW, blW) := borders
       instances := instances.push {
         dst := r, uv := { x := 0, y := 0, w := 0, h := 0 }, clip := curClip,
         radii, colorRGBA := fill, kind := 0, aux0 := bt.toUInt32, aux1 := 255
       }
+      if bt > 0 || brW > 0 || bbW > 0 || blW > 0 then
+        instances := instances.push {
+          dst := r, uv := { x := bt, y := brW, w := bbW, h := blW }, clip := curClip,
+          radii, colorRGBA := border, kind := 1, aux0 := 0, aux1 := 255
+        }
+      let saved := if activeRClips.isEmpty then ByteArray.empty else fb
       fb := drawRoundedBox vw vh fb curClip r radii fill borders border
-    | .linear r c0 c1 _angle rad =>
+      if !activeRClips.isEmpty then fb := applyRoundedClips vw vh saved fb (intersectRect curClip r) activeRClips
+    | .linear r c0 c1 angleDeg rad =>
       let radii : CornerRadii := (rad, rad, rad, rad)
       instances := instances.push {
         dst := r, uv := { x := 0, y := 0, w := 0, h := 0 }, clip := curClip,
-        radii, colorRGBA := c0, kind := 0, aux0 := c1, aux1 := 255
+        radii, colorRGBA := c0, kind := 6, aux0 := c1,
+        aux1 := (255 : UInt32) ||| ((angleDeg % 360).toUInt32 <<< 8)
       }
       let (r0, g0, b0, a0) := unpackColor c0
       let (r1, g1, b1, a1) := unpackColor c1
       let (x0, y0, x1, y1) := clampBounds vw vh curClip r
-      let span := max 1 r.h.toNat
       if x1 > x0 && y1 > y0 then
+        let radF : Float := ((angleDeg % 360).toFloat) * 3.141592653589793 / 180.0
+        let dirX : Float := Float.sin radF
+        let dirY : Float := -(Float.cos radF)
+        let halfW : Float := 0.5 * r.w.toNat.toFloat
+        let halfH : Float := 0.5 * r.h.toNat.toFloat
+        let cxF : Float := r.x.toFloat + halfW
+        let cyF : Float := r.y.toFloat + halfH
+        let halfLen : Float := max (Float.abs dirX * halfW + Float.abs dirY * halfH) 1e-4
+        let saved := if activeRClips.isEmpty then ByteArray.empty else fb
         for py in [y0.toNat : y1.toNat] do
-          let t := min span (py - r.y.toNat)
-          let inv := span - t
-          let mr := ((r0.toNat * inv + r1.toNat * t) / span).toUInt8
-          let mg := ((g0.toNat * inv + g1.toNat * t) / span).toUInt8
-          let mb := ((b0.toNat * inv + b1.toNat * t) / span).toUInt8
-          let ma := ((a0.toNat * inv + a1.toNat * t) / span).toUInt8
+          let pyF : Float := py.toFloat + 0.5 - cyF
           for px in [x0.toNat : x1.toNat] do
             let d16 := sdfRoundedRect16 r radii (px : Int) (py : Int)
             if d16 < 8 then
+              let pxF : Float := px.toFloat + 0.5 - cxF
+              let tRaw : Float := (pxF * dirX + pyF * dirY) / (2.0 * halfLen) + 0.5
+              let tClamped : Float := if tRaw < 0.0 then 0.0 else if tRaw > 1.0 then 1.0 else tRaw
+              let tN : Nat := (tClamped * 1024.0 + 0.5).toUInt32.toNat
+              let tN := min 1024 tN
+              let inv := 1024 - tN
+              let mr := ((r0.toNat * inv + r1.toNat * tN + 512) / 1024).toUInt8
+              let mg := ((g0.toNat * inv + g1.toNat * tN + 512) / 1024).toUInt8
+              let mb := ((b0.toNat * inv + b1.toNat * tN + 512) / 1024).toUInt8
+              let ma := ((a0.toNat * inv + a1.toNat * tN + 512) / 1024).toUInt8
               let cov : Nat := if d16 ≤ -8 then 255 else ((8 - d16).toNat * 255) / 16
               let effA := ((ma.toNat * cov + 127) / 255).toUInt8
               let idx := (py * vw + px) * 4
@@ -457,6 +692,7 @@ def rasterizeSceneInto (vw vh : Nat) (clearColor : Color) (atlas : Text.GlyphAtl
                 blendOver (fb.get! idx) (fb.get! (idx + 1)) (fb.get! (idx + 2)) (fb.get! (idx + 3))
                   mr mg mb effA
               fb := fb.set! idx nr |>.set! (idx + 1) ng |>.set! (idx + 2) nb |>.set! (idx + 3) na
+        if !activeRClips.isEmpty then fb := applyRoundedClips vw vh saved fb (intersectRect curClip r) activeRClips
     | .shadow r col rad blur =>
       let radii : CornerRadii := (rad, rad, rad, rad)
       let pad : Int := (blur * 2 : Int)
@@ -468,14 +704,14 @@ def rasterizeSceneInto (vw vh : Nat) (clearColor : Color) (atlas : Text.GlyphAtl
         radii, colorRGBA := col, kind := 2, aux0 := blur.toUInt32, aux1 := 255
       }
       let (sr, sg, sb, sa) := unpackColor col
-      -- CSS blur-radius is twice Gaussian sigma. Blur coverage, not the distance
-      -- field: the old polynomial falloff made broad dark wedges beside dialogs.
-      let (x0, y0, x1, y1) := clampBounds vw vh curClip expanded
+      let sigma := blur / 2
+      let halo : Int := if sigma == 0 then 0 else (sigma + (sigma - 1) * 2 : Nat)
+      let support : Rect :=
+        { x := r.x - halo, y := r.y - halo
+          w := r.w + 2 * halo, h := r.h + 2 * halo }
+      let (x0, y0, x1, y1) := clampBounds vw vh curClip support
       if x1 > x0 && y1 > y0 && sa > 0 then
-        -- Each pass reads at most its radius on either side. Include the
-        -- entire dependency halo, retaining edge replication at viewport edges.
-        let sigma := blur / 2
-        let halo : Int := (sigma + (sigma - 1) * 2 : Nat)
+        let saved := if activeRClips.isEmpty then ByteArray.empty else fb
         let mx := max 0 (x0 - halo)
         let my := max 0 (y0 - halo)
         let mw := (min (vw : Int) (x1 + halo) - mx).toNat
@@ -484,27 +720,37 @@ def rasterizeSceneInto (vw vh : Nat) (clearColor : Color) (atlas : Text.GlyphAtl
         let empty := Text.AtlasPageBuffer.zeroBytes (mw * mh * 4)
         let mask := drawRoundedBox mw mh empty bounds { r with x := r.x - mx, y := r.y - my } radii 0xFFFFFFFF (0, 0, 0, 0) 0
         let blurred := blurBackdrop mask mw mh sigma
-        for py in [y0.toNat : y1.toNat] do
-          for px in [x0.toNat : x1.toNat] do
-            let idx := (py * vw + px) * 4
-            let alpha := ((py - my.toNat) * mw + px - mx.toNat) * 4 + 3
-            let effA := ((sa.toNat * (blurred.get! alpha).toNat + 127) / 255).toUInt8
-            let (nr, ng, nb, na) :=
-              blendOver (fb.get! idx) (fb.get! (idx + 1)) (fb.get! (idx + 2)) (fb.get! (idx + 3))
-                sr sg sb effA
-            fb := fb.set! idx nr |>.set! (idx + 1) ng |>.set! (idx + 2) nb |>.set! (idx + 3) na
-    | .glyph src dst col isColor =>
+        let sw := (x1 - x0).toNat
+        let sh := (y1 - y0).toNat
+        let sx := (x0 - mx).toNat
+        let sy := (y0 - my).toNat
+        if sh > 0 && sw > 0 && (sy + sh - 1) * mw + sx + sw ≤ blurred.size / 4 then
+          fb := FFI.blitGlyph fb blurred (y0.toNat * vw + x0.toNat).toUSize (sy * mw + sx).toUSize
+            vw.toUSize mw.toUSize sw.toUSize sh.toUSize col false
+        else
+          for py in [y0.toNat : y1.toNat] do
+            for px in [x0.toNat : x1.toNat] do
+              let idx := (py * vw + px) * 4
+              let alpha := ((py - my.toNat) * mw + px - mx.toNat) * 4 + 3
+              let effA := ((sa.toNat * (blurred.get! alpha).toNat + 127) / 255).toUInt8
+              let (nr, ng, nb, na) :=
+                blendOver (fb.get! idx) (fb.get! (idx + 1)) (fb.get! (idx + 2)) (fb.get! (idx + 3))
+                  sr sg sb effA
+              fb := fb.set! idx nr |>.set! (idx + 1) ng |>.set! (idx + 2) nb |>.set! (idx + 3) na
+        if !activeRClips.isEmpty then fb := applyRoundedClips vw vh saved fb ⟨x0, y0, x1 - x0, y1 - y0⟩ activeRClips
+    | .glyph src dst col isColor pageIdx =>
       instances := instances.push {
         dst, uv := src, clip := curClip,
         radii := (0, 0, 0, 0), colorRGBA := col,
-        kind := if isColor then 4 else 3, aux0 := 0, aux1 := 255
+        kind := if isColor then 4 else 3, aux0 := pageIdx.toUInt32, aux1 := 255
       }
-      if let some page := atlas.pages[0]? then
+      if let some page := atlas.pages[pageIdx]? then
         let pw := page.atlas.width
         let ph := page.atlas.height
         let (sr, sg, sb, sa) := unpackColor col
         let (x0, y0, x1, y1) := clampBounds vw vh curClip dst
         if x1 > x0 && y1 > y0 && sa > 0 then
+          let saved := if activeRClips.isEmpty then ByteArray.empty else fb
           let sx := src.x.toNat + (x0.toNat - dst.x.toNat)
           let sy := src.y.toNat + (y0.toNat - dst.y.toNat)
           let w := min (pw-sx) (x1-x0).toNat
@@ -526,10 +772,10 @@ def rasterizeSceneInto (vw vh : Nat) (clearColor : Color) (atlas : Text.GlyphAtl
                       let tr := page.rgba.get! aIdx
                       let tg := page.rgba.get! (aIdx + 1)
                       let tb := page.rgba.get! (aIdx + 2)
-                      let ta := ((page.rgba.get! (aIdx + 3)).toNat * sa.toNat + 127) / 255
+                      let ta := page.rgba.get! (aIdx + 3)
                       let (nr, ng, nb, na) :=
-                        blendOver (fb.get! idx) (fb.get! (idx + 1)) (fb.get! (idx + 2)) (fb.get! (idx + 3))
-                          tr tg tb ta.toUInt8
+                        blendOverPremul (fb.get! idx) (fb.get! (idx + 1)) (fb.get! (idx + 2)) (fb.get! (idx + 3))
+                          tr tg tb ta sa
                       fb := fb.set! idx nr |>.set! (idx + 1) ng |>.set! (idx + 2) nb |>.set! (idx + 3) na
                     else
                       let cov := page.rgba.get! (aIdx + 3)
@@ -538,6 +784,7 @@ def rasterizeSceneInto (vw vh : Nat) (clearColor : Color) (atlas : Text.GlyphAtl
                         blendOver (fb.get! idx) (fb.get! (idx + 1)) (fb.get! (idx + 2)) (fb.get! (idx + 3))
                           sr sg sb effA
                       fb := fb.set! idx nr |>.set! (idx + 1) ng |>.set! (idx + 2) nb |>.set! (idx + 3) na
+          if !activeRClips.isEmpty then fb := applyRoundedClips vw vh saved fb ⟨x0, y0, x1 - x0, y1 - y0⟩ activeRClips
     | .mask pageIdx src dst col =>
       instances := instances.push {
         dst, uv := src, clip := curClip,
@@ -550,21 +797,33 @@ def rasterizeSceneInto (vw vh : Nat) (clearColor : Color) (atlas : Text.GlyphAtl
         let (sr, sg, sb, sa) := unpackColor col
         let (x0, y0, x1, y1) := clampBounds vw vh curClip dst
         if x1 > x0 && y1 > y0 && sa > 0 then
-          for py in [y0.toNat : y1.toNat] do
-            let ty := src.y.toNat + (py - dst.y.toNat)
-            if ty < ph then
-              for px in [x0.toNat : x1.toNat] do
-                let tx := src.x.toNat + (px - dst.x.toNat)
-                if tx < pw then
-                  let aIdx := (ty * pw + tx) * 4
-                  if aIdx + 4 ≤ page.rgba.size then
-                    let cov := page.rgba.get! (aIdx + 3)
-                    let effA := ((sa.toNat * cov.toNat + 127) / 255).toUInt8
-                    let idx := (py * vw + px) * 4
-                    let (nr, ng, nb, na) :=
-                      blendOver (fb.get! idx) (fb.get! (idx + 1)) (fb.get! (idx + 2)) (fb.get! (idx + 3))
-                        sr sg sb effA
-                    fb := fb.set! idx nr |>.set! (idx + 1) ng |>.set! (idx + 2) nb |>.set! (idx + 3) na
+          let saved := if activeRClips.isEmpty then ByteArray.empty else fb
+          -- A coverage mask tinted by `col` is a monochrome glyph: blend it natively when its
+          -- atlas rows are in range (same arithmetic as the loop below).
+          let sx := src.x.toNat + (x0.toNat - dst.x.toNat)
+          let sy := src.y.toNat + (y0.toNat - dst.y.toNat)
+          let mw := min (pw - sx) (x1 - x0).toNat
+          let mh := min (ph - sy) (y1 - y0).toNat
+          if mh > 0 && mw > 0 && (sy + mh - 1) * pw + sx + mw ≤ page.rgba.size / 4 then
+            fb := FFI.blitGlyph fb page.rgba (y0.toNat * vw + x0.toNat).toUSize (sy * pw + sx).toUSize
+              vw.toUSize pw.toUSize mw.toUSize mh.toUSize col false
+          else
+            for py in [y0.toNat : y1.toNat] do
+              let ty := src.y.toNat + (py - dst.y.toNat)
+              if ty < ph then
+                for px in [x0.toNat : x1.toNat] do
+                  let tx := src.x.toNat + (px - dst.x.toNat)
+                  if tx < pw then
+                    let aIdx := (ty * pw + tx) * 4
+                    if aIdx + 4 ≤ page.rgba.size then
+                      let cov := page.rgba.get! (aIdx + 3)
+                      let effA := ((sa.toNat * cov.toNat + 127) / 255).toUInt8
+                      let idx := (py * vw + px) * 4
+                      let (nr, ng, nb, na) :=
+                        blendOver (fb.get! idx) (fb.get! (idx + 1)) (fb.get! (idx + 2)) (fb.get! (idx + 3))
+                          sr sg sb effA
+                      fb := fb.set! idx nr |>.set! (idx + 1) ng |>.set! (idx + 2) nb |>.set! (idx + 3) na
+          if !activeRClips.isEmpty then fb := applyRoundedClips vw vh saved fb ⟨x0, y0, x1 - x0, y1 - y0⟩ activeRClips
     | .image _tex src dst rad =>
       let radii : CornerRadii := (rad, rad, rad, rad)
       instances := instances.push {
@@ -572,7 +831,9 @@ def rasterizeSceneInto (vw vh : Nat) (clearColor : Color) (atlas : Text.GlyphAtl
         radii, colorRGBA := 0xC8D2E6FF,
         kind := 5, aux0 := 0, aux1 := 255
       }
+      let saved := if activeRClips.isEmpty then ByteArray.empty else fb
       fb := drawRoundedBox vw vh fb curClip dst radii 0xC8D2E6FF (0, 0, 0, 0) 0
+      if !activeRClips.isEmpty then fb := applyRoundedClips vw vh saved fb (intersectRect curClip dst) activeRClips
   return (fb, instances)
 
 /-- Full-frame compatibility entry point. -/
@@ -584,9 +845,11 @@ def rasterizeScene (vw vh : Nat) (clearColor : Color) (atlas : Text.GlyphAtlasCa
 def renderFrame (ctx : VulkanContext) (clearColor : Color) (atlas : Text.GlyphAtlasCache)
     (scene : Scene) : IO VulkanContext := do
   let (fb, insts) := rasterizeScene ctx.width ctx.height clearColor atlas scene
-  let _ ← stageInstances ctx insts
+  if ctx.scratchPtr != 0 then
+    let _ ← stageInstances ctx insts
   return { ctx with
     framebuffer := fb
+    lastUploadedDirtyRect := some { x := 0, y := 0, w := (ctx.width : Int), h := (ctx.height : Int) }
     lastDrawnPrims := insts.size
     lastDamagePixels := ctx.width * ctx.height
     previousPaint := some ⟨scene, atlas.pages, clearColor, ctx.width, ctx.height⟩ }
@@ -598,9 +861,16 @@ def hasGlobalEffect (scene : Scene) : Bool :=
     | .backdropBlur _ | .layerPush _ | .layerPop => true
     | _ => false
 
--- Diff the exact command stream. A structural edit can change the meaning of
--- an identical suffix; never infer local damage across such an edit.
-private def changedBounds (vp : Rect) (old new : Scene) : Option Rect := Id.run do
+private def unionRect (a b : Rect) : Rect :=
+  ⟨min a.x b.x, min a.y b.y, max a.right b.right - min a.x b.x, max a.bottom b.bottom - min a.y b.y⟩
+
+private def horizNear (a b : Rect) (pad : Int := 32) : Bool :=
+  !(a.right + pad ≤ b.x || b.right + pad ≤ a.x)
+
+-- Diff the exact command stream into up to two horizontally disjoint dirty rectangles.
+-- Keeping widely separated columns separate (such as transcript prose and a right-edge
+-- overlay scrollbar) avoids expanding the dirty rectangle across untouched intervening chrome.
+private def changedRects (vp : Rect) (old new : Scene) : Option (Array Rect) := Id.run do
   let n := min old.size new.size
   let mut pre := 0
   while pre < n && old[pre]? == new[pre]? do pre := pre + 1
@@ -613,17 +883,36 @@ private def changedBounds (vp : Rect) (old new : Scene) : Option Rect := Id.run 
     | some .clipPop => clips := match clips with | _ :: _ :: _ => clips.tail! | _ => [vp]
     | _ => pure ()
   let clip := clips.head?.getD vp
-  let mut area : Option Rect := none
+  let mut rects : Array Rect := #[]
   for cmds in #[old, new] do
     for i in [pre:cmds.size-suf] do
       let some p := cmds[i]? | return none
       let some r := p.bounds | return none
       let b := intersectRect clip r
       if b.w > 0 && b.h > 0 then
-        area := some (match area with
-          | none => b
-          | some a => ⟨min a.x b.x, min a.y b.y, max a.right b.right - min a.x b.x, max a.bottom b.bottom - min a.y b.y⟩)
-  return some (area.getD ⟨0,0,0,0⟩)
+        if rects.size == 0 then
+          rects := #[b]
+        else if rects.size == 1 then
+          let a := rects[0]!
+          if horizNear a b then
+            rects := #[unionRect a b]
+          else
+            rects := #[a, b]
+        else
+          let r0 := rects[0]!
+          let r1 := rects[1]!
+          let (n0, n1) :=
+            if horizNear r0 b then (unionRect r0 b, r1)
+            else if horizNear r1 b then (r0, unionRect r1 b)
+            else
+              let gap0 := if b.x ≥ r0.right then b.x - r0.right else r0.x - b.right
+              let gap1 := if b.x ≥ r1.right then b.x - r1.right else r1.x - b.right
+              if gap0 ≤ gap1 then (unionRect r0 b, r1) else (r0, unionRect r1 b)
+          if horizNear n0 n1 0 then
+            rects := #[unionRect n0 n1]
+          else
+            rects := #[n0, n1]
+  return some rects
 
 -- Express paints in coordinates relative to a horizontal band. Equality includes
 -- paint order, all style/sampling parameters and the actually visible scissor.
@@ -644,7 +933,7 @@ private def bandPaint (scene : Scene) (band : Rect) : Option (Array (Prim × Rec
         let key : Option Prim := match p with
           | .quad b c rad w e => some (.quad (if rad == 0 && w == 0 then v else rel b) c rad w e)
           | .rrect b c rad w e => some (.rrect (rel b) c rad w e)
-          | .glyph s d c k => if d.y < 0 then none else some (.glyph s (rel d) c k)
+          | .glyph s d c k p => if d.y < 0 then none else some (.glyph s (rel d) c k p)
           | .mask i s d c => if d.y < 0 then none else some (.mask i s (rel d) c)
           | _ => none
         let some k := key | return none
@@ -659,11 +948,11 @@ private def scrollBand (old new : Scene) (dirty vp : Rect) : Option (Rect × Nat
   while i < min old.size new.size && old[i]? == new[i]? do i := i + 1
   let mut shift := 0
   for j in [i:old.size] do
-    if let some (.glyph s a c k) := old[j]? then
+    if let some (.glyph s a c k pg1) := old[j]? then
       if a.y > dirty.y + 64 && a.y < dirty.bottom then
         for n in [max i (j-160):min new.size (j+64)] do
-          if let some (.glyph t b e l) := new[n]? then
-            if s == t && a.x == b.x && c == e && k == l && a.y > b.y && a.y-b.y ≤ 64 then
+          if let some (.glyph t b e l pg2) := new[n]? then
+            if s == t && a.x == b.x && c == e && k == l && pg1 == pg2 && a.y > b.y && a.y-b.y ≤ 64 then
               shift := (a.y-b.y).toNat
               break
         if shift > 0 then break
@@ -671,10 +960,21 @@ private def scrollBand (old new : Scene) (dirty vp : Rect) : Option (Rect × Nat
   let band := { dirty with h := dirty.h - max 96 (2 * (shift : Int)) }
   let src := { band with y := band.y + shift }
   if intersectRect vp src != src then return none
-  let some a := bandPaint old src | return none
-  let some b := bandPaint new band | return none
-  if a != b then return none
-  return some (band,shift)
+  let matchesBand (b : Rect) : Bool :=
+    let s := { b with y := b.y + shift }
+    match bandPaint old s, bandPaint new b with
+    | some a, some c => a == c
+    | _, _ => false
+  if matchesBand band then
+    return some (band, shift)
+  -- Overlay scrollbars paint inside the right-edge gutter and move opposite to content.
+  -- Inset by a narrow right-edge strip so `FFI.scrollRows` still reuses the content body.
+  let gutter : Int := min (band.w / 8) 32
+  if gutter > 0 && band.w > gutter + 96 then
+    let inner := { band with w := band.w - gutter }
+    if matchesBand inner then
+      return some (inner, shift)
+  return none
 
 -- New glyph allocations may change unused texels. Prove that every old
 -- sampling command still sees the same bytes, or discard the framebuffer.
@@ -683,7 +983,7 @@ private def samplesUnchanged (scene : Scene) (idx : Nat) (a b : Text.AtlasPageBu
   if a.rgba == b.rgba then return true
   for p in scene do
     let pair := match p with
-      | .glyph src dst _ _ => if idx == 0 then some (src,dst) else none
+      | .glyph src dst _ _ page => if idx == page then some (src,dst) else none
       | .mask page src dst _ => if idx == page then some (src,dst) else none
       | _ => none
     if let some (src,dst) := pair then
@@ -709,7 +1009,7 @@ def renderFrameDamage (ctx : VulkanContext) (clearColor : Color) (atlas : Text.G
   let vp : Rect := ⟨0,0,ctx.width,ctx.height⟩
   let profile := (← IO.getEnv "ORB_U7_PROFILE") == some "1"
   let t0 ← IO.monoNanosNow
-  let some dirty := changedBounds vp prev.scene scene | return ← renderFrame ctx clearColor atlas scene
+  let some dirtyRects := changedRects vp prev.scene scene | return ← renderFrame ctx clearColor atlas scene
   let t1 ← IO.monoNanosNow
   if prev.pages.size != atlas.pages.size then return ← renderFrame ctx clearColor atlas scene
   for i in [:prev.pages.size] do
@@ -717,10 +1017,11 @@ def renderFrameDamage (ctx : VulkanContext) (clearColor : Color) (atlas : Text.G
     let b := atlas.pages[i]!
     if !samplesUnchanged prev.scene i a b then
       return ← renderFrame ctx clearColor atlas scene
-  if dirty.w == 0 || dirty.h == 0 then
+  if dirtyRects.isEmpty then
     if profile then IO.eprintln s!"u7-paint-ns {t1-t0} {(← IO.monoNanosNow)-t1} 0 0 0"
     return { ctx with
       previousPaint := some ⟨scene, atlas.pages, clearColor, ctx.width, ctx.height⟩
+      lastUploadedDirtyRect := none
       lastDamagePixels := 0
       lastDrawnPrims := 0
       partialFrames := ctx.partialFrames + 1 }
@@ -730,27 +1031,133 @@ def renderFrameDamage (ctx : VulkanContext) (clearColor : Color) (atlas : Text.G
   let initial := if profile then ctx.framebuffer.copySlice 0 ByteArray.empty 0 ctx.framebuffer.size else ctx.framebuffer
   let ctx := { ctx with framebuffer := ByteArray.empty }
   let t3 ← IO.monoNanosNow
-  let mut initial := initial
-  let mut paint := dirty
-  if let some (band, shift) := scrollBand prev.scene scene dirty vp then
-    initial := FFI.scrollRows initial ((band.y.toNat*ctx.width+band.x.toNat)*4).toUSize
-      (ctx.width*4).toUSize (band.w.toNat*4).toUSize band.h.toNat.toUSize shift.toUSize
-    paint := { dirty with y := band.bottom, h := dirty.bottom - band.bottom }
-    if profile then IO.eprintln s!"u7-scroll-reuse dy={shift} pixels={band.w*band.h}"
-  let (fb, insts) := rasterizeSceneInto ctx.width ctx.height clearColor atlas (some initial) (some paint) scene
+  let mut fb := initial
+  let mut insts : Array GpuPrimInstance := #[]
+  let mut pixels : Nat := 0
+  let mut uploadedUnion : Option Rect := none
+  for dRect in dirtyRects do
+    let mut paint := dRect
+    let mut extraStrip : Option Rect := none
+    if let some (band, shift) := scrollBand prev.scene scene dRect vp then
+      fb := FFI.scrollRows fb ((band.y.toNat*ctx.width+band.x.toNat)*4).toUSize
+        (ctx.width*4).toUSize (band.w.toNat*4).toUSize band.h.toNat.toUSize shift.toUSize
+      paint := { dRect with y := band.bottom, h := dRect.bottom - band.bottom }
+      if band.right < dRect.right then
+        extraStrip := some { x := band.right, y := dRect.y, w := dRect.right - band.right, h := band.bottom - dRect.y }
+      if profile then IO.eprintln s!"u7-scroll-reuse dy={shift} pixels={band.w*band.h}"
+    let (fb0, insts0) := rasterizeSceneInto ctx.width ctx.height clearColor atlas (some fb) (some paint) scene
+    fb := fb0
+    insts := insts ++ insts0
+    if let some strip := extraStrip then
+      let (fb1, insts1) := rasterizeSceneInto ctx.width ctx.height clearColor atlas (some fb) (some strip) scene
+      fb := fb1
+      insts := insts ++ insts1
+    let clipped := intersectRect vp dRect
+    if !clipped.isEmpty then
+      uploadedUnion := match uploadedUnion with
+        | none => some clipped
+        | some u => some (unionRect u clipped)
+    pixels := pixels + (max 0 clipped.w * max 0 clipped.h).toNat
   let t4 ← IO.monoNanosNow
-  let _ ← stageInstances ctx insts
+  if ctx.scratchPtr != 0 then
+    let _ ← stageInstances ctx insts
   if profile then IO.eprintln s!"u7-paint-ns {t1-t0} {t2-t1} {t3-t2} {t4-t3} {(← IO.monoNanosNow)-t4}"
-  let clipped := intersectRect { x := 0, y := 0, w := (ctx.width : Int), h := (ctx.height : Int) } dirty
-  let pixels := (max 0 clipped.w * max 0 clipped.h).toNat
   return {
     ctx with
     framebuffer := fb
     previousPaint := some ⟨scene, atlas.pages, clearColor, ctx.width, ctx.height⟩
+    lastUploadedDirtyRect := uploadedUnion
     lastDrawnPrims := insts.size
     lastDamagePixels := pixels
     partialFrames := ctx.partialFrames + 1
   }
+
+/-- Tear down an active GPU session after unrecoverable `DEVICE_LOST` and switch to `cpuShm`. -/
+private def fallbackToCpuShm (ctx : VulkanContext) (reason : String) : IO VulkanContext := do
+  if let some sess := ctx.gpuSession then
+    if let some pipe := sess.pipe then
+      Vk.destroyInstancedPipeline sess.wsi.dev pipe
+    let _ ← Vk.destroyWsi sess.wsi
+  return { ctx with
+    backend := .cpuShm
+    gpuSession := none
+    fallbackReason := some reason
+    gpuAllocatedBytes := 0
+    previousPaint := none
+    framebuffer := ByteArray.empty }
+
+/-- Render and present a live Wayland frame on the active Vulkan backend (`vkInstanced` or
+`vkPresent`). On `vkInstanced`, CPU `framebuffer` and `previousPaint` are never allocated.
+Returns `(ctx', atlas', handledByVulkan, didPresent)`:
+- `(true, true)`: frame was presented to WSI (clear damage, bump `presentCount`).
+- `(true, false)`: swapchain needs recreate / zero-extent suspended (preserve damage, do not bump `presentCount`).
+- `(false, false)`: runtime `DEVICE_LOST` fell back to `cpuShm` (caller renders CPU + `wl_shm`). -/
+def renderAndPresentGpu (ctx : VulkanContext) (clearColor : Color) (atlas : Text.GlyphAtlasCache)
+    (scene : Scene) (dirty : Option Rect) (prePresent onPresentAborted : IO Unit) :
+    IO (VulkanContext × Text.GlyphAtlasCache × Bool × Bool) := do
+  let some sess := ctx.gpuSession | return (ctx, atlas, false, false)
+  match ctx.backend, sess.pipe with
+  | .vkInstanced, some pipe =>
+    let (wsi', pipe', outcome, primCount, ssboBytes, atlasBytes) ←
+      Vk.presentInstancedScene sess.wsi pipe ctx.width ctx.height clearColor atlas scene dirty prePresent onPresentAborted
+    let allocBytes ← wsi'.dev.allocatedBytes.get
+    match outcome with
+    | .presented _ acqNs upNs subNs presNs =>
+      let ctx' : VulkanContext := { ctx with
+        framebuffer := ByteArray.empty
+        previousPaint := none
+        lastUploadedDirtyRect := dirty
+        gpuSession := some { wsi := wsi', pipe := some pipe' }
+        swapchainRecreates := wsi'.sm.recreateCount
+        gpuAllocatedBytes := allocBytes
+        lastAcquireNs := acqNs
+        lastUploadNs := upNs
+        lastSubmitNs := subNs
+        lastPresentNs := presNs
+        lastUploadBytes := ssboBytes + atlasBytes
+        lastAtlasUploadBytes := atlasBytes
+        lastSsboBytes := ssboBytes
+        lastDrawnPrims := primCount
+        lastDamagePixels := ctx.width * ctx.height }
+      return (ctx', atlas.clearGpuDirtyRects, true, true)
+    | .skipped =>
+      return ({ ctx with gpuSession := some { wsi := wsi', pipe := some pipe' }, gpuAllocatedBytes := allocBytes }, atlas, true, false)
+    | .needsRecreate =>
+      return ({ ctx with gpuSession := some { wsi := wsi', pipe := some pipe' }, swapchainRecreates := wsi'.sm.recreateCount, gpuAllocatedBytes := allocBytes }, atlas, true, false)
+    | .deviceLost reason =>
+      let fbCtx ← fallbackToCpuShm { ctx with gpuSession := some { wsi := wsi', pipe := some pipe' } } reason
+      return (fbCtx, atlas, false, false)
+  | .vkPresent, _ =>
+    let ctx1 ← match dirty with
+      | some d => renderFrameDamage ctx clearColor atlas d scene
+      | none => renderFrame ctx clearColor atlas scene
+    let (wsi', outcome) ←
+      Vk.presentCpuDirty sess.wsi ctx1.framebuffer ctx1.width ctx1.height ctx1.lastUploadedDirtyRect prePresent onPresentAborted
+    let allocBytes ← wsi'.dev.allocatedBytes.get
+    match outcome with
+    | .presented upBytes acqNs upNs subNs presNs =>
+      let ctx' : VulkanContext := { ctx1 with
+        gpuSession := some { sess with wsi := wsi' }
+        swapchainRecreates := wsi'.sm.recreateCount
+        gpuAllocatedBytes := allocBytes
+        lastAcquireNs := acqNs
+        lastUploadNs := upNs
+        lastSubmitNs := subNs
+        lastPresentNs := presNs
+        lastUploadBytes := upBytes }
+      return (ctx', atlas, true, true)
+    | .skipped =>
+      return ({ ctx1 with gpuSession := some { sess with wsi := wsi' }, gpuAllocatedBytes := allocBytes }, atlas, true, false)
+    | .needsRecreate =>
+      let wsiDirty := match wsi'.bundle with
+        | some b => { wsi' with bundle := some { b with backingNeedsFullUpload := true } }
+        | none => wsi'
+      return ({ ctx1 with gpuSession := some { sess with wsi := wsiDirty }, swapchainRecreates := wsiDirty.sm.recreateCount, gpuAllocatedBytes := allocBytes }, atlas, true, false)
+    | .deviceLost reason =>
+      let fbCtx ← fallbackToCpuShm { ctx1 with gpuSession := some { sess with wsi := wsi' } } reason
+      return (fbCtx, atlas, false, false)
+  | _, _ =>
+    return (ctx, atlas, false, false)
 
 /-- Compute IEEE 802.3 CRC-32 for a PNG chunk (`type ++ data`). -/
 def crc32 (data : ByteArray) : UInt32 := Id.run do

@@ -37,17 +37,19 @@ def providerTypeMatchesAuthType (provType authType : String) : Bool :=
 private def idWithoutHyphens (id : String) : String :=
   String.ofList (id.toList.filter (· != '-'))
 
-def authFileMatchesRowId (f : CliAuthFileInfo) (id : String) (member : Bool := false) : Bool :=
-  !id.isEmpty && (if member then f.prefixId == id else
-    f.prefixId == id || f.accountId == id ||
-    (!f.authType.isEmpty && f.prefixId == s!"orb-{f.authType}-{idWithoutHyphens id}") ||
-    (!f.authType.isEmpty && f.fileName == s!"{f.authType}-sandboxed-{id}.json"))
-
 /-- An unmatched login keeps the same identifier when another login joins,
 departs, refreshes, or changes its display label. -/
 private def fileDigest (file : String) := LeanSys.Auth.bytesToHexLower (LeanSys.Auth.sha256Bytes file.toUTF8)
 
 def fileAccountId (provider file : String) : String := s!"cliproxyapi:{provider}:{fileDigest file}"
+
+def authFileMatchesRowId (f : CliAuthFileInfo) (id : String) (member : Bool := false) : Bool :=
+  !id.isEmpty && (
+    let fileId := fileAccountId (authTypeToProviderType f.authType) f.fileName
+    if member then f.prefixId == id || id == fileId else
+      f.prefixId == id || f.accountId == id || id == fileId ||
+      (!f.authType.isEmpty && f.prefixId == s!"orb-{f.authType}-{idWithoutHyphens id}") ||
+      (!f.authType.isEmpty && f.fileName == s!"{f.authType}-sandboxed-{id}.json"))
 
 /-- Sidecar model namespace for an OAuth file that originally had no prefix. -/
 def vpnModelPrefix (file : String) : String := "orb-vpn-" ++ fileDigest file

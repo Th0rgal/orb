@@ -199,16 +199,42 @@ Build on spark instead of locally.
   `~/work/orb` on spark and build with `turbo-lean` through `scripts/build_orb_bins.sh --only <bin>`.
   These link against Ubuntu's loader and do not run on NixOS as they are.
 - **The NixOS desktop package (`orb-desktop` in `~/work/nixos/omarchnix`, what Alt+O launches):**
-  build it in spark's Nix store, which patches the binaries for NixOS:
+  build it directly in spark's Nix store (preferred over `--store ssh-ng://spark` when WireGuard
+  is flaky or slow, because spark fetches the flake directly from GitHub and a `nohup` build
+  survives mesh blips without stalling on `nix copy`):
   ```bash
-  cd ~/work/nixos/omarchnix
-  nix build .#orb-desktop --eval-store auto --store ssh-ng://spark --no-link --print-out-paths
+  ssh spark 'nohup nix build --extra-experimental-features "nix-command flakes" \
+    github:Th0rgal/omarchnix/<branch>#orb-desktop --no-link --print-out-paths \
+    --max-jobs 2 --cores 4 > /tmp/orb-desktop.log 2>&1 </dev/null &'
   ```
-  Building this way was verified from the laptop on 2026-11-12. Copying the result back
+  When WireGuard is steady, `nix build .#orb-desktop --eval-store auto --store ssh-ng://spark --no-link --print-out-paths`
+  from `~/work/nixos/omarchnix` also works. Copying the result back
   (`nix copy --from ssh-ng://spark <path>`) is refused for an unprivileged user because the path is
-  unsigned: either run the copy as root, or add the laptop user to `nix.settings.trusted-users` in
-  `nixos-config`. `--builders ssh-ng://spark` is ignored for the same reason.
+  unsigned: either run the copy as root, add the laptop user to `nix.settings.trusted-users` in
+  `nixos-config`, or `rsync` the output store paths into `~/.local/opt/orb-nightly/`. `--builders ssh-ng://spark` is ignored for the same reason.
 - To pick up a new Orb commit, bump the `orb` input first: `nix flake update orb` in `omarchnix`.
+
+## Parallel agent dispatch, reviews, and CI speedups
+
+- **Route Lean/PR workers to build-capable fleet hosts:** Place `orb` build and PR missions on
+  `uruk`, `ashur`, or `dgx-spark` (all three have `libssl-dev`, Lean toolchains, and `gh` /
+  `development-identity` auth). Avoid `babylon`, `nippur`, and `lagash` for Orb builds/PRs.
+- **Two-tier review cadence (Carbon first-pass + Neon re-verification):** Run a read-only
+  Gemini 4 Carbon (`pro`) audit for the first pass on non-trivial PRs to catch architectural,
+  concurrency, and security bugs. Once Carbon's findings are fixed with targeted commits and
+  regression tests, use fast Gemini 4 Neon (`flash`) to re-verify those exact fixes rather than
+  re-running a full Carbon pass.
+- **Parallelize across disjoint surfaces:** Fan out parallel workers on non-overlapping trees
+  (`lean/OrbCore/**` vs `lean/OrbDesktop/**` vs `lean/OrbBin/**`). When two PRs touch a shared
+  file (e.g. `LeanUI/Runtime.lean` or `OrbDesktop/State.lean`), document the merge boundary up
+  front so the second PR rebases in under two minutes.
+- **Keep Nix CI scoped to what it builds:** `.github/workflows/nix.yml` builds `.#orb-core`
+  (not `OrbDesktop`), so it excludes `!lean/OrbDesktop/**`; pure LeanUI PRs are verified by
+  `CI/Orb Desktop Shell (LeanUI)` and `LeanUI parity/parity` instead of burning 45+ minutes on
+  an unrelated `orb-core` Nix build.
+- **Antigravity (`agy`) credentials on `agent-core`:** `orb-core` runs with
+  `HOME=/var/lib/opencode`. If Gemini 4 models disappear from the Antigravity model dropdown,
+  verify `/var/lib/opencode/.gemini/antigravity-cli/antigravity-oauth-token` (not `/root/`).
 
 ## High-level flow
 

@@ -253,6 +253,8 @@ def tagTextInput : UInt64 := 10
 def tagDataDevice : UInt64 := 11
 def tagDataOffer : UInt64 := 12
 def tagFrameCallback : UInt64 := 13
+def tagShmBufferA : UInt64 := 14
+def tagShmBufferB : UInt64 := 15
 
 /-- Registered core + extension `wl_interface*` pointers for a Wayland session. -/
 structure ProtocolInterfaces where
@@ -478,6 +480,8 @@ structure ShmBuffers where
   h : Nat := 0
   /-- `true` when `bufB` is the buffer the compositor currently shows. -/
   frontIsB : Bool := true
+  bufABusy : Bool := false
+  bufBBusy : Bool := false
   deriving Repr, Inhabited
 
 /-- Proxies and native entry points of an open window. All zero when headless. -/
@@ -497,6 +501,7 @@ structure WindowHandles where
   fnMunmap : USize := 0
   fnClose : USize := 0
   fnDisconnect : USize := 0
+  fnProxyDestroy : USize := 0
   deriving Repr, Inhabited
 
 /-- Mutable state of a Wayland client session (or headless fallback). -/
@@ -508,6 +513,16 @@ structure WaylandClient where
   shm : ShmBuffers := {}
   /-- Set by the first `xdg_surface.configure`; no buffer may be attached before it. -/
   configured : Bool := false
+  /-- True when the Wayland compositor advertises `zwp_linux_dmabuf_v1` or `wl_drm`. -/
+  hasLinuxDmabuf : Bool := false
+  /-- Active `wl_surface.frame` callback proxy (`0` = none). Always destroyed with `wl_proxy_destroy`. -/
+  frameCallbackProxy : USize := 0
+  /-- Invariant: `frameCallbackPending == (frameCallbackProxy != 0)`. -/
+  frameCallbackPending : Bool := false
+  /-- Set on `xdg_surface.configure` so an acked configure bypasses frame-callback deferral once. -/
+  configurePendingCommit : Bool := false
+  lastViewportW : Nat := 0
+  lastViewportH : Nat := 0
   xkbState : USize := 0
   pressedKeysyms : List (UInt32 × UInt32) := []
   enterSerial : Option UInt32 := none
@@ -572,6 +587,7 @@ def openWindow (title appId : String) (initW initH initScale120 : Nat) : IO Wayl
   let fnFlush ← requireSym wl "wl_display_flush"
   let fnDispatch ← requireSym wl "wl_display_dispatch"
   let fnDisconnect ← requireSym wl "wl_display_disconnect"
+  let fnProxyDestroy ← requireSym wl "wl_proxy_destroy"
   let fnMmap ← requireSym "" "mmap"
   let fnMunmap ← requireSym "" "munmap"
   let fnClose ← requireSym "" "close"
@@ -593,6 +609,8 @@ def openWindow (title appId : String) (initW initH initScale120 : Nat) : IO Wayl
     | none =>
       if required then throw (IO.userError s!"compositor does not offer {name}")
       return (0, 0)
+  let hasLinuxDmabuf : Bool :=
+    globals.any fun g => g.1 == "zwp_linux_dmabuf_v1" || g.1 == "wl_drm"
   let (compositor, _) ← bind "wl_compositor" ifaces.wlCompositor 4 4 0 true
   let (shmGlobal, _) ← bind "wl_shm" ifaces.wlShm 1 1 0 true
   let (wmBase, xdgVersion) ← bind "xdg_wm_base" ifaces.xdgWmBase 4 1 tagXdgWmBase true
@@ -614,9 +632,33 @@ def openWindow (title appId : String) (initW initH initScale120 : Nat) : IO Wayl
   let _ ← marshalRequest toplevel 3 0 xdgVersion 0 0 #[.str (some appId)]
   let _ ← marshalRequest surface 6 0 4 0 0 #[]
   return {
-    headless := false, display := disp, ifaces
-    window := { surface, viewport, shmGlobal, cursorManager, seatVersion, textInput, fnFlush, fnDispatch, fnMmap, fnMunmap, fnClose, fnDisconnect }
+    headless := false, display := disp, ifaces, hasLinuxDmabuf
+    window := { surface, viewport, shmGlobal, cursorManager, seatVersion, textInput, fnFlush, fnDispatch, fnMmap, fnMunmap, fnClose, fnDisconnect, fnProxyDestroy }
     pendingW := initW, pendingH := initH, scale120 := initScale120 }
+
+/-- Destroy any live `wl_callback` proxy via `wl_proxy_destroy` (NEVER `WL_MARSHAL_FLAG_DESTROY`,
+since `wl_callback` has 0 client requests) and clear `frameCallbackPending`. -/
+def cancelFrameCallback (c : WaylandClient) : IO WaylandClient := do
+  if c.frameCallbackProxy != 0 && c.window.fnProxyDestroy != 0 then
+    let _ ← nativeCall c.window.fnProxyDestroy c.frameCallbackProxy.toUInt64
+  return { c with frameCallbackProxy := 0, frameCallbackPending := false }
+
+/-- Request a `wl_surface.frame` pacing callback (opcode 3) if none is currently pending.
+Intended to be called right before `vkQueuePresentKHR` or `wl_surface.commit`. -/
+def requestFrameCallback (c : WaylandClient) : IO WaylandClient := do
+  if c.headless || c.window.surface == 0 || c.ifaces.wlCallback == 0 || c.frameCallbackPending then
+    return c
+  let cb ← marshalRequest c.window.surface 3 c.ifaces.wlCallback 1 0 tagFrameCallback #[.newId]
+  if cb == 0 then return c
+  return { c with frameCallbackProxy := cb, frameCallbackPending := true, configurePendingCommit := false }
+
+/-- Synchronize `wp_viewport.set_destination(pendingW, pendingH)` (opcode 2) whenever the logical
+viewport changed; Mesa WSI's `wl_surface.commit()` inside `vkQueuePresentKHR` applies it atomically. -/
+def syncViewportDestination (c : WaylandClient) : IO WaylandClient := do
+  if c.headless || c.window.viewport == 0 then return c
+  if c.lastViewportW == c.pendingW && c.lastViewportH == c.pendingH then return c
+  let _ ← marshalRequest c.window.viewport 2 0 1 0 0 #[.int c.pendingW, .int c.pendingH]
+  return { c with lastViewportW := c.pendingW, lastViewportH := c.pendingH }
 
 /-- Cursor shape requests are valid only for the most recent enter on this surface. -/
 def syncCursor (c : WaylandClient) (shape : UInt32) : IO WaylandClient := do
@@ -659,10 +701,10 @@ private def allocShm (c : WaylandClient) (w h : Nat) : IO ShmBuffers := do
   if ptr == 0xFFFFFFFFFFFFFFFF then throw (IO.userError "mmap of the window buffer failed")
   let shmProxy := c.window.shmGlobal
   let pool ← marshalRequest shmProxy 0 c.ifaces.wlShmPool 1 0 0 #[.newId, .fd fd, .int bytes]
-  let mk (offset : Nat) : IO USize :=
-    marshalRequest pool 0 c.ifaces.wlBuffer 1 0 0
+  let mk (offset : Nat) (tag : UInt64) : IO USize :=
+    marshalRequest pool 0 c.ifaces.wlBuffer 1 0 tag
       #[.newId, .int offset, .int w, .int h, .int (w * 4), .uint wlShmFormatArgb8888]
-  return { fd, ptr := ptr.toUSize, bytes, pool, bufA := ← mk 0, bufB := ← mk frame, w, h }
+  return { fd, ptr := ptr.toUSize, bytes, pool, bufA := ← mk 0 tagShmBufferA, bufB := ← mk frame tagShmBufferB, w, h }
 
 /-- Show the RGBA8 framebuffer `fb` (device size) in the window: copy it into the back buffer,
 attach it, scale it to the logical size through the viewport and commit. -/
@@ -673,19 +715,28 @@ def present (c : WaylandClient) (fb : ByteArray) : IO WaylandClient := do
   let shm ← if c.shm.w == bw && c.shm.h == bh then pure c.shm else do
     releaseShm c
     allocShm c bw bh
-  let toB := !shm.frontIsB
+  let toB :=
+    if !shm.frontIsB && !shm.bufBBusy then true
+    else if shm.frontIsB && !shm.bufABusy then false
+    else !shm.frontIsB
   let (buf, offset) := if toB then (shm.bufB, bw * bh * 4) else (shm.bufA, 0)
   FFI.presentArgb (shm.ptr + offset.toUSize) fb
   let surface := c.window.surface
   let _ ← marshalRequest surface 1 0 4 0 0 #[.obj buf, .int 0, .int 0]
   let _ ← marshalRequest c.window.viewport 2 0 1 0 0 #[.int c.pendingW, .int c.pendingH]
   let _ ← marshalRequest surface 9 0 4 0 0 #[.int 0, .int 0, .int bw, .int bh]
+  let c1 ← requestFrameCallback { c with lastViewportW := c.pendingW, lastViewportH := c.pendingH }
   let _ ← marshalRequest surface 6 0 4 0 0 #[]
-  return { c with shm := { shm with frontIsB := toB } }
+  let shm' := { shm with
+    frontIsB := toB
+    bufABusy := if !toB then true else shm.bufABusy
+    bufBBusy := if toB then true else shm.bufBBusy }
+  return { c1 with shm := shm', configurePendingCommit := false }
 
-/-- Release the window buffers and disconnect from the compositor. -/
+/-- Release the window buffers, pending frame callback, and disconnect from the compositor. -/
 def closeWindow (c : WaylandClient) : IO Unit := do
   if c.headless || c.display == 0 || c.window.fnDisconnect == 0 then return
+  let _ ← cancelFrameCallback c
   releaseShm c
   let _ ← nativeCall c.window.fnDisconnect c.display.toUInt64
 
@@ -693,11 +744,20 @@ def closeWindow (c : WaylandClient) : IO Unit := do
 def stepWireEvent (c : WaylandClient) (ev : WlWireEvent) : IO (WaylandClient × Array Event) := do
   let mut st := c
   let mut out : Array Event := #[]
-  if ev.tag == tagXdgSurface && ev.opcode == 0 then
+  if ev.tag == tagFrameCallback && ev.opcode == 0 then
+    if ev.proxy == st.frameCallbackProxy then
+      st ← cancelFrameCallback st
+  else if ev.tag == tagShmBufferA && ev.opcode == 0 then
+    st := { st with shm := { st.shm with bufABusy := false } }
+  else if ev.tag == tagShmBufferB && ev.opcode == 0 then
+    st := { st with shm := { st.shm with bufBBusy := false } }
+  else if ev.tag == tagXdgSurface && ev.opcode == 0 then
     if let some (WlWireArg.uint serial) := ev.arg? 0 then
       if !st.headless && ev.proxy != 0 then
         let _ ← marshalRequest ev.proxy 4 0 4 0 0 #[.uint serial]
-      st := { st with configured := true }
+      -- Destroy any pending frame callback and bypass deferral for configure commits.
+      st ← cancelFrameCallback st
+      st := { st with configured := true, configurePendingCommit := true }
       out := out.push (.resize st.pendingW st.pendingH)
   else if ev.tag == tagXdgWmBase && ev.opcode == 0 then
     if let some (WlWireArg.uint serial) := ev.arg? 0 then

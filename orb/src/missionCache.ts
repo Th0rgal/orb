@@ -1108,6 +1108,7 @@ async function fetchTranscript(
     priority?: RequestPriority | (() => RequestPriority);
     signal?: AbortSignal;
     registerPromote?: (fn: () => void) => void;
+    forceFull?: boolean;
   },
 ): Promise<TranscriptSnap> {
   const version=connectionVersionSafe();const check=()=>{if(opts?.signal?.aborted)throw new DOMException("Aborted","AbortError");if(version!==connectionVersionSafe())throw Error("Connection changed during transcript load.");};
@@ -1119,7 +1120,14 @@ async function fetchTranscript(
       ? { ...(prio ? { priority: prio } : {}), ...(opts?.signal ? { signal: opts.signal } : {}) }
       : undefined;
   };
-  const previous = peekReadyTranscript(id) ?? (await hydrateTranscriptFromDisk(id));
+  const cachedPrevious = opts?.forceFull ? undefined : (peekReadyTranscript(id) ?? (await hydrateTranscriptFromDisk(id)));
+  const hasCursorGap = Boolean(
+    cachedPrevious &&
+    cachedPrevious.cursor !== undefined &&
+    cachedPrevious.cursor > 1 &&
+    !cachedPrevious.stream.some((e) => e.type === "assistant_message" || e.type === "text_delta" || e.type === "tool_call"),
+  );
+  const previous = hasCursorGap ? undefined : cachedPrevious;
   const baselineSnap = peekTranscript(id);
   const baselineSeqs = new Set<number>();
   for (const ev of baselineSnap?.stream ?? []) {
@@ -1455,12 +1463,12 @@ function adoptPrefetch(scope:string):Promise<TranscriptSnap|null>|undefined{
  }
  return task.promise;
 }
-export function refreshTranscript(id:string):Promise<TranscriptSnap>{
+export function refreshTranscript(id:string,forceFull=false):Promise<TranscriptSnap>{
  const scope=key(id),initial=jobs.get(scope)?.pending.get('initial');
- if(initial&&!peekReadyTranscript(id))return initial;
- if(!peekReadyTranscript(id)&&prefetchTasks.has(scope))return loadTranscript(id);
+ if(!forceFull&&initial&&!peekReadyTranscript(id))return initial;
+ if(!forceFull&&!peekReadyTranscript(id)&&prefetchTasks.has(scope))return loadTranscript(id);
  cancelPrefetch(scope);
- return transcriptJob(id,'refresh',()=>fetchTranscript(id));
+ return transcriptJob(id,'refresh',()=>fetchTranscript(id,forceFull?{forceFull:true}:undefined));
 }
 export function loadTranscript(id:string):Promise<TranscriptSnap>{
  const cached=peekReadyTranscript(id);

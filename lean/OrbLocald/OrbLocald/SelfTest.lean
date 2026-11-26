@@ -289,6 +289,7 @@ private def runR6bClientLinkAndConflictChecks
     ("ack_seq", JVal.nat 256)
   ])
   let flushDrained ← dispatchRpcCommand stRef "client_link_flush" (.obj #[("mission", .str "m-journal")])
+  let flushUncarried ← dispatchRpcCommand stRef "client_link_flush" (.obj #[("mission", .str "m-never-carried")])
   total := total + 1
   let journalOk :=
     enq256Ok &&
@@ -298,7 +299,8 @@ private def runR6bClientLinkAndConflictChecks
     (match badAckBeyondHead with | .error "client_link_invalid_ack_seq" => true | _ => false) &&
     (match resyncFrom250 with | .ok jv => jv.fieldNat? "replay_count" == some 6 && jv.fieldUInt64? "replay_from_seq" == some 250 | _ => false) &&
     (match ackAll with | .ok jv => jv.fieldNat? "unacked_count" == some 0 | _ => false) &&
-    (match flushDrained with | .ok (.bool true) => true | _ => false)
+    (match flushDrained with | .ok (.bool true) => true | _ => false) &&
+    (match flushUncarried with | .ok (.bool false) => true | _ => false)
   if (← assertTrue "client_link_journal_ring_256_backpressure_ack_and_resync" journalOk) then passed := passed + 1
 
   -- 3. Local-origin lifecycle + typed 409 conflict classification (`stopping`/`non_terminal_run` retry vs `already_ended`/`moved`/`stale_receipt` retire).
@@ -1546,12 +1548,45 @@ private def runLinuxPortalFileChooserChecks (tmpStateDir validTok : String) : IO
 
   return (passed, total)
 
+private def runBindingsRefreshMergeChecks (pDir : System.FilePath) (validTok : String) : IO (Nat × Nat) := do
+  let mergeDir := pDir / "bindings-refresh-merge"
+  let workDir := mergeDir / "work"
+  IO.FS.createDirAll workDir
+  let stRef ← IO.mkRef ({ launchToken := validTok, orbStateDir := mergeDir.toString, homeDir := mergeDir.toString, hostOs := "linux" } : LocaldState)
+  let _ ← dispatchRpcCommand stRef "local_binding_set" (.obj #[
+    ("id", .str "m-persist-1"),
+    ("binding", .obj #[("harness", .str "claudecode"), ("bin", .str "/usr/bin/true"), ("cwd", .str workDir.toString)])
+  ])
+  -- External process writes a new binding with a higher revision to `local-bindings.json` after initial load.
+  IO.FS.writeFile (mergeDir / "local-bindings.json")
+    ("{\"revision\":51,\"bindings\":{\"m-persist-1\":{\"harness\":\"claudecode\",\"bin\":\"/usr/bin/true\",\"cwd\":\"" ++ workDir.toString ++ "\"},\"m-external-2\":{\"harness\":\"antigravity\",\"bin\":\"/usr/bin/true\",\"cwd\":\"" ++ workDir.toString ++ "\",\"sessionId\":\"sess-ext-2\"}}}\n")
+  let refreshedExt ← dispatchRpcCommand stRef "local_bindings_refresh" (.obj #[])
+  let afterLocalSet ← dispatchRpcCommand stRef "local_binding_set" (.obj #[
+    ("id", .str "m-local-3"),
+    ("binding", .obj #[("harness", .str "antigravity"), ("bin", .str "/usr/bin/true"), ("cwd", .str workDir.toString)])
+  ])
+  let ok :=
+    (match refreshedExt with
+     | .ok jv =>
+       ((jv.field? "bindings").bind (·.field? "m-persist-1")).isSome &&
+       ((jv.field? "bindings").bind (·.field? "m-external-2")).isSome &&
+       (jv.fieldNat? "revision").getD 0 >= 51
+     | _ => false) &&
+    (match afterLocalSet with
+     | .ok jv =>
+       ((jv.field? "bindings").bind (·.field? "m-external-2")).isSome &&
+       ((jv.field? "bindings").bind (·.field? "m-local-3")).isSome
+     | _ => false)
+  let passed := if (← assertTrue "local_bindings_refresh_merges_external_disk_additions" ok) then 1 else 0
+  return (passed, 1)
+
 private def runDesktopReliabilityParityChecks (tmpBase : String) (validTok : String) : IO (Nat × Nat) := do
   let pDir := System.FilePath.mk tmpBase / "parity-suite"
   IO.FS.createDirAll pDir
   let (p1, t1) ← runDesktopReliabilityParityChecksPart1 pDir validTok
   let (p2, t2) ← runLinuxPortalAndRevealChecks pDir validTok
-  return (p1 + p2, t1 + t2)
+  let (p3, t3) ← runBindingsRefreshMergeChecks pDir validTok
+  return (p1 + p2 + p3, t1 + t2 + t3)
 
 private def runWarmClaudeRpcE2eChecks (validTok tmpStateDir : String) : IO (Nat × Nat) := do
   let warmRpcDir := System.FilePath.mk tmpStateDir / "warm-rpc-repo"
@@ -2067,10 +2102,13 @@ private def runPostParityTailChecks (validTok tmpStateDir : String) : IO (Nat ×
           let ids2 := ((t2.fieldArr? "rows").getD #[]).filterMap (·.fieldStr? "row_id")
           let hidden := ((colCase.fieldArr? "expected_hidden_ids").getD #[]).filterMap (·.asStr?)
           let visible := ((colCase.fieldArr? "expected_visible_ids").getD #[]).filterMap (·.asStr?)
+          let projCore? := ((t1.fieldArr? "rows").getD #[]).find? (fun r => r.fieldStr? "row_id" == some "proj:core")
+          let projFolders := (projCore?.bind (·.fieldArr? "folders")).getD #[] |>.filterMap (·.asStr?)
           (t1.fieldBool? "expanded") == some false &&
           (t2.fieldBool? "expanded") == some true &&
           hidden.all (fun id => !ids1.contains id && ids2.contains id) &&
-          visible.all (fun id => ids1.contains id)
+          visible.all (fun id => ids1.contains id) &&
+          projFolders.contains "ui" && projFolders.contains "ui/desktop"
         | _, _ => false
       if (← assertTrue "native_chrome_toggle_expand_hides_and_restores_subtree" togOk) then
         ncPassed := ncPassed + 1

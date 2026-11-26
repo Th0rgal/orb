@@ -1,0 +1,123 @@
+{
+  "description": "Shared AirVPN settings parser, filename hint extractor, and session budget formatter across Desktop (orb/src/airVpnModel.ts), iOS (OrbAirVpnModel) and Android (OrbAirVpnModel).",
+  "status": [
+    {
+      "name": "legacy-devices-only",
+      "input": {
+        "api_key_configured": true,
+        "devices": ["orb-agy", "orb-openai"]
+      },
+      "expected": {
+        "apiKeyConfigured": true,
+        "sessionLimit": 5,
+        "profiles": [
+          { "device": "orb-agy", "country": "", "server": "", "active": false, "exits": [], "accounts": 0 },
+          { "device": "orb-openai", "country": "", "server": "", "active": false, "exits": [], "accounts": 0 }
+        ],
+        "activeTunnelsCount": 0
+      }
+    },
+    {
+      "name": "enriched-profiles-and-live-tunnels",
+      "input": {
+        "api_key_configured": true,
+        "session_limit": 5,
+        "devices": ["orb-agy", "orb-ch", "orb-openai"],
+        "profiles": [
+          { "device": "orb-agy", "country": "NL", "server": "Aljanah" },
+          { "device": "orb-ch", "country": "CH", "server": "Kitalpha" },
+          { "device": "orb-openai", "country": "NL", "server": "Alcyone" }
+        ],
+        "active_tunnels": [
+          { "device": "orb-openai", "country": "NL", "server": "Alcyone", "exits": ["213.152.161.155", "2a00:1678:2470:24::1"], "accounts": 2 }
+        ]
+      },
+      "expected": {
+        "apiKeyConfigured": true,
+        "sessionLimit": 5,
+        "profiles": [
+          { "device": "orb-agy", "country": "NL", "server": "Aljanah", "active": false, "exits": [], "accounts": 0 },
+          { "device": "orb-ch", "country": "CH", "server": "Kitalpha", "active": false, "exits": [], "accounts": 0 },
+          { "device": "orb-openai", "country": "NL", "server": "Alcyone", "active": true, "exits": ["213.152.161.155", "2a00:1678:2470:24::1"], "accounts": 2 }
+        ],
+        "activeTunnelsCount": 1
+      }
+    },
+    {
+      "name": "invalid-missing-devices",
+      "input": { "api_key_configured": true },
+      "expected": null
+    },
+    {
+      "name": "invalid-missing-flag",
+      "input": { "devices": [] },
+      "expected": null
+    }
+  ],
+  "filename_hints": [
+    {
+      "filename": "AirVPN_NL-Amsterdam_Alcyone_UDP-1637-Entry3.conf",
+      "expected": { "country": "NL", "server": "Alcyone", "device": "orb-nl-alcyone" }
+    },
+    {
+      "filename": "AirVPN_CH-Zurich_Kitalpha_UDP-1637.conf",
+      "expected": { "country": "CH", "server": "Kitalpha", "device": "orb-ch-kitalpha" }
+    },
+    {
+      "filename": "AirVPN_FR_Acamar.conf",
+      "expected": { "country": "FR", "server": "Acamar", "device": "orb-fr-acamar" }
+    },
+    {
+      "filename": "west.conf",
+      "expected": { "country": "", "server": "west", "device": "orb-west" }
+    },
+    {
+      "filename": "bad..name.conf",
+      "expected": { "country": "", "server": "", "device": "" }
+    }
+  ],
+  "session_summaries": [
+    {
+      "name": "unchecked-idle",
+      "activeSessions": null,
+      "orbTunnels": 0,
+      "sessionLimit": 5,
+      "expected": "Up to 5 concurrent sessions across AirVPN"
+    },
+    {
+      "name": "unchecked-one-orb",
+      "activeSessions": null,
+      "orbTunnels": 1,
+      "sessionLimit": 5,
+      "expected": "1 Orb tunnel active · up to 5 concurrent sessions"
+    },
+    {
+      "name": "checked-one-external",
+      "activeSessions": 1,
+      "orbTunnels": 0,
+      "sessionLimit": 5,
+      "expected": "1 / 5 active sessions · 0 Orb tunnels · 1 external · 4 free"
+    },
+    {
+      "name": "checked-external-only",
+      "activeSessions": 2,
+      "orbTunnels": 0,
+      "sessionLimit": 5,
+      "expected": "2 / 5 active sessions · 0 Orb tunnels · 2 external · 3 free"
+    },
+    {
+      "name": "checked-mixed",
+      "activeSessions": 3,
+      "orbTunnels": 1,
+      "sessionLimit": 5,
+      "expected": "3 / 5 active sessions · 1 Orb tunnel · 2 external · 2 free"
+    },
+    {
+      "name": "checked-full",
+      "activeSessions": 5,
+      "orbTunnels": 2,
+      "sessionLimit": 5,
+      "expected": "5 / 5 active sessions · 2 Orb tunnels · 3 external · 0 free"
+    }
+  ]
+}

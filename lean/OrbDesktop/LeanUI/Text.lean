@@ -1,3 +1,4 @@
+import Std.Data.HashMap
 import LeanUI.Defs
 import LeanUI.Layout
 import LeanUI.Kernel
@@ -273,6 +274,21 @@ def rasterizeIcon (paths : List (List (Int × Int))) (size : Nat)
              format := 1, isColor := false, pixels := FFI.iconMask segments size.toUSize }
   else rasterizeIconReference paths size strokeTenths
 
+/-- Maximum UTF-8 byte length eligible for short-label shaping/resolved-run caching.
+Longer strings (such as growing streaming replies) bypass caching to prevent thrashing. -/
+def maxShapeCacheBytes : Nat := 128
+
+/-- Maximum retained atlas-resolved short-label runs per `GlyphAtlasCache`. -/
+def maxResolvedRuns : Nat := 512
+
+/-- O(1) lookup key for `GlyphAtlasCache.resolvedMap` (color/underline applied on hit). -/
+structure ResolvedRunKey where
+  face : USize
+  scale : Nat
+  sizeSub : SubPx
+  text : String
+  deriving BEq, Hashable, Inhabited
+
 /-- Short label with atlas-resolved glyph positions, scoped to the owning atlas. -/
 structure ResolvedRun where
   face : USize
@@ -297,12 +313,17 @@ structure GlyphAtlasCache where
   /-- While building a frame, allocate UVs immediately but commit new bitmaps
   together so an immutable previous frame costs at most one page copy. -/
   pendingUploads : Option (Array (Nat × Rect × RasterizedGlyph)) := none
+  /-- Dirty `(pageIdx, rect)` atlas sub-regions pending GPU 2D-array upload. -/
+  gpuDirtyRects : Array (Nat × Rect) := #[]
+  /-- Monotonic atlas generation incremented on `resetAll` (triggers GPU `vkCmdClearColorImage`). -/
+  generation : UInt64 := 0
   cache : HashCache AtlasGlyphEntry := {}
   /-- Shaping results reused across frames; glyph rasterization is cached separately below. -/
   shapeCache : Array ShapeCacheEntry := #[]
   fallbackFonts : Array FontHandle := #[]
   missingCharsets : Array String := #[]
   resolved : Array ResolvedRun := #[]
+  resolvedMap : Std.HashMap ResolvedRunKey InlineRun := {}
   hits : Nat := 0
   misses : Nat := 0
   deriving Inhabited
@@ -315,20 +336,34 @@ def beginUploads (ac : GlyphAtlasCache) : GlyphAtlasCache :=
 def finishUploads (ac : GlyphAtlasCache) : GlyphAtlasCache := Id.run do
   let some uploads := ac.pendingUploads | return ac
   let mut pages := ac.pages
+  let mut gpuDirty := ac.gpuDirtyRects
   if !uploads.isEmpty then
     pages := pages.mapIdx fun idx page => Id.run do
       let mut out := page
       for (p, rect, glyph) in uploads do
         if p == idx then out := out.blitGlyph rect glyph
       return out
-  return { ac with pages, pendingUploads := none }
+    for (p, rect, _) in uploads do
+      gpuDirty := gpuDirty.push (p, rect)
+  return { ac with pages, pendingUploads := none, gpuDirtyRects := gpuDirty }
+
+/-- Clear GPU-pending dirty atlas sub-regions after uploading them to the GPU 2D-array atlas. -/
+def clearGpuDirtyRects (ac : GlyphAtlasCache) : GlyphAtlasCache :=
+  { ac with gpuDirtyRects := #[] }
 
 /-- Reset all atlas pages (`Atlas.reset`) and clear the `HashCache`. -/
 def resetAll (ac : GlyphAtlasCache) : GlyphAtlasCache :=
   let pages' := ac.pages.map fun p =>
     { atlas := p.atlas.reset
       rgba := ByteArray.empty }
-  { ac with pages := pages', cache := {}, resolved := #[], pendingUploads := none }
+  { ac with
+    pages := pages'
+    cache := {}
+    resolved := #[]
+    resolvedMap := {}
+    pendingUploads := none
+    gpuDirtyRects := #[]
+    generation := ac.generation + 1 }
 
 /-- Allocate a padded slot `(w, h)` across pages using `Atlas.allocPadded` / `Atlas.allocPages`
 and blit the rasterized bitmap into the chosen page. -/
@@ -352,8 +387,10 @@ def insertRasterized (ac : GlyphAtlasCache) (key : GlyphKey) (rg : RasterizedGly
       let entry : AtlasGlyphEntry :=
         { page := idx, uv := rect, bearingX := rg.bearingX, bearingY := rg.bearingY, isColor := rg.isColor }
       let cache' := ac.cache.insert hashGlyphKey key entry
+      let gpuDirty' := if ac.pendingUploads.isSome then ac.gpuDirtyRects else ac.gpuDirtyRects.push (idx, rect)
       return ({ ac with pages := pages', cache := cache', misses := ac.misses + 1,
-                        pendingUploads := ac.pendingUploads.map (·.push (idx, rect, rg)) }, entry)
+                        pendingUploads := ac.pendingUploads.map (·.push (idx, rect, rg)),
+                        gpuDirtyRects := gpuDirty' }, entry)
   -- Otherwise allocate a new page via `Atlas.allocPages` / `Atlas.allocPadded`
   let pw := max ac.pageWidth (rg.width + ac.pad)
   let ph := max ac.pageHeight (rg.height + ac.pad)
@@ -367,8 +404,10 @@ def insertRasterized (ac : GlyphAtlasCache) (key : GlyphKey) (rg : RasterizedGly
     let entry : AtlasGlyphEntry :=
       { page := pageIdx, uv := rect, bearingX := rg.bearingX, bearingY := rg.bearingY, isColor := rg.isColor }
     let cache' := ac.cache.insert hashGlyphKey key entry
+    let gpuDirty' := if ac.pendingUploads.isSome then ac.gpuDirtyRects else ac.gpuDirtyRects.push (pageIdx, rect)
     return ({ ac with pages := pages', cache := cache', misses := ac.misses + 1,
-                      pendingUploads := ac.pendingUploads.map (·.push (pageIdx, rect, rg)) }, entry)
+                      pendingUploads := ac.pendingUploads.map (·.push (pageIdx, rect, rg)),
+                      gpuDirtyRects := gpuDirty' }, entry)
   | none =>
     -- Also exercise `Atlas.allocPages` fallback
     let atlases := (ac.pages.map (·.atlas)).toList
@@ -407,7 +446,7 @@ def shapeTextCached (ac : GlyphAtlasCache) (f : FontHandle) (size64 : UInt32) (t
     (features : String := "") : IO (GlyphAtlasCache × Array ShapedGlyph) := do
   -- Bound retained bytes as well as entry count. Growing replies are shaped
   -- once per new prefix; keeping those prefixes evicts reusable labels.
-  if text.utf8ByteSize > 128 then return (ac, ← shapeText f size64 text features)
+  if text.utf8ByteSize > maxShapeCacheBytes then return (ac, ← shapeText f size64 text features)
   match ac.shapeCache.find? (fun cached =>
       cached.fontId == f.fontId && cached.size64 == size64 && cached.text == text && cached.features == features) with
   | some cached =>
@@ -504,10 +543,7 @@ def layoutTextRun (ac : GlyphAtlasCache) (f : FontHandle) (sizeSub : Nat) (scale
           w := entry.uv.w
           h := entry.uv.h }
       let prim : Prim :=
-        if entry.page > 0 && !entry.isColor then
-          .mask entry.page entry.uv dst color
-        else
-          .glyph entry.uv dst color entry.isColor
+        .glyph entry.uv dst color entry.isColor entry.page
       prims := prims.push prim
     penDev64 := penDev64 + sg.xAdvance64
   let advSub : Int := (penDev64 * (scaleDen : Int)) / (if scale120 == 0 then 120 else (scale120 : Int)) - xSub

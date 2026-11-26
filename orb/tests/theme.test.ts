@@ -55,10 +55,10 @@ describe("detectDesktopPlatform", () => {
     );
     expect(css).toMatch(/:root\[data-theme="light"\]\s*\{[^}]*--sidebar-opacity:\s*60%;[^}]*--surface-opacity:\s*94\.75%;/s);
     expect(css).toMatch(
-      /:root\[data-platform="linux"\]\s*\{[^}]*--sidebar-opacity:\s*78%;[^}]*--surface-opacity:\s*94%;[^}]*--bg-active:\s*color-mix\([^;]*transparent\);[^}]*--tb-traffic-left:\s*8px;[^}]*--tb-traffic-margin:\s*0px;[^}]*\}/,
+      /:root\[data-platform="linux"\]\s*\{[^}]*--sidebar-opacity:\s*78%;[^}]*--surface-opacity:\s*100%;[^}]*--bg-active:\s*color-mix\([^;]*transparent\);[^}]*--tb-traffic-left:\s*8px;[^}]*--tb-traffic-margin:\s*0px;[^}]*\}/,
     );
     expect(css).toMatch(
-      /:root\[data-platform="linux"\]\[data-theme="light"\]\s*\{[^}]*--sidebar-opacity:\s*72%;[^}]*--surface-opacity:\s*95\.5%;[^}]*--bg-active:\s*color-mix\([^;]*transparent\);[^}]*\}/,
+      /:root\[data-platform="linux"\]\[data-theme="light"\]\s*\{[^}]*--sidebar-opacity:\s*72%;[^}]*--surface-opacity:\s*100%;[^}]*--bg-active:\s*color-mix\([^;]*transparent\);[^}]*\}/,
     );
     expect(css).not.toMatch(/\.settings-view\s+\.sidebar\s*\{\s*background:\s*var\(--bg-sidebar\)/);
   });

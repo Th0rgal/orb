@@ -20,7 +20,10 @@ import OrbCore.ProviderUsageAndLogin
 import OrbCore.RemoteFleetAndRelay
 import OrbCore.Skills
 import OrbCore.AutoPlacement
+import OrbCore.Proxy
 import OrbCore.TelemetryAndVoice
+import OrbCore.AccountVpnPool
+import OrbCore.AccountVpnRelay
 
 namespace OrbCore.RemoteDispatch
 
@@ -41,12 +44,15 @@ open OrbCore.TelemetryAndVoice
 /-! ## Remote Job Supervisor Handle -/
 
 structure RemoteJobSupervisor where
-  mu             : Std.Mutex (Array String)
-  boundPortRef   : IO.Ref UInt16
-  jwtSecret      : String
-  devMode        : Bool
-  telemetrySink? : Option TelemetrySink := none
-  providerHub?   : Option ProviderRuntimeHub := none
+  mu                : Std.Mutex (Array String)
+  boundPortRef      : IO.Ref UInt16
+  jwtSecret         : String
+  devMode           : Bool
+  telemetrySink?    : Option TelemetrySink := none
+  providerHub?      : Option ProviderRuntimeHub := none
+  vpnPool?          : Option AccountVpnPool.Pool := none
+  vpnCoordinatorDir : String := ""
+  vpnMeshRelayUrl?  : Option (String → String → Option String) := none
 
 def newRemoteJobSupervisor (jwtSecret : String := "") (devMode : Bool := false) (telemetrySink? : Option TelemetrySink := none) : IO RemoteJobSupervisor := do
   let mu ← Std.Mutex.new (#[] : Array String)
@@ -515,8 +521,44 @@ def harnessProxySetup (harness rawModel proxyBase proxyToken : String) : Harness
                 "-c", "model_providers.sandboxed.wire_api=\"responses\"",
                 "-c", "model_providers.sandboxed.env_key=\"SANDBOXED_PROXY_API_KEY\""]
       model := if bare.isEmpty then none else some bare }
+  else if harness == "grok" then
+    let bare := if raw.startsWith "xai/" then (raw.drop 4).toString else raw
+    { env := #[("GROK_XAI_API_BASE_URL", proxyBase), ("XAI_API_KEY", proxyToken)]
+      model := if bare.isEmpty then none else some bare }
   else
     { model := if raw.isEmpty then none else some raw }
+
+/-- Resolve AirVPN SOCKS5 proxy environment variables for a native Antigravity turn.
+    Returns `#[]` when the account uses Direct routing, and fails closed if an AirVPN
+    preference is configured but the tunnel or mesh relay is unavailable. -/
+def resolveAntigravityVpnProxyEnvs
+    (store : CoreStore)
+    (sup : RemoteJobSupervisor)
+    (accountId? : Option String)
+    (apiBase : String) : IO (Except String (Array (String × String))) := do
+  let some acct := accountId?.map (·.trimAscii.toString) |>.filter (!·.isEmpty) | return .ok #[]
+  let .ok pref? ← OrbCore.AccountVpnRoutes.read store.missionsDb acct
+    | return .error "antigravity_vpn_route_store_unavailable"
+  let some pref := pref? | return .ok #[]
+  let some pool := sup.vpnPool? | return .error "antigravity_vpn_coordinator_unavailable"
+  if let .error e ← OrbCore.AccountVpnPool.allocate pool store.rootDir sup.vpnCoordinatorDir
+      store.missionsDb acct "antigravity" pref then
+    return .error s!"antigravity_vpn_unavailable:{e}"
+  let some buildUrl := sup.vpnMeshRelayUrl? | return .error "antigravity_vpn_relay_unconfigured"
+  let some proxyUrl := buildUrl "antigravity" acct | return .error "antigravity_vpn_relay_unconfigured"
+  let apiHost := match parseUrl apiBase with
+    | .ok u => u.host.trimAscii.toString
+    | .error _ => ""
+  let noProxy := if apiHost.isEmpty then "127.0.0.1,localhost,::1"
+    else s!"127.0.0.1,localhost,::1,{apiHost}"
+  return .ok #[
+    ("HTTPS_PROXY", proxyUrl),
+    ("https_proxy", proxyUrl),
+    ("ALL_PROXY", proxyUrl),
+    ("all_proxy", proxyUrl),
+    ("NO_PROXY", noProxy),
+    ("no_proxy", noProxy)
+  ]
 
 private def wrapWithRemoteMcp (harness innerCmd : String) : String :=
   s!"if [ -x /usr/local/bin/sandboxed-mcp ]; then /usr/local/bin/sandboxed-mcp launch --harness {harness} -- {innerCmd}; else {innerCmd}; fi"
@@ -690,6 +732,39 @@ private def readAdminAntigravitySyncPayload? (boundFile : String) : IO (Option J
             ])
   return none
 
+private def antigravityWindowExhaustedAt (w : JVal) (nowSec : UInt64) : Bool := Id.run do
+  let rawPct := match w.field? "used_percent" with
+    | some (.num raw) => raw.trimAscii.toString
+    | some (.str raw) => raw.trimAscii.toString
+    | _ => ""
+  unless rawPct == "100" || rawPct.startsWith "100." do return false
+  match (w.fieldUInt64? "reset_at").orElse (fun _ => (w.fieldStr? "resets_at").bind parseIso8601EpochU64?) with
+  | some r => nowSec == 0 || r > nowSec
+  | none => true
+
+private def antigravityAccountExhaustedOrRejected?
+    (store : CoreStore) (hub? : Option ProviderRuntimeHub)
+    (hp : HydratedProvider) (nowSec : UInt64) : IO Bool := do
+  if let .ok rows ← execParamQuery store.missionsDb
+      "SELECT 1 FROM provider_auth_health WHERE account_key=?1 LIMIT 1;" #[hp.id] then
+    if rows.size > 1 then return true
+  if let some hub := hub? then
+    let entries ← hub.mu.atomically (do return (← get).usageEntries)
+    if let some entry := entries.find? (fun e => e.providerId == hp.id) then
+      if entry.payload.fieldStr? "status" == some "needs_reauth" then return true
+      if ((entry.payload.fieldArr? "antigravity_windows").getD #[]).any (antigravityWindowExhaustedAt · nowSec) then
+        return true
+  if !hp.boundOauthFile.isEmpty then
+    for dir in ← candidateCliProxyAuthDirs do
+      let fp := System.FilePath.mk s!"{dir}/{hp.boundOauthFile}"
+      if ← fp.pathExists then
+        if let some raw ← (try some <$> IO.FS.readFile fp catch _ => pure none) then
+          if let .ok jv := OrbBin.Json.parse raw then
+            if ((jv.fieldArr? "sandboxed_gemini_windows").getD #[]).any (antigravityWindowExhaustedAt · nowSec) then
+              return true
+        break
+  return false
+
 /-- Determine whether an admin-owned Antigravity CLI turn on `effNodeId` may run through
     the static node's `managed_auth` (`agy` with full workspace & MCP tools) because:
     1. the caller is the bootstrap admin and the mission has no shared-workspace grant binding;
@@ -698,12 +773,14 @@ private def readAdminAntigravitySyncPayload? (boundFile : String) : IO (Option J
     3. at least one admin-owned Antigravity provider is enabled (including caller prefs), and
        every enabled admin Antigravity provider is routed `Direct` (`country == ""` in
        `account_vpn_routes`), never bypassing a configured VPN exit.
-    Returns `some boundOauthFile` (possibly empty) when eligible, or `none` when the turn
-    must go through `NativeSharedWorkspace`. -/
+    Selects the highest-priority enabled credential (`provider_order.json` / `sort_order`) that
+    is not currently quota-exhausted or auth-rejected, falling back to the top bound credential
+    if all enabled accounts are exhausted. -/
 def adminDirectAntigravityStaticTarget?
     (store : CoreStore) (coreWorkDir effNodeId ownerUserId bootstrapAdminId : String)
     (bound? : Option String) (rollout : NativeCanary.Scope)
-    (holderPresent : Bool) (staticNodes : Array StaticRemoteNode) : IO (Option String) := do
+    (holderPresent : Bool) (staticNodes : Array StaticRemoteNode)
+    (hub? : Option ProviderRuntimeHub := none) (nowSec : UInt64 := 0) : IO (Option String) := do
   unless !bootstrapAdminId.isEmpty && ownerUserId == bootstrapAdminId && bound?.isNone do
     return none
   if rollout.reserves effNodeId || holderPresent then
@@ -713,8 +790,7 @@ def adminDirectAntigravityStaticTarget?
   let hydrated ← loadHydratedProviders store coreWorkDir
   let prefs ← getUserProviderPrefs store ownerUserId
   let allAdminAg := hydrated.filter fun hp =>
-    hp.providerType == "antigravity" &&
-      (hp.createdByUserId.isEmpty || hp.createdByUserId == bootstrapAdminId)
+    hp.providerType == "antigravity"
   for hp in allAdminAg do
     match ← OrbCore.AccountVpnRoutes.snapshot store.missionsDb hp.id with
     | .ok (.direct _) => pure ()
@@ -722,8 +798,79 @@ def adminDirectAntigravityStaticTarget?
   let activeAdminAg := allAdminAg.filter fun hp => hp.enabled && isUserProviderEnabled prefs hp.id
   if activeAdminAg.isEmpty then
     return none
-  let oauthFile := (activeAdminAg.find? (fun h => !h.boundOauthFile.isEmpty)).map (·.boundOauthFile) |>.getD ""
+  let withOauth := activeAdminAg.filter fun h => !h.boundOauthFile.isEmpty
+  let mut chosen? : Option String := none
+  for hp in withOauth do
+    if chosen?.isNone then
+      if !(← antigravityAccountExhaustedOrRejected? store hub? hp nowSec) then
+        chosen? := some hp.boundOauthFile
+  let oauthFile := chosen?.orElse (fun _ => withOauth[0]?.map (·.boundOauthFile)) |>.getD ""
   return some oauthFile
+
+/-- When a multi-turn mission starts a fresh harness session (`resumeSid? = none`, e.g. after
+    migrating `backend` via `PATCH /api/control/missions/:id/settings`), carry over the mission
+    board and recent completed conversation turns so the new harness retains full continuity. -/
+def buildFreshSessionTranscriptHandoff
+    (store : CoreStore) (missionId currentPrompt : String) : IO String := do
+  if missionId.isEmpty || currentPrompt.utf8ByteSize ≥ 12000 then return currentPrompt
+  let .ok rows ← execParamQuery store.missionsDb
+      ("SELECT event_type, COALESCE(payload,''), COALESCE(content,'') " ++
+       "FROM mission_events WHERE mission_id=?1 " ++
+       "AND event_type IN ('user_message','assistant_message') " ++
+       "ORDER BY id DESC LIMIT 13;") #[missionId]
+    | return currentPrompt
+  if rows.size ≤ 1 then return currentPrompt
+  let mut revTurns : Array (String × String) := #[]
+  let mut sawAssistant := false
+  for i in [1:rows.size] do
+    let r := rows[i]!
+    let evType := cell r 0
+    let payload := cell r 1
+    let fallback := cell r 2
+    let text :=
+      (((OrbBin.Json.parse payload).toOption.bind fun j =>
+          (j.fieldStr? "content").orElse (fun _ => j.fieldStr? "text")).getD fallback).trimAscii.toString
+    if !text.isEmpty then
+      if evType == "assistant_message" then sawAssistant := true
+      revTurns := revTurns.push (evType, text)
+  unless sawAssistant do return currentPrompt
+  let chron := revTurns.reverse
+  let trimmedCurr := currentPrompt.trimAscii.toString
+  let prior :=
+    if h : chron.size > 0 then
+      let last := chron[chron.size - 1]
+      if last.1 == "user_message" && last.2 == trimmedCurr then chron.pop else chron
+    else chron
+  let mut boardText := ""
+  if let .ok bRows ← execParamQuery store.missionsDb
+      "SELECT COALESCE(text,'') FROM mission_board WHERE mission_id=?1 LIMIT 1;" #[missionId] then
+    if bRows.size > 1 then
+      boardText := (cell bRows[1]! 0).trimAscii.toString
+  if prior.isEmpty && boardText.isEmpty then return currentPrompt
+  let clip (s : String) (limit : Nat) : String :=
+    if s.length ≤ limit then s else (s.take limit).toString ++ "\n...[truncated]"
+  let maxHandoffBytes : Nat := 13500 - min currentPrompt.utf8ByteSize 12000
+  let mut sections : Array String := #[
+    "[Mission Context Handoff — new harness session on existing mission]",
+    "Earlier turns ran under a previous session or harness; workspace files and git state on disk are preserved."
+  ]
+  let mut budget : Nat := 240
+  if !boardText.isEmpty then
+    let bClip := clip boardText 2200
+    let sec := s!"--- Mission Board ---\n{bClip}"
+    if budget + sec.utf8ByteSize + 80 ≤ maxHandoffBytes then
+      sections := sections.push sec
+      budget := budget + sec.utf8ByteSize + 4
+  for (evType, txt) in prior do
+    let role := if evType == "assistant_message" then "Assistant" else "User"
+    let tClip := clip txt 1600
+    let sec := s!"--- Prior {role} ---\n{tClip}"
+    if budget + sec.utf8ByteSize + 80 ≤ maxHandoffBytes then
+      sections := sections.push sec
+      budget := budget + sec.utf8ByteSize + 4
+  if sections.size ≤ 2 then return currentPrompt
+  sections := sections.push "[End Mission Context Handoff — Current Turn Instruction]"
+  return String.intercalate "\n\n" sections.toList ++ "\n\n" ++ currentPrompt
 
 private def prepareRemoteHarnessCommand
     (store : CoreStore)
@@ -752,6 +899,12 @@ private def prepareRemoteHarnessCommand
       (trimmedPrompt.drop 5).trimAscii.toString
     else
       spec.prompt
+  let resumeSid? := spec.resumeSessionId?.map (·.trimAscii.toString) |>.filter (!·.isEmpty)
+  let deliveredPrompt ←
+    if resumeSid?.isNone && !spec.sideQuestion && spec.goalDispatch?.isNone then
+      buildFreshSessionTranscriptHandoff store spec.missionId deliveredPrompt
+    else
+      pure deliveredPrompt
   -- The Library lives on Core: ship the delivered skills into the node workspace so every
   -- harness finds them where it looks (`.opencode/skills`, `.claude/skills`, `.agents/skills`).
   let bootstrapAdminId := (← getBootstrapAdmin? store).map (·.id) |>.getD ""
@@ -759,7 +912,6 @@ private def prepareRemoteHarnessCommand
     (if spec.project.trimAscii.toString.isEmpty then none else some spec.project) spec.backend.trimAscii.toString.toLower store.rootDir spec.ownerUserId bootstrapAdminId)
   let (skillPrelude, skillEnvs) := stageSkillBundle skillBundle
   let (fd3Prelude, promptEnvs) := stagePromptOnFd3 deliveredPrompt
-  let resumeSid? := spec.resumeSessionId?.map (·.trimAscii.toString) |>.filter (!·.isEmpty)
   let bLow := spec.backend.trimAscii.toString.toLower
   let harness := if bLow == "claude" then "claudecode" else bLow
 
@@ -883,6 +1035,16 @@ private def prepareRemoteHarnessCommand
       wsPrefix ++ skillPrelude ++ fd3Prelude ++
       "command -v grok >/dev/null 2>&1 || { echo 'grok is not installed on this node' >&2; exit 127; }; " ++
       wrapWithRemoteMcp "grok" inner
+    if !proxyBase.isEmpty then
+      let pTok ← match ← mintMissionProxyToken store spec.missionId spec.ownerUserId (nowSec + 86400) with
+        | .ok t => pure t
+        | .error e => return .error s!"failed to mint mission proxy token: {e}"
+      let envs := skillEnvs ++ promptEnvs ++ mcpEnvs ++ #[
+        ("GROK_XAI_API_BASE_URL", proxyBase),
+        ("XAI_API_KEY", pTok),
+        ("NO_COLOR", "1")
+      ]
+      return .ok { command := cmd, envPairs := envs, managedAuth := #[], proxyToken := pTok }
     let envs := skillEnvs ++ promptEnvs ++ mcpEnvs ++ #[("NO_COLOR", "1")]
     return .ok { command := cmd, envPairs := envs, managedAuth := #["grok"], proxyToken := "" }
 
@@ -908,7 +1070,7 @@ private def prepareRemoteHarnessCommand
     let adminDirectOauth? ←
       if legacyAdmin then pure none
       else
-        adminDirectAntigravityStaticTarget? store coreWorkDir effNodeId spec.ownerUserId bootstrapAdminId bound? rollout holder?.isSome staticNodes
+        adminDirectAntigravityStaticTarget? store coreWorkDir effNodeId spec.ownerUserId bootstrapAdminId bound? rollout holder?.isSome staticNodes sup.providerHub? nowSec
     if let some oauthFile := adminDirectOauth? then
       if let some payload ← readAdminAntigravitySyncPayload? oauthFile then
         discard <| (callRemoteNodeHttpOpt relayHub? mc? effNodeId "PUT" "/managed-auth/antigravity" (some payload) #[] 4000).toBaseIO
@@ -941,10 +1103,19 @@ private def prepareRemoteHarnessCommand
       let cmd := wsPrefix ++ skillPrelude ++ fd3Prelude ++ "exec python3 -I -c " ++ shellSingleQuote worker ++ " " ++ args
       return .ok { command := cmd, envPairs := skillEnvs ++ promptEnvs ++ #[
         ("ORB_NATIVE_CORE", apiBase), ("ORB_NATIVE_ANTIGRAVITY_TOKEN", bearer)], managedAuth := #[], proxyToken := bearer }
+    let agyAcctId? ← match bound? with
+      | some a => pure (some a)
+      | none =>
+        let hydrated ← loadHydratedProviders store coreWorkDir
+        pure ((hydrated.find? (fun hp => hp.providerType == "antigravity" && hp.enabled &&
+          adminDirectOauth?.all (fun f => f.isEmpty || hp.boundOauthFile == f))).map (·.id))
+    let vpnEnvs ← match ← resolveAntigravityVpnProxyEnvs store sup agyAcctId? apiBase with
+      | .ok es => pure es
+      | .error e => return .error e
     let cmd := wsPrefix ++ skillPrelude ++ fd3Prelude ++
       "command -v agy >/dev/null 2>&1 || { echo 'agy is not installed on this node' >&2; exit 127; }; " ++
       readPrompt ++ invocation spec.modelOverride
-    let envs := skillEnvs ++ promptEnvs ++ mcpEnvs ++ #[("NO_COLOR", "1")]
+    let envs := skillEnvs ++ promptEnvs ++ mcpEnvs ++ vpnEnvs ++ #[("NO_COLOR", "1")]
     return .ok { command := cmd, envPairs := envs, managedAuth := #["antigravity"], proxyToken := "" }
 
   else
@@ -969,6 +1140,15 @@ private def emitMissionEventAndBroadcast
     (store : CoreStore)
     (broadcastHub? : Option BroadcastHub)
     (missionId evType payloadJson nowIso : String) : IO Unit := do
+  if evType == "error" then
+    let msg := ((OrbBin.Json.parse payloadJson).toOption.bind (·.fieldStr? "message") |>.getD "").trimAscii.toString
+    if !msg.isEmpty then
+      if let .ok rows ← execParamQuery store.missionsDb
+          "SELECT event_type, COALESCE(payload,''), COALESCE(content,'') FROM mission_events WHERE mission_id=?1 ORDER BY id DESC LIMIT 1;" #[missionId] then
+        if let some r := rows[1]? then
+          if cell r 0 == "error" then
+            let prevMsg := (((OrbBin.Json.parse (cell r 1)).toOption.bind (·.fieldStr? "message")).getD (cell r 2)).trimAscii.toString
+            if prevMsg == msg then return
   discard <| appendMissionEvent store missionId evType payloadJson nowIso
   publishControlEvent broadcastHub? evType payloadJson (some missionId)
 
@@ -1960,6 +2140,15 @@ partial def spawnRemoteJobPoller
                   interrupted      := jState != "succeeded"
                 }
                 observeControlTurnFinished tSink missionId turnUsage ownerUid? ownerUname? nowSec
+              if proxyTok.isEmpty then
+                let bLow := backend.trimAscii.toString.toLower
+                let normHarness := if bLow == "claude" then "claudecode" else bLow
+                let effModel :=
+                  (acc.model?.orElse fun _ =>
+                    (mRec?.map fun r => r.modelOverride.trimAscii.toString).filter (!·.isEmpty)).getD ""
+                OrbCore.Proxy.recordNativeHarnessUsage store nowSec normHarness effModel missionId
+                  ((mRec?.map MissionRecord.parentMissionId).getD "") ((mRec?.map MissionRecord.modelOverride).getD "")
+                  (acc.inputTokens?.getD 0).toNat (acc.outputTokens?.getD 0).toNat (acc.cacheReadTokens?.getD 0).toNat
 
               let nextQueued? ←
                 if jState == "cancelled" || curRunGen != capturedGen || (isGoal && jState == "succeeded" && !finalDrained) then pure none
@@ -2053,6 +2242,7 @@ partial def spawnRemoteJobPoller
                   else if let some (_, tReason) := transientVerdict? then tReason
                   else if nextMissionStatus == "awaiting_user" then "awaiting_wakeup"
                   else if jState == "cancelled" && isProvErr then "provider_error"
+                  else if jState == "cancelled" && termReason.isEmpty then "remote_job_cancelled"
                   else termReason
                 if transientVerdict?.isSome then
                   discard <| execParamQuery store.missionsDb
@@ -2060,10 +2250,10 @@ partial def spawnRemoteJobPoller
                     #[missionId, nextTermReason, nowIso, jobId, s!"{capturedGen}"]
                 -- Only the observer that owns the current generation may settle
                 -- the mission. A stale poller still closes its own job ledger,
-                -- but cannot overwrite a newer turn's status or queues.
+                -- but cannot overwrite a newer turn's status or an already-settled turn.
                 if let .ok updated ← execParamQuery store.missionsDb
                   ("UPDATE missions SET status=?2, terminal_reason=?3, state_revision=state_revision+1, updated_at=?4 " ++
-                   "WHERE id=?1 AND run_generation=CAST(?5 AS INTEGER) AND status NOT IN ('cancelled','interrupted') RETURNING id;")
+                   "WHERE id=?1 AND run_generation=CAST(?5 AS INTEGER) AND status NOT IN ('completed','awaiting_user','acknowledged','archived','cancelled','interrupted') RETURNING id;")
                   #[missionId, nextMissionStatus, nextTermReason, nowIso, s!"{capturedGen}"] then
                   if updated.size > 1 then
                     emitMissionEventAndBroadcast store broadcastHub? missionId "mission_status_changed"

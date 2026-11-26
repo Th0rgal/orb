@@ -1,5 +1,20 @@
 import SwiftUI
 
+enum OrbProviderDirectoryHint {
+    static let storageKey = "orb.providerDirectoryHints"
+    static let defaultEnabled = true
+    static let urlString = "https://mozhenzhen.com/go/orb"
+    static let url = URL(string: urlString)!
+    static let copy = "Compare model prices & check API authenticity on Mozhenzhen"
+    static let settingTitle = "Provider directory link"
+    static let settingDescription = "Show the Mozhenzhen model pricing and API authenticity link in provider setup."
+
+    static func isEnabled(in defaults: UserDefaults = .standard) -> Bool {
+        if defaults.object(forKey: storageKey) == nil { return defaultEnabled }
+        return defaults.bool(forKey: storageKey)
+    }
+}
+
 struct OrbProviderLogin: Identifiable {
     let id: String
     let name: String
@@ -83,6 +98,7 @@ struct OrbProviderLogo: View {
 struct OrbProvidersSettings: View {
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.openURL) private var openURL
+    @AppStorage(OrbProviderDirectoryHint.storageKey) private var showDirectoryHints = OrbProviderDirectoryHint.defaultEnabled
     @State private var client = OrbSettingsClient()
     @State private var providers: [OrbJSON] = []
     @State private var usage: OrbJSON = .null
@@ -355,6 +371,15 @@ struct OrbProvidersSettings: View {
                         }
                     }
                 }.disabled(!ready)
+            } footer: {
+                if showDirectoryHints {
+                    Link(destination: OrbProviderDirectoryHint.url) {
+                        Text("\(OrbProviderDirectoryHint.copy) ↗")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+                    .accessibilityIdentifier("providers.mozhenzhen-link")
+                }
             }
         }
         .scrollContentBackground(.hidden).background(OrbStyle.background)
@@ -905,6 +930,7 @@ struct OrbProviderKeyEditor: View {
     let client: OrbSettingsClient
     let onSaved: () -> Void
     @Environment(\.dismiss) private var dismiss
+    @AppStorage(OrbProviderDirectoryHint.storageKey) private var showDirectoryHints = OrbProviderDirectoryHint.defaultEnabled
     @State private var type = "openai"
     @State private var name = ""
     @State private var key = ""
@@ -954,9 +980,20 @@ struct OrbProviderKeyEditor: View {
                 if canEditBaseUrl {
                     TextField(isAdmin ? "Base URL" : "Base URL (public https://)", text: $baseURL).keyboardType(.URL).textInputAutocapitalization(.never).autocorrectionDisabled()
                 }
-                Section("Router pacing (optional)") {
+                Section {
                     TextField("Requests / min limit (e.g. 300)", text: $rpmLimit).keyboardType(.numberPad)
                     TextField("Max concurrent requests (e.g. 10)", text: $maxConcurrency).keyboardType(.numberPad)
+                } header: {
+                    Text("Router pacing (optional)")
+                } footer: {
+                    if provider == nil && showDirectoryHints {
+                        Link(destination: OrbProviderDirectoryHint.url) {
+                            Text("\(OrbProviderDirectoryHint.copy) ↗")
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
+                        }
+                        .accessibilityIdentifier("providers.key-editor.mozhenzhen-link")
+                    }
                 }
             }.disabled(busy)
             .navigationTitle(provider == nil ? "Add API key" : (canEditCredentials ? "Edit API key" : "Edit provider settings")).navigationBarTitleDisplayMode(.inline)
@@ -1311,7 +1348,7 @@ private struct AlternativeRouterSettings: View {
     }
 }
 
-private struct OrbAccountVpnSettings: View {
+struct OrbAccountVpnSettings: View {
     @Environment(\.scenePhase) private var scenePhase
     let client: OrbSettingsClient
     let account: String

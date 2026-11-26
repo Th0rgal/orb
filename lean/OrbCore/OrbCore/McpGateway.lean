@@ -67,8 +67,8 @@ private def checkProjectScope (claims : McpSessionClaims) (targetProj : String) 
   else
     .ok eff
 
-/-- Check whether `claims` may read `targetMissionId` (self, child/descendant, operator/coordinator in same project,
-    or approved `mission_access.json` grant). -/
+/-- Check whether `claims` may read `targetMissionId` (self, own parent for child/`/btw`,
+    transitive descendant, operator/coordinator in same project, or approved `mission_access.json` grant). -/
 private def checkMissionReadAccess
     (store : CoreStore)
     (claims : McpSessionClaims)
@@ -91,8 +91,22 @@ private def checkMissionReadAccess
     return .error s!"mission `{targetMissionId}` is outside confined project `{claims.project}`"
   if claims.role == "operator" || claims.role == "coordinator" then
     return .ok ()
-  if !claims.missionId.isEmpty && parentMid == claims.missionId then
-    return .ok ()
+  if !claims.missionId.isEmpty then
+    if parentMid == claims.missionId then
+      return .ok ()
+    -- Allow child / `/btw` missions to read their own direct parent mission.
+    if let .ok callerRows ← execParamQuery store.missionsDb
+        "SELECT COALESCE(parent_mission_id,'') FROM missions WHERE id=?1;" #[claims.missionId] then
+      if callerRows.size > 1 && cell callerRows[1]! 0 == targetMissionId then
+        return .ok ()
+    -- Allow reading any transitive descendant in the caller's mission tree.
+    if let .ok descRows ← execParamQuery store.missionsDb
+        ("WITH RECURSIVE lineage(id) AS (SELECT id FROM missions WHERE id=?1 " ++
+         "UNION SELECT m.id FROM missions m JOIN lineage l ON m.parent_mission_id=l.id) " ++
+         "SELECT id FROM lineage WHERE id=?2 LIMIT 1;")
+        #[claims.missionId, targetMissionId] then
+      if descRows.size > 1 then
+        return .ok ()
   let callerSubject := if claims.isExternal then "session:" ++ claims.sessionId
     else if !claims.missionId.isEmpty then "mission:" ++ claims.missionId else ""
   if ← hasApprovedMissionReadAccess store.rootDir claims.missionId targetMissionId nowEpochSec callerSubject then
@@ -619,7 +633,7 @@ def dispatchMcpToolCall
     "get_mission_events", "list_mission_shared_files", "get_consult_result", "get_cloud_execution", "get_budget"]
   let missionWriteTools := #["send_message_to_mission", "ask_mission", "answer_mission_question",
     "cancel_mission", "acknowledge_mission", "adopt_mission", "resume_mission", "update_mission_settings",
-    "link_mission_to_project", "schedule_wakeup", "schedule_job_wakeup"]
+    "update_mission_metadata", "link_mission_to_project", "schedule_wakeup", "schedule_job_wakeup"]
   -- The REST collaboration class permits messages and cancellation to shared
   -- participants; changing owner settings/placement or resuming remains owner-only.
   let collaborateTools := #["send_message_to_mission", "ask_mission", "answer_mission_question", "cancel_mission"]
@@ -637,16 +651,20 @@ def dispatchMcpToolCall
     if a.isEmpty || b.isEmpty then return false
     if ← missionInTree a b then return true
     missionInTree b a
-  let checkTenantMission (mid : String) (allowParticipant : Bool) : IO Bool := do
+  let checkTenantMission (mid : String) (allowParticipant : Bool) (allowReadGrant : Bool := false) : IO Bool := do
     if !tenantScoped then return true
     let (exists_, owns, shares) ← getMissionRelationship store mid callerUserId
     if !exists_ then return false
     if allowParticipant && shares then return true
     if !owns then return false
     -- A mission session acts inside its own lineage, not every mission the same
-    -- user happens to own (`R16`: unrelated same-user trees stay isolated).
+    -- user happens to own (`R16`: unrelated same-user trees stay isolated unless
+    -- explicitly bridged by an approved cross-mission read grant).
     if callerMid.isEmpty || claims.isExternal then return true
-    sameMissionTree callerMid mid
+    if ← sameMissionTree callerMid mid then return true
+    if allowReadGrant then
+      return ← hasApprovedMissionReadAccess store.rootDir callerMid mid nowEpochSec ("mission:" ++ callerMid)
+    return false
   if toolName == "get_consult_result" then
     match args.field? "mission_ids" with
     | none | some .null => pure ()
@@ -656,7 +674,8 @@ def dispatchMcpToolCall
     let mid := (args.fieldStr? "mission_id").orElse (fun _ =>
       (args.fieldStr? "target_mission_id").orElse (fun _ => args.fieldStr? "id")) |>.getD callerMid
     unless mid.isEmpty && toolName == "get_budget" do
-      unless ← checkTenantMission mid (missionReadTools.contains toolName || collaborateTools.contains toolName) do
+      let isRead := missionReadTools.contains toolName
+      unless ← checkTenantMission mid (isRead || collaborateTools.contains toolName) isRead do
         return mcpErr "not_found" "Mission not found"
   if toolName == "start_mission" || toolName == "consult_model" then
     let parent := (args.fieldStr? "parent_mission_id").getD callerMid
@@ -683,7 +702,7 @@ def dispatchMcpToolCall
     callerProj := mission.project
   if (toolName == "read_project_board" || toolName == "write_project_board") && (callerMid.isEmpty || callerProj.isEmpty) then
     return mcpErr "no_project" "Mission has no project"
-  let projectTools := #["read_project_board", "write_project_board", "get_project", "update_project_status", "get_project_grant", "set_project_grant", "link_mission_to_project"]
+  let projectTools := #["read_project_board", "write_project_board", "get_project", "update_project_status", "get_project_grant", "set_project_grant", "link_mission_to_project", "create_project_folder", "rename_project_folder"]
   let mut args := args
   if tenantScoped && projectTools.contains toolName then
     let raw := if toolName == "read_project_board" || toolName == "write_project_board" then callerProj
@@ -724,7 +743,7 @@ def dispatchMcpToolCall
   -- Reserve before effects, replay before admission, and settle each winning row
   -- once. Every reserved branch is enclosed by withReservedMcpOutcome.
   let receiptTools := #["send_message_to_mission", "cancel_mission", "start_mission", "consult_model",
-    "resume_mission", "adopt_mission", "schedule_wakeup"]
+    "import_mission", "resume_mission", "adopt_mission", "schedule_wakeup"]
   if receiptTools.contains toolName && !idemKeyTop.isEmpty && toolName != "get_action" && toolName != "wait_actions" &&
       toolName != "reconcile_action" && toolName != "cancel_action" &&
       toolName != "write_project_board" && toolName != "write_mission_board" &&
@@ -1741,6 +1760,135 @@ def dispatchMcpToolCall
     | .error (_, e) => return mcpErr "move_failed" e
     | .ok (_, _changed) =>
       return mcpOk (.obj #[("ok", .bool true), ("mission_id", .str mid), ("project", .str effProj), ("folder", .str folder)])
+
+  | "create_project_folder" =>
+    let rawProj := (args.fieldStr? "project").orElse (fun _ => args.fieldStr? "slug") |>.getD ""
+    let effProj ← match checkProjectScope claims rawProj with
+      | .ok p => pure p
+      | .error e => return mcpErr "project_scope_violation" e
+    if effProj.isEmpty then return mcpErr "invalid_arguments" "missing project slug"
+    let rawFolder := (args.fieldStr? "folder").getD ""
+    let some (rel, absFp) := OrbCore.ProjectFilesAndController.projectFileAbsPath? store.rootDir effProj rawFolder
+      | return mcpErr "invalid_arguments" "invalid_folder_path"
+    if rel.isEmpty then return mcpErr "invalid_arguments" "folder path must not be empty"
+    if let .error e ← (IO.FS.createDirAll absFp).toBaseIO then
+      return mcpErr "mkdir_failed" s!"{e}"
+    return mcpOk (.obj #[("ok", .bool true), ("project", .str effProj), ("folder", .str rel)])
+
+  | "rename_project_folder" =>
+    let rawProj := (args.fieldStr? "project").orElse (fun _ => args.fieldStr? "slug") |>.getD ""
+    let effProj ← match checkProjectScope claims rawProj with
+      | .ok p => pure p
+      | .error e => return mcpErr "project_scope_violation" e
+    if effProj.isEmpty then return mcpErr "invalid_arguments" "missing project slug"
+    let oldFolder := (args.fieldStr? "old_folder").getD ""
+    let newFolder := (args.fieldStr? "new_folder").getD ""
+    match ← OrbCore.ProjectFilesAndController.transferProjectFileOrFolder store broadcastHub? effProj effProj effProj oldFolder newFolder false nowIso with
+    | .error (_, e) => return mcpErr "rename_folder_failed" e
+    | .ok res => return mcpOk res
+
+  | "update_mission_metadata" =>
+    let mid := (args.fieldStr? "mission_id").getD callerMid
+    if mid.isEmpty then return mcpErr "invalid_arguments" "missing mission_id"
+    let some existing ← getMission? store mid
+      | return mcpErr "not_found" "mission_not_found"
+    let newTitle := match args.fieldStr? "title" with
+      | some t =>
+        let trimmed := t.trimAscii.toString
+        if trimmed.isEmpty then existing.title else trimmed
+      | none => existing.title
+    let hasProj := (args.fieldStr? "project").isSome || (args.fieldStr? "slug").isSome
+    let hasFolder := (args.fieldStr? "folder").isSome
+    let nextProj ← if hasProj then
+      let rawProj := (args.fieldStr? "project").orElse (fun _ => args.fieldStr? "slug") |>.getD ""
+      match checkProjectScope claims rawProj with
+      | .ok p => pure p
+      | .error e => return mcpErr "project_scope_violation" e
+    else pure existing.project
+    let nextFolder := if hasFolder then
+      normalizeMissionFolder ((args.fieldStr? "folder").getD "")
+    else existing.folder
+    let effFolder := if nextProj.isEmpty then "" else nextFolder
+    if newTitle != existing.title then
+      if let .error e ← execParamQuery store.missionsDb
+          "UPDATE missions SET title=?2, updated_at=?3, metadata_updated_at=?3, state_revision=state_revision+1 WHERE id=?1;"
+          #[mid, newTitle, nowIso] then
+        return mcpErr "update_failed" e
+    if nextProj != existing.project || effFolder != existing.folder then
+      let upd : CheckedPlacementUpdate := {
+        missionId := mid
+        expectedProject := existing.project
+        nextProject := nextProj
+        nextFolder := effFolder
+      }
+      if let .error (_, e) ← MissionSettings.commitPlacementWithRecovery store #[upd] callerUserId nowIso then
+        return mcpErr "move_failed" e
+    return mcpOk (.obj #[
+      ("ok", .bool true),
+      ("mission_id", .str mid),
+      ("title", .str newTitle),
+      ("project", .str nextProj),
+      ("folder", .str effFolder)
+    ])
+
+  | "import_mission" => withReservedMcpOutcome store claims callerUserId toolName idemKeyTop nowIso do
+    let title := ((args.fieldStr? "title").getD "").trimAscii.toString
+    let sessionId := ((args.fieldStr? "session_id").getD "").trimAscii.toString
+    if title.isEmpty then return mcpErr "invalid_arguments" "missing title"
+    if sessionId.isEmpty then return mcpErr "invalid_arguments" "missing session_id"
+    let backend := ((args.fieldStr? "backend").getD "antigravity").trimAscii.toString
+    if !(#["opencode", "claudecode", "codex", "grok", "antigravity", "vibe"].contains backend) then
+      return mcpErr "invalid_arguments" s!"unsupported backend: {backend}"
+    let rawProj := (args.fieldStr? "project").orElse (fun _ => args.fieldStr? "slug") |>.getD ""
+    let effProj ← match checkProjectScope claims rawProj with
+      | .ok p => pure p
+      | .error e => return mcpErr "project_scope_violation" e
+    let folder := if effProj.isEmpty then "" else normalizeMissionFolder ((args.fieldStr? "folder").getD "")
+    let workDir := ((args.fieldStr? "working_directory").getD "").trimAscii.toString
+    let modelOv := ((args.fieldStr? "model_override").getD "").trimAscii.toString
+    let effort := ((args.fieldStr? "model_effort").getD "").trimAscii.toString
+    let mut tags : Array String := #["imported-session"]
+    if let some (.arr rawTags) := args.field? "tags" then
+      for tv in rawTags do
+        if let .str s := tv then
+          let t := s.trimAscii.toString
+          if !t.isEmpty && !tags.contains t then tags := tags.push t
+    let tagsJson := renderCompact (.arr (tags.map JVal.str))
+    let mid ← newUuidV4
+    let initRev : UInt64 := if effProj.isEmpty && folder.isEmpty then 0 else 1
+    if let .error e ← execParamQuery store.missionsDb
+        ("INSERT INTO missions(id,title,status,backend,model_override,model_effort,working_directory,workspace_id,project,folder,placement_revision,session_id,resumable,authority_mode,tags,created_at,updated_at,metadata_updated_at,node_boot_epoch,owner_user_id) " ++
+         "VALUES(?1,?2,'awaiting_user',?3,NULLIF(?4,''),NULLIF(?5,''),?6,'00000000-0000-0000-0000-000000000000',?7,?8,?9,?10,1,'writer',?11,?12,?12,?12,?13,?14);")
+        #[mid, title, backend, modelOv, effort, workDir, effProj, folder, s!"{initRev}", sessionId, tagsJson, nowIso, s!"{store.bootEpoch}", callerUserId] then
+      return mcpErr "import_failed" e
+    discard <| execParamQuery store.missionsDb
+      "INSERT OR REPLACE INTO harness_continuity(mission_id, backend, session_generation, session_id, prompt_claim_id, prompt_claim_phase, tool_journal_json, reconcile_required, state_revision, updated_at) VALUES(?1,?2,1,?3,'','delivered','[]',0,1,?4);"
+      #[mid, backend, sessionId, nowIso]
+    let mut importedEvents : Nat := 0
+    if let some (.arr hist) := args.field? "history" then
+      let bounded := if hist.size > 200 then hist.extract (hist.size - 200) hist.size else hist
+      for item in bounded do
+        let role := ((item.fieldStr? "role").getD "").trimAscii.toString
+        let content := (item.fieldStr? "content").getD ""
+        let ts := match item.fieldStr? "timestamp" with
+          | some s => if s.trimAscii.toString.isEmpty then nowIso else s.trimAscii.toString
+          | none => nowIso
+        if !content.isEmpty && (role == "user" || role == "assistant") then
+          importedEvents := importedEvents + 1
+          let evType := if role == "user" then "user_message" else "assistant_message"
+          discard <| execParamQuery store.missionsDb
+            "INSERT INTO mission_events(mission_id,seq,sequence,event_type,content,created_at,timestamp) VALUES(?1,?2,?2,?3,?4,?5,?5);"
+            #[mid, s!"{importedEvents}", evType, content, ts]
+    return mcpOk (.obj #[
+      ("ok", .bool true),
+      ("mission_id", .str mid),
+      ("status", .str "awaiting_user"),
+      ("backend", .str backend),
+      ("session_id", .str sessionId),
+      ("project", .str effProj),
+      ("folder", .str folder),
+      ("imported_events", JVal.nat importedEvents)
+    ])
 
   -- Compute Fleet & Managed Machines
   | "get_compute_fleet" =>

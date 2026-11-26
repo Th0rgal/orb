@@ -44,14 +44,18 @@ open LeanUI.Widgets
 structure DesktopCliConfig where
   runtimeCfg : Runtime.RuntimeConfig := {}
   headlessGoldenAllDir : Option System.FilePath := none
+  headlessGoldenAllPrims : Option System.FilePath := none
+  gpuReadbackAllPrims : Option System.FilePath := none
   screenOpt : Option ScreenId := none
   benchIterations : Option Nat := none
+  benchWsiIterations : Option Nat := none
   verifyRepaint : Bool := false
   selfTest : Bool := false
   deriving Repr, Inhabited
 
-/-- Parse `OrbDesktop` CLI arguments. -/
+/-- Parse `OrbDesktop` CLI arguments, delegating shared runtime flags to `Runtime.parseRuntimeArgs`. -/
 def parseDesktopArgs (args : List String) : DesktopCliConfig :=
+  let baseRuntime := Runtime.parseRuntimeArgs args
   let rec loop (rem : List String) (cfg : DesktopCliConfig) : DesktopCliConfig :=
     match rem with
     | [] => cfg
@@ -59,28 +63,20 @@ def parseDesktopArgs (args : List String) : DesktopCliConfig :=
       loop rest { cfg with selfTest := true }
     | "--headless-golden-all" :: dir :: rest =>
       loop rest { cfg with headlessGoldenAllDir := some dir }
-    | "--headless-golden" :: path :: rest =>
-      loop rest { cfg with runtimeCfg := { cfg.runtimeCfg with headlessGolden := some path } }
+    | "--headless-golden-all-prims" :: path :: rest =>
+      loop rest { cfg with headlessGoldenAllPrims := some path }
+    | "--gpu-readback-all-prims" :: path :: rest =>
+      loop rest { cfg with gpuReadbackAllPrims := some path }
     | "--screen" :: scrStr :: rest =>
       loop rest { cfg with screenOpt := ScreenId.parse? scrStr }
     | "--bench" :: nStr :: rest =>
       loop rest { cfg with benchIterations := some (max 1 (nStr.toNat?.getD 20)) }
+    | "--bench-wsi" :: nStr :: rest =>
+      loop rest { cfg with benchWsiIterations := some (max 1 (nStr.toNat?.getD 20)) }
     | "--verify-repaint" :: rest => loop rest { cfg with verifyRepaint := true }
-    | "--width" :: w :: rest =>
-      loop rest { cfg with runtimeCfg := { cfg.runtimeCfg with width := w.toNat?.getD cfg.runtimeCfg.width } }
-    | "--height" :: h :: rest =>
-      loop rest { cfg with runtimeCfg := { cfg.runtimeCfg with height := h.toNat?.getD cfg.runtimeCfg.height } }
-    | "--scale120" :: s :: rest =>
-      loop rest { cfg with runtimeCfg := { cfg.runtimeCfg with scale120 := s.toNat?.getD cfg.runtimeCfg.scale120 } }
-    | "--light" :: rest =>
-      loop rest { cfg with runtimeCfg := { cfg.runtimeCfg with darkTheme := false } }
-    | "--dark" :: rest =>
-      loop rest { cfg with runtimeCfg := { cfg.runtimeCfg with darkTheme := true } }
-    | "--frames" :: n :: rest =>
-      loop rest { cfg with runtimeCfg := { cfg.runtimeCfg with maxFrames := n.toNat?.getD cfg.runtimeCfg.maxFrames } }
     | _ :: rest =>
       loop rest cfg
-  loop args {}
+  loop args { runtimeCfg := baseRuntime }
 
 /-- Shape a single-line or word-wrapped UTF-8 string into `List InlineRun` via `LeanUI.Text`
 (updating `GlyphAtlasCache`), or synthesize deterministic fallback `InlineRun` advances when
@@ -94,10 +90,11 @@ def shapeDesktopRuns (ac : Text.GlyphAtlasCache) (font : Text.FontHandle)
   if font.facePtr != 0 then
     -- Cache short labels, not the growing stream. UVs remain valid through
     -- append-only shelf allocation; resetAll discards all resolved runs.
-    let cacheable := text.utf8ByteSize ≤ 128
+    let cacheable := text.utf8ByteSize ≤ Text.maxShapeCacheBytes
+    let cacheKey : Text.ResolvedRunKey := ⟨font.facePtr, scale120, style.sizeSub, text⟩
     if cacheable then
-      if let some hit := ac.resolved.find? (fun e => e.face == font.facePtr && e.scale == scale120 && e.text == text && e.style == style) then
-        return (ac, [hit.run])
+      if let some hit := ac.resolvedMap.get? cacheKey then
+        return (ac, [{ hit with style := style }])
     let (ac', shaped) ← Text.shapeWithFallback ac font devSize64 text
     let mut curAc := ac'
     let mut glyphs : Array ShapedGlyph := #[]
@@ -123,6 +120,7 @@ def shapeDesktopRuns (ac : Text.GlyphAtlasCache) (font : Text.FontHandle)
         xOffset := xOffSub
         yOffset := yOffSub
         atlasSrc := entry.uv
+        atlasPage := entry.page
         sizePx := (entry.uv.w.toNat, entry.uv.h.toNat)
         bearingPx := (entry.bearingX, entry.bearingY)
         isColor := entry.isColor
@@ -137,7 +135,16 @@ def shapeDesktopRuns (ac : Text.GlyphAtlasCache) (font : Text.FontHandle)
     }
     if cacheable then
       let entries := curAc.resolved.push ⟨font.facePtr, scale120, text, style, run⟩
-      curAc := { curAc with resolved := if entries.size > 128 then entries.extract 1 entries.size else entries }
+      let map' := curAc.resolvedMap.insert cacheKey run
+      if entries.size > Text.maxResolvedRuns then
+        let map'' := match entries[0]? with
+          | some evicted =>
+            let evKey : Text.ResolvedRunKey := ⟨evicted.face, evicted.scale, evicted.style.sizeSub, evicted.text⟩
+            if evKey == cacheKey then map' else map'.erase evKey
+          | none => map'
+        curAc := { curAc with resolved := entries.extract 1 entries.size, resolvedMap := map'' }
+      else
+        curAc := { curAc with resolved := entries, resolvedMap := map' }
     return (curAc, [run])
   else
     return (ac, [overlaySynthRun style text])
@@ -198,7 +205,7 @@ partial def shapeWidgetTree (ac : Text.GlyphAtlasCache) (font mono bold medium s
           | none => curAc.insertRasterized key (Text.rasterizeIcon paths size strokeTenths)
         curAc := ac'
         pure (WidgetPayload.iconMask entry.page entry.uv color badgeBg)
-      | .text lineHeightSub runs =>
+      | .text lineHeightSub runs caret =>
         let mut shapedRuns : Array InlineRun := #[]
         for r in runs do
           let isSynth := !r.glyphs.isEmpty && r.glyphs.all (fun g => g.sizePx.1 == 0 && g.sizePx.2 == 0)
@@ -238,7 +245,7 @@ partial def shapeWidgetTree (ac : Text.GlyphAtlasCache) (font mono bold medium s
             shapedRuns := #[( { r with glyphs := glyphs.toList, allowBreakAfter := false } )]
             for dot in dots do
               shapedRuns := shapedRuns.push dot
-        pure (WidgetPayload.text lineHeightSub shapedRuns.toList)
+        pure (WidgetPayload.text lineHeightSub shapedRuns.toList caret)
       | other => pure other
     let mut shapedChildren : Array WidgetNode := #[]
     for c in children do
@@ -302,27 +309,27 @@ def renderDesktopView (rt : Runtime.RuntimeState DesktopState) :
   let rootBox := layoutNode sc rt.focus.owner pal.focusRing 0 0 availW availH layoutRoot
   let t2 ← IO.monoNanosNow
   -- This backend diffs paint commands; it does not consume per-node fingerprints.
-  let sceneOut := buildSceneFromLayout sc rt.focus theme widgetRoot rootBox (recordNodes := false)
+  let sceneOut := buildSceneFromLayout sc rt.focus theme widgetRoot rootBox (recordNodes := false) (focusVisible := rt.focusVisible)
   if profile then IO.eprintln s!"u7-view-ns {t1-t0} {t2-t1} {(← IO.monoNanosNow)-t2}"
   if let some menu := st.missionMenu then
     let w := min availW (pxToSub (if menu.page == .picker .model then 440 else 228))
-    let count := min (max 1 ((availH - pxToSub 14) / pxToSub 30)) (missionMenuRows st menu).length
-    let h := min availH (pxToSub (14 + 30 * count))
+    let count := min (max 1 ((availH - pxToSub 10) / pxToSub 26)) (missionMenuRows st menu).length
+    let h := min availH (pxToSub (10 + 26 * count))
     let left := max 0 (min menu.x (availW - w : Nat))
     let top := max 0 (min menu.y (availH - h : Nat))
     let raw := buildMissionMenu st menu w count
     let (ac7, widget) ← shapeWidgetTree ac6 rt.primaryFont rt.monoFont rt.boldFont rt.mediumFont rt.semiboldFont sc raw
     let box := layoutNode sc rt.focus.owner pal.focusRing left top w h widget.toLayoutNode
-    let overlay := buildSceneFromLayout sc rt.focus theme widget box (recordNodes := false)
+    let overlay := buildSceneFromLayout sc rt.focus theme widget box (recordNodes := false) (focusVisible := rt.focusVisible)
     let outside : Rect := { x := 0, y := 0, w := availW, h := availH }
     return ((ac7.finishUploads, if liveWindow then 0 else pal.canvas, sceneOut.prims ++ overlay.prims,
       (719, outside) :: overlay.hitRegionsSub, overlay.focusableOrder), [])
   if let .searchPalette spec := st.modal then
     let overRaw := buildSearchModalOverlay theme availW availH spec st.searchFilterTab
-      st.searchProjectFilter st.searchTimeFilter st.searchSortOrder (!st.liveData)
+      st.searchProjectFilter st.searchTimeFilter st.searchSortOrder (!st.liveData) st.searchBuffer
     let (ac7, overWidget) ← shapeWidgetTree ac6 rt.primaryFont rt.monoFont rt.boldFont rt.mediumFont rt.semiboldFont sc overRaw
     let overBox := layoutNode sc none pal.focusRing 0 0 availW availH overWidget.toLayoutNode
-    let overScene := buildSceneFromLayout sc rt.focus theme overWidget overBox (recordNodes := false)
+    let overScene := buildSceneFromLayout sc rt.focus theme overWidget overBox (recordNodes := false) (focusVisible := rt.focusVisible)
     let clearColor := if liveWindow then 0x00000000 else pal.canvas
     let outside : Rect := { x := 0, y := 0, w := availW, h := availH }
     return ((ac7.finishUploads, clearColor, sceneOut.prims ++ #[.backdropBlur (scaleSubPx sc (pxToSub 6))] ++ overScene.prims,
@@ -334,7 +341,7 @@ def renderDesktopView (rt : Runtime.RuntimeState DesktopState) :
     let (ac7, widget) ← shapeWidgetTree ac6 rt.primaryFont rt.monoFont rt.boldFont rt.mediumFont rt.semiboldFont sc notice
     let box := layoutNode sc rt.focus.owner pal.focusRing (availW - w - pxToSub 8 : Nat)
       (availH - chromeComposerHeightSub - h - pxToSub 8 : Nat) w h widget.toLayoutNode
-    let overlay := buildSceneFromLayout sc rt.focus theme widget box (recordNodes := false)
+    let overlay := buildSceneFromLayout sc rt.focus theme widget box (recordNodes := false) (focusVisible := rt.focusVisible)
     return ((ac7.finishUploads, if liveWindow then 0 else pal.canvas, sceneOut.prims ++ overlay.prims,
       sceneOut.hitRegionsSub ++ overlay.hitRegionsSub, sceneOut.focusableOrder ++ overlay.focusableOrder), scrollRegionsOf rootBox)
   else
@@ -357,7 +364,7 @@ def desktopReducer (rt : Runtime.RuntimeState DesktopState) :
         if let .searchPalette spec := st.modal then
           if rt.focus.owner == some spec.inputWidgetId then
             if let some buf := st.searchBuffer.editKey? key mods then
-              let spec' := { spec with query := buf.text ++ buf.imePreeditText, selectedIdx := 0 }
+              let spec' := { spec with query := buf.displayText, selectedIdx := 0 }
               return ({ st with searchBuffer := buf, modal := .searchPalette spec' }, if buf == st.searchBuffer then none else some viewport)
         else if !st.liveData && st.screen == .settingsGeneral && rt.focus.owner == some settingsApiUrlId then
           if let some buf := st.settingsApiUrl.editKey? key mods then
@@ -434,6 +441,10 @@ def desktopReducer (rt : Runtime.RuntimeState DesktopState) :
             st.multiRows.filterMap fun r => if r.startsWith "mission:" then some (r.drop 8).toString else none
           else [mid]
         return ({ st with missionMenu := some { mission := mid, x, y, trigger := id, targets, mixed } }, some viewport)
+    if let .scrollTo regionId targetY := ev then
+      if st.missionMenu.isNone && st.modal == .none then
+        let some r := regions.find? (·.id == regionId) | return (st, none)
+        return applyScrollRegionTo scale r.id r.bounds r.limitY r.offsetY targetY st
     if let .scroll x y _ dy := ev then
       if st.missionMenu.isNone && st.modal == .none then
         let some r := regions.find? (fun r => r.bounds.contains x y) | return (st, none)
@@ -509,10 +520,260 @@ def renderAll36Goldens (width height : Nat) (outDir : System.FilePath) : IO UInt
   IO.println s!"Rendered {count}/36 golden PNGs to {outDir}"
   return 0
 
+/-- Synthetic translucent all-primitives parity fixture (rendered on `clearColor = 0x00000000`)
+exercising every GPU/CPU primitive kind `0..7`: solid & translucent `.quad`/`.rrect` with
+asymmetric borders, compute `.shadow`, monochrome & premultiplied color `.glyph` across
+`pageIdx = 0` and `pageIdx = 1`, `.mask` on `pageIdx = 1`, `.image`, angled `.linear` gradients
+(`0°`, `45°`, `90°`, `180°`), nested `clipPushRounded`, nested `layerPush`/`layerPop`, and
+`.backdropBlur`. -/
+def buildAllPrimitivesFixture : Nat × Nat × Color × Text.GlyphAtlasCache × Scene := Id.run do
+  let w := 512
+  let h := 384
+  -- Build a 2-page atlas: page 0 holds an R8 monochrome glyph (16×16); page 1 holds a
+  -- premultiplied color glyph (16×16) and a coverage mask (16×16).
+  let mut monoPix := ByteArray.emptyWithCapacity (16 * 16)
+  for y in [:16] do
+    for x in [:16] do
+      let cov : UInt8 := if x >= 2 && x < 14 && y >= 2 && y < 14 && (x == 3 || y == 3 || x == 12 || y == 8) then 255 else if x >= 1 && x < 15 && y >= 1 && y < 15 then 96 else 0
+      monoPix := monoPix.push cov
+  let rgMono : Text.RasterizedGlyph := {
+    width := 16, height := 16, bearingX := 0, bearingY := 14, format := 1, isColor := false, pixels := monoPix
+  }
+  -- Premultiplied BGRA color glyph (FreeType FT_PIXEL_MODE_BGRA format)
+  let mut colorPix := ByteArray.emptyWithCapacity (16 * 16 * 4)
+  for y in [:16] do
+    for x in [:16] do
+      let dx := (x : Int) - 8
+      let dy := (y : Int) - 8
+      let d2 := dx * dx + dy * dy
+      let (b, g, r, a) : UInt8 × UInt8 × UInt8 × UInt8 :=
+        if d2 <= 25 then (40, 180, 230, 255)
+        else if d2 <= 49 then (20, 90, 115, 128)
+        else (0, 0, 0, 0)
+      colorPix := colorPix.push b |>.push g |>.push r |>.push a
+  let rgColor : Text.RasterizedGlyph := {
+    width := 16, height := 16, bearingX := 0, bearingY := 14, format := 4, isColor := true, pixels := colorPix
+  }
+  let p0 := (Text.AtlasPageBuffer.create 1024 1024).blitGlyph ⟨4, 4, 16, 16⟩ rgMono
+  let p1 := ((Text.AtlasPageBuffer.create 1024 1024).blitGlyph ⟨8, 8, 16, 16⟩ rgColor).blitGlyph ⟨32, 8, 16, 16⟩ rgMono
+  let atlas : Text.GlyphAtlasCache := {
+    pageWidth := 1024, pageHeight := 1024, pad := 1
+    pages := #[p0, p1]
+    gpuDirtyRects := #[(0, ⟨4, 4, 16, 16⟩), (1, ⟨8, 8, 16, 16⟩), (1, ⟨32, 8, 16, 16⟩)]
+  }
+  let scene : Scene := #[
+    -- Translucent base panel with rounded corners
+    .quad ⟨16, 16, 480, 352⟩ 0x161B22E0 14 1 0x30363DFF,
+    -- Asymmetric rrect with per-corner radii and per-side borders
+    .rrect ⟨32, 32, 180, 90⟩ 0x1F2937CC (16, 4, 20, 8) (2, 4, 1, 3) 0x58A6FFFF,
+    -- Angled CSS linear gradients (0°, 45°, 90°, 180°)
+    .linear ⟨228, 32, 60, 40⟩ 0xE05252FF 0x3B82F6FF 0 6,
+    .linear ⟨296, 32, 60, 40⟩ 0x22C55EFF 0xA855F7FF 45 8,
+    .linear ⟨364, 32, 60, 40⟩ 0xF59E0BFF 0x06B6D4FF 90 10,
+    .linear ⟨432, 32, 52, 40⟩ 0xEC4899CC 0x14B8A6CC 180 4,
+    -- Compute-blurred drop shadow + card
+    .shadow ⟨48, 148, 160, 96⟩ 0x00000099 12 10,
+    .quad ⟨48, 148, 160, 96⟩ 0x252D38FF 12 1 0x4B5563FF,
+    -- Monochrome glyph (page 0), color glyph (page 1), mask (page 1), and rounded image placeholder
+    .glyph ⟨4, 4, 16, 16⟩ ⟨64, 168, 16, 16⟩ 0xF3F4F6FF false 0,
+    .glyph ⟨8, 8, 16, 16⟩ ⟨92, 168, 16, 16⟩ 0xFFFFFFCC true 1,
+    .mask 1 ⟨32, 8, 16, 16⟩ ⟨120, 168, 16, 16⟩ 0x58A6FFEE,
+    .image 0 ⟨0, 0, 0, 0⟩ ⟨148, 168, 44, 32⟩ 8,
+    -- Backdrop blur region followed by nested rounded clip + nested opacity layer
+    .backdropBlur 3,
+    .clipPushRounded ⟨232, 136, 240, 210⟩ (18, 18, 18, 18),
+    .quad ⟨220, 124, 264, 234⟩ 0x1E293BD8 0 0 0,
+    .layerPush 176,
+    .quad ⟨252, 156, 120, 72⟩ 0x38BDF8FF 10 2 0xFFFFFFFF,
+    .layerPush 160,
+    .quad ⟨296, 196, 140, 96⟩ 0xF472B6FF 12 0 0,
+    .glyph ⟨8, 8, 16, 16⟩ ⟨312, 212, 16, 16⟩ 0xFFFFFFFF true 1,
+    .layerPop,
+    .layerPop,
+    .clipPop
+  ]
+  return (w, h, 0x00000000, atlas, scene)
+
+/-- Render all 36 canonical screens via headless offscreen Vulkan readback (`--gpu-readback`). -/
+def renderAll36GpuReadback (width height : Nat) (gpuMode : Vulkan.GpuModeRequest)
+    (outDir : System.FilePath) (screenOpt : Option ScreenId) : IO UInt32 := do
+  IO.FS.createDirAll outDir
+  let enableVal := (← IO.getEnv "ORB_LEANUI_VK_VALIDATION") == some "1"
+  let effMode ← Vulkan.resolveGpuMode gpuMode
+  let rbInit ← match ← Vk.createOffscreenReadback enableVal with
+    | .error e =>
+      IO.eprintln s!"gpu-readback: failed to create Vulkan offscreen context: {e}"
+      return 1
+    | .ok ctx => pure ctx
+  let rbRef ← IO.mkRef rbInit
+  try
+    let screens := match screenOpt with | some s => [s] | none => ScreenId.all
+    let themes : List Bool := [true, false]
+    let scales : List Nat := [120, 240]
+    let mut count : Nat := 0
+    for scr in screens do
+      for isDark in themes do
+        for sc in scales do
+          let cfg : Runtime.RuntimeConfig := {
+            headless := true, width, height, scale120 := sc, darkTheme := isDark, maxFrames := 1
+          }
+          let initSt := DesktopState.forScreen scr isDark sc
+          let rt0Raw ← Runtime.initRuntime cfg initSt
+          let rt0 := { rt0Raw with focus := initSt.initialFocusState }
+          let (atlas, clearColor, scene, _, _) ← renderDesktopFrame rt0
+          let (bw, bh) := rt0.wayland.deviceBufferSize
+          let curRb ← rbRef.get
+          let pixels ←
+            if effMode == .present then
+              let (cpuFb, _) := Vulkan.rasterizeScene bw bh clearColor atlas scene
+              match ← Vk.renderOffscreenPresent curRb bw bh cpuFb with
+              | .error e =>
+                Runtime.shutdownRuntime rt0
+                IO.eprintln s!"gpu-readback(present) failed: {e}"
+                return 1
+              | .ok (rb', px) => rbRef.set rb'; pure px
+            else
+              match ← Vk.renderOffscreenInstanced curRb bw bh clearColor atlas scene true with
+              | .error e =>
+                Runtime.shutdownRuntime rt0
+                IO.eprintln s!"gpu-readback(instanced) failed: {e}"
+                return 1
+              | .ok (rb', px) => rbRef.set rb'; pure px
+          Runtime.shutdownRuntime rt0
+          let fpath := outDir / scr.goldenFileName isDark sc
+          IO.FS.writeBinFile fpath (Vulkan.encodeRGBA8ToPNG bw bh pixels)
+          count := count + 1
+    let finalRb ← rbRef.get
+    IO.println s!"Rendered {count} GPU readback PNGs ({finalRb.dev.deviceName}) to {outDir}"
+    return 0
+  finally
+    Vk.destroyOffscreenReadback (← rbRef.get)
+
+/-- Render the synthetic translucent all-primitives fixture on CPU or GPU readback. -/
+def renderAllPrimsFixture (useGpu : Bool) (gpuMode : Vulkan.GpuModeRequest)
+    (outPath : System.FilePath) : IO UInt32 := do
+  let (w, h, clearColor, atlas, scene) := buildAllPrimitivesFixture
+  if let some parent := outPath.parent then IO.FS.createDirAll parent
+  if !useGpu then
+    let (fb, _) := Vulkan.rasterizeScene w h clearColor atlas scene
+    IO.FS.writeBinFile outPath (Vulkan.encodeRGBA8ToPNG w h fb)
+    IO.println s!"Rendered CPU all-primitives fixture to {outPath}"
+    return 0
+  let effMode ← Vulkan.resolveGpuMode gpuMode
+  let enableVal := (← IO.getEnv "ORB_LEANUI_VK_VALIDATION") == some "1"
+  let rbInit ← match ← Vk.createOffscreenReadback enableVal with
+    | .error e => IO.eprintln s!"gpu-readback-all-prims failed: {e}"; return 1
+    | .ok ctx => pure ctx
+  let rbRef ← IO.mkRef rbInit
+  try
+    let curRb ← rbRef.get
+    let res ←
+      if effMode == .present then
+        let (cpuFb, _) := Vulkan.rasterizeScene w h clearColor atlas scene
+        Vk.renderOffscreenPresent curRb w h cpuFb
+      else
+        Vk.renderOffscreenInstanced curRb w h clearColor atlas scene true
+    match res with
+    | .error e => IO.eprintln s!"gpu-readback-all-prims render failed: {e}"; return 1
+    | .ok (rb', px) =>
+      rbRef.set rb'
+      IO.FS.writeBinFile outPath (Vulkan.encodeRGBA8ToPNG w h px)
+      IO.println s!"Rendered GPU ({rb'.dev.deviceName}) all-primitives fixture to {outPath}"
+      return 0
+  finally
+    Vk.destroyOffscreenReadback (← rbRef.get)
+
+/-- Read private anonymous heap (`RssAnon` in KiB) from `/proc/self/status` on Linux. -/
+private def readRssAnonKiB : IO Nat := do
+  try
+    let content ← IO.FS.readFile "/proc/self/status"
+    for line in content.splitOn "\n" do
+      if line.startsWith "RssAnon:" then
+        let parts := (line.drop 8).toString.splitOn " " |>.filter (· != "")
+        if let some numStr := parts.head? then
+          return numStr.toNat?.getD 0
+    return 0
+  catch _ => return 0
+
 /-- Format microseconds as milliseconds with two zero-padded decimals (`10050` -> `10.05`). -/
 def fmtMs (us : Nat) : String :=
   let frac := (us % 1000) / 10
   s!"{us / 1000}.{if frac < 10 then "0" else ""}{frac}"
+
+/-- Live-compositor WSI benchmark (`--bench-wsi <iterations>`): opens a real Wayland window on
+`$WAYLAND_DISPLAY`, waits for initial `xdg_surface.configure`, drives `iterations` streamed frames
+through the active backend (`vkInstanced`, `vkPresent`, or `cpuShm` fallback), checks quiescence,
+and prints structured JSON metrics. -/
+def runWsiBench (cfg : Runtime.RuntimeConfig) (iterations : Nat) : IO UInt32 := do
+  let iters := max 1 iterations
+  let initSt := DesktopState.forScreen .missionTranscript cfg.darkTheme cfg.scale120
+  let t0 ← IO.monoNanosNow
+  let rt0 ← Runtime.openWindowRuntime cfg "orb-desktop-bench-wsi" initSt
+  let rtRef ← IO.mkRef { rt0 with focus := initSt.initialFocusState }
+  try
+    let mut rt ← rtRef.get
+    -- Wait for initial xdg_surface.configure (up to ~5s)
+    let mut waitSteps := 0
+    while !rt.wayland.configured && waitSteps < 500 do
+      Wayland.waitEvents rt.wayland
+      let (wl, evs) ← Wayland.pumpEvents rt.wayland
+      rt := { rt with wayland := wl }
+      for ev in evs do rt := rt.stepEvent (desktopReducer rt) ev
+      rtRef.set rt
+      waitSteps := waitSteps + 1
+    if !rt.wayland.configured then
+      IO.eprintln "bench-wsi: compositor never sent xdg_surface.configure"
+      return 1
+    -- Initial frame
+    let rendered0 := rt.framesRendered
+    rt ← Runtime.stepFrameWithRegions rt desktopReducer renderDesktopView
+    if rt.framesRendered != rendered0 && rt.vulkan.backend == .cpuShm then
+      let wl ← Wayland.present rt.wayland rt.vulkan.framebuffer
+      rt := { rt with wayland := wl, presentCount := rt.presentCount + 1 }
+    rtRef.set rt
+    let coldUs := ((← IO.monoNanosNow) - t0) / 1000
+
+    let mut frameTimesUs : Array Nat := #[]
+    for idx in [:iters] do
+      let (nextSt, streamDmg) :=
+        applyStreamFrame rt.wayland.scale120 rt.viewportDeviceRect rt.app
+          [s!" wsi frame {idx}", " gpu swapchain benchmark"]
+      let dmg := match streamDmg with
+        | none => rt.damage
+        | some d => Damage.add rt.damage d
+      rt := { rt with app := nextSt, damage := dmg, wayland := { rt.wayland with configurePendingCommit := true } }
+      let f0 ← IO.monoNanosNow
+      let prevR := rt.framesRendered
+      rt ← Runtime.stepFrameWithRegions rt desktopReducer renderDesktopView
+      if rt.framesRendered != prevR && rt.vulkan.backend == .cpuShm then
+        let wl ← Wayland.present rt.wayland rt.vulkan.framebuffer
+        rt := { rt with wayland := wl, presentCount := rt.presentCount + 1 }
+      rtRef.set rt
+      let f1 ← IO.monoNanosNow
+      frameTimesUs := frameTimesUs.push ((f1 - f0) / 1000)
+
+    -- Quiescence check: no damage -> 0 extra redraws
+    let beforeQuiescent := rt.framesRendered
+    rt ← Runtime.stepFrameWithRegions rt desktopReducer renderDesktopView
+    rtRef.set rt
+    let quiescentRedraws := rt.framesRendered - beforeQuiescent
+    let rssAnonKiB ← readRssAnonKiB
+    let sorted := frameTimesUs.qsort (· < ·)
+    let p50Us := sorted[sorted.size / 2]?.getD 0
+    let p99Us := sorted[min ((sorted.size * 99) / 100) (sorted.size - 1)]?.getD 0
+    let backendStr := match rt.vulkan.backend with
+      | .cpuShm => "cpuShm"
+      | .vkPresent => "vkPresent"
+      | .vkInstanced => "vkInstanced"
+    let escJson (s : String) : String :=
+      s.replace "\\" "\\\\" |>.replace "\"" "\\\"" |>.replace "\n" "\\n" |>.replace "\r" "\\r"
+    let fallbackStr := escJson (rt.vulkan.fallbackReason.getD "")
+    let icdStr := escJson rt.vulkan.icdName
+    let errors : Nat := if quiescentRedraws == 0 && rt.presentCount >= iters then 0 else 1
+    IO.println s!"\{\"backend\": \"{backendStr}\", \"icd_name\": \"{icdStr}\", \"present_mode\": {rt.vulkan.presentMode}, \"fallback_reason\": \"{fallbackStr}\", \"cold_ms\": {fmtMs coldUs}, \"frame_p50_ms\": {fmtMs p50Us}, \"frame_p99_ms\": {fmtMs p99Us}, \"frames_rendered\": {rt.framesRendered}, \"present_count\": {rt.presentCount}, \"quiescent_redraws\": {quiescentRedraws}, \"recreates\": {rt.vulkan.swapchainRecreates}, \"gpu_allocated_bytes\": {rt.vulkan.gpuAllocatedBytes}, \"rss_anon_kib\": {rssAnonKiB}, \"width\": {rt.vulkan.width}, \"height\": {rt.vulkan.height}, \"error_count\": {errors}}"
+    return (if errors == 0 then 0 else 1)
+  finally
+    Runtime.shutdownRuntime (← rtRef.get)
 
 /-- Execute `--bench <iterations>`. The cold pass records startup, then a transcript is opened from
 an already-running control screen. Each measured update queues several stream deltas and flushes
@@ -635,10 +896,20 @@ def liveViewportRegression : Bool := Id.run do
   return !before.any visible && after.any visible && bottom.rosterTopSub == down.rosterTopSub &&
     atBottom.hitRegions.any (·.1 == 2)
 
-/-- `--self-test`: check live viewports and quiescent rendering. -/
+/-- `--self-test`: check live viewports, embedded palette, and quiescent rendering. -/
 def runSelfTest (cfg : Runtime.RuntimeConfig) (initSt : DesktopState) : IO UInt32 := do
   unless liveViewportRegression do
     IO.eprintln "orb-desktop self-test: live viewport regression"
+    return 1
+  try
+    embeddedPaletteSelfTest
+  catch e =>
+    IO.eprintln s!"orb-desktop self-test: embedded palette regression: {e}"
+    return 1
+  try
+    embeddedSidebarCacheSelfTest
+  catch e =>
+    IO.eprintln s!"orb-desktop self-test: embedded sidebar cache regression: {e}"
     return 1
   let rt0Raw ← Runtime.initRuntime { cfg with headless := true } initSt
   let rt0 := { rt0Raw with focus := initSt.initialFocusState }
@@ -662,10 +933,20 @@ private def runningBadgeDamage (rt : Runtime.RuntimeState DesktopState) : Damage
 def main (args : List String) : IO UInt32 := do
   if let ["--gtk-sidebar-host", path] := args then
     return ← runEmbeddedSidebar path shapeWidgetTree
+  if let ["--bench-embedded", n] := args then
+    return ← runEmbeddedSidebarBench (n.toNat?.getD 200) shapeWidgetTree
   let dcfg := parseDesktopArgs args
   let rcfg := dcfg.runtimeCfg
   if let some iters := dcfg.benchIterations then
     return (← runDesktopBench rcfg iters dcfg.verifyRepaint)
+  if let some wsiIters := dcfg.benchWsiIterations then
+    return (← runWsiBench rcfg wsiIters)
+  if let some path := dcfg.headlessGoldenAllPrims then
+    return (← renderAllPrimsFixture false .disabled path)
+  if let some path := dcfg.gpuReadbackAllPrims then
+    return (← renderAllPrimsFixture true rcfg.gpuMode path)
+  if let some rbDir := rcfg.gpuReadbackDir then
+    return (← renderAll36GpuReadback rcfg.width rcfg.height rcfg.gpuMode rbDir dcfg.screenOpt)
   if let some allDir := dcfg.headlessGoldenAllDir then
     return (← renderAll36Goldens rcfg.width rcfg.height allDir)
   if let some outPath := rcfg.headlessGolden then

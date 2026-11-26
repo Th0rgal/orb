@@ -736,7 +736,8 @@ fun OrbConversationPage(
                 !project.str("remote_node_id").isNullOrEmpty()
         )
     }
-    val remoteGoalTarget = selectedWorkspaceId.isEmpty() && selectedNodeId.isNotEmpty() && selectedNodeId != "core" &&
+    val isLocalSideSystem = selectedWorkspaceId.isEmpty() && selectedNodeId == OrbSideSystem.LOCAL_NODE_ID
+    val remoteGoalTarget = selectedWorkspaceId.isEmpty() && selectedNodeId.isNotEmpty() && selectedNodeId != "core" && !isLocalSideSystem &&
         selectedBackend !in setOf("cursor_cloud", "grok_bot", "hermes")
     val defaultOpenCodeOnCore = selectedBackend == "opencode" && selectedModel.isBlank() && !nodePinnedByUser
     val draftRemoteNode = selectedNodeId.takeIf { remoteGoalTarget && missionId == null && !defaultOpenCodeOnCore }
@@ -1987,7 +1988,7 @@ fun OrbConversationPage(
                         if (selectedWorktreeMode != OrbWorktreeLaunchMode.Auto) nativeBody["worktree_mode"] = selectedWorktreeMode.wire
                         if (selectedModel.isNotEmpty()) nativeBody["model_override"] = selectedModel
                         if (selectedWorkspaceId.isNotEmpty()) nativeBody["workspace_id"] = selectedWorkspaceId
-                        if (selectedWorkspaceId.isEmpty() && selectedNodeId.isNotEmpty() && selectedNodeId != "core") {
+                        if (selectedWorkspaceId.isEmpty() && selectedNodeId.isNotEmpty() && selectedNodeId != "core" && selectedNodeId != OrbSideSystem.LOCAL_NODE_ID) {
                             if (OrbManagedMachines.isAutoManagedTarget(selectedNodeId) && selectedBackend in setOf("grok", "vibe")) {
                                 throw OrbError("${OrbAgentCatalog.backendLabel(selectedBackend, backends)} is not supported on managed cloud VMs. Choose Claude Code, Codex, OpenCode, or Antigravity, or select Core.")
                             }
@@ -2009,13 +2010,27 @@ fun OrbConversationPage(
                         nativeBody
                     }
 
-                    val created = core.request("/api/control/missions", method = "POST", body = body)
-                    val dict = OrbJSON.dict(created) ?: OrbJSON.dict(OrbJSON.dict(created)?.get("mission"))
-                    if (dict != null) {
-                        val rawRow = OrbRow(dict)
-                        val row = if (isCloudService && selectedModel.isNotBlank() && rawRow.str("model_override", "model", "model_id").isNullOrEmpty()) {
-                            OrbRow(rawRow.id, rawRow.raw + ("model_override" to selectedModel.trim()))
-                        } else rawRow
+                    val row = if (!isCloudService && selectedWorkspaceId.isEmpty() && selectedNodeId == OrbSideSystem.LOCAL_NODE_ID) {
+                        OrbSideSystem.launchLocalMission(
+                            core = core,
+                            projectSlug = slug,
+                            prompt = finalPrompt,
+                            backend = selectedBackend,
+                            model = selectedModel,
+                            title = OrbJSON.cleanTitle(baseText).take(72),
+                            permissionMode = if (selectedBackend == "claudecode") selectedPermissionMode.wire else null
+                        )
+                    } else {
+                        val created = core.request("/api/control/missions", method = "POST", body = body)
+                        val dict = OrbJSON.dict(created) ?: OrbJSON.dict(OrbJSON.dict(created)?.get("mission"))
+                        dict?.let {
+                            val rawRow = OrbRow(it)
+                            if (isCloudService && selectedModel.isNotBlank() && rawRow.str("model_override", "model", "model_id").isNullOrEmpty()) {
+                                OrbRow(rawRow.id, rawRow.raw + ("model_override" to selectedModel.trim()))
+                            } else rawRow
+                        }
+                    }
+                    if (row != null) {
                         if (isCloudService) cloudState.adoptCreatedMission(row.id)
                         adoptedNewMissionId = row.id
                         currentMission = row
@@ -4635,9 +4650,11 @@ private fun OrbConversationComposerArea(
     var showAttachMenu by remember { mutableStateOf(false) }
     var showDictationLanguages by remember { mutableStateOf(false) }
 
+    val coverScreen = LocalOrbCoverScreen.current
     Column(
         modifier = Modifier
             .fillMaxWidth()
+            .padding(end = coverScreen.bottomBarEndPadding(0.dp))
             .padding(horizontal = 14.dp, vertical = 8.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp)
     ) {
@@ -4943,6 +4960,7 @@ private fun OrbConversationComposerArea(
                                 !selectedWorkspaceName.isNullOrEmpty() -> selectedWorkspaceName
                                 OrbManagedMachines.isAutoManagedTarget(selectedNodeId) ->
                                     OrbManagedMachines.autoManagedLabel(selectedNodeId)
+                                selectedNodeId == OrbSideSystem.LOCAL_NODE_ID -> OrbSideSystem.LOCAL_LABEL
                                 selectedNodeId.isNotEmpty() && selectedNodeId != "core" -> {
                                     val found = nodes.firstOrNull { (it.str("id") ?: it.id) == selectedNodeId }
                                     found?.str("display_name", "name", "id") ?: selectedNodeId
@@ -5761,7 +5779,11 @@ fun OrbAgentPickerSheet(
             }
 
             // Machine / Workspace
-            if ((!existing || cloudHandoff) && !isCloudService && (sortedNodes.isNotEmpty() || workspaces.isNotEmpty() || usableCloudProviders.isNotEmpty())) {
+            val pickerContext = LocalContext.current
+            val sideSystemAvailable = remember(pickerContext) { OrbSideSystem.isInstalled(pickerContext) }
+            val showLocalSideSystemRow = sideSystemAvailable && (workspaceQuery.isBlank() ||
+                "local computer nixos sidesystem phone".contains(workspaceQuery.trim(), ignoreCase = true))
+            if ((!existing || cloudHandoff) && !isCloudService && (sideSystemAvailable || sortedNodes.isNotEmpty() || workspaces.isNotEmpty() || usableCloudProviders.isNotEmpty())) {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Row(
                         modifier = Modifier.fillMaxWidth(),
@@ -5838,7 +5860,7 @@ fun OrbAgentPickerSheet(
                     ) {
                         val visibleStaticNodes = staticFilteredNodes
                         val hasBelowStatic = filteredWorkspaces.isNotEmpty() || userManagedNodes.isNotEmpty() || agentManagedNodes.isNotEmpty()
-                        if (!showCoreRow && visibleStaticNodes.isEmpty() && !hasBelowStatic && usableCloudProviders.isEmpty()) {
+                        if (!showLocalSideSystemRow && !showCoreRow && visibleStaticNodes.isEmpty() && !hasBelowStatic && usableCloudProviders.isEmpty()) {
                             Text(
                                 text = "No matching workspaces",
                                 color = OrbStyle.textMuted,
@@ -5846,6 +5868,45 @@ fun OrbAgentPickerSheet(
                                 modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp)
                             )
                         } else {
+                            if (showLocalSideSystemRow) {
+                                val localSelected = selectedWorkspaceId.isEmpty() && selectedNodeId == OrbSideSystem.LOCAL_NODE_ID
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .orbPressClickable { if (!locked) onSelectNodeId(OrbSideSystem.LOCAL_NODE_ID, true) }
+                                        .padding(horizontal = 14.dp, vertical = 11.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(
+                                            text = OrbSideSystem.LOCAL_LABEL,
+                                            color = Color.White,
+                                            fontSize = 14.sp,
+                                            fontWeight = FontWeight.Medium,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                        Text(
+                                            text = "NixOS SideSystem · headless",
+                                            color = OrbStyle.textMuted,
+                                            fontSize = 11.sp,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                    }
+                                    if (localSelected) {
+                                        Icon(
+                                            imageVector = Icons.Default.Check,
+                                            contentDescription = "Selected",
+                                            tint = Color.White,
+                                            modifier = Modifier.size(16.dp)
+                                        )
+                                    }
+                                }
+                                if (showCoreRow || visibleStaticNodes.isNotEmpty() || hasBelowStatic || usableCloudProviders.isNotEmpty()) {
+                                    HorizontalDivider(color = OrbStyle.border, thickness = 0.5.dp)
+                                }
+                            }
                             if (showCoreRow) {
                                 val coreSelected = selectedWorkspaceId.isEmpty() && (selectedNodeId == "core" || selectedNodeId.isEmpty())
                                 Row(

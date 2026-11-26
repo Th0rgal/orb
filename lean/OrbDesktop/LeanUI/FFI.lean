@@ -100,6 +100,22 @@ opaque memWrite (ptr : USize) (bytes : @& ByteArray) : IO Unit
 @[extern "lean_ui_mem_read"]
 opaque memRead (ptr : USize) (size : USize) : IO ByteArray
 
+/-- Invoke a void-returning Vulkan C function pointer with 0..8 `UInt64` integer/pointer args (`64` bytes). -/
+@[extern "lean_ui_vk_call_void8"]
+opaque vkCallVoid8 (fn : USize) (args : @& ByteArray) : IO Unit
+
+/-- Invoke an `int32_t`-returning Vulkan C function pointer with 0..8 `UInt64` args (`64` bytes). -/
+@[extern "lean_ui_vk_call_res8"]
+opaque vkCallRes8 (fn : USize) (args : @& ByteArray) : IO UInt32
+
+/-- Bounds-checked zero-allocation strided copy from a Lean `ByteArray` into mapped `VkDeviceMemory`. -/
+@[extern "lean_ui_vk_copy_rect"]
+opaque vkCopyRect (dstPtr dstCap : USize) (src : @& ByteArray) (srcOff srcStride rowBytes rows : USize) : IO Unit
+
+/-- Bounds-checked zero-allocation strided copy from native memory into a fresh Lean `ByteArray`. -/
+@[extern "lean_ui_vk_read_rect"]
+opaque vkReadRect (srcPtr srcStride rowBytes rows : USize) : IO ByteArray
+
 /-- Resolve a Fontconfig pattern (`"Inter:weight=500"`) to a FreeType + HarfBuzz face handle. -/
 @[extern "lean_ui_font_open"]
 opaque fontOpen (pattern : @& String) : IO USize

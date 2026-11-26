@@ -16,6 +16,8 @@ const [localMemory, setLocalMemory] = createSignal<number>();
 export const recordMissions = (rows: Mission[]) => { setMissions(rows); };
 export const recordFleet = (rows: RemoteNodeView[]) => { setFleet(rows); rememberNodeNames(rows); };
 export const recordLocalMemory = (free: number | undefined) => { setLocalMemory(free); };
+export const isFleetNodeOnline = (nodeId: string): boolean =>
+  fleet().some((node) => node.id.toLowerCase() === nodeId.toLowerCase() && node.status === "online");
 
 /** `client`, `core`, or a node id: the keys both machine menus use. */
 export function missionMachine(mission: Mission): string | undefined {

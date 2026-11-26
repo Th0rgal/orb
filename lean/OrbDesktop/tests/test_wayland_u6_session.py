@@ -237,6 +237,7 @@ class WaylandTestCompositor:
         self._pools: dict[int, tuple[int, int, mmap.mmap]] = {}
         self._buffers: dict[int, tuple[int, int, int, int, int]] = {}  # buf -> (pool, off, w, h, stride)
         self._attached_buf: int | None = None
+        self._pending_frame_cbs: list[int] = []
         self.surface_id: int | None = None
         self.xdg_surface_id: int | None = None
         self.xdg_toplevel_id: int | None = None
@@ -265,11 +266,14 @@ class WaylandTestCompositor:
     def _send(self, payload: bytes, fds: list[int] | None = None) -> None:
         if self._client is None:
             return
-        if fds:
-            anc = [(socket.SOL_SOCKET, socket.SCM_RIGHTS, array.array("i", fds).tobytes())]
-            self._client.sendmsg([payload], anc)
-        else:
-            self._client.sendall(payload)
+        try:
+            if fds:
+                anc = [(socket.SOL_SOCKET, socket.SCM_RIGHTS, array.array("i", fds).tobytes())]
+                self._client.sendmsg([payload], anc)
+            else:
+                self._client.sendall(payload)
+        except OSError:
+            pass
 
     def _serve(self) -> None:
         buf = bytearray()
@@ -418,6 +422,9 @@ class WaylandTestCompositor:
             if opcode == 1:  # attach(buffer, x, y)
                 bid = struct.unpack_from("=I", body, 0)[0]
                 self._attached_buf = bid
+            elif opcode == 3:  # frame(callback)
+                cb = struct.unpack_from("=I", body, 0)[0]
+                self._pending_frame_cbs.append(cb)
             elif opcode == 6:  # commit
                 if self.xdg_toplevel_id and self.xdg_surface_id and not self.configured_acked and self._attached_buf is None:
                     # Initial commit -> send xdg_toplevel.configure + xdg_surface.configure
@@ -426,7 +433,8 @@ class WaylandTestCompositor:
                     self._send(_wl_msg(self.xdg_surface_id, 0, struct.pack("=I", self._next_serial())))
                     self._maybe_send_enter()
                 elif self._attached_buf and self._attached_buf in self._buffers:
-                    pid, off, w, h, stride = self._buffers[self._attached_buf]
+                    bid = self._attached_buf
+                    pid, off, w, h, stride = self._buffers[bid]
                     if pid in self._pools:
                         mm = self._pools[pid][2]
                         frame = mm[off : off + stride * h]
@@ -436,6 +444,14 @@ class WaylandTestCompositor:
                         self.last_frame_stride = stride
                         self.last_frame_hash = hashlib.sha256(frame).hexdigest()
                     self.commit_count += 1
+                    # Release buffer and fire any pending wl_surface.frame callbacks per Wayland spec
+                    self._send(_wl_msg(bid, 0, b""))  # wl_buffer.release
+                    if self._pending_frame_cbs:
+                        ts = int(time.monotonic() * 1000) & 0xFFFFFFFF
+                        for cb in self._pending_frame_cbs:
+                            self._send(_wl_msg(cb, 0, struct.pack("=I", ts)))  # wl_callback.done
+                            self._send(_wl_msg(1, 1, struct.pack("=I", cb)))   # wl_display.delete_id
+                        self._pending_frame_cbs.clear()
                     self._maybe_send_enter()
                     self._cond.notify_all()
 
@@ -537,6 +553,24 @@ class WaylandTestCompositor:
         with self._lock:
             assert self.pointer_id is not None
             self._send(_wl_msg(self.pointer_id, 2, struct.pack("=Iii", self._ms(), int(x * 256), int(y * 256))))
+            self._send(_wl_msg(self.pointer_id, 5))
+
+    def pointer_press(self, x: float, y: float, button: int = 0x110) -> None:
+        with self._lock:
+            assert self.pointer_id is not None
+            fx, fy = int(x * 256), int(y * 256)
+            self._send(_wl_msg(self.pointer_id, 2, struct.pack("=Iii", self._ms(), fx, fy)))
+            self._send(_wl_msg(self.pointer_id, 5))
+            self._send(_wl_msg(self.pointer_id, 3, struct.pack("=IIII", self._next_serial(), self._ms(), button, 1)))
+            self._send(_wl_msg(self.pointer_id, 5))
+
+    def pointer_release(self, x: float, y: float, button: int = 0x110) -> None:
+        with self._lock:
+            assert self.pointer_id is not None
+            fx, fy = int(x * 256), int(y * 256)
+            self._send(_wl_msg(self.pointer_id, 2, struct.pack("=Iii", self._ms(), fx, fy)))
+            self._send(_wl_msg(self.pointer_id, 5))
+            self._send(_wl_msg(self.pointer_id, 3, struct.pack("=IIII", self._next_serial(), self._ms(), button, 0)))
             self._send(_wl_msg(self.pointer_id, 5))
 
     def pointer_click(self, x: float, y: float, button: int = 0x110) -> None:
@@ -1032,10 +1066,11 @@ class WaylandU6SessionTest(unittest.TestCase):
                     frame_search_open = comp.wait_frame_change(frame_diff_panel, timeout=5.0)
                     comp.wait_text_input(True, timeout=5.0)
                     comp.ime_edit(commit="Hello", preedit="検")
-                    comp.wait_frame_change(frame_search_open, timeout=5.0)
+                    h_preedit = comp.wait_frame_change(frame_search_open, timeout=5.0)
                     comp.ime_edit(commit="", preedit="")
+                    # Wait for the preedit-clear frame to settle before verifying interior click stability.
+                    h_in_search = comp.wait_frame_change(h_preedit, timeout=5.0)
                     # Clicking inside the Search modal preview pane (900, 300) must NOT dismiss the modal.
-                    h_in_search = comp.last_frame_hash
                     comp.pointer_click(900, 300)
                     time.sleep(0.15)
                     self.assertEqual(comp.last_frame_hash, h_in_search, "clicking inside Search card must not close modal")
@@ -1293,6 +1328,161 @@ class WaylandU6SessionTest(unittest.TestCase):
                                 self.assertEqual(comp.last_frame_hash, prev_hash, f"{screen_id}: {label} must not repaint/dismiss")
                     finally:
                         self._shutdown(comp, proc)
+
+    def test_scrollbar_drag_and_quiet_pointer_focus(self) -> None:
+        """Verify draggable overlay scrollbar (thumb drag, track jump, live Orb.Scroll unpinning)
+        and Cursor-style quiet pointer focus vs keyboard Tab :focus-visible over real Wayland."""
+        with tempfile.TemporaryDirectory(prefix="orb-u6-track1b-") as td:
+            root = Path(td)
+
+            # 1. Quiet pointer focus vs keyboard Tab :focus-visible on 02_control_populated.
+            sub_focus = root / "quiet_focus"
+            sub_focus.mkdir()
+            comp, proc = self._launch(sub_focus, ["--screen", "02_control_populated"], height=923)
+            try:
+                comp.wait_ready(timeout=15.0)
+                h_init = comp.last_frame_hash
+                sidebar_top_init = comp.region_hash(0, 0, 120, 40)
+                project_pill_init = comp.region_hash(535, 370, 620, 410)
+                machine_pill_init = comp.region_hash(615, 370, 780, 410)
+                composer_init = comp.region_hash(535, 415, 1155, 515)
+
+                # Keyboard Tab focuses first focusable button (sidebar toggle) with visible focusRing.
+                comp.key_tap("tab")
+                comp.wait_frame_change(h_init, timeout=5.0)
+                sidebar_top_tabbed = comp.region_hash(0, 0, 120, 40)
+                self.assertNotEqual(
+                    sidebar_top_tabbed,
+                    sidebar_top_init,
+                    "Tab navigation must paint keyboard :focus-visible ring on sidebar toggle",
+                )
+
+                # Pointer click on Project pill transfers logical focus quietly (clears sidebar toggle's
+                # keyboard ring, leaves Project pill visually quiet with no harsh focusRing border).
+                comp.pointer_click(575, 390)
+                comp.wait_region_change(0, 0, 120, 40, sidebar_top_tabbed, timeout=5.0)
+                self.assertEqual(
+                    comp.region_hash(0, 0, 120, 40),
+                    sidebar_top_init,
+                    "pointer click must clear previous keyboard focusRing",
+                )
+                self.assertEqual(
+                    comp.region_hash(535, 370, 620, 410),
+                    project_pill_init,
+                    "pointer click on Project pill must stay visually quiet (no focusRing)",
+                )
+
+                # Pressing Tab from the pointer-focused Project pill moves focus to the adjacent
+                # machine pill (`720`) AND turns :focus-visible back on.
+                comp.key_tap("tab")
+                comp.wait_region_change(615, 370, 780, 410, machine_pill_init, timeout=5.0)
+
+                # Pointer click on composer (`1`) draws its vertical text caret cleanly even on click,
+                # and clears the previous keyboard ring on the machine pill.
+                comp.pointer_click(845, 435)
+                comp.wait_region_change(535, 415, 1155, 515, composer_init, timeout=5.0)
+                self.assertEqual(
+                    comp.region_hash(615, 370, 780, 410),
+                    machine_pill_init,
+                    "clicking composer must clear keyboard focusRing on machine pill",
+                )
+            finally:
+                self._shutdown(comp, proc)
+
+            # 2. Scrollbar track jump + thumb drag on overflowing 03_mission_transcript (1470x600).
+            sub_scroll = root / "scrollbar_fixture"
+            sub_scroll.mkdir()
+            comp, proc = self._launch(sub_scroll, ["--screen", "03_mission_transcript"], height=600)
+            try:
+                comp.wait_ready(timeout=15.0)
+                tx_top = comp.region_hash(240, 45, 1450, 485)
+
+                # Track jump: press in right-edge scrollbar gutter (x=1464) below thumb -> jumps immediately.
+                comp.pointer_press(1464, 465)
+                tx_jumped = comp.wait_region_change(240, 45, 1450, 485, tx_top, timeout=5.0)
+
+                # Continue holding and drag upward toward top -> scrolls smoothly back up.
+                comp.pointer_move(1464, 60)
+                tx_dragged_up = comp.wait_region_change(240, 45, 1450, 485, tx_jumped, timeout=5.0)
+                comp.pointer_release(1464, 60)
+
+                # Direct thumb drag downward from near top -> scrolls back down.
+                comp.pointer_press(1464, 90)
+                comp.pointer_move(1464, 340)
+                tx_thumb_down = comp.wait_region_change(240, 45, 1450, 485, tx_dragged_up, timeout=5.0)
+                comp.pointer_release(1464, 340)
+                self.assertNotEqual(tx_thumb_down, tx_dragged_up)
+            finally:
+                self._shutdown(comp, proc)
+
+            # 3. Live mission scrollbar thumb drag upward unpins Orb.Scroll during incoming stream.
+            core_state = DisposableCoreState()
+
+            def count_req(method: str, prefix: str) -> int:
+                with core_state.lock:
+                    return sum(1 for m, p, _ in core_state.requests_log if m == method and p.startswith(prefix))
+
+            sub_live = root / "scrollbar_live"
+            sub_live.mkdir()
+            with ThreadingHTTPServer(("127.0.0.1", 0), make_core_handler(core_state)) as server:
+                threading.Thread(target=server.serve_forever, daemon=True).start()
+                try:
+                    api_url = f"http://127.0.0.1:{server.server_port}"
+                    (sub_live / "connection.json").write_text(json.dumps({"api_url": api_url, "token": "u6-sb-token"}))
+                    comp, proc = self._launch(sub_live, [], height=923)
+                    try:
+                        comp.wait_ready(timeout=15.0)
+                        h_boot = comp.last_frame_hash
+                        _wait_until("roster /api/auth/me", lambda: count_req("GET", "/api/auth/me") >= 1)
+                        comp.wait_frame_change(h_boot, timeout=5.0)
+
+                        comp.key_tap("n", MOD_CTRL)
+                        comp.wait_text_input(True, timeout=5.0)
+                        comp.type_ascii("Scrollbar drag test")
+                        comp.key_tap("return")
+
+                        created = _wait_until(
+                            "POST /api/control/missions",
+                            lambda: core_state.missions[0] if core_state.missions else None,
+                        )
+                        mid = created["id"]
+                        tx_before = comp.region_hash(240, 45, 1450, 810)
+                        _wait_until("mission /open", lambda: count_req("GET", f"/api/control/missions/{mid}/open") >= 1)
+                        _wait_until(
+                            "mission /current-bubble settled",
+                            lambda: count_req("GET", f"/api/control/missions/{mid}/current-bubble") >= 2,
+                            timeout=6.0,
+                        )
+                        tx_bottom = comp.wait_region_change(240, 45, 1450, 810, tx_before, timeout=5.0)
+
+                        # Drag right-edge scrollbar thumb upward from bottom (y=790 -> y=120) to unpin Orb.Scroll.
+                        comp.pointer_press(1464, 790)
+                        comp.pointer_move(1464, 120)
+                        tx_dragged = comp.wait_region_change(240, 45, 1450, 810, tx_bottom, timeout=5.0)
+                        comp.pointer_release(1464, 120)
+
+                        polls_before = count_req("GET", f"/api/control/missions/{mid}/current-bubble")
+                        with core_state.lock:
+                            core_state.append_assistant_delta(mid, "Streamed delta 50: arrived after scrollbar drag up.")
+                        _wait_until(
+                            "current-bubble polls after scrollbar drag",
+                            lambda: count_req("GET", f"/api/control/missions/{mid}/current-bubble") >= polls_before + 2,
+                            timeout=6.0,
+                        )
+                        self.assertEqual(
+                            comp.region_hash(240, 45, 1450, 810),
+                            tx_dragged,
+                            "dragging scrollbar upward must unpin Orb.Scroll so incoming deltas do not jump viewport",
+                        )
+
+                        # Track jump near bottom re-pins Orb.Scroll and reveals the new streamed delta.
+                        comp.pointer_click(1464, 800)
+                        tx_repinned = comp.wait_region_change(240, 45, 1450, 810, tx_dragged, timeout=5.0)
+                        self.assertNotEqual(tx_repinned, tx_dragged)
+                    finally:
+                        self._shutdown(comp, proc)
+                finally:
+                    server.shutdown()
 
 
 if __name__ == "__main__":

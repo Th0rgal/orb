@@ -1,5 +1,6 @@
 import SwiftUI
 import UIKit
+import UniformTypeIdentifiers
 
 // MARK: - Models & Routing (Orb: RoutingSettings.tsx, /api/model-routing)
 
@@ -1318,5 +1319,460 @@ private struct OrbSoulEditorView: View {
             .background(OrbStyle.background)
             .navigationTitle("Persona (SOUL.md)")
             .navigationBarTitleDisplayMode(.inline)
+    }
+}
+
+// MARK: - AirVPN settings & account routes (Orb: AirVpnSettings.tsx, airVpnModel.ts)
+
+enum OrbAirVpnModel {
+    struct TunnelSummary: Equatable, Sendable {
+        let device: String
+        let country: String
+        let server: String
+        let exits: [String]
+        let accounts: Int
+    }
+
+    struct ProfileView: Equatable, Sendable, Identifiable {
+        var id: String { device }
+        let device: String
+        let country: String
+        let server: String
+        let active: Bool
+        let exits: [String]
+        let accounts: Int
+    }
+
+    struct StatusView: Equatable, Sendable {
+        let apiKeyConfigured: Bool
+        let sessionLimit: Int
+        let profiles: [ProfileView]
+        let activeTunnels: [TunnelSummary]
+    }
+
+    struct FilenameHint: Equatable, Sendable {
+        let country: String
+        let server: String
+        let device: String
+    }
+
+    private static func asInt(_ val: OrbJSON, fallback: Int) -> Int {
+        if let d = val.doubleValue, d.isFinite { return max(0, Int(d)) }
+        if case .string(let s) = val, !s.isEmpty, s.allSatisfy(\.isNumber), let n = Int(s) { return max(0, n) }
+        return fallback
+    }
+
+    static func parseStatus(_ payload: OrbJSON) -> StatusView? {
+        guard case .object = payload,
+              case .bool(let configured) = payload["api_key_configured"],
+              case .array(let rawDevices) = payload["devices"] else {
+            return nil
+        }
+        var devices = rawDevices.compactMap { item -> String? in
+            let s = item.text
+            return s.isEmpty ? nil : s
+        }
+        let sessionLimit = max(1, asInt(payload["session_limit"], fallback: 5))
+
+        var activeTunnels: [TunnelSummary] = []
+        if case .array(let rawTunnels) = payload["active_tunnels"] {
+            for t in rawTunnels {
+                let dev = t["device"].text
+                guard !dev.isEmpty else { continue }
+                let exits = t["exits"].items.map(\.text).filter { !$0.isEmpty }
+                activeTunnels.append(TunnelSummary(
+                    device: dev,
+                    country: t["country"].text,
+                    server: t["server"].text,
+                    exits: exits,
+                    accounts: asInt(t["accounts"], fallback: 0)
+                ))
+            }
+        }
+        var tunnelByDevice: [String: TunnelSummary] = [:]
+        for t in activeTunnels { tunnelByDevice[t.device] = t }
+
+        var metaByDevice: [String: (country: String, server: String)] = [:]
+        if case .array(let rawProfiles) = payload["profiles"] {
+            for p in rawProfiles {
+                let dev = p["device"].text
+                guard !dev.isEmpty else { continue }
+                metaByDevice[dev] = (p["country"].text, p["server"].text)
+                if !devices.contains(dev) { devices.append(dev) }
+            }
+        }
+
+        let profiles = devices.map { dev -> ProfileView in
+            let meta = metaByDevice[dev]
+            let live = tunnelByDevice[dev]
+            let country = !(meta?.country.isEmpty ?? true) ? meta!.country : (live?.country ?? "")
+            let server = !(meta?.server.isEmpty ?? true) ? meta!.server : (live?.server ?? "")
+            return ProfileView(
+                device: dev,
+                country: country,
+                server: server,
+                active: live != nil,
+                exits: live?.exits ?? [],
+                accounts: live?.accounts ?? 0
+            )
+        }
+        return StatusView(
+            apiKeyConfigured: configured,
+            sessionLimit: sessionLimit,
+            profiles: profiles,
+            activeTunnels: activeTunnels
+        )
+    }
+
+    private static func slugify(_ raw: String) -> String {
+        var out = ""
+        var prevDash = false
+        for ch in raw.lowercased() {
+            if (ch >= "a" && ch <= "z") || (ch >= "0" && ch <= "9") {
+                out.append(ch)
+                prevDash = false
+            } else if !prevDash && !out.isEmpty {
+                out.append("-")
+                prevDash = true
+            }
+        }
+        while out.last == "-" { out.removeLast() }
+        return String(out.prefix(64))
+    }
+
+    static func parseFilenameHint(_ filename: String) -> FilenameHint {
+        let leaf = filename.split(whereSeparator: { $0 == "/" || $0 == "\\" }).last.map(String.init) ?? filename
+        let base: String
+        if leaf.lowercased().hasSuffix(".conf") {
+            base = String(leaf.dropLast(5)).trimmingCharacters(in: .whitespacesAndNewlines)
+        } else {
+            base = leaf.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        guard !base.isEmpty else { return FilenameHint(country: "", server: "", device: "") }
+
+        if let re = try? NSRegularExpression(
+            pattern: "^AirVPN_([A-Za-z]{2})(?:-[A-Za-z0-9-]+)?_([A-Za-z0-9-]+?)(?:_(?:UDP|TCP|Entry|TLS|IPv4|IPv6).*)?$",
+            options: [.caseInsensitive]
+        ), let match = re.firstMatch(in: base, range: NSRange(base.startIndex..., in: base)),
+           let ccRange = Range(match.range(at: 1), in: base),
+           let srvRange = Range(match.range(at: 2), in: base) {
+            let cc = base[ccRange].uppercased()
+            let srv = String(base[srvRange])
+            return FilenameHint(country: cc, server: srv, device: slugify("orb-\(cc)-\(srv)"))
+        }
+
+        if base.count <= 56, base.allSatisfy({ $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "-") }) {
+            return FilenameHint(country: "", server: base, device: slugify("orb-\(base)"))
+        }
+        return FilenameHint(country: "", server: "", device: "")
+    }
+
+    static func sessionSummary(activeSessions: Int?, orbTunnels: Int, sessionLimit: Int = 5) -> String {
+        let limit = sessionLimit > 0 ? sessionLimit : 5
+        let orb = max(0, orbTunnels)
+        guard let rawActive = activeSessions else {
+            if orb == 0 { return "Up to \(limit) concurrent sessions across AirVPN" }
+            return "\(orb) Orb tunnel\(orb == 1 ? "" : "s") active · up to \(limit) concurrent sessions"
+        }
+        let active = max(0, rawActive)
+        let external = max(0, active - orb)
+        let free = max(0, limit - active)
+        return "\(active) / \(limit) active sessions · \(orb) Orb tunnel\(orb == 1 ? "" : "s") · \(external) external · \(free) free"
+    }
+}
+
+struct OrbAirVpnSettings: View {
+    @State private var client = OrbSettingsClient()
+    @State private var status: OrbAirVpnModel.StatusView?
+    @State private var providers: [OrbJSON] = []
+    @State private var activeSessions: Int?
+    @State private var error = ""
+    @State private var notice = ""
+    @State private var busy = false
+
+    @State private var editingKey = false
+    @State private var keyDraft = ""
+
+    @State private var importingProfile = false
+    @State private var replacingDevice: String?
+    @State private var deviceDraft = ""
+    @State private var countryDraft = ""
+    @State private var serverDraft = ""
+    @State private var profileDraft = ""
+    @State private var pickingFile = false
+
+    @State private var deletingDevice: String?
+
+    private var isAdmin: Bool { OrbCore.shared.isAdminUser }
+
+    var body: some View {
+        List {
+            OrbSettingsError(message: error)
+            if !notice.isEmpty {
+                Section { Text(notice).font(.footnote) }
+            }
+            if isAdmin {
+                subscriptionSection
+                profilesSection
+            }
+            accountRoutesSection
+        }
+        .scrollContentBackground(.hidden).background(OrbStyle.background)
+        .navigationTitle("AirVPN").navigationBarTitleDisplayMode(.inline)
+        .refreshable { await load() }
+        .task { await load() }
+        .alert("AirVPN API key", isPresented: $editingKey) {
+            SecureField("AirVPN API key", text: $keyDraft)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+            Button("Save key") { Task { await saveKey() } }
+                .disabled(keyDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            Button("Cancel", role: .cancel) { keyDraft = "" }
+        } message: {
+            Text("Generate a key in AirVPN’s Client Area → API. Core encrypts it at rest.")
+        }
+        .sheet(isPresented: $importingProfile) {
+            importProfileSheet
+        }
+        .alert("Remove \(deletingDevice ?? "")?", isPresented: Binding(get: { deletingDevice != nil }, set: { if !$0 { deletingDevice = nil } })) {
+            Button("Remove profile", role: .destructive) {
+                if let dev = deletingDevice { Task { await removeProfile(dev) } }
+            }
+            Button("Cancel", role: .cancel) { deletingDevice = nil }
+        } message: {
+            Text("Any active Orb tunnel using this WireGuard device profile will be drained and disconnected.")
+        }
+    }
+
+    private var subscriptionSection: some View {
+        Section {
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("API key")
+                    Text(status?.apiKeyConfigured == true ? "Configured · Stored encrypted on Core" : "Not configured")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button(status?.apiKeyConfigured == true ? "Update" : "Set key") {
+                    keyDraft = ""
+                    editingKey = true
+                }
+                .disabled(busy)
+            }
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Session budget").font(.subheadline)
+                Text(OrbAirVpnModel.sessionSummary(
+                    activeSessions: activeSessions,
+                    orbTunnels: status?.activeTunnels.count ?? 0,
+                    sessionLimit: status?.sessionLimit ?? 5
+                ))
+                .font(.caption).foregroundStyle(.secondary)
+                if status?.apiKeyConfigured == true {
+                    Button("Check active sessions") { Task { await checkSessions() } }
+                        .disabled(busy)
+                }
+            }
+        } header: {
+            Text("Subscription & sessions")
+        } footer: {
+            Text("AirVPN allows up to 5 concurrent WireGuard sessions across Orb and external devices.")
+        }
+    }
+
+    private var profilesSection: some View {
+        Section {
+            if let profiles = status?.profiles, !profiles.isEmpty {
+                ForEach(profiles) { prof in
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(prof.country.isEmpty ? prof.device : "\(prof.country) · \(prof.server.isEmpty ? prof.device : prof.server)")
+                            .font(.subheadline.weight(.medium))
+                        Text(profileSubtitle(prof))
+                            .font(.caption.monospaced())
+                            .foregroundStyle(.secondary)
+                    }
+                    .swipeActions(edge: .trailing) {
+                        Button("Remove", role: .destructive) { deletingDevice = prof.device }
+                        Button("Replace") { openImportSheet(prof) }.tint(.blue)
+                    }
+                }
+            } else {
+                Text("No WireGuard profiles imported.").foregroundStyle(.secondary)
+            }
+            Button("Import WireGuard profile…") { openImportSheet(nil) }
+                .disabled(busy)
+        } header: {
+            Text("WireGuard profiles (\(status?.profiles.count ?? 0))")
+        } footer: {
+            Text("Different provider categories share one tunnel per country. Import extra profiles in the same country only when multiple accounts of the same provider need distinct public exits.")
+        }
+    }
+
+    private var accountRoutesSection: some View {
+        Section {
+            if providers.isEmpty {
+                Text("No connected provider accounts.").foregroundStyle(.secondary)
+            } else {
+                ForEach(providers, id: \.selfID) { account in
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text(account["name"].text.isEmpty ? account.selfID : account["name"].text)
+                            .font(.subheadline.weight(.medium))
+                        OrbAccountVpnSettings(
+                            client: client,
+                            account: account.selfID,
+                            nativeAccount: account["provider_type"].text == "antigravity"
+                        )
+                    }
+                    .padding(.vertical, 2)
+                }
+            }
+        } header: {
+            Text("Account routes")
+        }
+    }
+
+    private var importProfileSheet: some View {
+        NavigationStack {
+            Form {
+                Section("WireGuard .conf file") {
+                    Button("Choose .conf file from Files…") { pickingFile = true }
+                    TextEditor(text: $profileDraft)
+                        .font(.system(.caption, design: .monospaced))
+                        .frame(minHeight: 120)
+                }
+                Section("Server metadata") {
+                    TextField("Country code (e.g. CH, NL, FR)", text: $countryDraft)
+                        .textInputAutocapitalization(.characters)
+                        .autocorrectionDisabled()
+                    TextField("AirVPN server name (e.g. Kitalpha)", text: $serverDraft)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                    TextField("Device name (e.g. orb-ch)", text: $deviceDraft)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                        .disabled(replacingDevice != nil)
+                }
+            }
+            .navigationTitle(replacingDevice.map { "Replace \($0)" } ?? "Import profile")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { profileDraft = ""; importingProfile = false }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Import") { Task { await saveProfile() } }
+                        .disabled(busy || profileDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }
+            }
+            .fileImporter(isPresented: $pickingFile, allowedContentTypes: [.data, .plainText]) { result in
+                guard case .success(let url) = result else { return }
+                let scoped = url.startAccessingSecurityScopedResource()
+                defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+                if let data = try? Data(contentsOf: url), data.count <= 30_000,
+                   let text = String(data: data, encoding: .utf8) {
+                    let hint = OrbAirVpnModel.parseFilenameHint(url.lastPathComponent)
+                    if countryDraft.trimmingCharacters(in: .whitespaces).isEmpty && !hint.country.isEmpty {
+                        countryDraft = hint.country
+                    }
+                    if serverDraft.trimmingCharacters(in: .whitespaces).isEmpty && !hint.server.isEmpty {
+                        serverDraft = hint.server
+                    }
+                    if replacingDevice == nil && deviceDraft.trimmingCharacters(in: .whitespaces).isEmpty && !hint.device.isEmpty {
+                        deviceDraft = hint.device
+                    }
+                    profileDraft = text
+                }
+            }
+        }
+    }
+
+    private func profileSubtitle(_ prof: OrbAirVpnModel.ProfileView) -> String {
+        if prof.active {
+            let ipText = prof.exits.isEmpty ? "" : " · \(prof.exits.joined(separator: ", "))"
+            return "\(prof.device) · Active\(ipText) · \(prof.accounts) account\(prof.accounts == 1 ? "" : "s")"
+        }
+        return "\(prof.device) · Idle"
+    }
+
+    private func openImportSheet(_ existing: OrbAirVpnModel.ProfileView?) {
+        replacingDevice = existing?.device
+        deviceDraft = existing?.device ?? ""
+        countryDraft = existing?.country ?? ""
+        serverDraft = existing?.server ?? ""
+        profileDraft = ""
+        importingProfile = true
+    }
+
+    private func load() async {
+        do {
+            if isAdmin {
+                let raw = try await client.call("/api/settings/airvpn")
+                status = OrbAirVpnModel.parseStatus(raw)
+            }
+            let list = try await client.call("/api/ai/providers")
+            let rows = list.items.isEmpty ? list["providers"].items : list.items
+            providers = rows.filter {
+                if case .bool(false) = $0["has_credentials"] { return false }
+                return !$0.selfID.isEmpty
+            }
+            error = ""
+        } catch is CancellationError {} catch { self.error = error.localizedDescription }
+    }
+
+    private func saveKey() async {
+        let clean = keyDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !clean.isEmpty else { return }
+        busy = true; defer { busy = false }
+        do {
+            _ = try await client.call("/api/settings/airvpn", method: "PUT", body: .object(["api_key": .string(clean)]))
+            keyDraft = ""
+            editingKey = false
+            notice = "API key saved."
+            await load()
+        } catch is CancellationError {} catch { self.error = error.localizedDescription }
+    }
+
+    private func checkSessions() async {
+        busy = true; defer { busy = false }
+        do {
+            let res = try await client.call("/api/settings/airvpn", method: "POST")
+            let count = Int(res["active_sessions"].doubleValue ?? Double(res["active_sessions"].text) ?? 0)
+            activeSessions = count
+            notice = "AirVPN reports \(count) active session\(count == 1 ? "" : "s")."
+            await load()
+        } catch is CancellationError {} catch { self.error = error.localizedDescription }
+    }
+
+    private func saveProfile() async {
+        let dev = deviceDraft.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let cc = countryDraft.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+        let srv = serverDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        let conf = profileDraft
+        guard !dev.isEmpty, cc.count == 2, !srv.isEmpty, !conf.isEmpty else {
+            error = "Fill in country code, AirVPN server name, device name, and WireGuard profile."
+            return
+        }
+        busy = true; defer { busy = false }
+        do {
+            _ = try await client.call("/api/settings/airvpn", method: "PUT", body: .object([
+                "device_id": .string(dev),
+                "country": .string(cc),
+                "server": .string(srv),
+                "profile": .string(conf),
+            ]))
+            profileDraft = ""
+            importingProfile = false
+            notice = "Device profile saved."
+            await load()
+        } catch is CancellationError {} catch { self.error = error.localizedDescription }
+    }
+
+    private func removeProfile(_ dev: String) async {
+        busy = true; defer { busy = false }
+        do {
+            _ = try await client.call("/api/settings/airvpn", method: "DELETE", body: .object(["device_id": .string(dev)]))
+            deletingDevice = nil
+            notice = "Removed profile \(dev)."
+            await load()
+        } catch is CancellationError {} catch { self.error = error.localizedDescription }
     }
 }

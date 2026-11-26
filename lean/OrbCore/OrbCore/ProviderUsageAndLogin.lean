@@ -962,272 +962,6 @@ private def findHeaderCI? (hdrs : Array (String × String)) (name : String) : Op
   let nl := name.toLower
   (hdrs.find? (fun (k, _) => k.toLower == nl)).map Prod.snd
 
-private def buildOptimizeWindow
-    (key label metric source : String)
-    (pctUsed : String)
-    (windowSecs : Nat)
-    (resetAt? : Option String) : JVal :=
-  let usedNat := ((pctUsed.splitOn ".").headD "0").toNat?.getD 0
-  let remNat := if usedNat >= 100 then 0 else 100 - usedNat
-  .obj #[
-    ("key", .str key),
-    ("label", .str label),
-    ("metric", .str metric),
-    ("source", .str source),
-    ("pct_used", .num pctUsed),
-    ("pct_remaining", JVal.nat remNat),
-    ("limit", .null),
-    ("remaining", .null),
-    ("used", .null),
-    ("window_seconds", JVal.nat windowSecs),
-    ("reset_at", match resetAt? with | some r => if r.isEmpty then .null else .str r | none => .null),
-    ("reset_in_seconds", .null)
-  ]
-
-/-- Pick the optimize window key with the lowest `pct_remaining` (matching `usage_optimize.rs`). -/
-def selectPrimaryOptimizeWindow (windows : Array JVal) : JVal := Id.run do
-  let mut bestKey? : Option String := none
-  let mut bestRem : Nat := 1000000
-  for w in windows do
-    let some k := w.fieldStr? "key" | continue
-    let rem := (w.fieldNat? "pct_remaining").getD 100
-    if bestKey?.isNone || rem < bestRem then
-      bestKey? := some k
-      bestRem := rem
-  match bestKey? with
-  | some k => .str k
-  | none => .null
-
-/-- Match the historical serde `as_i64` reset contract: integer JSON only,
-    including zero/negative values, without wrapping values outside signed i64. -/
-private def codexResetEpoch? (window : JVal) : Option Int := do
-  let epoch ← window.fieldInt? "reset_at"
-  if epoch < (-9223372036854775808 : Int) then none
-  else if epoch > (9223372036854775807 : Int) then none
-  else some epoch
-
-/-- Derive the `(key, label)` for a Codex optimize window from its reported duration in seconds,
-    matching the actual window length rather than assuming `primary = 5h`. -/
-private def codexOptimizeWindowKeyLabel (winSecs : Nat) (fallbackKey fallbackLabel : String) : String × String :=
-  let mins := winSecs / 60
-  if mins == 0 then (fallbackKey, fallbackLabel)
-  else if mins == 10080 then ("7d", "7-day")
-  else if mins >= 1440 && mins % 1440 == 0 then
-    let d := mins / 1440
-    (s!"{d}d", s!"{d}-day")
-  else if mins >= 60 && mins % 60 == 0 then
-    let h := mins / 60
-    (s!"{h}h", s!"{h}-hour")
-  else
-    (s!"{mins}m", s!"{mins}-minute")
-
-/-- Extract an optional human-readable window/limit name when upstream `wham/usage` provides one. -/
-private def codexWindowUpstreamLabel? (w : JVal) : Option String :=
-  let tryKey (k : String) : Option String :=
-    (w.fieldStr? k).map (·.trimAscii.toString) |>.filter (!·.isEmpty)
-  tryKey "limit_name" <|> tryKey "label" <|> tryKey "name" <|> tryKey "title" <|> tryKey "window_name"
-
-/-- The production wham projection, kept pure so wire fixtures need no vendor calls.
-    Scalar Codex fields and optimize-window fields have separate client contracts. -/
-def projectCodexUsage (wham : JVal) : Array (String × JVal) × Array JVal × JVal := Id.run do
-  let mut fields : Array (String × JVal) := #[
-    ("codex_plan_type", .str ((wham.fieldStr? "plan_type").getD "pro")),
-    ("codex_source", .str "usage")]
-  let mut windows : Array JVal := #[]
-  if let some rl := wham.field? "rate_limit" then
-    let mut primaryBaseKey? : Option String := none
-    let mut primaryBaseLabel? : Option String := none
-    if let some pw := rl.field? "primary_window" then
-      let usedPct := match pw.field? "used_percent" with | some (.num n) => n | _ => "0"
-      let resetEpoch? := codexResetEpoch? pw
-      let resetSec := (resetEpoch?.map (fun epoch => epoch.toNat.toUInt64)).getD 0
-      let resetIso := if resetSec > 0 then formatEpochIso8601Utc resetSec else ""
-      let winSecs := (pw.fieldNat? "limit_window_seconds").getD 18000
-      fields := fields.push ("codex_primary_used_percent", .num usedPct)
-      fields := fields.push ("codex_primary_window_minutes", JVal.nat (winSecs / 60))
-      if let some epoch := resetEpoch? then
-        fields := fields.push ("codex_primary_reset_at", JVal.int epoch)
-      let upstreamLbl? := codexWindowUpstreamLabel? pw
-      if let some lbl := upstreamLbl? then
-        fields := fields.push ("codex_primary_window_label", .str lbl)
-      let (baseKey, baseLabel) := codexOptimizeWindowKeyLabel winSecs "primary" "Primary"
-      primaryBaseKey? := some baseKey
-      primaryBaseLabel? := some baseLabel
-      let optLabel := upstreamLbl?.getD baseLabel
-      windows := windows.push (buildOptimizeWindow baseKey optLabel "used_pct" "codex_wham" usedPct winSecs (some resetIso))
-    if let some sw := rl.field? "secondary_window" then
-      let usedPct := match sw.field? "used_percent" with | some (.num n) => n | _ => "0"
-      let resetEpoch? := codexResetEpoch? sw
-      let resetSec := (resetEpoch?.map (fun epoch => epoch.toNat.toUInt64)).getD 0
-      let resetIso := if resetSec > 0 then formatEpochIso8601Utc resetSec else ""
-      let winSecs := (sw.fieldNat? "limit_window_seconds").getD 604800
-      fields := fields.push ("codex_secondary_used_percent", .num usedPct)
-      fields := fields.push ("codex_secondary_window_minutes", JVal.nat (winSecs / 60))
-      if let some epoch := resetEpoch? then
-        fields := fields.push ("codex_secondary_reset_at", JVal.int epoch)
-      let upstreamLbl? := codexWindowUpstreamLabel? sw
-      if let some lbl := upstreamLbl? then
-        fields := fields.push ("codex_secondary_window_label", .str lbl)
-      let (baseKey, baseLabel) := codexOptimizeWindowKeyLabel winSecs "secondary" "Secondary"
-      let sameKey := primaryBaseKey? == some baseKey
-      let sameLabel := primaryBaseLabel? == some baseLabel
-      let optKey := if sameKey then s!"{baseKey}_secondary" else baseKey
-      let optLabel := match upstreamLbl? with
-        | some lbl => lbl
-        | none => if sameLabel then s!"{baseLabel} (secondary)" else baseLabel
-      windows := windows.push (buildOptimizeWindow optKey optLabel "used_pct" "codex_wham" usedPct winSecs (some resetIso))
-  return (fields, windows, selectPrimaryOptimizeWindow windows)
-
-/-- A JSON fraction (`1`, `0.9972415`, `2.5e-05`) as millionths, clamped to `[0, 1_000_000]`. -/
-def antigravityFractionMicros? (raw : String) : Option Nat := do
-  let s := raw.trimAscii.toString
-  if s.startsWith "-" then return 0
-  let (mant, exp) ← match s.splitOn "e" with
-    | [m] => match m.splitOn "E" with
-      | [m'] => some (m', (0 : Int))
-      | [m', e] => (String.toInt? e).map (m', ·)
-      | _ => none
-    | [m, e] => (String.toInt? e).map (m, ·)
-    | _ => none
-  let (whole, frac) ← match mant.splitOn "." with
-    | [w] => some (w, "")
-    | [w, f] => some (w, f)
-    | _ => none
-  let digits ← (whole ++ frac).toNat?
-  let shift : Int := 6 + exp - frac.length
-  let micros := if shift ≥ 0 then digits * 10 ^ shift.toNat else digits / 10 ^ (-shift).toNat
-  return min micros 1000000
-
-/-- Used share of a remaining fraction, in tenths of a percent (`1000` = 100%). -/
-def antigravityUsedTenths (remainingMicros : Nat) : Nat :=
-  (1000000 - min remainingMicros 1000000 + 500) / 1000
-
-private def antigravityWindowJv (label : String) (usedTenths : Nat) (reset? : Option UInt64) : JVal :=
-  let base := #[("label", .str label), ("used_percent", .num s!"{usedTenths / 10}.{usedTenths % 10}")]
-  .obj (match reset? with | some r => base.push ("reset_at", .num (toString r)) | none => base)
-
-private def antigravityReset? (bucket : JVal) : Option UInt64 :=
-  (bucket.fieldStr? "resetTime").bind parseIso8601EpochU64?
-
-private def antigravityRemaining? (bucket : JVal) : Option Nat :=
-  match bucket.field? "remainingFraction" with
-  | some (.num raw) => antigravityFractionMicros? raw
-  | _ => none
-
-private def antigravityGroupLabel (group : JVal) : String :=
-  let ids := ((group.fieldArr? "buckets").getD #[]).filterMap (·.fieldStr? "bucketId")
-  if ids.any (·.startsWith "gemini-") then "Gemini"
-  else if ids.any (·.startsWith "3p-") then "Claude & GPT"
-  else
-    let n := (group.fieldStr? "displayName").getD ""
-    let n := if n.endsWith " models" || n.endsWith " Models" then (n.dropEnd 7).toString else n
-    if n.isEmpty then "Models" else n
-
-/-- `retrieveUserQuotaSummary`: one window per group and quota period (5h, daily, weekly). -/
-def parseAntigravitySummary (payload : JVal) : Array JVal := Id.run do
-  let rank (b : JVal) : Nat := match b.fieldStr? "window" with
-    | some "5h" => 0 | some "daily" => 1 | some "weekly" => 2 | _ => 3
-  let mut out : Array JVal := #[]
-  for group in (payload.fieldArr? "groups").getD #[] do
-    let name := antigravityGroupLabel group
-    let buckets := ((group.fieldArr? "buckets").getD #[]).toList.mergeSort (fun a b => rank a ≤ rank b)
-    for bucket in buckets do
-      -- Google omits a zero remaining fraction: a bucket with a reset but no figure is spent.
-      let some remaining := (antigravityRemaining? bucket).orElse
-          (fun _ => (antigravityReset? bucket).map (fun _ => 0)) | continue
-      let window := match (bucket.fieldStr? "window").getD "" with
-        | "weekly" => "Weekly"
-        | "daily" => "Daily"
-        | other => other
-      if window.isEmpty then continue
-      out := out.push (antigravityWindowJv s!"{name} · {window}" (antigravityUsedTenths remaining) (antigravityReset? bucket))
-  return out
-
-/-- Gemini quota from `retrieveUserQuota` (`buckets` or `models.*.quotaInfo`) when the summary
-    has no Gemini group: the tightest remaining fraction, named 5h or Weekly from its reset. -/
-def antigravityGeminiWindow? (payload : JVal) (nowSec : UInt64) : Option JVal := Id.run do
-  let isGemini (id : String) : Bool :=
-    let m := id.toLower
-    ((m.splitOn "gemini").length > 1 && (m.splitOn "carbon").length == 1) || m.startsWith "agy-demo"
-  let mut entries : Array (String × JVal) := #[]
-  for b in (payload.fieldArr? "buckets").getD #[] do
-    if let some id := b.fieldStr? "modelId" then entries := entries.push (id, b)
-  if let some (.obj models) := payload.field? "models" then
-    for (id, m) in models do
-      entries := entries.push (id, (m.field? "quotaInfo").getD .null)
-  let mut remaining : Option Nat := none
-  let mut reset : Option UInt64 := none
-  for (id, info) in entries do
-    if !isGemini id then continue
-    let resetAt := antigravityReset? info
-    let frac? : Option Nat := match info.field? "remainingFraction", resetAt with
-      | some (.num raw), _ => antigravityFractionMicros? raw
-      | _, some _ => some 0
-      | _, none => none
-    let some frac := frac? | continue
-    remaining := some (match remaining with | some r => min r frac | none => frac)
-    if frac < 1000000 then
-      reset := match reset, resetAt with
-        | some a, some b => some (min a b)
-        | a, b => a <|> b
-  let some rem := remaining | return none
-  let window := match reset with
-    | some r => if r > nowSec + 5 * 3600 + 600 then "Weekly" else "5h"
-    | none => "5h"
-  return some (antigravityWindowJv s!"Gemini · {window}" (antigravityUsedTenths rem) reset)
-
-private def antigravityFamily? (model : String) : Option String :=
-  let m := model.toLower
-  if (m.splitOn "claude").length > 1 then some "Claude"
-  else if (m.splitOn "gpt").length > 1 then some "GPT-OSS"
-  else if (m.splitOn "image").length > 1 then some "Image"
-  else if (m.splitOn "gemini").length > 1 && (m.splitOn "pro").length > 1 then some "Gemini Pro"
-  else if (m.splitOn "gemini").length > 1 && (m.splitOn "flash").length > 1 then some "Gemini Flash"
-  else if m.startsWith "agy-" then some "Gemini Agent"
-  else none
-
-/-- `retrieveUserQuota` fallback: per-model buckets merged into one window per model family.
-    Google omits a zero remaining fraction, so a bucket with a reset but no figure is spent. -/
-def parseAntigravityQuota (payload : JVal) : Array JVal := Id.run do
-  let mut wins : Array (String × Nat × Option UInt64) := #[]
-  for bucket in (payload.fieldArr? "buckets").getD #[] do
-    let some label := (bucket.fieldStr? "modelId").bind antigravityFamily? | continue
-    let reset := antigravityReset? bucket
-    let remaining? : Option Nat := match bucket.field? "remainingFraction", reset with
-      | some (.num raw), _ => antigravityFractionMicros? raw
-      | _, some _ => some 0
-      | _, none => none
-    let some remaining := remaining? | continue
-    let used := antigravityUsedTenths remaining
-    if reset.isNone && used == 0 then continue
-    match wins.findIdx? (·.1 == label) with
-    | some i =>
-      let (_, u, r) := wins[i]!
-      let r' := match r, reset with
-        | some a, some b => some (min a b)
-        | a, b => a <|> b
-      wins := wins.set! i (label, max u used, r')
-    | none => wins := wins.push (label, used, reset)
-  return wins.map fun (l, u, r) => antigravityWindowJv l u r
-
-/-- `seven_day_<model>` objects of Anthropic's OAuth usage (`{utilization, resets_at}`, percent)
-    as `{label: "<Model> · Weekly", used_percent, reset_at?}`. Unknown model keys pass through,
-    so a newly metered model appears without a client change. -/
-def anthropicModelWindows (usage : JVal) : Array JVal := Id.run do
-  let .obj fields := usage | return #[]
-  let mut out : Array JVal := #[]
-  for (key, v) in fields do
-    if !key.startsWith "seven_day_" || key == "seven_day_oauth_apps" then continue
-    let some (.num pct) := v.field? "utilization" | continue
-    let model := (key.drop 10).toString.replace "_" " "
-    let label := (model.capitalize) ++ " · Weekly"
-    let base := #[("label", JVal.str label), ("used_percent", JVal.num pct)]
-    let reset? := (v.fieldStr? "resets_at").bind parseIso8601EpochU64?
-    out := out.push (.obj (match reset? with
-      | some r => base.push ("reset_at", JVal.num (toString r))
-      | none => base))
-  return out
-
 /-- Parse numeric or numeric-string JSON value into raw number string. -/
 private def jvalNumRaw? (v : JVal) : Option String :=
   match v with
@@ -1297,6 +1031,329 @@ private def parseNumTenths? (raw : String) : Option Nat := do
     let fn ← (if f1.isEmpty then some 0 else f1.toNat?)
     return wn * 10 + fn
   | _ => none
+
+/-- Convert a `0..100` percentage string (`"12.0"`, `"7.5"`, `"100"`) into a `0..1` fraction string (`"0.12"`, `"0.075"`, `"1"`). -/
+private def percentToFractionStr? (pctRaw : String) : Option String := do
+  let tenths ← parseNumTenths? pctRaw
+  let c := min tenths 1000
+  if c == 0 then return "0"
+  else if c >= 1000 then return "1"
+  else
+    let d1 := c / 100
+    let d2 := (c / 10) % 10
+    let d3 := c % 10
+    if d3 != 0 then return s!"0.{d1}{d2}{d3}"
+    else if d2 != 0 then return s!"0.{d1}{d2}"
+    else return s!"0.{d1}"
+
+private def buildOptimizeWindow
+    (key label metric source : String)
+    (pctUsed : String)
+    (windowSecs : Nat)
+    (resetAt? : Option String) : JVal :=
+  let usedNat := match parseNumTenths? pctUsed with
+    | some tenths => (min tenths 1000 + 5) / 10
+    | none => ((pctUsed.splitOn ".").headD "0").toNat?.getD 0
+  let remNat := if usedNat >= 100 then 0 else 100 - usedNat
+  .obj #[
+    ("key", .str key),
+    ("label", .str label),
+    ("metric", .str metric),
+    ("source", .str source),
+    ("pct_used", .num pctUsed),
+    ("pct_remaining", JVal.nat remNat),
+    ("limit", .null),
+    ("remaining", .null),
+    ("used", .null),
+    ("window_seconds", JVal.nat windowSecs),
+    ("reset_at", match resetAt? with | some r => if r.isEmpty then .null else .str r | none => .null),
+    ("reset_in_seconds", .null)
+  ]
+
+/-- Pick the optimize window key with the lowest `pct_remaining` (matching `usage_optimize.rs`). -/
+def selectPrimaryOptimizeWindow (windows : Array JVal) : JVal := Id.run do
+  let mut bestKey? : Option String := none
+  let mut bestRem : Nat := 1000000
+  for w in windows do
+    let some k := w.fieldStr? "key" | continue
+    let rem := (w.fieldNat? "pct_remaining").getD 100
+    if bestKey?.isNone || rem < bestRem then
+      bestKey? := some k
+      bestRem := rem
+  match bestKey? with
+  | some k => .str k
+  | none => .null
+
+/-- Match the historical serde `as_i64` reset contract: integer JSON only,
+    including zero/negative values, without wrapping values outside signed i64. -/
+private def codexResetEpoch? (window : JVal) : Option Int := do
+  let epoch ← window.fieldInt? "reset_at"
+  if epoch < (-9223372036854775808 : Int) then none
+  else if epoch > (9223372036854775807 : Int) then none
+  else some epoch
+
+/-- Derive the `(key, label)` for a Codex optimize window from its reported duration in seconds,
+    matching the actual window length rather than assuming `primary = 5h`. -/
+private def codexOptimizeWindowKeyLabel (winSecs : Nat) (fallbackKey fallbackLabel : String) : String × String :=
+  let mins := winSecs / 60
+  if mins == 0 then (fallbackKey, fallbackLabel)
+  else if mins == 10080 then ("7d", "7-day")
+  else if mins >= 1440 && mins % 1440 == 0 then
+    let d := mins / 1440
+    (s!"{d}d", s!"{d}-day")
+  else if mins >= 60 && mins % 60 == 0 then
+    let h := mins / 60
+    (s!"{h}h", s!"{h}-hour")
+  else
+    (s!"{mins}m", s!"{mins}-minute")
+
+/-- Extract an optional human-readable window/limit name when upstream `wham/usage` provides one. -/
+private def codexWindowUpstreamLabel? (w : JVal) : Option String :=
+  let tryKey (k : String) : Option String :=
+    (w.fieldStr? k).map (·.trimAscii.toString) |>.filter (!·.isEmpty)
+  tryKey "limit_name" <|> tryKey "label" <|> tryKey "name" <|> tryKey "title" <|> tryKey "window_name"
+
+/-- The production wham projection, kept pure so wire fixtures need no vendor calls.
+    Scalar Codex fields and optimize-window fields have separate client contracts. -/
+def projectCodexUsage (wham : JVal) : Array (String × JVal) × Array JVal × JVal := Id.run do
+  let mut fields : Array (String × JVal) := #[
+    ("codex_plan_type", .str ((wham.fieldStr? "plan_type").getD "pro")),
+    ("codex_source", .str "usage")]
+  let mut windows : Array JVal := #[]
+  if let some rl@(.obj _) := wham.field? "rate_limit" then
+    let mut primaryBaseKey? : Option String := none
+    let mut primaryBaseLabel? : Option String := none
+    if let some pw@(.obj _) := rl.field? "primary_window" then
+      let usedPct := ((pw.field? "used_percent").bind jvalNumRaw?).getD "0"
+      let resetEpoch? := codexResetEpoch? pw
+      let resetSec := (resetEpoch?.map (fun epoch => epoch.toNat.toUInt64)).getD 0
+      let resetIso := if resetSec > 0 then formatEpochIso8601Utc resetSec else ""
+      let winSecs := (pw.fieldNat? "limit_window_seconds").getD 18000
+      fields := fields.push ("codex_primary_used_percent", .num usedPct)
+      fields := fields.push ("codex_primary_window_minutes", JVal.nat (winSecs / 60))
+      if let some epoch := resetEpoch? then
+        fields := fields.push ("codex_primary_reset_at", JVal.int epoch)
+      let upstreamLbl? := codexWindowUpstreamLabel? pw
+      if let some lbl := upstreamLbl? then
+        fields := fields.push ("codex_primary_window_label", .str lbl)
+      let (baseKey, baseLabel) := codexOptimizeWindowKeyLabel winSecs "primary" "Primary"
+      primaryBaseKey? := some baseKey
+      primaryBaseLabel? := some baseLabel
+      let optLabel := upstreamLbl?.getD baseLabel
+      windows := windows.push (buildOptimizeWindow baseKey optLabel "used_pct" "codex_wham" usedPct winSecs (some resetIso))
+    if let some sw@(.obj _) := rl.field? "secondary_window" then
+      let usedPct := ((sw.field? "used_percent").bind jvalNumRaw?).getD "0"
+      let resetEpoch? := codexResetEpoch? sw
+      let resetSec := (resetEpoch?.map (fun epoch => epoch.toNat.toUInt64)).getD 0
+      let resetIso := if resetSec > 0 then formatEpochIso8601Utc resetSec else ""
+      let winSecs := (sw.fieldNat? "limit_window_seconds").getD 604800
+      fields := fields.push ("codex_secondary_used_percent", .num usedPct)
+      fields := fields.push ("codex_secondary_window_minutes", JVal.nat (winSecs / 60))
+      if let some epoch := resetEpoch? then
+        fields := fields.push ("codex_secondary_reset_at", JVal.int epoch)
+      let upstreamLbl? := codexWindowUpstreamLabel? sw
+      if let some lbl := upstreamLbl? then
+        fields := fields.push ("codex_secondary_window_label", .str lbl)
+      let (baseKey, baseLabel) := codexOptimizeWindowKeyLabel winSecs "secondary" "Secondary"
+      let sameKey := primaryBaseKey? == some baseKey
+      let sameLabel := primaryBaseLabel? == some baseLabel
+      let optKey := if sameKey then s!"{baseKey}_secondary" else baseKey
+      let optLabel := match upstreamLbl? with
+        | some lbl => lbl
+        | none => if sameLabel then s!"{baseLabel} (secondary)" else baseLabel
+      windows := windows.push (buildOptimizeWindow optKey optLabel "used_pct" "codex_wham" usedPct winSecs (some resetIso))
+  return (fields, windows, selectPrimaryOptimizeWindow windows)
+
+/-- A JSON fraction (`1`, `0.9972415`, `2.5e-05`) as millionths, clamped to `[0, 1_000_000]`. -/
+def antigravityFractionMicros? (raw : String) : Option Nat := do
+  let s := raw.trimAscii.toString
+  if s.startsWith "-" then return 0
+  let (mant, exp) ← match s.splitOn "e" with
+    | [m] => match m.splitOn "E" with
+      | [m'] => some (m', (0 : Int))
+      | [m', e] => (String.toInt? e).map (m', ·)
+      | _ => none
+    | [m, e] => (String.toInt? e).map (m, ·)
+    | _ => none
+  let (whole, frac) ← match mant.splitOn "." with
+    | [w] => some (w, "")
+    | [w, f] => some (w, f)
+    | _ => none
+  let digits ← (whole ++ frac).toNat?
+  let shift : Int := 6 + exp - frac.length
+  let micros := if shift ≥ 0 then digits * 10 ^ shift.toNat else digits / 10 ^ (-shift).toNat
+  return min micros 1000000
+
+/-- Used share of a remaining fraction, in tenths of a percent (`1000` = 100%). -/
+def antigravityUsedTenths (remainingMicros : Nat) : Nat :=
+  (1000000 - min remainingMicros 1000000 + 500) / 1000
+
+private def antigravityWindowJv (label : String) (usedTenths : Nat) (reset? : Option UInt64) : JVal :=
+  let base := #[("label", .str label), ("used_percent", .num s!"{usedTenths / 10}.{usedTenths % 10}")]
+  .obj (match reset? with | some r => base.push ("reset_at", .num (toString r)) | none => base)
+
+private def antigravityReset? (bucket : JVal) : Option UInt64 :=
+  (bucket.fieldStr? "resetTime").bind parseIso8601EpochU64?
+
+private def antigravityRemaining? (bucket : JVal) : Option Nat :=
+  match bucket.field? "remainingFraction" with
+  | some (.num raw) => antigravityFractionMicros? raw
+  | _ => none
+
+private def antigravityGroupLabel (group : JVal) : String :=
+  let ids := ((group.fieldArr? "buckets").getD #[]).filterMap (·.fieldStr? "bucketId")
+  if ids.any (·.startsWith "gemini-") then "Gemini"
+  else if ids.any (·.startsWith "3p-") then "Claude & GPT"
+  else
+    let n := (group.fieldStr? "displayName").getD ""
+    let n := if n.endsWith " models" || n.endsWith " Models" then (n.dropEnd 7).toString else n
+    if n.isEmpty then "Models" else n
+
+/-- Convert a `0..1` utilization fraction (`"0.12"`, `"0.125"`, `"1.0"`) into a `0..100`
+    percentage string (`"12"`, `"12.5"`, `"100"`). -/
+def utilizationFractionToPercent (raw : String) : String :=
+  let t := raw.trimAscii.toString
+  match antigravityFractionMicros? t with
+  | some micros => formatTenthsPct ((micros + 500) / 1000)
+  | none => t
+
+private def antigravityBucketWindow (bucket : JVal) : String :=
+  ((bucket.fieldStr? "window").orElse fun _ => bucket.fieldStr? "refreshWindowLabel").getD ""
+
+private def antigravityBucketModelId? (bucket : JVal) : Option String :=
+  (bucket.fieldStr? "modelId").orElse fun _ => (bucket.field? "model").bind (·.fieldStr? "modelId")
+
+/-- `retrieveUserQuotaSummary` or `aicode.googleapis.com/v1alpha:fetchQuotaStatus`:
+    one window per group and quota period (`5h`, `daily`, `weekly`). -/
+def parseAntigravitySummary (payload : JVal) : Array JVal := Id.run do
+  let summaryObj := match payload.field? "quotaSummary" with
+    | some qs@(.obj _) => qs
+    | _ => payload
+  let rank (b : JVal) : Nat := match antigravityBucketWindow b with
+    | "5h" => 0 | "daily" => 1 | "weekly" => 2 | _ => 3
+  let mut out : Array JVal := #[]
+  for group in (summaryObj.fieldArr? "groups").getD #[] do
+    let name := antigravityGroupLabel group
+    let buckets := ((group.fieldArr? "buckets").getD #[]).toList.mergeSort (fun a b => rank a ≤ rank b)
+    for bucket in buckets do
+      -- Google omits a zero remaining fraction: a bucket with a reset but no figure is spent.
+      let some remaining := (antigravityRemaining? bucket).orElse
+          (fun _ => (antigravityReset? bucket).map (fun _ => 0)) | continue
+      let window := match antigravityBucketWindow bucket with
+        | "weekly" => "Weekly"
+        | "daily" => "Daily"
+        | other => other
+      if window.isEmpty then continue
+      out := out.push (antigravityWindowJv s!"{name} · {window}" (antigravityUsedTenths remaining) (antigravityReset? bucket))
+  return out
+
+/-- Gemini quota from `retrieveUserQuota` or `fetchQuotaStatus` (`buckets` or `models.*.quotaInfo`)
+    when the summary has no Gemini group: the tightest remaining fraction, named 5h or Weekly from its reset. -/
+def antigravityGeminiWindow? (payload : JVal) (nowSec : UInt64) : Option JVal := Id.run do
+  let isGemini (id : String) : Bool :=
+    let m := id.toLower
+    (m.splitOn "gemini").length > 1 || m.startsWith "agy-"
+  let mut entries : Array (String × JVal) := #[]
+  for b in (payload.fieldArr? "buckets").getD #[] do
+    if let some id := antigravityBucketModelId? b then entries := entries.push (id, b)
+  if let some (.obj models) := payload.field? "models" then
+    for (id, m) in models do
+      entries := entries.push (id, (m.field? "quotaInfo").getD .null)
+  let mut remaining : Option Nat := none
+  let mut reset : Option UInt64 := none
+  for (id, info) in entries do
+    if !isGemini id then continue
+    let resetAt := antigravityReset? info
+    let frac? : Option Nat := match info.field? "remainingFraction", resetAt with
+      | some (.num raw), _ => antigravityFractionMicros? raw
+      | _, some _ => some 0
+      | _, none => none
+    let some frac := frac? | continue
+    remaining := some (match remaining with | some r => min r frac | none => frac)
+    if frac < 1000000 then
+      reset := match reset, resetAt with
+        | some a, some b => some (min a b)
+        | a, b => a <|> b
+  let some rem := remaining | return none
+  let window := match reset with
+    | some r => if r > nowSec + 5 * 3600 + 600 then "Weekly" else "5h"
+    | none => "5h"
+  return some (antigravityWindowJv s!"Gemini · {window}" (antigravityUsedTenths rem) reset)
+
+private def antigravityFamily? (model : String) : Option String :=
+  let m := model.toLower
+  if (m.splitOn "claude").length > 1 then some "Claude"
+  else if (m.splitOn "gpt").length > 1 then some "GPT-OSS"
+  else if (m.splitOn "image").length > 1 then some "Image"
+  else if (m.splitOn "gemini").length > 1 && (m.splitOn "pro").length > 1 then some "Gemini Pro"
+  else if (m.splitOn "gemini").length > 1 && (m.splitOn "flash").length > 1 then some "Gemini Flash"
+  else if (m.splitOn "gemini").length > 1 then some "Gemini"
+  else if m.startsWith "agy-" then some "Gemini Agent"
+  else none
+
+/-- `retrieveUserQuota` fallback: per-model buckets merged into one window per model family.
+    Google omits a zero remaining fraction, so a bucket with a reset but no figure is spent. -/
+def parseAntigravityQuota (payload : JVal) : Array JVal := Id.run do
+  let mut wins : Array (String × Nat × Option UInt64) := #[]
+  for bucket in (payload.fieldArr? "buckets").getD #[] do
+    let some label := (antigravityBucketModelId? bucket).bind antigravityFamily? | continue
+    let reset := antigravityReset? bucket
+    let remaining? : Option Nat := match bucket.field? "remainingFraction", reset with
+      | some (.num raw), _ => antigravityFractionMicros? raw
+      | _, some _ => some 0
+      | _, none => none
+    let some remaining := remaining? | continue
+    let used := antigravityUsedTenths remaining
+    if reset.isNone && used == 0 then continue
+    match wins.findIdx? (·.1 == label) with
+    | some i =>
+      let (_, u, r) := wins[i]!
+      let r' := match r, reset with
+        | some a, some b => some (min a b)
+        | a, b => a <|> b
+      wins := wins.set! i (label, max u used, r')
+    | none => wins := wins.push (label, used, reset)
+  return wins.map fun (l, u, r) => antigravityWindowJv l u r
+
+/-- Convert rendered `antigravity_windows` entries into `optimize` windows + `primary_window`. -/
+def antigravityOptimizeWindows (windows : Array JVal) : Array JVal × JVal := Id.run do
+  let slugify (s : String) : String :=
+    let chars := s.toLower.toList.map fun c =>
+      if ('a' ≤ c && c ≤ 'z') || ('0' ≤ c && c ≤ '9') then c else '_'
+    let parts := (String.ofList chars).splitOn "_" |>.filter (!·.isEmpty)
+    if parts.isEmpty then "antigravity" else String.intercalate "_" parts
+  let mut optWins : Array JVal := #[]
+  for w in windows do
+    let lbl := (w.fieldStr? "label").getD "Quota"
+    let pctStr := match (w.field? "used_percent").bind jvalNumRaw? with
+      | some raw => raw
+      | none => if (w.field? "reset_at").isSome then "100" else "0"
+    let low := lbl.toLower
+    let winSecs : Nat :=
+      if (low.splitOn "weekly").length > 1 then 604800
+      else if (low.splitOn "daily").length > 1 then 86400
+      else 18000
+    let resetIso? := ((w.field? "reset_at").bind jvalEpochSec?).map formatEpochIso8601Utc
+    optWins := optWins.push (buildOptimizeWindow (slugify lbl) lbl "quota_pct" "antigravity_quota" pctStr winSecs resetIso?)
+  return (optWins, selectPrimaryOptimizeWindow optWins)
+
+/-- `seven_day_<model>` objects of Anthropic's OAuth usage (`{utilization, resets_at}`, percent)
+    as `{label: "<Model> · Weekly", used_percent, reset_at?}`. Unknown model keys pass through,
+    so a newly metered model appears without a client change. -/
+def anthropicModelWindows (usage : JVal) : Array JVal := Id.run do
+  let .obj fields := usage | return #[]
+  let mut out : Array JVal := #[]
+  for (key, v) in fields do
+    if !key.startsWith "seven_day_" || key == "seven_day_oauth_apps" then continue
+    let some pct := (v.field? "utilization").bind jvalNumRaw? | continue
+    let model := (key.drop 10).toString.replace "_" " "
+    let label := (model.capitalize) ++ " · Weekly"
+    let base := #[("label", JVal.str label), ("used_percent", JVal.num pct)]
+    let reset? := (v.fieldStr? "resets_at").bind parseIso8601EpochU64?
+    out := out.push (.obj (match reset? with
+      | some r => base.push ("reset_at", JVal.num (toString r))
+      | none => base))
+  return out
 
 /-- Pure Muse Code usage projector (`POST https://api.meta.ai/muse-code/key`).
     Never fabricates `muse_subscription_active = true` or 0% windows when idle. -/
@@ -1561,10 +1618,13 @@ def projectXaiBillingUsage (billing : JVal) (settings? : Option JVal := none) : 
      billing.field? "used_percent").bind jvalNumRaw?
 
   let computedPct? : Option String := Id.run do
-    if let (some u, some c) := ((cfg.field? "onDemandUsed").bind jvalNatFlex?, (cfg.field? "onDemandCap").bind jvalNatFlex?) then
+    let tenthsOf (v? : Option JVal) : Option Nat := v?.bind jvalNumRaw? |>.bind parseNumTenths?
+    if let (some u, some c) := (tenthsOf ((cfg.field? "onDemandUsed").orElse (fun _ => billing.field? "onDemandUsed")),
+                                tenthsOf ((cfg.field? "onDemandCap").orElse (fun _ => billing.field? "onDemandCap"))) then
       if c > 0 && explicitPct?.isNone then
         return some (formatTenthsPct ((u * 1000 + c / 2) / c))
-    if let (some u, some lim) := (((billing.field? "usage").bind (·.field? "totalUsed")).bind jvalNatFlex?, (billing.field? "monthlyLimit").bind jvalNatFlex?) then
+    if let (some u, some lim) := (tenthsOf ((billing.field? "usage").bind (·.field? "totalUsed")),
+                                  tenthsOf (billing.field? "monthlyLimit")) then
       if lim > 0 then
         return some (formatTenthsPct ((u * 1000 + lim / 2) / lim))
     if endSec?.isSome then
@@ -1819,6 +1879,36 @@ private def antigravityCall (http : UsageHttp) (token method : String) (body : J
     else return .unavailable s!"Antigravity quota returned HTTP {code}"
   | .error _ => return .unavailable "Antigravity quota unreachable"
 
+/-- Antigravity 2.0 / Gemini 4 quota summary endpoint (`GET https://aicode.googleapis.com/v1alpha:fetchQuotaStatus`). -/
+private def antigravityAicodeQuotaCall (http : UsageHttp) (token : String) : IO AntigravityCall := do
+  match ← http "GET" "https://aicode.googleapis.com/v1alpha:fetchQuotaStatus" (some token) none
+      #[("User-Agent", "antigravity")] 10000 1048576 with
+  | .ok (code, _, body?) =>
+    if 200 ≤ code && code < 300 then
+      match body? with
+      | some jv => return .ok jv
+      | none => return .unavailable "Unreadable Antigravity AICode quota"
+    else if code == 401 || code == 403 then return .unauthorized
+    else return .unavailable s!"Antigravity AICode quota returned HTTP {code}"
+  | .error _ => return .unavailable "Antigravity AICode quota unreachable"
+
+/-- Operator-only host `agy` token fallback when a pre-`aicode` CLIProxyAPI file lacks `https://www.googleapis.com/auth/aicode`
+    for the exact same email address. Never read in hermetic tests or for member-added accounts. -/
+private def matchingHostAgyToken? (hp : HydratedProvider) : IO (Option String) := do
+  if (← isHermeticTestMode) || !hp.createdByUserId.isEmpty then return none
+  let wantEmail := hp.accountEmail.trimAscii.toString.toLower
+  if wantEmail.isEmpty then return none
+  let homeDir := (← IO.getEnv "HOME").getD "/root"
+  let fp := System.FilePath.mk s!"{homeDir}/.gemini/antigravity-cli/antigravity-oauth-token"
+  if !(← fp.pathExists) then return none
+  let some raw ← (try some <$> IO.FS.readFile fp catch _ => pure none) | return none
+  let .ok jv := OrbBin.Json.parse raw | return none
+  let fileEmail := ((jv.fieldStr? "id_token_email").getD "").trimAscii.toString.toLower
+  if fileEmail != wantEmail then return none
+  let tok := (((jv.field? "token").bind (·.fieldStr? "access_token")).getD "").trimAscii.toString
+  if tok.isEmpty || tok == hp.oauthToken then return none
+  return some tok
+
 /-- Read one provider account's usage from its vendor. `http` is the only way out to the vendor
     for the Kimi, Muse Code and Antigravity adapters (and the sidecar row Antigravity joins). -/
 def fetchLiveProviderUsage (hp : HydratedProvider) (managementHttp : UsageHttp := liveUsageHttp)
@@ -1928,24 +2018,49 @@ def fetchLiveProviderUsage (hp : HydratedProvider) (managementHttp : UsageHttp :
           if let some v := findHeaderCI? resp.headers hName then
             extraFields := extraFields.push (fName, .str v.trimAscii.toString)
         if let some u5 := findHeaderCI? resp.headers "anthropic-ratelimit-unified-5h-utilization" then
-          let pct5 := match u5.trimAscii.toString.toNat? with | some n => toString n | none => u5.trimAscii.toString
-          let r5 := findHeaderCI? resp.headers "anthropic-ratelimit-unified-5h-reset"
-          extraFields := extraFields.push ("unified_5h_utilization", .num u5.trimAscii.toString)
+          let u5Trim := u5.trimAscii.toString
+          let pct5 := utilizationFractionToPercent u5Trim
+          let r5 := (findHeaderCI? resp.headers "anthropic-ratelimit-unified-5h-reset").map (·.trimAscii.toString)
+          let r5Iso := (r5.bind fun rv => (jvalEpochSec? (.str rv)).map formatEpochIso8601Utc) <|> r5
+          extraFields := extraFields.push ("unified_5h_utilization", .num u5Trim)
           if let some rv := r5 then extraFields := extraFields.push ("unified_5h_reset", .str rv)
-          optWindows := optWindows.push (buildOptimizeWindow "5h" "5-hour" "utilization_pct" "anthropic_unified_headers" pct5 18000 r5)
+          optWindows := optWindows.push (buildOptimizeWindow "5h" "5-hour" "utilization_pct" "anthropic_unified_headers" pct5 18000 r5Iso)
         if let some u7 := findHeaderCI? resp.headers "anthropic-ratelimit-unified-7d-utilization" then
-          let pct7 := match u7.trimAscii.toString.toNat? with | some n => toString n | none => u7.trimAscii.toString
-          let r7 := findHeaderCI? resp.headers "anthropic-ratelimit-unified-7d-reset"
-          extraFields := extraFields.push ("unified_7d_utilization", .num u7.trimAscii.toString)
+          let u7Trim := u7.trimAscii.toString
+          let pct7 := utilizationFractionToPercent u7Trim
+          let r7 := (findHeaderCI? resp.headers "anthropic-ratelimit-unified-7d-reset").map (·.trimAscii.toString)
+          let r7Iso := (r7.bind fun rv => (jvalEpochSec? (.str rv)).map formatEpochIso8601Utc) <|> r7
+          extraFields := extraFields.push ("unified_7d_utilization", .num u7Trim)
           if let some rv := r7 then extraFields := extraFields.push ("unified_7d_reset", .str rv)
-          optWindows := optWindows.push (buildOptimizeWindow "7d" "7-day" "utilization_pct" "anthropic_unified_headers" pct7 604800 r7)
+          optWindows := optWindows.push (buildOptimizeWindow "7d" "7-day" "utilization_pct" "anthropic_unified_headers" pct7 604800 r7Iso)
         primaryWin := selectPrimaryOptimizeWindow optWindows
-      -- Model-specific weekly limits (Opus, Sonnet, Fable, ...) are metered apart from the
-      -- overall weekly limit and only reported by the OAuth usage endpoint.
+      -- Model-specific weekly limits (Opus, Sonnet, Fable, ...) and OAuth 5h/7d fallback when
+      -- unified rate-limit headers were omitted or unreachable.
       if !hp.oauthToken.isEmpty then
         if let .ok (code, _, some uJv) ← http "GET" "https://api.anthropic.com/api/oauth/usage"
             (some hp.oauthToken) none #[("anthropic-beta", "oauth-2025-04-20")] 6000 65536 then
           if 200 ≤ code && code < 300 then
+            let has5h := extraFields.any (·.1 == "unified_5h_utilization")
+            if !has5h then
+              if let some fh@(.obj _) := uJv.field? "five_hour" then
+                if let some pctRaw := (fh.field? "utilization").bind jvalNumRaw? then
+                  if let some fracStr := percentToFractionStr? pctRaw then
+                    extraFields := extraFields.push ("unified_5h_utilization", .num fracStr)
+                    let rstSec? := (fh.fieldStr? "resets_at").bind parseIso8601EpochU64?
+                    if let some rs := rstSec? then extraFields := extraFields.push ("unified_5h_reset", .str (toString rs))
+                    optWindows := optWindows.push (buildOptimizeWindow "5h" "5-hour" "utilization_pct" "anthropic_oauth_usage"
+                      (formatTenthsPct ((parseNumTenths? pctRaw).getD 0)) 18000 (rstSec?.map formatEpochIso8601Utc))
+            let has7d := extraFields.any (·.1 == "unified_7d_utilization")
+            if !has7d then
+              if let some sd@(.obj _) := uJv.field? "seven_day" then
+                if let some pctRaw := (sd.field? "utilization").bind jvalNumRaw? then
+                  if let some fracStr := percentToFractionStr? pctRaw then
+                    extraFields := extraFields.push ("unified_7d_utilization", .num fracStr)
+                    let rstSec? := (sd.fieldStr? "resets_at").bind parseIso8601EpochU64?
+                    if let some rs := rstSec? then extraFields := extraFields.push ("unified_7d_reset", .str (toString rs))
+                    optWindows := optWindows.push (buildOptimizeWindow "7d" "7-day" "utilization_pct" "anthropic_oauth_usage"
+                      (formatTenthsPct ((parseNumTenths? pctRaw).getD 0)) 604800 (rstSec?.map formatEpochIso8601Utc))
+            primaryWin := selectPrimaryOptimizeWindow optWindows
             let wins := anthropicModelWindows uJv
             if !wins.isEmpty then extraFields := extraFields.push ("anthropic_model_windows", .arr wins)
 
@@ -2130,24 +2245,57 @@ def fetchLiveProviderUsage (hp : HydratedProvider) (managementHttp : UsageHttp :
         | .ok sJv =>
           let summary := parseAntigravitySummary sJv
           if !summary.isEmpty then
-            -- The summary drops the Gemini group once it is exhausted; read it per model.
+            -- Antigravity 2.0 / Gemini 4 reports Gemini windows on `aicode.googleapis.com/v1alpha:fetchQuotaStatus`
+            -- (`quotaSummary.groups` with `refreshWindowLabel`), omitting Gemini from `retrieveUserQuotaSummary`.
             let hasGemini := summary.any fun w => ((w.fieldStr? "label").getD "").startsWith "Gemini"
             let mut merged := summary
             if !hasGemini then
-              if let .ok qJv ← antigravityCall http hp.oauthToken "retrieveUserQuota" quotaBody 1048576 then
-                if let some g := antigravityGeminiWindow? qJv (← nowEpoch) then merged := #[g] ++ merged
+              let mut aicodeJv? : Option JVal := none
+              let mut aicodeUnauthorized := false
+              match ← antigravityAicodeQuotaCall http hp.oauthToken with
+              | .ok aiJv => aicodeJv? := some aiJv
+              | .unauthorized =>
+                aicodeUnauthorized := true
+                if let some hostTok ← matchingHostAgyToken? hp then
+                  if let .ok aiJv ← antigravityAicodeQuotaCall http hostTok then
+                    aicodeJv? := some aiJv
+                    aicodeUnauthorized := false
+              | .unavailable _ => pure ()
+              if let some aiJv := aicodeJv? then
+                let aiSummary := parseAntigravitySummary aiJv
+                if !aiSummary.isEmpty then
+                  let aiPools := aiSummary.map (fun w => (((w.fieldStr? "label").getD "").splitOn " · ").headD "")
+                  let extra := summary.filter (fun w => !aiPools.contains ((((w.fieldStr? "label").getD "").splitOn " · ").headD ""))
+                  merged := aiSummary ++ extra
+                else if let some g := antigravityGeminiWindow? aiJv (← nowEpoch) then
+                  merged := #[g] ++ merged
+              if !(merged.any fun w => ((w.fieldStr? "label").getD "").startsWith "Gemini") then
+                if let .ok qJv ← antigravityCall http hp.oauthToken "retrieveUserQuota" quotaBody 1048576 then
+                  if let some g := antigravityGeminiWindow? qJv (← nowEpoch) then
+                    -- When AICode refused with 401/403 (missing `aicode` OAuth scope), legacy Cloud Code
+                    -- `gemini-2.5` buckets sit at `remainingFraction = 1`: never present missing Gemini 4 quota as 0%.
+                    if !aicodeUnauthorized || g.field? "used_percent" != some (.num "0.0") then
+                      merged := #[g] ++ merged
             windows? := some merged
         | .unauthorized => unauthorized := true
         | .unavailable reason => failure? := some reason
         if windows?.isNone && !unauthorized then
-          match ← antigravityCall http hp.oauthToken "retrieveUserQuota" quotaBody 1048576 with
-          | .ok qJv => windows? := some (parseAntigravityQuota qJv)
-          | .unauthorized => unauthorized := true
-          | .unavailable reason => failure? := some reason
+          if let .ok aiJv ← antigravityAicodeQuotaCall http hp.oauthToken then
+            let aiSummary := parseAntigravitySummary aiJv
+            if !aiSummary.isEmpty then windows? := some aiSummary
+          if windows?.isNone then
+            match ← antigravityCall http hp.oauthToken "retrieveUserQuota" quotaBody 1048576 with
+            | .ok qJv => windows? := some (parseAntigravityQuota qJv)
+            | .unauthorized => unauthorized := true
+            | .unavailable reason => failure? := some reason
         if unauthorized then extraFields := extraFields.push refreshNote
         else
           match windows? with
-          | some windows => extraFields := extraFields.push ("antigravity_windows", .arr windows)
+          | some windows =>
+            extraFields := extraFields.push ("antigravity_windows", .arr windows)
+            let (agOptWins, agPrimary) := antigravityOptimizeWindows windows
+            optWindows := agOptWins
+            primaryWin := agPrimary
           -- Neither quota view answered: say so instead of reporting an empty quota.
           | none => extraFields := extraFields.push (unavailable (failure?.getD "Antigravity quota unreachable"))
     -- Google can accept the login and still refuse every request until its owner verifies the
@@ -2671,7 +2819,8 @@ def reconcileCliLoginCompletion
   let providers ← loadHydratedProviders store workingDir
   let target? := sess.targetProvId?.bind (fun id => providers.find? (fun hp => hp.id == id))
   let targetTypeUnique (hp : HydratedProvider) : Bool :=
-    (files.filter (fun f => !f.disabled && !f.accessToken.isEmpty && providerTypeMatchesAuthType hp.providerType f.authType)).size == 1
+    (files.filter (fun f => !f.disabled && !f.accessToken.isEmpty &&
+      f.fileName != hp.oauthFile && providerTypeMatchesAuthType hp.providerType f.authType)).size == 1
   let candidate (f : CliAuthFileInfo) : Bool :=
     f.authType == sess.authFileType && !f.disabled && !f.accessToken.isEmpty &&
     !(sess.beforeFiles.contains (f.fileName, f.fingerprint)) &&
@@ -2702,12 +2851,46 @@ def reconcileCliLoginCompletion
       }
     let providerType := (affected[0]?.map (·.providerType)).getD
       (if sess.authFileType == "claude" then "anthropic" else if sess.authFileType == "codex" then "openai" else sess.authFileType)
+    let matchedFile? := files.find? candidate
+    if let (some hp, some newFile) := (target?, matchedFile?) then
+      if !hp.oauthFile.isEmpty && newFile.fileName != hp.oauthFile &&
+          files.any (fun f => f.fileName == hp.oauthFile && !f.disabled) then
+        if let some mgmtKey ← resolveCliProxyMgmtKey? then
+          let mgmtBase ← resolveCliProxyBaseUrl
+          discard <| sendJsonRequest "PATCH" s!"{mgmtBase}/v0/management/auth-files/status"
+            (some mgmtKey) (some (.obj #[("name", .str hp.oauthFile), ("disabled", .bool true)])) #[] 2000 65536
+    let mut completedProvId := sess.targetProvId?.getD ""
+    if sess.targetProvId?.isNone && sess.authFileType == "antigravity" then
+      if let some newFile := matchedFile? then
+        if let some mgmtKey ← resolveCliProxyMgmtKey? then
+          let mgmtBase ← resolveCliProxyBaseUrl
+          discard <| AccountVpnSidecar.alternativeRouterAccess mgmtBase mgmtKey newFile.fileName (some false)
+    if sess.targetProvId?.isNone && !sess.userId.isEmpty then
+      if let some newFile := matchedFile? then
+        let newProvId := fileAccountId providerType newFile.fileName
+        completedProvId := newProvId
+        if (← getAIProvider? store newProvId).isNone then
+          let baseName := (lookupProviderMeta providerType).name
+          let cleanEmail := newFile.email.trimAscii.toString
+          let dispName := if cleanEmail.isEmpty then baseName else s!"{baseName} ({cleanEmail})"
+          discard <| upsertAIProvider store {
+            id := newProvId
+            providerType := providerType
+            name := dispName
+            enabled := !newFile.disabled
+            baseUrl := ""
+            apiKey := "cli-proxy-managed"
+            updatedAt := formatEpochIso8601Utc now
+            createdByUserId := sess.userId
+          }
     let typeKey := s!"cliproxyapi:{providerType}"
     let typePrefix := s!"{typeKey}:"
     let mut oauthRowIds := (affected.filter (fun hp => hp.hasOAuth && !hp.hasApiKey)).map (·.id)
+    if !completedProvId.isEmpty && !oauthRowIds.contains completedProvId then
+      oauthRowIds := oauthRowIds.push completedProvId
     let targetedCodex := sess.authFileType == "codex" && sess.targetProvId?.isSome
     if targetedCodex then
-      if let some file := files.find? candidate then
+      if let some file := matchedFile? then
         oauthRowIds := oauthRowIds.push (fileAccountId providerType file.fileName)
     let matchesLoginKey (k : String) : Bool :=
       oauthRowIds.contains k || k == typeKey || (!targetedCodex && k.startsWith typePrefix)
@@ -2721,7 +2904,7 @@ def reconcileCliLoginCompletion
     for hp in affected do
       refreshProviderUsageAsync hub hp
     result := { result with status := "completed", message? := some "Connected" }
-    appendProviderAuditLog store sess.userId "" "login_complete" (sess.targetProvId?.getD "")
+    appendProviderAuditLog store sess.userId "" "login_complete" completedProvId
       #[s!"provider_type:{sess.providerSlug}"] (formatEpochIso8601Utc now)
   else if now >= started + 60 then
     result := { result with status := "failed", message? := some "Authentication completed but the new auth file was not visible within 60 seconds. Try reconnecting again." }
@@ -3025,7 +3208,6 @@ def dispatchProviderAndAiRoute
     return some (jsonResp 200 (.obj #[("snapshots", .arr #[])]))
 
   if segs == ["api", "providers", "catalog", "refresh"] && method == "POST" then
-    if !effAdmin then return some (jsonErr 403 "admin_required")
     refreshCustomModelDiscovery store workingDir hub
     let _ ← nativeCatalogForRequest (← NativeCanary.load) hub store workingDir callerUserId rawTarget effAdmin true true
     let nowSec ← nowEpoch
@@ -3343,8 +3525,11 @@ def dispatchProviderAndAiRoute
       let remQuota : JVal :=
         match usageCached.find? (fun u => u.providerId == hp.id) with
         | some u =>
-          let wins := ((u.payload.field? "optimize").bind (fun o => o.fieldArr? "windows")).getD #[]
-          match wins[0]?.bind (fun w => w.field? "pct_remaining") with
+          let opt := u.payload.fieldOrNull "optimize"
+          let wins := (opt.fieldArr? "windows").getD #[]
+          let pKey? := opt.fieldStr? "primary_window"
+          let chosen? := (pKey?.bind fun pk => wins.find? (fun w => w.fieldStr? "key" == some pk)).orElse (fun _ => wins[0]?)
+          match chosen?.bind (fun w => w.field? "pct_remaining") with
           | some v => v
           | none => .null
         | none => .null
@@ -3453,6 +3638,15 @@ def dispatchProviderAndAiRoute
         for idx in [0:ids.size] do
           nextOrder := nextOrder.setField ids[idx]! (JVal.nat idx)
         writeDataJsonFile workingDir store.rootDir "provider_order.json" nextOrder
+      if let some mgmtKey ← resolveCliProxyMgmtKey? then
+        let mgmtBase ← resolveCliProxyBaseUrl
+        if AccountVpnSidecar.validManagement mgmtBase then
+          let curHps ← loadHydratedProviders store workingDir
+          for idx in [0:ids.size] do
+            if let some hp := curHps.find? (fun p => p.id == ids[idx]!) then
+              let file := accountRoutingFile curHps hp
+              if !file.isEmpty then
+                discard <| AccountVpnSidecar.setCredentialPriority mgmtBase mgmtKey file ((ids.size - idx) * 10)
       appendProviderAuditLog store callerUserId (if effAdmin then "admin" else "member") "reorder" "" #["sort_order"]
         (formatEpochIso8601Utc (← nowEpoch))
 
@@ -3862,13 +4056,15 @@ def dispatchProviderAndAiRoute
 
       -- `POST /api/ai/providers/:id/antigravity/recheck`
       if method == "POST" && segs.length == 6 && segs[4]? == some "antigravity" && segs[5]? == some "recheck" then
-        if !effAdmin then return some (jsonErr 403 "admin_required")
         let some hp := matchedProv?
           | return some (jsonErr 404 "Provider not found")
+        if !effAdmin && !providerAddedBy hp callerUserId then
+          return some (jsonErr 403 "admin_required")
         let cur ← proxyCooldownsRef.get
         proxyCooldownsRef.set (cur.filter (fun c => c.accountId != hp.id))
         let live ← probeProviderUsage hub hp
-        return some (jsonResp 200 live)
+        let projected := if effAdmin || providerAddedBy hp callerUserId then live else projectMemberProviderUsageJv live (memberProviderDisplayName hps hp)
+        return some (jsonResp 200 projected)
 
       -- `GET /api/ai/providers/:id/auth/methods`
       if method == "GET" && segs.length == 6 && segs[4]? == some "auth" && segs[5]? == some "methods" then

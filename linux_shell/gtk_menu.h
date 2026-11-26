@@ -1,21 +1,25 @@
-/* linux_shell/gtk_menu.h — Native Chrome sidebar context menu (right-click on a mission or project row). */
+/* linux_shell/gtk_menu.h — Native Chrome sidebar context menu, inline rename & tree clipboard. */
 #ifndef ORB_GTK_MENU_H
 #define ORB_GTK_MENU_H
 
-/* Slug of a `project:<slug>` row target, or NULL. */
 const char *orb_menu_project_slug(const char *target);
 int orb_gtk_menu_self_test(void);
 
 #if defined(ORB_HAS_WEBKITGTK)
 #include <gtk/gtk.h>
 GtkWidget *orb_menu_page(void);
-gboolean orb_menu_key(GtkWidget *row, GdkEventKey *event, gpointer data);
-void orb_menu_anchor(GtkPopover *pop, GtkWidget *row, const GdkEvent *event);
-void orb_project_menu_populate(GtkWidget *wv, GtkWidget *menu, const char *slug);
-/* Pops up the menu for `row` when it is a mission or project row; returns TRUE when it did. */
+void orb_menu_popup(GtkWidget *menu, GtkWidget *row, const GdkEvent *event);
+void orb_inline_rename(GtkWidget *wv, GtkWidget *row, const char *mode, const char *id, const char *title);
+void orb_eval_project_action(GtkWidget *wv, const char *action, const char *target, const char *arg);
+void orb_project_menu_populate(GtkWidget *wv, GtkWidget *menu, GtkWidget *row, const char *slug, gboolean has_cut);
+void orb_folder_menu_populate(GtkWidget *wv, GtkWidget *menu, GtkWidget *row, const char *slug, const char *folder, gboolean has_cut);
+void orb_file_menu_populate(GtkWidget *wv, GtkWidget *menu, GtkWidget *row, const char *slug, const char *file_path, const char *parent_folder, gboolean has_cut);
+void orb_sidebar_mark_cut(gboolean active);
+gboolean orb_sidebar_has_cut(void);
+gboolean orb_sidebar_cut_copy(GtkWidget *wv, GtkWidget *list, GtkWidget *focus, gboolean copy);
+gboolean orb_sidebar_paste(GtkWidget *wv, GtkWidget *focus);
+gboolean orb_sidebar_rename_focused(GtkWidget *wv, GtkWidget *focus);
 gboolean orb_gtk_row_context_menu(GtkWidget *wv, GtkWidget *list, GtkWidget *row, const GdkEvent *ev);
-/* Multi-selection: re-apply after the list is rebuilt, toggle/extend on a modified click, clear,
- * and delete the selected missions (or `fallback`, a `m:<id>` target) with one confirmation. */
 void orb_sel_sync(GtkWidget *list);
 gboolean orb_sel_click(GtkWidget *list, GtkWidget *row, gboolean extend);
 gboolean orb_sel_clear(GtkWidget *list);
