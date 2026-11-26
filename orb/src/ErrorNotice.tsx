@@ -43,19 +43,16 @@ function inferLaunchHarness(raw: string, backend?: string | null): string {
 }
 
 export function classifyProcessLaunchFailure(raw: string, backend?: string | null): (ErrorInfo & { kind: ProcessLaunchFailureKind; nonResumable: true }) | null {
-  const mk = (kind: ProcessLaunchFailureKind, agent: string, message: string) => ({ kind, nonResumable: true as const, title: `${agent} could not start`, message });
-  if (/argument list too long|\bE2BIG\b|\bos error 7\b/i.test(raw)) {
-    const agent = inferLaunchHarness(raw, backend);
-    return mk("arg_list_too_long", agent, `The carried conversation history exceeded the system command-line limit before ${agent} could launch. ${PRESERVED} Update the backend so ${agent} receives large histories over stdin, then continue or send a message in this conversation directly without transferring again — or send a shorter message, switch agents, or continue in the original conversation.`);
-  }
-  if (MISSING_BIN_RE.test(raw)) {
-    const agent = inferLaunchHarness(raw, backend);
-    return mk("missing_binary", agent, `The ${agent} CLI was not found on the execution machine. ${PRESERVED} Install or update ${agent} on that machine, ${CONT_DIRECT}`);
-  }
-  if (SPAWN_FAIL_RE.test(raw)) {
-    const agent = inferLaunchHarness(raw, backend);
-    return mk("spawn_failed", agent, `The execution machine could not launch the ${agent} CLI process. ${PRESERVED} Check the ${agent} CLI installation or update the backend on that machine, ${CONT_DIRECT}`);
-  }
+  const fb = (kind: ProcessLaunchFailureKind, message: (a: string) => string) => {
+    const a = inferLaunchHarness(raw, backend);
+    return { kind, nonResumable: true as const, title: `${a} could not start`, message: message(a) };
+  };
+  if (/argument list too long|\bE2BIG\b|\bos error 7\b/i.test(raw))
+    return fb("arg_list_too_long", a => `The carried conversation history exceeded the system command-line limit before ${a} could launch. ${PRESERVED} Update the backend so ${a} receives large histories over stdin, ${CONT_DIRECT}`);
+  if (MISSING_BIN_RE.test(raw))
+    return fb("missing_binary", a => `The ${a} CLI was not found on the execution machine. ${PRESERVED} Install or update ${a} on that machine, ${CONT_DIRECT}`);
+  if (SPAWN_FAIL_RE.test(raw))
+    return fb("spawn_failed", a => `The execution machine could not launch the ${a} CLI process. ${PRESERVED} Check the ${a} CLI installation or update the backend on that machine, ${CONT_DIRECT}`);
   return null;
 }
 
@@ -93,10 +90,10 @@ export function describeError(raw: string, fallback = "Something went wrong", ba
   if (/REMOTE_JOB_STILL_RUNNING/.test(raw)) return { title: "A turn is still running", message: "Wait for it to finish before sending this follow-up. Your draft is kept." };
   if (/REMOTE_RESUME_REQUIRES_REPLACEMENT/.test(raw)) return { title: "Couldn’t resume this session", message: "Your draft is kept. Try again; if the problem persists, fork the conversation into a new mission." };
   const defaultFallback = fallback === "Something went wrong" || fallback === "Mission failed";
-  if (/Node `[^`]+` answers ping but its API is unresponsive/i.test(raw)) {
+  if (/Node [`'][^`']+[`'] answers ping but its API is unresponsive/i.test(raw)) {
     return { tone: "warning", title: defaultFallback ? "Execution node unresponsive" : fallback, message: raw.trim() };
   }
-  if (/Lost contact with remote node `[^`]+`/i.test(raw)) {
+  if (/Lost contact with remote node [`'][^`']+[`']/i.test(raw)) {
     return { tone: "warning", title: defaultFallback ? "Connection to execution node interrupted" : fallback, message: raw.trim() };
   }
   if (/There was a network issue connecting to the server/i.test(raw)) return { title: "Network issue connecting to the model server", message: `The connection dropped while the agent was working. Check your internet connection, then resume to ${CONT_STEP}` };
@@ -115,17 +112,15 @@ export function describeError(raw: string, fallback = "Something went wrong", ba
   }
   const outdated = raw.match(/Update (.+) to receive a workspace (containing links|with selected build folders)/);
   if (outdated) return { title: `${outdated[1]} needs an update`, message: `This workspace ${outdated[2] === "containing links" ? "contains links" : "includes build folders you selected"}, which that machine cannot receive yet. Update it, or choose another machine. The conversation has not moved.` };
-  const silentStop = raw.match(/^Remote\s+(opencode|claudecode|claude|codex|antigravity|grok|vibe|node\s+'[^']+')\s+job\s+[0-9a-f-]{36}(?:\s+on\s+node\s+'([^']+)')?\s+finished without assistant text(?:\s+\(stop reason:\s*([^)]+)\))?\.?$/i);
+  const silentStop = new RegExp(`^Remote\\s+(${CLI_PAT}|node\\s+'[^']+')\\s+job\\s+[0-9a-f-]{36}(?:\\s+on\\s+node\\s+'([^']+)')?\\s+finished without assistant text(?:\\s+\\(stop reason:\\s*([^)]+)\\))?\\.?$`, "i").exec(raw);
   if (silentStop) {
-    const agent = inferLaunchHarness(raw, backend);
-    const node = silentStop[2] ? ` on ${silentStop[2]}` : "";
     return {
       tone: "warning",
-      title: `${agent} stopped without a written reply`,
-      message: `The run${node} completed its tool or reasoning step without emitting a final message. Your workspace and conversation history are preserved — resume or send a follow-up to ask for the summary.`,
+      title: `${inferLaunchHarness(raw, backend)} stopped without a written reply`,
+      message: `The run${silentStop[2] ? ` on ${silentStop[2]}` : ""} completed its tool or reasoning step without emitting a final message. ${PRESERVED} Resume or send a follow-up to ask for the summary.`,
     };
   }
-  if (raw.trim() === "Model error") return { title: fallback, message: "The run ended with an error before returning a response. Your workspace and conversation history are preserved." };
+  if (raw.trim() === "Model error") return { title: fallback, message: `The run ended with an error before returning a response. ${PRESERVED}` };
   let cleaned = raw.trim();
   const normalize = (s: string) => s.replace(/[\u2018\u2019]/g, "'").toLowerCase();
   if (fallback && normalize(cleaned).startsWith(`${normalize(fallback)}:`)) {

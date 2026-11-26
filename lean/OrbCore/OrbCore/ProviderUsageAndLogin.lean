@@ -2860,6 +2860,11 @@ def reconcileCliLoginCompletion
           discard <| sendJsonRequest "PATCH" s!"{mgmtBase}/v0/management/auth-files/status"
             (some mgmtKey) (some (.obj #[("name", .str hp.oauthFile), ("disabled", .bool true)])) #[] 2000 65536
     let mut completedProvId := sess.targetProvId?.getD ""
+    if sess.targetProvId?.isNone && sess.authFileType == "antigravity" then
+      if let some newFile := matchedFile? then
+        if let some mgmtKey ← resolveCliProxyMgmtKey? then
+          let mgmtBase ← resolveCliProxyBaseUrl
+          discard <| AccountVpnSidecar.alternativeRouterAccess mgmtBase mgmtKey newFile.fileName (some false)
     if sess.targetProvId?.isNone && !sess.userId.isEmpty then
       if let some newFile := matchedFile? then
         let newProvId := fileAccountId providerType newFile.fileName
@@ -3633,6 +3638,15 @@ def dispatchProviderAndAiRoute
         for idx in [0:ids.size] do
           nextOrder := nextOrder.setField ids[idx]! (JVal.nat idx)
         writeDataJsonFile workingDir store.rootDir "provider_order.json" nextOrder
+      if let some mgmtKey ← resolveCliProxyMgmtKey? then
+        let mgmtBase ← resolveCliProxyBaseUrl
+        if AccountVpnSidecar.validManagement mgmtBase then
+          let curHps ← loadHydratedProviders store workingDir
+          for idx in [0:ids.size] do
+            if let some hp := curHps.find? (fun p => p.id == ids[idx]!) then
+              let file := accountRoutingFile curHps hp
+              if !file.isEmpty then
+                discard <| AccountVpnSidecar.setCredentialPriority mgmtBase mgmtKey file ((ids.size - idx) * 10)
       appendProviderAuditLog store callerUserId (if effAdmin then "admin" else "member") "reorder" "" #["sort_order"]
         (formatEpochIso8601Utc (← nowEpoch))
 

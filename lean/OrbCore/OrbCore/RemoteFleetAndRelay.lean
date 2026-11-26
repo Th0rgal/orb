@@ -701,7 +701,8 @@ def observeNodeApi (store : CoreStore) (node status now : String) (ping : IO Boo
     let pending ← query ("SELECT m.id,h.incident_id " ++
       "FROM missions m JOIN node_api_hangs h ON h.node_id=?1 AND h.strikes>=2 WHERE EXISTS (SELECT 1 FROM remote_node_jobs j WHERE j.node_id=?1 AND j.mission_id=m.id " ++
       "AND j.state NOT IN ('terminal','completed','succeeded','failed','aborted','cancelled','lost')) AND NOT EXISTS " ++
-      "(SELECT 1 FROM mission_events e WHERE e.mission_id=m.id AND e.event_type='error' AND CASE WHEN json_valid(e.payload) THEN json_extract(e.payload,'$.incident_id') END=h.incident_id)") #[node]
+      "(SELECT 1 FROM mission_events e WHERE e.mission_id=m.id AND e.event_type='error' AND CASE WHEN json_valid(e.payload) THEN json_extract(e.payload,'$.incident_id') END=h.incident_id) " ++
+      "AND COALESCE((SELECT CASE WHEN le.event_type='error' AND json_valid(le.payload) AND json_extract(le.payload,'$.reason')='hung_node' AND json_extract(le.payload,'$.node_id')=?1 THEN 1 ELSE 0 END FROM mission_events le WHERE le.mission_id=m.id ORDER BY le.id DESC LIMIT 1),0)=0") #[node]
     for r in pending.extract 1 pending.size do
       let payload := renderCompact (.obj #[("reason", .str "hung_node"), ("node_id", .str node),
         ("incident_id", .str (cell r 1)), ("message", .str s!"Node `{node}` answers ping but its API is unresponsive.")])
@@ -1493,7 +1494,25 @@ def runConfiguredManagedLifecycle (mc : ManagedComputeStore) (ctx : ManagedLifec
   if Orb.ManagedNode.verifyVmLifecycleAdmit slice.phaseCode op 0 1
       slice.nodeBootEpoch slice.nodeBootEpoch nowEpoch slice.deletableAt != 1 then
     return .error "vm_lifecycle_rejected"
-  if slice.phaseCode == 0 && m.providerId.isEmpty then return .error "managed_provider_identity_pending"
+  if slice.phaseCode == 0 && m.providerId.isEmpty then
+    if action != "destroy" || nowEpoch < m.createdAtSec + 120 then
+      return .error "managed_provider_identity_pending"
+    let inventory ← match ← provider.list with
+      | .ok items => pure items
+      | .error e => return .error e.code
+    let hits := inventory.filter (fun r => r.name == m.sandboxName)
+    if hits.size > 1 then return .error "ambiguous_provider_name"
+    if let some remote := hits[0]? then
+      discard <| backfillManagedProviderIdentity mc m.id m.provider remote.providerId
+      if let .error e ← provider.destroy remote.providerId then return .error e.code
+    let .ok _ ← applyVmLifecycle mc m.id {
+        opCode := op, ownerLive := 0, idleElapsed := 1,
+        presentedBootEpoch := m.nodeBootEpoch, nowEpoch
+      } (some (hits[0]?.map (·.providerId) |>.getD ""))
+      | return .error "managed_lifecycle_commit_failed"
+    let some (saved, _) ← getManagedMachine? mc m.id
+      | return .error "managed_machine_missing"
+    return .ok (managedLifecycleResult saved)
   let outcome ← if action == "stop" then provider.stop m.effectiveProviderId else provider.destroy m.effectiveProviderId
   if let .error e := outcome then return .error e.code
   let .ok _ ← applyVmLifecycle mc m.id {

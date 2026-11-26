@@ -159,3 +159,26 @@ it("deduplicates repeated hung-node warnings and hides them once the turn resume
   expect(afterRecovery.querySelectorAll(".error-notice")).toHaveLength(0);
   expect(afterRecovery.textContent).toContain("The node answered and the check passed.");
 });
+
+it("collapses similar or wrapped error notices within the same turn into a single card", () => {
+  const sameTurnWrapped = buildTranscript([
+    storedToStream({ id: 1, sequence: 1, event_id: "u-1", event_type: "user_message", timestamp: "", content: "Resume check", metadata: {} })!,
+    storedToStream({ id: 2, sequence: 2, event_id: "e-2", event_type: "error", timestamp: "", content: "Node `ashur` answers ping but its API is unresponsive.", metadata: {} })!,
+    storedToStream({ id: 3, sequence: 3, event_id: "tc-3", event_type: "tool_call", timestamp: "", content: "", tool_call_id: "sched-1", tool_name: "schedule", metadata: { done: false } })!,
+    storedToStream({ id: 4, sequence: 4, event_id: "e-4", event_type: "error", timestamp: "", content: "Wakeup dispatch failed: Node 'ashur' answers ping but its API is unresponsive", metadata: {} })!,
+  ]);
+  const { container: c1 } = render(() => <Transcript items={visibleTranscript(sameTurnWrapped)} />);
+  expect(c1.querySelectorAll(".error-notice")).toHaveLength(1);
+
+  const errorThenPrefixedStatus = buildTranscript([
+    storedToStream({ id: 10, sequence: 10, event_id: "u-10", event_type: "user_message", timestamp: "", content: "Deploy", metadata: {} })!,
+    storedToStream({ id: 11, sequence: 11, event_id: "e-11", event_type: "error", timestamp: "", content: "Rate limit exceeded for model gemini-4-neon", metadata: {} })!,
+    storedToStream({
+      id: 12, sequence: 12, event_id: "s-12", event_type: "mission_status_changed", timestamp: "",
+      content: "Mission failed: Rate limit exceeded for model gemini-4-neon",
+      metadata: { status: "failed", summary: "Mission failed: Rate limit exceeded for model gemini-4-neon" },
+    })!,
+  ]);
+  const { container: c2 } = render(() => <Transcript items={visibleTranscript(errorThenPrefixedStatus)} />);
+  expect(c2.querySelectorAll(".error-notice")).toHaveLength(1);
+});

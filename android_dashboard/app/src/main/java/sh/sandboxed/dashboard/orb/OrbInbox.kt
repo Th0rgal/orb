@@ -1535,8 +1535,11 @@ object OrbInboxModel {
                         val isProse = clean.length >= 220 && !Regex("^(error|failed|exception|panic):", RegexOption.IGNORE_CASE).containsMatchIn(clean)
                         val role = if (isProse) "assistant" else "error"
                         val last = turns.lastOrNull()
-                        if (role == "assistant" && last != null && last.role == "assistant") {
-                            turns[turns.lastIndex] = last.copy(text = clean)
+                        if (last != null && last.role == role &&
+                            (role == "assistant" || last.text == clean || last.text.contains(clean, ignoreCase = true) || clean.contains(last.text, ignoreCase = true))
+                        ) {
+                            val merged = if (role == "error" && clean.length < last.text.length) last.text else clean
+                            turns[turns.lastIndex] = last.copy(text = merged)
                         } else {
                             turns.add(OrbInboxPeekTurn("ev-$idx", role, clean))
                         }

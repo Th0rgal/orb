@@ -100,4 +100,15 @@ def alternativeRouterAccess (base key file : String) (allowed? : Option Bool) : 
   if credentialModelExclusions? updated != some after then return .error "router_access_readback_failed"
   confirmRouterAccess base key file next
 
+/-- Sync Orb's provider priority ordering into CLIProxyAPI (`higher priority = preferred first`). -/
+def setCredentialPriority (base key file : String) (priority : Nat) : IO (Except String Unit) := do
+  let unavailable := "credential_priority_unavailable"
+  if !validManagement base || key.isEmpty || !file.endsWith ".json" || file.contains '/' || file.contains '\\' then
+    return .error unavailable
+  let patch := JVal.obj #[("name", .str file), ("priority", JVal.nat priority)]
+  let .ok (200, _, some ack) ← sendJsonRequest "PATCH" (base ++ "/v8/management/credentials/fields")
+      (some key) (some patch) #[] 4000 8192 | return .error unavailable
+  unless ack.fieldStr? "status" == some "ok" do return .error unavailable
+  return .ok ()
+
 end OrbCore.AccountVpnSidecar

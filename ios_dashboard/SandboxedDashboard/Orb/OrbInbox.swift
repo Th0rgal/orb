@@ -1356,8 +1356,10 @@ enum OrbInboxModel {
                     if !text.isEmpty {
                         let isProse = text.count >= 220 && text.range(of: #"^(error|failed|exception|panic):"#, options: [.regularExpression, .caseInsensitive]) == nil
                         let role = isProse ? "assistant" : "error"
-                        if role == "assistant", let last = turns.last, last.role == "assistant" {
-                            turns[turns.count - 1] = OrbInboxPeekTurn(id: last.id, role: "assistant", text: text, workReceipt: last.workReceipt)
+                        if let last = turns.last, last.role == role,
+                           role == "assistant" || last.text == text || last.text.contains(text) || text.contains(last.text) {
+                            let merged = role == "error" && text.count < last.text.count ? last.text : text
+                            turns[turns.count - 1] = OrbInboxPeekTurn(id: last.id, role: role, text: merged, workReceipt: last.workReceipt)
                         } else {
                             turns.append(OrbInboxPeekTurn(id: "ev-\(idx)", role: role, text: text))
                         }
