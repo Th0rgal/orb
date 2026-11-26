@@ -719,7 +719,7 @@ export function Transcript(p: { sizeKey?: string; initialBottom?: boolean; backe
     },
   );
   const nonQueuedItems = createMemo(() => {
-    const list = p.items, q = (it: StreamItem) => it.kind === "user" && it.queued, s = (it: StreamItem) => p.working === false && (it.kind === "think" || it.kind === "tool") && !it.done;
+    const list = p.items, q = (it: StreamItem) => it.kind === "user" && it.queued, s = (it: StreamItem) => p.working === false && it.kind === "think" && !it.done;
     return list.some(it => q(it) || s(it)) ? list.filter(it => !q(it)).map(it => s(it) ? { ...it, done: true } : it) : list;
   });
   const groups = createMemo<Grouped[]>((previous) => groupWork(nonQueuedItems(), previous), []);
