@@ -414,6 +414,25 @@ private def missionHasBwProjectAccess
       let gp := (g.fieldStr? "bitwarden_project").getD ""
       (gp == "all" || gp == bwProjName || (!bwProjId.isEmpty && gp == bwProjId))
 
+/-- True when the local secret broker holds an active grant or live approved request
+    for `HINDSIGHT_API_KEY` or `SPARK_MEMORY_API_TOKEN` for this mission/subject.
+    Uses local broker state only (no network I/O) and defaults to `false` on errors. -/
+def missionHasApprovedMemorySecretAccess
+    (dataRoot missionId projectSlug : String) (nowEpochSec : UInt64)
+    (callerSubject : String := "") : IO Bool := do
+  let broker ← readSecretBrokerWithDefaults dataRoot
+  let nowIso := formatEpochIso8601Utc nowEpochSec
+  let memKeys : Array String := #["HINDSIGHT_API_KEY", "SPARK_MEMORY_API_TOKEN"]
+  let hasGrant := ((broker.fieldArr? "grants").getD #[]).any fun g =>
+    grantMatchesRequester g missionId callerSubject &&
+    grantIsActive g nowEpochSec nowIso &&
+    memKeys.contains ((g.fieldStr? "secret_name").getD "")
+  if hasGrant then return true
+  let hasApprovedReq := ((broker.fieldArr? "requests").getD #[]).any fun r =>
+    memKeys.any (fun k => secretRequestMatches r missionId projectSlug k callerSubject) &&
+    secretApprovalIsLive r nowEpochSec
+  return hasApprovedReq
+
 def mcpSecretList
     (workingDir dataRoot missionId projectSlug : String) (nowEpochSec : UInt64)
     (callerSubject : String := "") : IO JVal := do
