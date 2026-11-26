@@ -166,3 +166,130 @@ it("rolls back a rejected native Archive on B and keeps A open", async () => {
     .toEqual([[[target.id, "acknowledged"]], [[target.id, target.status]]]);
   expect(open).not.toHaveBeenCalled();
 });
+
+describe("newly started missions in the sidebar", () => {
+  const baseMission = {
+    id: "existing-1",
+    title: "Existing task",
+    project: "verity",
+    status: "completed",
+    tags: [],
+    history: [],
+    created_at: "2026-11-25T10:00:00Z",
+    updated_at: "2026-11-25T10:00:00Z",
+  } as Mission;
+
+  it("shows a newly started mission immediately in an already-loaded project even when the project list cache is warm", async () => {
+    listed = [baseMission];
+    const [activity, setActivity] = createSignal<Mission[]>([]);
+    const reported: Mission[][] = [];
+    const view = render(() => (
+      <LiveProjectsSection
+        activityMissions={activity()}
+        currentMission={baseMission}
+        selected={() => "m:existing-1"}
+        onProjectMissions={(_slug, rows) => reported.push(rows)}
+        harnessChoices={[]}
+        onFork={() => {}}
+        open={() => {}}
+        onNewAgent={() => {}}
+        onNewProject={() => {}}
+      />
+    ));
+    await view.findByRole("button", { name: "Existing task", exact: true });
+    await waitFor(() => expect(reported.length).toBeGreaterThan(0));
+
+    // Server list still hasn't been invalidated (simulates 10s read cache or backend lag),
+    // and activityMissions transitions from empty [] -> [started].
+    const started = {
+      ...baseMission,
+      id: "newly-started",
+      title: "Fix Android app",
+      status: "active",
+      created_at: "2026-11-26T10:00:00Z",
+      updated_at: "2026-11-26T10:00:00Z",
+    } as Mission;
+    setActivity([started]);
+
+    await view.findByRole("button", { name: "Fix Android app", exact: true });
+    expect(reported.at(-1)?.some(m => m.id === "newly-started")).toBe(true);
+  });
+
+  it("keeps a newly started mission when a stale in-flight project list resolves without it", async () => {
+    listed = [baseMission];
+    let releaseFirstList!: () => void;
+    const firstListGate = new Promise<void>(resolve => { releaseFirstList = resolve; });
+    let listCalls = 0;
+    const fetcher = vi.mocked(fetch);
+    fetcher.mockImplementation(async (input) => {
+      const url = new URL(String(input)), path = url.pathname;
+      if (path.endsWith("/missions") && url.searchParams.get("project") === "verity") {
+        listCalls++;
+        if (listCalls <= 2) await firstListGate;
+      }
+      const body = path === "/api/projects" ? { projects: [{ slug: "verity", title: "Verity" }] }
+        : path.endsWith("/files") ? { entries: [] }
+        : path.endsWith("/controller") ? { job: null, runs: [] }
+        : path.endsWith("/crons") ? { jobs: [] }
+        : path.endsWith("/missions") ? listed : [];
+      return new Response(JSON.stringify(body), { status: 200 });
+    });
+
+    const [activity, setActivity] = createSignal<Mission[]>([]);
+    const view = render(() => (
+      <LiveProjectsSection
+        activityMissions={activity()}
+        selected={() => null}
+        harnessChoices={[]}
+        onFork={() => {}}
+        open={() => {}}
+        onNewAgent={() => {}}
+        onNewProject={() => {}}
+      />
+    ));
+    const project = await view.findByRole("button", { name: "Verity", exact: true });
+    fireEvent.click(project);
+
+    const started = {
+      ...baseMission,
+      id: "race-started",
+      title: "Started mid-fetch",
+      status: "active",
+      created_at: "2026-11-26T10:01:00Z",
+      updated_at: "2026-11-26T10:01:00Z",
+    } as Mission;
+    setActivity([started]);
+    await view.findByRole("button", { name: "Started mid-fetch", exact: true });
+
+    // Stale initial project list resolves without `started`.
+    releaseFirstList();
+    await new Promise(r => setTimeout(r, 30));
+    expect(view.getByRole("button", { name: "Started mid-fetch", exact: true })).toBeTruthy();
+  });
+
+  it("does not insert /btw or archived-by-tag missions from activityMissions into the project list", async () => {
+    listed = [baseMission];
+    const [activity, setActivity] = createSignal<Mission[]>([baseMission]);
+    const view = render(() => (
+      <LiveProjectsSection
+        activityMissions={activity()}
+        currentMission={baseMission}
+        selected={() => "m:existing-1"}
+        harnessChoices={[]}
+        onFork={() => {}}
+        open={() => {}}
+        onNewAgent={() => {}}
+        onNewProject={() => {}}
+      />
+    ));
+    await view.findByRole("button", { name: "Existing task", exact: true });
+
+    const btw = { ...baseMission, id: "btw-1", title: "Side question", status: "active", tags: ["btw-subagent"] } as Mission;
+    const archivedTag = { ...baseMission, id: "arch-1", title: "Tagged archived", status: "completed", tags: ["archived"] } as Mission;
+    setActivity([baseMission, btw, archivedTag]);
+    await new Promise(r => setTimeout(r, 30));
+
+    expect(view.queryByRole("button", { name: "Side question", exact: true })).toBeNull();
+    expect(view.queryByRole("button", { name: "Tagged archived", exact: true })).toBeNull();
+  });
+});

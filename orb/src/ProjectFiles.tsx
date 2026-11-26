@@ -1117,6 +1117,12 @@ export function LiveProjectsSection(p: {
   });
 
   const newerThan = (a: Mission, b: Mission) => (Date.parse(a.updated_at || "") || 0) > (Date.parse(b.updated_at || "") || 0);
+  const hiddenInSession = (id: string) => deletedInSession.has(id) || archivedInSession.has(id);
+  const withArchiving = (m: Mission) => archiving.has(m.id) ? { ...m, status: archiving.get(m.id)! } : m;
+  const unseenActivity = (slug: string, source: readonly Mission[] | undefined, existing?: readonly Mission[]) => {
+    const seen = existing ? new Set(existing.map(m => m.id)) : undefined;
+    return (source ?? []).filter(m => !seen?.has(m.id) && !isMissionParticipant(m) && m.project?.trim() === slug && !hiddenInSession(m.id) && !isArchived(m) && !m.tags?.includes("archived") && !isBtwMission(m) && !movingOutOf(m.id, slug)).map(m => withArchiving(withHierarchy(m)));
+  };
   const loadMissions = (slug: string, opts?: { transcripts?: boolean; cached?: boolean; background?: boolean }) => {
     if (!isConnected()) return Promise.resolve();
     const version = connectionVersion();
@@ -1129,10 +1135,11 @@ export function LiveProjectsSection(p: {
           return;
         }
         const partial = isPartialList(list);
-        const visibleList = list.filter(m => !deletedInSession.has(m.id) && !archivedInSession.has(m.id));
+        const visibleList = list.filter(m => !hiddenInSession(m.id));
         // Reconcile, never replace: a short answer during a Core/Hermes restart keeps what is on screen.
         const misses = listMisses.get(slug) ?? new Map() as Misses; listMisses.set(slug, misses);
-        const reconciled = reconcileMissionList((missions[slug] ?? []).filter(m => !deletedInSession.has(m.id) && !archivedInSession.has(m.id)), visibleList.map(m => archiving.has(m.id) ? {...m, status: archiving.get(m.id)!} : m), misses, partial);
+        const stored = (missions[slug] ?? []).filter(m => !hiddenInSession(m.id));
+        const reconciled = reconcileMissionList([...unseenActivity(slug, p.activityMissions, stored), ...stored], visibleList.map(withArchiving), misses, partial);
         const merged = mergeById(missions[slug] ?? [], reconciled);
         batch(() => {
           if (merged !== missions[slug]) setMissions(slug, merged);
@@ -1164,67 +1171,52 @@ export function LiveProjectsSection(p: {
   };
 
   let prevActivityByProject = new Map<string, string>();
+  let activityInitialized = false;
   createEffect(on(() => p.activityMissions, (list) => {
     if (!isConnected()) {
       prevActivityByProject = new Map();
+      activityInitialized = false;
       return;
     }
     const incomingByProject = new Map<string, Mission[]>();
-    const nextByProject = new Map<string, string[]>();
     for (const m of list ?? []) {
-      if (isMissionParticipant(m)) continue;
-      const slug = m.project?.trim();
+      const slug = isMissionParticipant(m) ? "" : m.project?.trim();
       if (!slug) continue;
-      let rows = incomingByProject.get(slug);
-      if (!rows) incomingByProject.set(slug, rows = []);
-      rows.push(m);
-      let entries = nextByProject.get(slug);
-      if (!entries) nextByProject.set(slug, entries = []);
-      entries.push(`${m.id}:${m.status}:${m.remote_job?.job_id ?? ""}:${m.remote_job?.node_state ?? ""}`);
+      (incomingByProject.get(slug) ?? incomingByProject.set(slug, []).get(slug)!).push(m);
     }
-    const nextSignatures = new Map<string, string>();
-    for (const [slug, entries] of nextByProject) {
-      nextSignatures.set(slug, entries.sort().join("|"));
-    }
-    if (prevActivityByProject.size > 0) {
-      const slugs = new Set([...prevActivityByProject.keys(), ...nextSignatures.keys()]);
-      batch(() => {
-        for (const slug of slugs) {
-          if (prevActivityByProject.get(slug) === nextSignatures.get(slug)) continue;
-          const existing = missions[slug];
-          const incoming = incomingByProject.get(slug);
-          let hasUnseenMission = false;
-          if (existing && incoming?.length) {
-            const existingIds = new Set(existing.map(item => item.id));
-            for (const item of incoming) {
-              if (!existingIds.has(item.id) && !deletedInSession.has(item.id) && !archivedInSession.has(item.id)) {
-                hasUnseenMission = true;
-                break;
-              }
-            }
-            const byId = new Map(incoming.map(item => [item.id, item]));
-            let changed = false;
-            const patched = existing.map(row => {
-              const inc = byId.get(row.id);
-              if (!inc || deletedInSession.has(row.id) || archivedInSession.has(row.id)) return row;
-              const merged = mergeMission(row, inc, "partial");
-              const withArch = archiving.has(row.id) ? { ...merged, status: archiving.get(row.id)! } : merged;
-              if (withArch !== row) changed = true;
-              return withArch;
-            });
-            if (changed) {
-              setMissions(slug, patched);
-              p.onProjectMissions?.(slug, patched);
-            }
-          } else if (!existing && incoming?.length) {
-            hasUnseenMission = true;
-          }
-          if (warmed.has(slug) && (hasUnseenMission || !existing)) {
-            void loadMissions(slug, { transcripts: false, cached: true, background: true });
+    const nextSignatures = new Map([...incomingByProject].map(([slug, rows]) => [
+      slug,
+      rows.map(m => `${m.id}:${m.status}:${m.remote_job?.job_id ?? ""}:${m.remote_job?.node_state ?? ""}`).sort().join("|"),
+    ]));
+    const slugs = new Set([...prevActivityByProject.keys(), ...nextSignatures.keys()]);
+    batch(() => {
+      for (const slug of slugs) {
+        if (prevActivityByProject.get(slug) === nextSignatures.get(slug)) continue;
+        const existing = missions[slug];
+        const incoming = incomingByProject.get(slug);
+        const unseen = incoming?.length ? unseenActivity(slug, incoming, existing) : [];
+        if (existing && incoming?.length) {
+          const byId = new Map(incoming.map(item => [item.id, item]));
+          let changed = unseen.length > 0;
+          const patched = existing.map(row => {
+            const inc = byId.get(row.id);
+            if (!inc || hiddenInSession(row.id)) return row;
+            const withArch = withArchiving(mergeMission(row, inc, "partial"));
+            if (withArch !== row) changed = true;
+            return withArch;
+          });
+          if (changed) {
+            const next = [...unseen, ...patched];
+            setMissions(slug, next);
+            p.onProjectMissions?.(slug, next);
           }
         }
-      });
-    }
+        if ((warmed.has(slug) || expanded[slug] || p.headless) && (unseen.length > 0 || (activityInitialized && !existing))) {
+          void loadMissions(slug, { transcripts: false, background: true });
+        }
+      }
+    });
+    activityInitialized = true;
     prevActivityByProject = nextSignatures;
   }));
 
