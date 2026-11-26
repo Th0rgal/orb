@@ -1965,12 +1965,13 @@ private def runFastMemoryBrokerTests
       OrbBin.PosixExt.setenvVar "LIBRARY_PATH" testLibRoot
       OrbBin.PosixExt.setenvVar "SPARK_MEMORY_MCP_BASE_URL" s!"http://127.0.0.1:{authPort}/mcp"
       OrbBin.PosixExt.setenvVar "SPARK_MEMORY_API_TOKEN" "hindsight-auth-test-tok"
+      let appStMem : CoreAppState := { appSt with bootstrapAdminId := sec11Owner }
       let _ ← execParamQuery store.projectsDb
         "INSERT OR REPLACE INTO projects(slug,name,skills) VALUES('ethereum','Ethereum','[]');" #[]
       let ethCreateBody := "{\"id\":\"m-eth-mem\",\"title\":\"Glamsterdam\",\"placement\":\"managed\",\"project\":\"ethereum\"}"
       let ethCreateRaw := s!"POST /api/control/missions HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {validJwt}\r\nContent-Length: {ethCreateBody.utf8ByteSize}\r\n\r\n{ethCreateBody}".toUTF8
       let .ok ethCreateReq := parseRequest ethCreateRaw none | pure 1
-      let .ok ethCreateResp ← dispatchCoreRequest appSt ethCreateReq nowSec | pure 1
+      let .ok ethCreateResp ← dispatchCoreRequest appStMem ethCreateReq nowSec | pure 1
       if ethCreateResp.status != 201 then
         IO.eprintln s!"[orb-core-test] FAIL: mem-auth mission create failed: {ethCreateResp.status}"
         pure 1
@@ -1978,14 +1979,14 @@ private def runFastMemoryBrokerTests
         let ethSessBody := "{\"mission_id\":\"m-eth-mem\",\"role\":\"worker\",\"project\":\"ethereum\"}"
         let ethSessRaw := s!"POST /api/mcp/session HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {validJwt}\r\nContent-Length: {ethSessBody.utf8ByteSize}\r\n\r\n{ethSessBody}".toUTF8
         let .ok ethSessReq := parseRequest ethSessRaw none | pure 1
-        let .ok ethSessResp ← dispatchCoreRequest appSt ethSessReq nowSec | pure 1
+        let .ok ethSessResp ← dispatchCoreRequest appStMem ethSessReq nowSec | pure 1
         let .ok ethSessJson := OrbBin.Json.parseBytes ethSessResp.body | pure 1
         let ethTok := (ethSessJson.fieldStr? "token").getD ""
         let callMem : IO String := do
           let body := "{\"name\":\"memory_search_knowledge\",\"arguments\":{\"query\":\"Glamsterdam\"}}"
           let raw := s!"POST /api/mcp/call HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {ethTok}\r\nContent-Length: {body.utf8ByteSize}\r\n\r\n{body}".toUTF8
           let .ok req := parseRequest raw none | return ""
-          let .ok resp ← dispatchCoreRequest appSt req nowSec | return ""
+          let .ok resp ← dispatchCoreRequest appStMem req nowSec | return ""
           return String.fromUTF8! resp.body
         -- 1. Empty Library + empty projects.skills -> denied (`SEC-11`).
         IO.FS.createDirAll (System.FilePath.mk s!"{testLibRoot}/skills")
