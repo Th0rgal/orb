@@ -48,7 +48,7 @@ export function classifyProcessLaunchFailure(raw: string, backend?: string | nul
     return { kind, nonResumable: true as const, title: `${a} could not start`, message: message(a) };
   };
   if (/argument list too long|\bE2BIG\b|\bos error 7\b/i.test(raw))
-    return fb("arg_list_too_long", a => `The carried conversation history exceeded the system command-line limit before ${a} could launch. ${PRESERVED} Update the backend so ${a} receives large histories over stdin, ${CONT_DIRECT}`);
+    return fb("arg_list_too_long", a => `The carried conversation history exceeded the system command-line limit before ${a} could launch. ${PRESERVED} Update the backend so ${a} receives large histories over stdin, ${CONT_DIRECT.slice(0, -1)}, or continue in the original conversation.`);
   if (MISSING_BIN_RE.test(raw))
     return fb("missing_binary", a => `The ${a} CLI was not found on the execution machine. ${PRESERVED} Install or update ${a} on that machine, ${CONT_DIRECT}`);
   if (SPAWN_FAIL_RE.test(raw))
