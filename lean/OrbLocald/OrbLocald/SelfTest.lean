@@ -1546,12 +1546,45 @@ private def runLinuxPortalFileChooserChecks (tmpStateDir validTok : String) : IO
 
   return (passed, total)
 
+private def runBindingsRefreshMergeChecks (pDir : System.FilePath) (validTok : String) : IO (Nat × Nat) := do
+  let mergeDir := pDir / "bindings-refresh-merge"
+  let workDir := mergeDir / "work"
+  IO.FS.createDirAll workDir
+  let stRef ← IO.mkRef ({ launchToken := validTok, orbStateDir := mergeDir.toString, homeDir := mergeDir.toString, hostOs := "linux" } : LocaldState)
+  let _ ← dispatchRpcCommand stRef "local_binding_set" (.obj #[
+    ("id", .str "m-persist-1"),
+    ("binding", .obj #[("harness", .str "claudecode"), ("bin", .str "/usr/bin/true"), ("cwd", .str workDir.toString)])
+  ])
+  -- External process writes a new binding with a higher revision to `local-bindings.json` after initial load.
+  IO.FS.writeFile (mergeDir / "local-bindings.json")
+    ("{\"revision\":51,\"bindings\":{\"m-persist-1\":{\"harness\":\"claudecode\",\"bin\":\"/usr/bin/true\",\"cwd\":\"" ++ workDir.toString ++ "\"},\"m-external-2\":{\"harness\":\"antigravity\",\"bin\":\"/usr/bin/true\",\"cwd\":\"" ++ workDir.toString ++ "\",\"sessionId\":\"sess-ext-2\"}}}\n")
+  let refreshedExt ← dispatchRpcCommand stRef "local_bindings_refresh" (.obj #[])
+  let afterLocalSet ← dispatchRpcCommand stRef "local_binding_set" (.obj #[
+    ("id", .str "m-local-3"),
+    ("binding", .obj #[("harness", .str "antigravity"), ("bin", .str "/usr/bin/true"), ("cwd", .str workDir.toString)])
+  ])
+  let ok :=
+    (match refreshedExt with
+     | .ok jv =>
+       ((jv.field? "bindings").bind (·.field? "m-persist-1")).isSome &&
+       ((jv.field? "bindings").bind (·.field? "m-external-2")).isSome &&
+       (jv.fieldNat? "revision").getD 0 >= 51
+     | _ => false) &&
+    (match afterLocalSet with
+     | .ok jv =>
+       ((jv.field? "bindings").bind (·.field? "m-external-2")).isSome &&
+       ((jv.field? "bindings").bind (·.field? "m-local-3")).isSome
+     | _ => false)
+  let passed := if (← assertTrue "local_bindings_refresh_merges_external_disk_additions" ok) then 1 else 0
+  return (passed, 1)
+
 private def runDesktopReliabilityParityChecks (tmpBase : String) (validTok : String) : IO (Nat × Nat) := do
   let pDir := System.FilePath.mk tmpBase / "parity-suite"
   IO.FS.createDirAll pDir
   let (p1, t1) ← runDesktopReliabilityParityChecksPart1 pDir validTok
   let (p2, t2) ← runLinuxPortalAndRevealChecks pDir validTok
-  return (p1 + p2, t1 + t2)
+  let (p3, t3) ← runBindingsRefreshMergeChecks pDir validTok
+  return (p1 + p2 + p3, t1 + t2 + t3)
 
 private def runWarmClaudeRpcE2eChecks (validTok tmpStateDir : String) : IO (Nat × Nat) := do
   let warmRpcDir := System.FilePath.mk tmpStateDir / "warm-rpc-repo"
