@@ -67,6 +67,7 @@ export type NativeChromeSyncSnapshot = {
 
 type NativeChromeWindow = Window & {
   __ORB_NATIVE_CHROME__?: boolean;
+  __ORB_NATIVE_SYNC_BRIDGE__?: boolean;
   __ORB_SELECT_MISSION__?: (missionId: string) => boolean;
   __ORB_NATIVE_NAV__?: (target: string) => boolean;
   __ORB_NATIVE_EXPAND__?: (rowId: string) => boolean;
@@ -131,7 +132,19 @@ export function withLiveExecution(rows: readonly Mission[], live: ReadonlyMap<st
   return rows.map((row) => {
     const owner = live.get(row.id);
     if (!owner || owner === row) return row;
-    return { ...row, status: owner.status, updated_at: owner.updated_at, remote_job: owner.remote_job, execution: owner.execution, queue_wait: owner.queue_wait };
+    const takeTitle =
+      Boolean(owner.title) &&
+      (!row.metadata_updated_at ||
+        (!!owner.metadata_updated_at && owner.metadata_updated_at >= row.metadata_updated_at));
+    return {
+      ...row,
+      ...(takeTitle ? { title: owner.title, metadata_updated_at: owner.metadata_updated_at } : {}),
+      status: owner.status,
+      updated_at: owner.updated_at,
+      remote_job: owner.remote_job,
+      execution: owner.execution,
+      queue_wait: owner.queue_wait,
+    };
   });
 }
 
@@ -440,37 +453,68 @@ export function createNativeChromeSyncer(
       : Math.max(1, Date.now()) * 1024;
   let pendingSnap: NativeChromeSyncSnapshot | null = null;
   let timer: ReturnType<typeof setTimeout> | null = null;
+  let inFlight = false;
+  let disposed = false;
   let unsupported = false;
+  let lastImmediateKey = "";
+  let lastPayloadJson = "";
 
   const flushNow = async (): Promise<void> => {
     if (timer !== null) {
       clearTimeout(timer);
       timer = null;
     }
+    if (inFlight || disposed || unsupported) return;
     const snap = pendingSnap;
     pendingSnap = null;
-    if (!snap || !snap.scope || unsupported) return;
+    if (!snap || !snap.scope) return;
+    const nw = typeof window === "undefined" ? undefined : (window as NativeChromeWindow);
+    const postNative =
+      !invokeOverride && nw?.__ORB_NATIVE_SYNC_BRIDGE__ === true
+        ? nw.webkit?.messageHandlers?.orbNative
+        : undefined;
     const invoke = invokeOverride ?? nativeInvoke();
-    if (!invoke) return;
+    if (!postNative && !invoke) return;
+    const args = buildNativeChromeSyncArgs(snap, 0);
+    const dedupJson = JSON.stringify(args);
+    if (dedupJson === lastPayloadJson) return;
     revision += 1;
-    const args = buildNativeChromeSyncArgs(snap, revision);
+    args.revision = revision;
+    inFlight = true;
     try {
-      await invoke("native_chrome_sync_state", args);
+      if (postNative) {
+        postNative.postMessage({
+          command: "native_chrome_sync_state",
+          args: JSON.stringify({ command: "native_chrome_sync_state", args }),
+        });
+      } else if (invoke) {
+        await invoke("native_chrome_sync_state", args);
+      }
+      lastPayloadJson = dedupJson;
     } catch (err) {
       const msg = String((err as Error)?.message ?? err ?? "");
       if (/unknown desktop command|is not supported in this local runtime/i.test(msg)) {
         unsupported = true;
       }
+    } finally {
+      inFlight = false;
+      if (pendingSnap && !disposed && !unsupported) {
+        void flushNow();
+      }
     }
   };
 
   const schedule = (snap: NativeChromeSyncSnapshot, immediate = false): void => {
+    if (disposed) return;
     pendingSnap = snap;
-    if (immediate) {
+    const immKey = `${snap.scope}\0${snap.selected ?? ""}\0${snap.onSettings ? 1 : 0}`;
+    const navChanged = immKey !== lastImmediateKey;
+    lastImmediateKey = immKey;
+    if (immediate || navChanged) {
       void flushNow();
       return;
     }
-    if (timer !== null) return;
+    if (timer !== null || inFlight) return;
     timer = setTimeout(() => {
       timer = null;
       void flushNow();
@@ -478,6 +522,7 @@ export function createNativeChromeSyncer(
   };
 
   const dispose = (): void => {
+    disposed = true;
     pendingSnap = null;
     if (timer !== null) {
       clearTimeout(timer);

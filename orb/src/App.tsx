@@ -12,7 +12,7 @@ import { movedMission, withMovedMissions } from "./moves";
 import { applyServerPlacementEvent, moveMissions, planMissionMoves } from "./missionMove";
 import { MissionBoardSection } from "./MissionBoard";
 import { MissionLookupContext } from "./orchestrationModel";
-import { renamedTitle, renameOptimistically, withRenamedTitles } from "./renames";
+import { renamedTitle, renameOptimistically, renameVersion, withRenamedTitles } from "./renames";
 import { readString, writeString } from "./storage";
 import { missionAssignedNode, nodeLabel } from "./machines/nodes";
 import { isLive, isWorking, missionActivity, presentedStatus } from "./missionStatus";
@@ -791,7 +791,7 @@ export default function App() {
       cfg,
     ).map(item => item.id);
   });
-  const inboxCount = () => inboxBadgeIds().length;
+  const inboxCount = createMemo(() => inboxBadgeIds().length);
   onMount(() => {
     // Web Inspector can read the actual badge inputs without opening a mission or fetching a transcript.
     const inspector = window as Window & { orbInboxBadgeIds?: () => string[] };
@@ -1106,7 +1106,7 @@ export default function App() {
   }
   /** Native sidebar context-menu actions, sharing the HTML sidebar's API calls. */
   const nativeMissionAction = (action: NativeMissionAction, id: string, arg: string): boolean => {
-    const settle = () => { void refreshMissions(); loadNativeArchived(); };
+    const settle = () => { void refreshMissions(); bumpProjects(); loadNativeArchived(); };
     if (action === "delete") {
       // One confirmation for the whole selection, through the headless sidebar's delete flow
       // (running workers, descendants). `arg` lists the selected ids; "current" is the open one.
@@ -1148,10 +1148,12 @@ export default function App() {
     if (!mission) return false;
     const fail = (title: string) => (error: unknown) => notify({ kind: "error", key: `native-action:${id}`, title, message: error instanceof Error ? error.message : String(error) });
     switch (action) {
-      case "rename":
-        if (!arg || arg === mission.title) return false;
-        void renameOptimistically("mission", id, arg, mission.title ?? null, () => renameMission(id, arg)).then(settle, swallow("app.nativeRename", { mission: id }));
+      case "rename": {
+        const prev = renamedTitle("mission", id, mission.title);
+        if (!arg || arg === prev) return false;
+        void renameOptimistically("mission", id, arg, prev ?? null, () => renameMission(id, arg)).then(settle, swallow("app.nativeRename", { mission: id }));
         return true;
+      }
       case "archive":
       case "restore": {
         // Runs through the HTML sidebar's `changeArchiveState` (headless ProjectFiles): same subtree
@@ -1221,12 +1223,16 @@ export default function App() {
     });
   });
   if (nativeChromeSyncer) {
+    let prevRenameMap = renameVersion();
     createEffect(() => {
       const canBack = hIdx() > 0;
       const canForward = hIdx() < history().length - 1;
       notifyNativeChromeShell("set_native_history", { can_back: canBack, can_forward: canForward });
     });
     createEffect(() => {
+      const curRenameMap = renameVersion();
+      const renameChanged = curRenameMap !== prevRenameMap;
+      prevRenameMap = curRenameMap;
       const scope = historyScope();
       const sel = selected();
       const inSet = onSettings();
@@ -1275,7 +1281,7 @@ export default function App() {
         completedMissions: compMissions,
         archivedMissions: archived,
         projectMissions: projMissions,
-      });
+      }, renameChanged);
     });
   }
 
