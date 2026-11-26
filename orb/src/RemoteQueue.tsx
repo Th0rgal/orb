@@ -147,6 +147,15 @@ export function RemoteQueue(p: {
     return out;
   };
   const [error, setError] = createSignal("");
+  let errorForId: string | undefined;
+  const setQueueError = (msg: string, forId?: string) => {
+    errorForId = msg ? forId : undefined;
+    setError(msg);
+  };
+  createEffect(() => {
+    const sent = delivered();
+    if (errorForId && sent.has(errorForId)) setQueueError("");
+  });
   const [cancelling, setCancelling] = createSignal<string>();
   const [working, setWorking] = createSignal(false);
   const [collapsed, setCollapsed] = createSignal(false);
@@ -161,7 +170,7 @@ export function RemoteQueue(p: {
     serverQueueRev = 1;
     hasExplicitServerRev = false;
     clearObservedMissionQueueRevision(scopeKey);
-    untrack(() => { setSettledPollEpoch(0); setRows([]); setLiveEdits(new Map()); setError(""); p.onRows([]); });
+    untrack(() => { setSettledPollEpoch(0); setRows([]); setLiveEdits(new Map()); setQueueError(""); p.onRows([]); });
     let disposed = false, loading = false;
     const applyFetchedRows = (fetched: QueuedMessage[], pollEpoch: number, started: number) => {
       const pending = fetched.filter(row => !row.inflight && !deletedIds.has(row.id) && (row.source === "remote-queue" || row.source?.startsWith("host-queue:api:")));
@@ -345,13 +354,27 @@ export function RemoteQueue(p: {
       await p.onSendImmediate?.(payload);
     } catch (e) {
       if (version === connectionVersion() && mission === p.mission) {
+        if (isQueueMessageConsumed(e) || isQueueMessageGone(e)) {
+          // Already claimed or delivered while Send now was in flight: the transcript owns it now.
+          revision++;
+          p.onRows(rows().map(row => row.id));
+          p.onCancel(target.id);
+          return;
+        }
+        const detail = e instanceof ApiError ? e.detail : (e instanceof Error ? e.message : String(e));
+        const interruptUnsupported = (e instanceof ApiError ? e.status === 409 : /\b409\b/.test(detail)) && /interrupt_not_supported/i.test(detail);
         // Refused or unconfirmed: put the queue back as it was, same id, so nothing
         // looks sent that was not. The next queue read reconciles a late delivery.
         batch(() => {
           p.onRetract?.(target.id);
           deletedIds.delete(target.id);
           setRows(before);
-          setError(e instanceof Error ? e.message : String(e));
+          setQueueError(
+            interruptUnsupported
+              ? "Couldn’t interrupt the current turn; your message stays queued for the next turn."
+              : (e instanceof Error ? e.message : String(e)),
+            target.id,
+          );
         });
       }
     } finally {
@@ -504,7 +527,7 @@ export function RemoteQueue(p: {
           <Show when={r().queue_error || (p.terminal && !r().sending)}><small title={r().queue_error ?? undefined}>{r().queue_error ? `Delivery paused · ${r().queue_error}` : "Not delivered · mission ended before delivery"}</small></Show>
         </li>;
       }}</For></ol></Show>
-      <ErrorToast error={error()} onDismiss={() => setError("")} />
+      <ErrorToast error={error()} onDismiss={() => setQueueError("")} />
     </section>
   </Show>;
 }
