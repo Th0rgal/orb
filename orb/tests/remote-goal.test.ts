@@ -27,6 +27,8 @@ describe("remote goal envelope v1", () => {
     expect(state.phase).toBe("complete");
     state = applyRemoteGoalEvent(state, { type: "goal_status", data: { status: "active" } });
     expect(state.phase).toBe("complete");
+    state = applyRemoteGoalEvent(state, { type: "goal_status", data: { status: "active", objective: "Next objective", iteration: 0, reason: "remote_goal_started" } });
+    expect(state).toEqual({ phase: "active", objective: "Next objective", iteration: 0, detail: undefined });
     expect(remoteGoalStatusLabel({ phase: "active", objective: "Ship it", iteration: 2 })).toBe("Goal in progress · iteration 2");
   });
   for (const fixture of fixtures.projection_cases) {

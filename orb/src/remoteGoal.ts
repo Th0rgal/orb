@@ -20,12 +20,17 @@ export function applyRemoteGoalEvent(previous: RemoteGoalProjection, value: unkn
   if (!event) return previous;
   const data = event.data;
   const status = typeof data.status === "string" ? data.status : undefined;
-  const phase: RemoteGoalPhase = status === "complete" || status === "stopped" || status === "paused" || status === "blocked" ? status : status === "active" && previous.phase !== "complete" && previous.phase !== "stopped" ? "active" : previous.phase;
+  const restarted = data.reason === "remote_goal_started";
+  const phase: RemoteGoalPhase = status === "complete" || status === "stopped" || status === "paused" || status === "blocked"
+    ? status
+    : status === "active" && (restarted || (previous.phase !== "complete" && previous.phase !== "stopped"))
+      ? "active"
+      : previous.phase;
   return {
     phase,
     objective: typeof data.objective === "string" ? data.objective : previous.objective,
     iteration: typeof data.iteration === "number" ? data.iteration : previous.iteration,
-    detail: typeof data.summary === "string" ? data.summary : previous.detail,
+    detail: typeof data.summary === "string" ? data.summary : restarted ? undefined : previous.detail,
   };
 }
 

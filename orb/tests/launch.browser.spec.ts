@@ -111,7 +111,7 @@ test("an existing remote harness does not offer or send Goal follow-ups",async({
  await expect(page.getByRole("option",{name:"Goal",exact:true})).toHaveCount(0);
  const draft = `/goal ${(objective + " ").repeat(120).trim()}`;
  await input.fill(draft);
- await expect(page.getByText("Start a new Goal-capable mission to use /goal, or send a standard follow-up.", {exact:true})).toBeVisible();
+ await expect(page.getByText(/This harness does not support Goals on this node/)).toBeVisible();
  const warning = page.locator(".composer + .composer-warning");
  await expect(warning).toBeInViewport({ratio:1});
  const composer = page.locator(".composer").filter({has:input});
@@ -127,6 +127,27 @@ test("an existing remote harness does not offer or send Goal follow-ups",async({
  await expect(composer.locator(".send")).toBeEnabled();
  expect(followups).toEqual([]);
  expect(posts).toEqual([]);
+});
+
+test("an existing Goal-capable remote harness offers and sends /goal follow-ups",async({page})=>{
+ await setup(page,{failed:true,emptyStatus:"awaiting_user",capability:{...typedCapability,harnesses:["claudecode","opencode","grok","antigravity"],goal_harnesses:["opencode","claudecode","grok","antigravity"]}});
+ const followups:any[]=[];
+ await page.route("**/api/control/message",async route=>{
+  followups.push(route.request().postDataJSON());
+  return route.fulfill({json:{id:"goal-followup-1",queued:false,message_accepted:true}});
+ });
+ await page.getByRole("button",{name:"Test",exact:true}).click();
+ await page.getByRole("button",{name:/Remote task/}).click();
+ await expect(page.getByPlaceholder("Send follow-up")).toBeVisible();
+ const input=page.locator(".composer textarea").last();
+ await input.fill("/g");
+ await expect(page.getByRole("option",{name:"Goal",exact:true})).toBeVisible();
+ await input.fill(prompt);
+ await expect(page.locator(".composer .mode-chip")).toContainText("Goal");
+ await expect(page.getByText(/does not support Goals/)).toHaveCount(0);
+ await input.press("Enter");
+ await expect.poll(()=>followups.length).toBe(1);
+ expect(followups[0]).toMatchObject({mission_id:"accepted",content:prompt});
 });
 
 async function setupColdMemberFleet(page: Page) {

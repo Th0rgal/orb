@@ -1167,18 +1167,45 @@ def run : IO Unit := do
            let .ok response ← dispatchCoreRequest { app with remoteSup? := some sup } req 24
              | throw (IO.userError "Goal fixture REST dispatch")
            return response
-         let rejected ← send "/api/control/missions" "{\"id\":\"unsupported-goal\",\"backend\":\"claudecode\",\"remote_node_id\":\"mockgoal\",\"prompt\":\"/goal Ship it\"}"
+         let rejected ← send "/api/control/missions" "{\"id\":\"unsupported-goal\",\"backend\":\"vibe\",\"remote_node_id\":\"mockgoal\",\"prompt\":\"/goal Ship it\"}"
          check (rejected.status == 400 && ((String.fromUTF8? rejected.body).getD "").contains "remote_goal_unsupported" &&
            (← statusOf "unsupported-goal").isEmpty) "Core rejects unsupported direct Goal creation before inserting a mission"
          newMission "m-nongoal-remote" "[\"remote-node:mockgoal\"]"
-         discard <| execParamQuery db "UPDATE missions SET owner_user_id='goal-test-admin' WHERE id='m-nongoal-remote';" #[]
+         discard <| execParamQuery db "UPDATE missions SET backend='vibe',owner_user_id='goal-test-admin' WHERE id='m-nongoal-remote';" #[]
          let eventCount ← cellOf db "SELECT COUNT(*) FROM mission_events WHERE mission_id='m-nongoal-remote';" #[]
          let rejected ← send "/api/control/message" "{\"mission_id\":\"m-nongoal-remote\",\"content\":\"/goal Ship it\"}"
          let rejection := (String.fromUTF8? rejected.body).getD ""
-         check (rejected.status == 400 && rejection.contains "remote_goal_followup_unsupported" &&
+         check (rejected.status == 400 && rejection.contains "remote_goal_unsupported" &&
            (← cellOf db "SELECT COUNT(*) FROM remote_message_queue WHERE mission_id='m-nongoal-remote';" #[]) == "0" &&
            (← cellOf db "SELECT COUNT(*) FROM mission_events WHERE mission_id='m-nongoal-remote';" #[]) == eventCount)
-           s!"Core rejects a remote Goal follow-up before appending or queueing (got {rejected.status}: {rejection})"
+           s!"Core rejects an unsupported remote Goal follow-up before appending or queueing (got {rejected.status}: {rejection})"
+         let .ok (followupFd, followupPort) ← LeanSys.Posix.tcpListen "127.0.0.1" 0 8
+           | throw (IO.userError "Goal followup mock node listen failed")
+         try
+           newMission "m-goal-followup" "[\"remote-node:mockgoalfollowup\"]"
+           discard <| execParamQuery db
+             ("UPDATE missions SET backend='antigravity',status='awaiting_user',terminal_reason='remote_goal_complete'," ++
+              "goal_mode=1,goal_objective='Old goal',owner_user_id='goal-test-admin' WHERE id='m-goal-followup';") #[]
+           discard <| execParamQuery db
+             ("INSERT INTO mission_continuations(id,mission_id,run_generation,phase,due_epoch,trigger_kind,reason,prompt,request_id,job_id,source,error,recurrence,stop_after_first,created_at,updated_at) " ++
+              "VALUES('old-goal-cont','m-goal-followup',1,1,999999,'time','remote_goal','Old','req-old','','remote-goal','','',1,'2026-11-19T00:00:00Z','2026-11-19T00:00:00Z');") #[]
+           let emptyGoalFollowup ← send "/api/control/message" "{\"mission_id\":\"m-goal-followup\",\"content\":\"/goal   \"}"
+           check (emptyGoalFollowup.status == 400) "Core rejects empty /goal follow-up"
+           setenvVar "SANDBOXED_REMOTE_NODES" s!"mockgoal=http://127.0.0.1:{port}|TURN_OUTCOME_MOCK_TOK,mockgoalfollowup=http://127.0.0.1:{followupPort}|TURN_OUTCOME_MOCK_TOK"
+           let replacing ← IO.asTask (send "/api/control/message" "{\"mission_id\":\"m-goal-followup\",\"content\":\"/goal New objective\"}")
+           withMockNodeRequest followupFd fun conn req => do
+             let bodyStr := (String.fromUTF8? req.bodySlice.toByteArray).getD ""
+             check (req.method == "POST" && req.path == "/jobs" && bodyStr.contains "New objective" && bodyStr.contains "GOAL_COMPLETE")
+               "remote /goal follow-up dispatches wrapped objective"
+             mockNodeReply conn "200 OK" "{\"accepted\":true}"
+           let replaced ← IO.ofExcept replacing.get
+           check (replaced.status == 200 &&
+             (← cellOf db "SELECT goal_mode || ':' || goal_objective FROM missions WHERE id='m-goal-followup';" #[]) == "1:New objective" &&
+             (← cellOf db "SELECT source || ':' || phase || ':' || error FROM mission_continuations WHERE id='old-goal-cont';" #[]) == "remote-goal-replaced:4:goal_replaced")
+             "remote /goal follow-up activates/replaces the goal and retires prior continuations"
+         finally
+           discard <| LeanSys.Posix.closeFd followupFd
+           setenvVar "SANDBOXED_REMOTE_NODES" s!"mockgoal=http://127.0.0.1:{port}|TURN_OUTCOME_MOCK_TOK"
          let fired ← tickContinuationScheduler store none none none sup none root (some launch) (some 22)
          check ((← IO.ofExcept accepted.get) && fired == 1 && (← launches.get) == 0 &&
            (← statusOf "m-goal-dispatch") == "active") "Goal scheduler recovers a claimed intent in the same Codex thread"
