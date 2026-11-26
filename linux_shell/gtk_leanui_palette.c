@@ -15,7 +15,7 @@ void orb_pal_close(OrbPalette *p, gboolean restore_prev) {
     orb_pal_clear_items(p);
     GdkWindow *gw = gtk_widget_get_window(p->canvas);
     if (gw) gdk_window_set_cursor(gw, NULL);
-    gtk_widget_hide(p->canvas);
+    orb_pal_gpu_detach(p); gtk_widget_hide(p->canvas);
     if (p->wv) webkit_web_view_evaluate_javascript(WEBKIT_WEB_VIEW(p->wv), "document.documentElement.classList.remove('orb-pal-blur')", -1, NULL, NULL, NULL, NULL, NULL);
     GtkWidget *target = (restore_prev && p->prev_focus && gtk_widget_get_visible(p->prev_focus) &&
                          gtk_widget_get_mapped(p->prev_focus) && gtk_widget_get_can_focus(p->prev_focus))
@@ -130,7 +130,7 @@ gboolean orb_leanui_palette_key(GtkWidget *overlay, GdkEventKey *ev) {
 }
 
 static gboolean on_draw(GtkWidget *w, cairo_t *cr, OrbPalette *p) {
-    (void)w; if (p->surface) { cairo_set_source_surface(cr, p->surface, 0, 0); cairo_paint(cr); } return TRUE;
+    (void)w; if (!p->gpu_active && p->surface) { cairo_set_source_surface(cr, p->surface, 0, 0); cairo_paint(cr); } return TRUE;
 }
 static void on_alloc(GtkWidget *w, GtkAllocation *a, OrbPalette *p) {
     int sc = gtk_widget_get_scale_factor(w);
@@ -184,7 +184,7 @@ static void on_destroy(GtkWidget *w, OrbPalette *p) {
         p->overlay = NULL;
     }
     p->closed = TRUE; p->open = FALSE; p->dirty = FALSE; p->pending_enter = FALSE;
-    orb_pal_try_free(p);
+    orb_pal_gpu_detach(p); orb_pal_try_free(p);
 }
 
 GtkWidget *orb_leanui_palette_new(GtkWidget *base, GtkWidget *wv, unsigned port, const char *token,

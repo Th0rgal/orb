@@ -161,7 +161,6 @@ static GtkWidget *hit_button(OrbSidebar *s, unsigned id) {
     g_object_set_data_full(G_OBJECT(b),"orb-parent-id",g_strdup(rid),g_free);
     return b;
 }
-
 static gboolean fade_wake(gpointer data) {
     OrbSidebar *s = data;
     s->fade = 0;
@@ -213,7 +212,6 @@ void orb_sidebar_hits(void *view, const char *regions) {
     if (running && animations && !s->animation) s->animation = g_timeout_add(16,animate,s);
     if ((!running || !animations) && s->animation) { g_source_remove(s->animation); s->animation = 0; }
 }
-
 void orb_sidebar_model_free(OrbSidebar *s) {
     g_hash_table_destroy(s->buttons);
     g_ptr_array_free(s->indices,TRUE);

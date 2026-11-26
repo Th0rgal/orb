@@ -94,7 +94,6 @@ static gboolean on_inline_key(GtkWidget *w, GdkEventKey *ev, gpointer ud) {
     if (ev->keyval == GDK_KEY_Escape) { r->cancelled = TRUE; commit_inline_rename(r, TRUE); return TRUE; }
     return FALSE;
 }
-
 void orb_inline_rename(GtkWidget *wv, GtkWidget *row, const char *mode, const char *id, const char *title) {
     GtkWidget *ov = row ? gtk_widget_get_ancestor(row, GTK_TYPE_OVERLAY) : NULL;
     if (!wv || !ov || !id || !*id) return;

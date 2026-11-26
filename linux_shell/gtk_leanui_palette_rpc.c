@@ -1,5 +1,6 @@
 /* linux_shell/gtk_leanui_palette_rpc.c — Palette singleflight RPC & LeanUI paint bridge (<= 220 LOC). */
 #include "gtk_leanui_palette_private.h"
+#include <inttypes.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -27,8 +28,21 @@ void orb_pal_clear_items(OrbPalette *p) {
     p->count = 0;
 }
 
+/* Release the Vulkan session (the renderer owns the swapchain) before destroying its surface. */
+void orb_pal_gpu_detach(OrbPalette *p) {
+    if (p->wl.surface) {
+        char req[64];
+        snprintf(req, sizeof(req), "D\t%" PRIuPTR, (uintptr_t)p->wl.surface);
+        orb_leanui_paint(req, NULL, 0, NULL, NULL);
+    }
+    orb_wl_subsurface_detach(&p->wl);
+    if (p->gpu_active) p->surface_fresh = TRUE;
+    p->gpu_active = FALSE;
+}
+
 void orb_pal_try_free(OrbPalette *p) {
     if (!p->closed || p->inflight > 0) return;
+    orb_pal_gpu_detach(p);
     orb_pal_clear_items(p);
     if (p->surface) cairo_surface_destroy(p->surface);
     if (p->query) g_string_free(p->query, TRUE);
@@ -47,13 +61,6 @@ static gboolean pal_paint(gpointer data) {
     if (p->closed || !p->open || p->width < 2 || p->height < 2 || !gtk_widget_get_mapped(p->canvas))
         return G_SOURCE_REMOVE;
     int scale = p->scale > 0 ? p->scale : 1, w = p->width * scale, h = p->height * scale;
-    if (!p->surface || cairo_image_surface_get_width(p->surface) != w ||
-        cairo_image_surface_get_height(p->surface) != h) {
-        if (p->surface) cairo_surface_destroy(p->surface);
-        p->surface = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, w, h);
-        p->surface_fresh = TRUE;
-    }
-    if (cairo_surface_status(p->surface) != CAIRO_STATUS_SUCCESS) return G_SOURCE_REMOVE;
     GString *req = g_string_sized_new(1024);
     char buf[1024];
     int n = orb_palette_format_header(buf, sizeof(buf), p->width, p->height, scale, p->light, p->selected, p->query->str);
@@ -64,6 +71,31 @@ static gboolean pal_paint(gpointer data) {
                                     it->subtitle, it->status, it->shortcut, it->color);
         if (n > 0) g_string_append_len(req, buf, n);
     }
+    /* Prefer Vulkan on a subsurface above the window; the renderer answers 2 (presented),
+     * 0 (retry) or anything else (no GPU here: detach and paint into the cairo surface). */
+    p->wl.above = TRUE;
+    if (!p->gpu_disabled && orb_wl_subsurface_ensure(&p->wl, p->canvas, NULL)) {
+        char gpu[96];
+        int g = snprintf(gpu, sizeof(gpu), "G\t%" PRIuPTR "\t%" PRIuPTR "\n", (uintptr_t)p->wl.display, (uintptr_t)p->wl.surface);
+        g_string_prepend(req, gpu);
+        int rc = orb_leanui_paint(req->str, NULL, 0, pal_hits_cb, p);
+        g_string_erase(req, 0, g);
+        if (rc == 2 || rc == 0) {
+            if (!p->gpu_active) { p->gpu_active = TRUE; gtk_widget_queue_draw(p->canvas); }
+            if (rc == 0) orb_pal_invalidate(p);
+            g_string_free(req, TRUE);
+            return G_SOURCE_REMOVE;
+        }
+        p->gpu_disabled = TRUE;
+        orb_pal_gpu_detach(p);
+    }
+    if (!p->surface || cairo_image_surface_get_width(p->surface) != w ||
+        cairo_image_surface_get_height(p->surface) != h) {
+        if (p->surface) cairo_surface_destroy(p->surface);
+        p->surface = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, w, h);
+        p->surface_fresh = TRUE;
+    }
+    if (cairo_surface_status(p->surface) != CAIRO_STATUS_SUCCESS) { g_string_free(req, TRUE); return G_SOURCE_REMOVE; }
     /* "F": the surface holds no earlier frame, so the renderer must send a whole one. */
     if (p->surface_fresh) g_string_prepend_c(req, 'F');
     cairo_surface_flush(p->surface);

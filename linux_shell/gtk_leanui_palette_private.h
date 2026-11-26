@@ -24,7 +24,8 @@ typedef struct {
     guint64 req_gen, applied_gen;
     cairo_surface_t *surface;
     guint idle;
-    gboolean open, light, closed, dirty, pending_enter, surface_fresh;
+    gboolean open, light, closed, dirty, pending_enter, surface_fresh, gpu_active, gpu_disabled;
+    OrbWlSubsurface wl; /* Vulkan presents the palette here, above the window, when it can */
 } OrbPalette;
 
 void orb_pal_clear_items(OrbPalette *p);
@@ -32,4 +33,5 @@ void orb_pal_try_free(OrbPalette *p);
 void orb_pal_invalidate(OrbPalette *p);
 void orb_pal_query(OrbPalette *p);
 void orb_pal_close(OrbPalette *p, gboolean restore_prev);
+void orb_pal_gpu_detach(OrbPalette *p);
 void orb_pal_activate(OrbPalette *p, int idx);

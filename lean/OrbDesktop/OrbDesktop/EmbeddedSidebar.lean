@@ -754,6 +754,49 @@ def paletteRegionFrame (stride : Nat) (hits : String) (fb : ByteArray) (d : Rect
     out := fb.copySlice ((y * stride + x) * 4) out out.size (w * 4)
   return (s!"\x01{stride} {x} {d.y.toNat} {w} {d.h.toNat}\n" ++ hits, out)
 
+/-- Present `prims` on the Wayland surface `wlSurface` through the Vulkan session kept in
+    `gpuRef`, created (or replaced) when the surface changes. `none` when the GPU cannot serve
+    this surface and the caller must paint on the CPU; otherwise whether a frame was presented
+    (`false`: the swapchain skipped or is being recreated, retry). -/
+def presentEmbeddedGpu (gpuRef : IO.Ref (USize × Vulkan.VulkanContext)) (atlas : IO.Ref Text.GlyphAtlasCache)
+    (devW devH : Nat) (wlDisplay wlSurface : USize) (clearColor : Color) (prims : Scene) : IO (Option Bool) := do
+  let (curSurf, curCtx) ← gpuRef.modifyGet fun p => (p, (0, {}))
+  let vkCtx ←
+    if curSurf == wlSurface && curCtx.gpuSession.isSome then
+      pure { curCtx with width := devW, height := devH }
+    else
+      if curCtx.gpuSession.isSome then Vulkan.shutdownVulkan curCtx
+      Vulkan.initVulkanSurface devW devH wlDisplay wlSurface
+  if vkCtx.backend == .cpuShm || vkCtx.gpuSession.isNone then
+    if vkCtx.gpuSession.isSome then Vulkan.shutdownVulkan vkCtx
+    return none
+  let (vkCtx', ac', handled, didPresent) ←
+    Vulkan.renderAndPresentGpu vkCtx clearColor (← atlas.get) prims none (pure ()) (pure ())
+  atlas.set ac'
+  if !handled then
+    if vkCtx'.gpuSession.isSome then Vulkan.shutdownVulkan vkCtx'
+    return none
+  gpuRef.set (wlSurface, vkCtx')
+  return some didPresent
+
+/-- Shut down the Vulkan session in `gpuRef` when it presents to `wlSurface` (any surface when
+    `wlSurface = 0`). Returns whether a session was released. -/
+def detachEmbeddedGpu (gpuRef : IO.Ref (USize × Vulkan.VulkanContext)) (wlSurface : USize) : IO Bool := do
+  let (cur, ctx) ← gpuRef.get
+  if wlSurface != 0 && cur != wlSurface then return false
+  gpuRef.set (0, {})
+  if ctx.gpuSession.isSome then Vulkan.shutdownVulkan ctx
+  return true
+
+/-- Shape, lay out and lower one palette request (no rasterization). -/
+def buildPaletteScene (req : PaletteRequest) (ac0 : Text.GlyphAtlasCache) (shape : ShapeFn) :
+    IO (Text.GlyphAtlasCache × SceneOutput) := do
+  let sc := 120 * req.scale
+  let (theme, root) := buildPaletteChrome req
+  let (ac, tree) ← shape ac0.beginUploads sc root
+  let box := layoutNode sc none theme.palette.focusRing 0 0 (pxToSub req.width) (pxToSub req.height) tree.toLayoutNode
+  return (ac.finishUploads, buildSceneFromLayout sc {} theme tree box (recordNodes := false))
+
 /-- Dispatch one embedded paint request, routing `"P\t"` exclusively to the palette pipeline
     and `"D\t"` to GPU surface teardown so malformed headers never fall through or clobber state. -/
 def dispatchEmbeddedRequest (request : String)
@@ -764,20 +807,51 @@ def dispatchEmbeddedRequest (request : String)
     (shape : ShapeFn)
     (gpuSurface? : Option (IO.Ref (USize × Vulkan.VulkanContext)) := none)
     (paletteGpu? : Option (IO.Ref PaletteGpu) := none)
-    (paletteRaster? : Option (IO.Ref PaletteRasterCache) := none) :
+    (paletteRaster? : Option (IO.Ref PaletteRasterCache) := none)
+    (paletteSurface? : Option (IO.Ref (USize × Vulkan.VulkanContext)) := none)
+    (paletteAtlas? : Option (IO.Ref Text.GlyphAtlasCache) := none) :
     IO (String × ByteArray) := do
   if request.startsWith "D\t" then
-    if let some gpuRef := gpuSurface? then
-      let (_, oldCtx) ← gpuRef.modifyGet fun p => (p, (0, {}))
-      if oldCtx.gpuSession.isSome then
-        Vulkan.shutdownVulkan oldCtx
+    -- Release the session presenting to that surface: the palette's, else the sidebar's.
+    let surf := ((request.drop 2).toString.toNat?.getD 0).toUSize
+    let palette ← match paletteSurface? with
+      | some r => if surf != 0 then detachEmbeddedGpu r surf else pure false
+      | none => pure false
+    if !palette then
+      if let some gpuRef := gpuSurface? then discard <| detachEmbeddedGpu gpuRef 0
     return ("GPU_DETACHED", ByteArray.empty)
+  -- `G\t<display>\t<surface>\n`: the palette host offers a Wayland subsurface for Vulkan.
+  let (gpuTarget, request) :=
+    if request.startsWith "G\t" then
+      match request.splitOn "\n" with
+      | first :: rest =>
+        match first.splitOn "\t" with
+        | [_, d, w] => (some ((d.toNat?.getD 0).toUSize, (w.toNat?.getD 0).toUSize), String.intercalate "\n" rest)
+        | _ => (none, String.intercalate "\n" rest)
+      | [] => (none, request)
+    else (none, request)
   -- `F`: the host's surface is new, so it needs a whole frame rather than the changed region.
   let freshSurface := request.startsWith "FP\t"
   let request := if freshSurface then (request.drop 1).toString else request
   if request.startsWith "P\t" then
     let some palReq := parsePaletteRequest? request
       | throw (IO.userError "invalid palette allocation")
+    let atlas := paletteAtlas?.getD atlas
+    if let (some (wd, ws), some surfRef) := (gpuTarget, paletteSurface?) then
+      if wd != 0 && ws != 0 then
+        -- The palette on its own Vulkan subsurface, above the window: no CPU raster or copy.
+        let t0 ← IO.monoNanosNow
+        let (ac, scene) ← buildPaletteScene palReq (← atlas.get) shape
+        atlas.set ac
+        let t1 ← IO.monoNanosNow
+        let presented ← presentEmbeddedGpu surfRef atlas (palReq.width * palReq.scale) (palReq.height * palReq.scale)
+            wd ws 0 scene.prims
+        if (← IO.getEnv "ORB_PAL_PROFILE") == some "1" then
+          IO.eprintln s!"pal-gpu scene_us={(t1 - t0) / 1000} present_us={((← IO.monoNanosNow) - t1) / 1000} prims={scene.prims.size}"
+        match presented with
+        | none => return ("GPU_FALLBACK", ByteArray.empty)
+        | some false => return ("GPU_SKIP", ByteArray.empty)
+        | some true => return ("GPU_OK\n" ++ formatPaletteHits scene, ByteArray.empty)
     let palCtx ← paletteFramebuffer.modifyGet fun c => (c, { c with framebuffer := ByteArray.empty, previousPaint := none })
     if let some r := paletteRaster? then r.modify ({ · with lastRegion := none })
     let (hits, ac, next) ← renderPaletteFrame palReq (← atlas.get) palCtx shape paletteGpu? paletteRaster?
@@ -793,26 +867,10 @@ def dispatchEmbeddedRequest (request : String)
   let { theme, scene, hitPayload, devW, devH, wlDisplay, wlSurface } := frame
   if wlDisplay != 0 && wlSurface != 0 then
     if let some gpuRef := gpuSurface? then
-      let (curSurf, curCtx) ← gpuRef.modifyGet fun p => (p, (0, {}))
-      let vkCtx ←
-        if curSurf == wlSurface && curCtx.gpuSession.isSome then
-          pure { curCtx with width := devW, height := devH }
-        else
-          if curCtx.gpuSession.isSome then Vulkan.shutdownVulkan curCtx
-          Vulkan.initVulkanSurface devW devH wlDisplay wlSurface
-      if vkCtx.backend == .cpuShm || vkCtx.gpuSession.isNone then
-        if vkCtx.gpuSession.isSome then Vulkan.shutdownVulkan vkCtx
-        return ("GPU_FALLBACK", ByteArray.empty)
-      let (vkCtx', ac', handled, didPresent) ←
-        Vulkan.renderAndPresentGpu vkCtx theme.palette.sidebar (← atlas.get) scene.prims none (pure ()) (pure ())
-      atlas.set ac'
-      if !handled then
-        if vkCtx'.gpuSession.isSome then Vulkan.shutdownVulkan vkCtx'
-        return ("GPU_FALLBACK", ByteArray.empty)
-      gpuRef.set (wlSurface, vkCtx')
-      if !didPresent then
-        return ("GPU_SKIP", ByteArray.empty)
-      return ("GPU_OK\n" ++ hitPayload, ByteArray.empty)
+      match ← presentEmbeddedGpu gpuRef atlas devW devH wlDisplay wlSurface theme.palette.sidebar scene.prims with
+      | none => return ("GPU_FALLBACK", ByteArray.empty)
+      | some false => return ("GPU_SKIP", ByteArray.empty)
+      | some true => return ("GPU_OK\n" ++ hitPayload, ByteArray.empty)
   let ctx ← framebuffer.modifyGet fun c => (c, { c with framebuffer := ByteArray.empty, previousPaint := none })
   let next ← Vulkan.renderFrameDamage { ctx with width := devW, height := devH }
     0 (← atlas.get) ⟨0, 0, 1, 1⟩ scene.prims
@@ -835,14 +893,18 @@ def runEmbeddedSidebar (modulePath : String)
   let gpuMode ← Vulkan.resolveGpuMode .auto
   let paletteGpu ← IO.mkRef ({ disabled := gpuMode == .disabled, allowSoftware := gpuMode == .lavapipe } : PaletteGpu)
   let paletteRaster ← IO.mkRef ({} : PaletteRasterCache)
+  -- The palette's own subsurface session and glyph atlas: two Vulkan devices must not share
+  -- one atlas's pending GPU uploads.
+  let paletteSurface ← IO.mkRef ((0 : USize), ({} : Vulkan.VulkanContext))
+  let paletteAtlas ← IO.mkRef rt.atlas
   try
     FFI.sidebarHost modulePath fun request =>
       dispatchEmbeddedRequest request atlas framebuffer paletteFramebuffer sidebarCache (fun a sc node =>
         shape a rt.primaryFont rt.monoFont rt.boldFont rt.mediumFont rt.semiboldFont sc node) (some gpuSurface)
-        (some paletteGpu) (some paletteRaster)
+        (some paletteGpu) (some paletteRaster) (some paletteSurface) (some paletteAtlas)
   finally
-    let (_, gctx) ← gpuSurface.modifyGet fun p => (p, (0, {}))
-    if gctx.gpuSession.isSome then Vulkan.shutdownVulkan gctx
+    discard <| detachEmbeddedGpu gpuSurface 0
+    discard <| detachEmbeddedGpu paletteSurface 0
     if let some pctx := (← paletteGpu.get).ctx then Vk.destroyOffscreenReadback pctx
     Runtime.shutdownRuntime rt
 
@@ -939,6 +1001,22 @@ def embeddedPaletteSelfTest : IO Unit := do
     let (detRes, detPx) ← dispatchEmbeddedRequest "D\t12345" atlasRef sbFbRef palFbRef sbCache paletteIdentityShape (some gpuRef)
     unless detRes == "GPU_DETACHED" && detPx.isEmpty && (← sbFbRef.get).framebuffer == ByteArray.mk #[1, 2, 3, 4] do
       throw (IO.userError s!"unexpected GPU detach response: {detRes}")
+    -- 4a2b. "D\t<surface>" releases only the session presenting to that surface.
+    let palSurf ← IO.mkRef ((42 : USize), ({} : Vulkan.VulkanContext))
+    let sideSurf ← IO.mkRef ((7 : USize), ({} : Vulkan.VulkanContext))
+    discard <| dispatchEmbeddedRequest "D\t42" atlasRef sbFbRef palFbRef sbCache paletteIdentityShape
+      (some sideSurf) none none (some palSurf)
+    unless (← palSurf.get).1 == 0 && (← sideSurf.get).1 == 7 do
+      throw (IO.userError "palette detach released the wrong Vulkan session")
+    -- 4a2c. A palette request offering no usable surface ("G\t0\t0") paints on the CPU as before.
+    let palFbA ← IO.mkRef { rt.vulkan with previousPaint := none, framebuffer := ByteArray.empty }
+    let palFbB ← IO.mkRef { rt.vulkan with previousPaint := none, framebuffer := ByteArray.empty }
+    let plainReq := "P\t320\t240\t1\t0\t0\tm\n0\tm:a\tmission\tA\tp\trunning\t\t"
+    let (hitsA, pxA) ← dispatchEmbeddedRequest plainReq atlasRef sbFbRef palFbA sbCache paletteIdentityShape
+    let (hitsB, pxB) ← dispatchEmbeddedRequest ("G\t0\t0\n" ++ plainReq) atlasRef sbFbRef palFbB sbCache paletteIdentityShape
+      none none none (some palSurf)
+    unless hitsA == hitsB && pxA == pxB && pxA.size == 320 * 240 * 4 do
+      throw (IO.userError "palette request with an unusable GPU surface changed the CPU frame")
     -- 4a3. 8-field sidebar header with wlDisplay=0, wlSurface=0 falls through to CPU buffer.
     let (sb8Hits, sb8Px) ← dispatchEmbeddedRequest
       "220\t200\t1\t0\t0\t0\t0\t0\n1000\tnav:new-agent\tnav\tNew Agent\t0\t\t⌘N\t0\t1\t0\t"

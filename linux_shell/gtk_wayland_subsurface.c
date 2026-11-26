@@ -63,7 +63,7 @@ gboolean orb_wl_subsurface_ensure(OrbWlSubsurface *sub, GtkWidget *canvas, gbool
             return FALSE;
         }
         wl_subsurface_set_desync(sub->subsurface);
-        wl_subsurface_place_below(sub->subsurface, parent);
+        if (sub->above) wl_subsurface_place_above(sub->subsurface, parent); else wl_subsurface_place_below(sub->subsurface, parent);
         sub->parent = parent;
         if (moved) *moved = TRUE;
     }
