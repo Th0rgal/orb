@@ -1431,6 +1431,32 @@ structure AntigravityOverlay where
   installed  : ByteArray
   lockFd     : Int32
 
+/-- Returns `true` when `entry` matches a runtime `sandboxed-mcp` server written by
+`buildHarnessOverlays` (so a crashed run's leftover overlay can be replaced once the
+exclusive `.sandboxed-mcp.lock` is held), while rejecting user-defined servers. -/
+def isManagedSandboxedMcpEntry (entry : JVal) : Bool := Id.run do
+  let some cmd := entry.fieldStr? "command" | return false
+  if (System.FilePath.mk cmd).fileName != some "sandboxed-mcp" then return false
+  let some args := entry.fieldArr? "args" | return false
+  let mut hasMissionId := false
+  let mut hasRuntimeTokenFile := false
+  for i in [0:args.size] do
+    if i + 1 < args.size then
+      match args[i]!, args[i + 1]! with
+      | .str "--mission-id", .str mid =>
+        if (parseUuidCanonical? mid).isSome then hasMissionId := true
+      | .str "--token-file", .str tok =>
+        let p := System.FilePath.mk tok
+        if p.fileName == some "credential" then
+          if let some parent := p.parent then
+            if let some dirName := parent.fileName then
+              if dirName.startsWith "sandboxed-mcp-" then
+                let suffix := (dirName.drop 14).toString
+                if (parseUuidCanonical? suffix).isSome then
+                  hasRuntimeTokenFile := true
+      | _, _ => pure ()
+  return hasMissionId && hasRuntimeTokenFile
+
 def installAntigravityOverlay (cwd : System.FilePath) (cfg : JVal) : IO (Except String AntigravityOverlay) := do
   let dir := cwd / ".agents"
   let dirSt ← statPath dir.toString
@@ -1480,9 +1506,23 @@ def installAntigravityOverlay (cwd : System.FilePath) (cfg : JVal) : IO (Except 
   if servers.asObj?.isNone then
     closeFdRaw lockFd
     return .error "Antigravity mcpServers must be an object"
-  if (servers.field? "sandboxed").isSome then
-    closeFdRaw lockFd
-    return .error "Antigravity workspace already defines sandboxed MCP; remove the stale runtime entry or rename the existing server"
+  let mut restoreOriginal? := original?
+  if let some existingSb := servers.field? "sandboxed" then
+    if !isManagedSandboxedMcpEntry existingSb then
+      closeFdRaw lockFd
+      return .error "Antigravity workspace already defines sandboxed MCP; remove the stale runtime entry or rename the existing server"
+    let cleanedServers := servers.removeField "sandboxed"
+    let serversEmpty := match cleanedServers.asObj? with
+      | some kvs => kvs.isEmpty
+      | none => false
+    let otherTopKeysEmpty := match (merged.removeField "mcpServers").asObj? with
+      | some kvs => kvs.isEmpty
+      | none => false
+    if serversEmpty && otherTopKeysEmpty then
+      restoreOriginal? := none
+    else
+      let cleanedMerged := merged.setField "mcpServers" cleanedServers
+      restoreOriginal? := some (renderPretty cleanedMerged).toUTF8
   let sbServer := (cfg.fieldOrNull "mcpServers").fieldOrNull "sandboxed"
   merged := merged.setField "mcpServers" (servers.setField "sandboxed" sbServer)
   let installedBytes := (renderPretty merged).toUTF8
@@ -1491,7 +1531,7 @@ def installAntigravityOverlay (cwd : System.FilePath) (cfg : JVal) : IO (Except 
     closeFdRaw lockFd
     return .error e
   | .ok () =>
-    return .ok { configPath := cfgPath, original?, installed := installedBytes, lockFd }
+    return .ok { configPath := cfgPath, original? := restoreOriginal?, installed := installedBytes, lockFd }
 
 def restoreAntigravityOverlay (ov : AntigravityOverlay) : IO Unit := do
   let cfgSt ← statPath ov.configPath.toString
