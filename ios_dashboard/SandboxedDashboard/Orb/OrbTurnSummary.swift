@@ -124,6 +124,14 @@ enum OrbTurnSummary {
         let open = Int(s["open"].doubleValue ?? 0)
         return "\(Int(total)) · \(open) open"
     }
+
+    /// Core answers `403` on `/api/cloud/hermes/*` when Hermes is not connected for this account
+    /// (`HERMES_CLOUD_OWNER` unset or another user). Treat as calm setup state, not a crash error.
+    static func hermesUnavailableMessage(for error: Error) -> String? {
+        guard let http = error as? OrbHTTPError, http.status == 403 else { return nil }
+        let detail = http.detail.trimmingCharacters(in: .whitespacesAndNewlines)
+        return detail.isEmpty ? "Hermes is not connected for this account" : detail
+    }
 }
 
 /// Codex-style review entry point at the end of a turn: what changed and where it ships.

@@ -304,4 +304,34 @@ describe("Hermes CloudAgentPage & CloudConversation end-to-end (H1)", () => {
     });
     expect(await screen.findByText("Stopping…")).toBeTruthy();
   });
+
+  it("does not probe /api/cloud/hermes/options on CloudConversation when Hermes account is unavailable", async () => {
+    setConnection("http://member.test", "member-token");
+    const urls: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        urls.push(url);
+        if (url.endsWith("/api/cloud/accounts")) return Response.json([hermesAccount(false)]);
+        if (url.endsWith("/api/control/missions/m-h2/cloud/children")) return Response.json({ missions: [] });
+        if (url.endsWith("/api/control/missions/m-h2/cloud")) {
+          return Response.json({
+            mission_id: "m-h2",
+            revision: 1,
+            selection: { provider: "hermes", account: "paloma", model: "builtin/smart", model_params: [{ id: "effort", value: "high" }] },
+            turns: [{ key: "turn-1", prompt: "Hello", phase: "response_complete", result: "Done", artifacts: [], branches: [] }],
+          } satisfies CloudExecution);
+        }
+        if (url.endsWith("/api/control/missions/m-h2")) {
+          return Response.json({ id: "m-h2", title: "Hello", backend: "cloud_hermes", status: "awaiting_user", history: [], created_at: "", updated_at: "" });
+        }
+        return Response.json({});
+      }),
+    );
+
+    render(() => <CloudConversation id="m-h2" />);
+    expect(await screen.findByText("Done")).toBeTruthy();
+    expect(urls.some((u) => u.includes("/api/cloud/hermes/options"))).toBe(false);
+  });
 });

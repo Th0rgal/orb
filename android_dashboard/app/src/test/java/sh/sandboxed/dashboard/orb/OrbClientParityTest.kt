@@ -165,6 +165,123 @@ class OrbClientParityTest {
     }
 
     @Test
+    fun hermesSettingsAndCloudAccountParity() {
+        assertEquals("paloma", OrbAdminFormatting.defaultCloudAccountId("hermes"))
+        assertEquals("cursor-default", OrbAdminFormatting.defaultCloudAccountId("cursor_cloud"))
+        assertEquals("grok-default", OrbAdminFormatting.defaultCloudAccountId("grok_bot"))
+
+        assertEquals(
+            "Hermes is not connected for this account",
+            OrbAdminFormatting.hermesUnavailableMessage(
+                OrbError("Forbidden", status = 403, body = """{"error":"Hermes is not connected for this account"}""")
+            )
+        )
+        assertEquals(
+            "Hermes is not connected for this account",
+            OrbAdminFormatting.hermesUnavailableMessage(OrbError("", status = 403))
+        )
+        assertNull(OrbAdminFormatting.hermesUnavailableMessage(OrbError("Server error", status = 500)))
+
+        val runtimeRows = OrbAdminFormatting.hermesRuntime(
+            mapOf(
+                "service_active" to true,
+                "api_server_healthy" to true,
+                "uses_sandboxed_proxy" to true,
+                "token_present" to true
+            )
+        )
+        assertEquals(
+            listOf("Service" to "Active", "API" to "Healthy", "Route" to "Via Core proxy"),
+            runtimeRows
+        )
+        assertEquals(
+            "12 · 2 open",
+            OrbAdminFormatting.hermesSessions(mapOf("total" to 12, "open" to 2))
+        )
+
+        val hermesSpec = OrbAdminFormatting.buildCloudCreateSpec(
+            provider = "hermes",
+            account = "paloma",
+            model = "",
+            effort = "high",
+            repository = "https://github.com/Th0rgal/orb",
+            gitRef = "master"
+        )
+        assertEquals("hermes", hermesSpec["provider"])
+        assertEquals("paloma", hermesSpec["account"])
+        assertFalse(hermesSpec.containsKey("model"))
+        assertFalse(hermesSpec.containsKey("repository"))
+        assertFalse(hermesSpec.containsKey("git_ref"))
+        assertEquals(listOf(mapOf("id" to "effort", "value" to "high")), hermesSpec["model_params"])
+
+        val cursorSpec = OrbAdminFormatting.buildCloudCreateSpec(
+            provider = "cursor_cloud",
+            account = "cursor-default",
+            model = "default",
+            effort = "high",
+            repository = "https://github.com/Th0rgal/orb",
+            gitRef = "master"
+        )
+        assertEquals("https://github.com/Th0rgal/orb", cursorSpec["repository"])
+        assertEquals("master", cursorSpec["git_ref"])
+        assertFalse(cursorSpec.containsKey("model_params"))
+
+        val resetFollowUp = OrbAdminFormatting.buildHermesFollowUpFields("", "")
+        assertEquals("", resetFollowUp["cloud_model"])
+        assertEquals(emptyList<Map<String, String>>(), resetFollowUp["cloud_model_params"])
+
+        val overrideFollowUp = OrbAdminFormatting.buildHermesFollowUpFields("builtin/smart", "medium")
+        assertEquals("builtin/smart", overrideFollowUp["cloud_model"])
+        assertEquals(listOf(mapOf("id" to "effort", "value" to "medium")), overrideFollowUp["cloud_model_params"])
+
+        val hydratedFromTurn = OrbAdminFormatting.extractCloudSelection(
+            mapOf(
+                "selection" to mapOf(
+                    "provider" to "hermes",
+                    "model" to "builtin/fast",
+                    "model_params" to listOf(mapOf("id" to "effort", "value" to "low"))
+                ),
+                "turns" to listOf(
+                    mapOf(
+                        "model" to "builtin/smart",
+                        "model_params" to listOf(mapOf("id" to "effort", "value" to "high"))
+                    )
+                )
+            )
+        )
+        assertEquals("builtin/smart" to "high", hydratedFromTurn)
+
+        val hydratedFromSelection = OrbAdminFormatting.extractCloudSelection(
+            mapOf(
+                "selection" to mapOf(
+                    "provider" to "hermes",
+                    "model" to "builtin/deep",
+                    "model_params" to listOf(mapOf("id" to "effort", "value" to "xhigh"))
+                ),
+                "turns" to listOf(mapOf("prompt" to "hello"))
+            )
+        )
+        assertEquals("builtin/deep" to "xhigh", hydratedFromSelection)
+        assertNull(OrbAdminFormatting.extractCloudSelection(null))
+
+        val nativeBackends = listOf(
+            OrbRow(mapOf("id" to "claudecode")),
+            OrbRow(mapOf("id" to "codex"))
+        )
+        assertEquals(listOf("claudecode", "codex"), OrbAgentCatalog.backendOptions(nativeBackends, existing = true))
+        assertEquals(
+            listOf("hermes", "claudecode", "codex"),
+            OrbAgentCatalog.backendOptions(nativeBackends, existing = true, activeCloudBackend = "hermes")
+        )
+
+        assertEquals("cursor_cloud", OrbAdminFormatting.normalizeCloudProvider("cloud_cursor"))
+        assertEquals("grok_bot", OrbAdminFormatting.normalizeCloudProvider("cloud_grok"))
+        assertEquals("hermes", OrbAdminFormatting.normalizeCloudProvider("cloud_hermes"))
+        assertEquals("cursor_cloud", OrbAdminFormatting.normalizeCloudProvider("cloud_cursor", mapOf("provider" to "cursor_cloud")))
+        assertNull(OrbAdminFormatting.normalizeCloudProvider("claudecode"))
+    }
+
+    @Test
     fun folderDeletionBlockingMissions() {
         val archived = OrbRow(mapOf("id" to "m-arch", "status" to "acknowledged", "folder" to "crons"))
         val superseded = OrbRow(mapOf("id" to "m-sup", "status" to "completed", "folder" to "crons/nightly", "superseded_by_mission_id" to "m-next"))

@@ -181,6 +181,104 @@ object OrbAdminFormatting {
         val open = (sessions["open"] as? Number)?.toInt() ?: 0
         return "$total · $open open"
     }
+
+    // Core returns 403 on Hermes cloud endpoints when Hermes is not connected for this account.
+    fun hermesUnavailableMessage(error: Throwable): String? {
+        val orbErr = error as? OrbError ?: return null
+        if (orbErr.status != 403) return null
+        val bodyMsg = orbErr.body?.let { raw ->
+            OrbJSON.dict(OrbJSON.parse(raw))?.let { d -> OrbJSON.str(d, "error", "message") }
+        }?.trim().orEmpty()
+        val detail = bodyMsg.ifEmpty { orbErr.message.trim() }
+        return detail.ifEmpty { "Hermes is not connected for this account" }
+    }
+
+    fun defaultCloudAccountId(provider: String): String = when (provider) {
+        "hermes" -> "paloma"
+        "cursor_cloud" -> "cursor-default"
+        else -> "grok-default"
+    }
+
+    fun buildCloudCreateSpec(
+        provider: String,
+        account: String,
+        model: String = "",
+        effort: String = "",
+        repository: String = "",
+        gitRef: String = ""
+    ): MutableMap<String, Any?> {
+        val spec = mutableMapOf<String, Any?>(
+            "provider" to provider,
+            "account" to account
+        )
+        val cleanModel = model.trim()
+        if (cleanModel.isNotEmpty()) spec["model"] = cleanModel
+        val cleanEffort = effort.trim()
+        if (provider == "hermes" && cleanEffort.isNotEmpty()) {
+            spec["model_params"] = listOf(mapOf("id" to "effort", "value" to cleanEffort))
+        }
+        if (provider == "cursor_cloud") {
+            val cleanRepo = repository.trim()
+            val cleanRef = gitRef.trim()
+            if (cleanRepo.isNotEmpty()) spec["repository"] = cleanRepo
+            if (cleanRef.isNotEmpty()) spec["git_ref"] = cleanRef
+        }
+        return spec
+    }
+
+    fun buildHermesFollowUpFields(model: String, effort: String): Map<String, Any?> {
+        val cleanEffort = effort.trim()
+        val params = if (cleanEffort.isNotEmpty()) {
+            listOf(mapOf("id" to "effort", "value" to cleanEffort))
+        } else {
+            emptyList<Map<String, String>>()
+        }
+        return mapOf(
+            "cloud_model" to model.trim(),
+            "cloud_model_params" to params
+        )
+    }
+
+    // Hydrate Hermes model + reasoning effort from GET /api/control/missions/:id/cloud
+    // matching Desktop CloudAgents.tsx (latest turn overrides selection).
+    fun extractCloudSelection(cloudExec: OrbDict?): Pair<String, String>? {
+        if (cloudExec == null) return null
+        val turns = OrbJSON.dictList(cloudExec["turns"])
+        val lastTurn = turns.lastOrNull()
+        val sel = OrbJSON.dict(cloudExec["selection"])
+        val model = OrbJSON.str(lastTurn, "model")
+            ?: OrbJSON.str(sel, "model")
+            ?: ""
+        val turnParams = OrbJSON.dictList(lastTurn?.get("model_params"))
+        val selParams = OrbJSON.dictList(sel?.get("model_params"))
+        val params = turnParams.ifEmpty { selParams }
+        val effort = params.firstOrNull { OrbJSON.str(it, "id") in setOf("effort", "reasoning_effort") }
+            ?.let { OrbJSON.str(it, "value") }
+            ?: ""
+        return model.trim() to effort.trim()
+    }
+
+    // Core stores cloud mission backends as "cloud_cursor", "cloud_grok", "cloud_hermes";
+    // normalize to the canonical cloud provider IDs used by pickers and wire requests.
+    fun normalizeCloudProvider(rawBackend: String?, cloudDict: OrbDict? = null): String? {
+        val explicit = OrbJSON.str(cloudDict, "provider")?.trim().orEmpty()
+        if (explicit.isNotEmpty()) {
+            return when (explicit) {
+                "cursor", "cloud_cursor" -> "cursor_cloud"
+                "grok", "cloud_grok" -> "grok_bot"
+                "cloud_hermes" -> "hermes"
+                else -> explicit
+            }
+        }
+        val raw = rawBackend?.trim().orEmpty()
+        if (!raw.startsWith("cloud_")) return null
+        return when (raw) {
+            "cloud_cursor", "cloud_cursor_cloud" -> "cursor_cloud"
+            "cloud_grok", "cloud_grok_bot" -> "grok_bot"
+            "cloud_hermes" -> "hermes"
+            else -> raw.removePrefix("cloud_")
+        }
+    }
 }
 
 @Composable
@@ -1780,9 +1878,16 @@ private fun OrbSkillDetailView(core: OrbCore, name: String, onBack: () -> Unit) 
 @Composable
 fun OrbHermesSettingsPage(core: OrbCore, onBack: () -> Unit) {
     val scope = rememberCoroutineScope()
+    val baseURL by core.baseURLFlow.collectAsState()
+    val token by core.tokenFlow.collectAsState()
+    var reloadNonce by remember { mutableIntStateOf(0) }
+    var saveGeneration by remember { mutableIntStateOf(0) }
+    var saveJob by remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
     var rawState by remember { mutableStateOf<OrbDict?>(null) }
+    var loading by remember { mutableStateOf(true) }
     var busy by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
+    var unavailable by remember { mutableStateOf<String?>(null) }
     var notice by remember { mutableStateOf<String?>(null) }
     var showSoulDialog by remember { mutableStateOf(false) }
 
@@ -1798,6 +1903,23 @@ fun OrbHermesSettingsPage(core: OrbCore, onBack: () -> Unit) {
     var telegramProgress by remember { mutableStateOf("new") }
     var telegramCleanup by remember { mutableStateOf(false) }
     var soul by remember { mutableStateOf("") }
+
+    fun resetDraftState() {
+        rawState = null
+        showSoulDialog = false
+        useRouter = true
+        defaultModel = ""
+        reasoningEffort = ""
+        memory = true
+        memoryLimit = 8000
+        userProfile = true
+        userLimit = 4000
+        compression = true
+        compressionThreshold = 0.5
+        telegramProgress = "new"
+        telegramCleanup = false
+        soul = ""
+    }
 
     fun applyState(s: OrbDict) {
         rawState = s
@@ -1815,20 +1937,51 @@ fun OrbHermesSettingsPage(core: OrbCore, onBack: () -> Unit) {
         soul = OrbJSON.str(s, "soul_markdown").orEmpty()
     }
 
-    LaunchedEffect(Unit) {
+    LaunchedEffect(baseURL, token, reloadNonce) {
+        saveGeneration += 1
+        val loadGen = saveGeneration
+        saveJob?.cancel()
+        saveJob = null
+        busy = false
+        resetDraftState()
+        loading = true
+        error = null
+        unavailable = null
+        notice = null
         try {
-            val s = core.fetchDict("/api/cloud/hermes/settings")
+            val s = OrbJSON.dict(
+                core.request(
+                    "/api/cloud/hermes/settings",
+                    explicitBaseURL = baseURL,
+                    explicitToken = token.orEmpty()
+                )
+            ) ?: emptyMap()
+            if (saveGeneration != loadGen) return@LaunchedEffect
             applyState(s)
             error = null
+            unavailable = null
         } catch (e: CancellationException) {
             throw e
         } catch (e: Throwable) {
-            error = e.message
+            if (saveGeneration != loadGen) return@LaunchedEffect
+            resetDraftState()
+            val reason = OrbAdminFormatting.hermesUnavailableMessage(e)
+            if (reason != null) {
+                unavailable = reason
+                error = null
+            } else {
+                error = e.message
+            }
+        } finally {
+            if (saveGeneration == loadGen) loading = false
         }
     }
 
     fun save(restart: Boolean) {
         if (busy) return
+        val subBaseURL = baseURL
+        val subToken = token
+        val subGen = saveGeneration
         val subDefaultModel = defaultModel
         val subReasoningEffort = reasoningEffort
         val subUseRouter = useRouter
@@ -1843,7 +1996,7 @@ fun OrbHermesSettingsPage(core: OrbCore, onBack: () -> Unit) {
         val subSoul = soul
         busy = true
         notice = null
-        scope.launch {
+        saveJob = scope.launch {
             try {
                 val body = mapOf(
                     "default_model" to subDefaultModel.trim(),
@@ -1860,7 +2013,16 @@ fun OrbHermesSettingsPage(core: OrbCore, onBack: () -> Unit) {
                     "soul_markdown" to subSoul,
                     "restart_service" to restart
                 )
-                val updated = OrbJSON.dict(core.request("/api/cloud/hermes/settings", "PUT", body = body))
+                val updated = OrbJSON.dict(
+                    core.request(
+                        "/api/cloud/hermes/settings",
+                        "PUT",
+                        body = body,
+                        explicitBaseURL = subBaseURL,
+                        explicitToken = subToken.orEmpty()
+                    )
+                )
+                if (baseURL != subBaseURL || token != subToken || saveGeneration != subGen) return@launch
                 if (updated != null) {
                     rawState = updated
                     if (useRouter == subUseRouter) useRouter = updated["use_sandboxed_router"] == true
@@ -1877,11 +2039,25 @@ fun OrbHermesSettingsPage(core: OrbCore, onBack: () -> Unit) {
                     if (soul == subSoul) soul = OrbJSON.str(updated, "soul_markdown").orEmpty()
                 }
                 error = null
+                unavailable = null
                 notice = if (restart) "Saved configuration and restarted Hermes." else "Saved Hermes configuration."
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Throwable) {
-                error = e.message
+                if (baseURL != subBaseURL || token != subToken || saveGeneration != subGen) return@launch
+                val reason = OrbAdminFormatting.hermesUnavailableMessage(e)
+                if (reason != null) {
+                    resetDraftState()
+                    unavailable = reason
+                    error = null
+                } else {
+                    error = e.message
+                }
             } finally {
-                busy = false
+                if (baseURL == subBaseURL && token == subToken && saveGeneration == subGen) {
+                    busy = false
+                    saveJob = null
+                }
             }
         }
     }
@@ -1900,7 +2076,28 @@ fun OrbHermesSettingsPage(core: OrbCore, onBack: () -> Unit) {
             notice?.let { Text(it, color = OrbStyle.success, fontSize = 13.sp) }
 
             val state = rawState
-            if (state == null && error == null) {
+            val unavailReason = unavailable
+            if (unavailReason != null) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(16.dp))
+                        .background(OrbStyle.surface)
+                        .border(1.dp, OrbStyle.border, RoundedCornerShape(16.dp))
+                        .padding(14.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Text("Assistant not set up on this Core", color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+                    Text(
+                        "$unavailReason. The Assistant runs on a Hermes gateway that Core proxies for the user named in HERMES_CLOUD_OWNER. Missions and local agents work without it.",
+                        color = OrbStyle.textSecondary,
+                        fontSize = 13.sp
+                    )
+                    TextButton(onClick = { reloadNonce += 1 }, enabled = !loading) {
+                        Text("Check again", color = Color.White)
+                    }
+                }
+            } else if (state == null && loading) {
                 Text("Loading Hermes settings…", color = OrbStyle.textMuted, fontSize = 13.sp)
             } else if (state != null) {
                 // Runtime & gateway
@@ -2039,11 +2236,15 @@ fun OrbHermesSettingsPage(core: OrbCore, onBack: () -> Unit) {
                     }
                 }
                 Spacer(Modifier.height(16.dp))
+            } else if (error != null) {
+                TextButton(onClick = { reloadNonce += 1 }, enabled = !loading) {
+                    Text("Retry", color = Color.White)
+                }
             }
         }
     }
 
-    if (showSoulDialog) {
+    if (showSoulDialog && rawState != null) {
         AlertDialog(
             onDismissRequest = { showSoulDialog = false },
             containerColor = OrbStyle.elevated,
