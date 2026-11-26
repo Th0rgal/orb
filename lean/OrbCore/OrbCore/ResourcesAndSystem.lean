@@ -2788,14 +2788,14 @@ def dispatchResourcesAndSystemRoute
       -- appends onto a complete conversational event log instead of hiding Turn 1.
       let uEvId := s!"origin-user:{mid}"
       if !prompt.trimAscii.toString.isEmpty then
-        let existingAny ← execParamQuery store.missionsDb
-          "SELECT 1 FROM mission_events WHERE mission_id=?1 LIMIT 1;" #[mid]
-        if match existingAny with | .ok rs => rs.size ≤ 1 | .error _ => false then
-          let uPayload := renderCompact (.obj #[("content", .str prompt), ("id", .str uEvId)])
-          if let .ok uSeq ← appendMissionEvent store mid "user_message" uPayload createdIso then
-            let _ ← execParamStmt store.missionsDb
-              "UPDATE mission_events SET event_id=?3, content=?4 WHERE mission_id=?1 AND seq=?2;"
-              #[mid, toString uSeq, uEvId, prompt]
+        if let .ok rs ← execParamQuery store.missionsDb
+            "SELECT 1 FROM mission_events WHERE mission_id=?1 LIMIT 1;" #[mid] then
+          if rs.size ≤ 1 then
+            let uPayload := renderCompact (.obj #[("content", .str prompt), ("id", .str uEvId)])
+            if let .ok uSeq ← appendMissionEvent store mid "user_message" uPayload createdIso then
+              let _ ← execParamStmt store.missionsDb
+                "UPDATE mission_events SET event_id=?3, content=?4 WHERE mission_id=?1 AND seq=?2;"
+                #[mid, toString uSeq, uEvId, prompt]
       let cleanText := text.trimAscii.toString
       if !cleanText.isEmpty then
         let aEvId := s!"origin-assistant:{mid}"
