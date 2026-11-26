@@ -289,6 +289,7 @@ private def runR6bClientLinkAndConflictChecks
     ("ack_seq", JVal.nat 256)
   ])
   let flushDrained ← dispatchRpcCommand stRef "client_link_flush" (.obj #[("mission", .str "m-journal")])
+  let flushUncarried ← dispatchRpcCommand stRef "client_link_flush" (.obj #[("mission", .str "m-never-carried")])
   total := total + 1
   let journalOk :=
     enq256Ok &&
@@ -298,7 +299,8 @@ private def runR6bClientLinkAndConflictChecks
     (match badAckBeyondHead with | .error "client_link_invalid_ack_seq" => true | _ => false) &&
     (match resyncFrom250 with | .ok jv => jv.fieldNat? "replay_count" == some 6 && jv.fieldUInt64? "replay_from_seq" == some 250 | _ => false) &&
     (match ackAll with | .ok jv => jv.fieldNat? "unacked_count" == some 0 | _ => false) &&
-    (match flushDrained with | .ok (.bool true) => true | _ => false)
+    (match flushDrained with | .ok (.bool true) => true | _ => false) &&
+    (match flushUncarried with | .ok (.bool false) => true | _ => false)
   if (← assertTrue "client_link_journal_ring_256_backpressure_ack_and_resync" journalOk) then passed := passed + 1
 
   -- 3. Local-origin lifecycle + typed 409 conflict classification (`stopping`/`non_terminal_run` retry vs `already_ended`/`moved`/`stale_receipt` retire).

@@ -509,6 +509,7 @@ structure ClientLinkState where
   lastAckedSeq       : UInt64 := 0
   headSeq            : UInt64 := 0
   unackedFrames      : Array ClientLinkJournalFrame := #[]
+  carriedMissions    : Array String := #[]
   harnesses          : JVal := .arr #[]
   startReceipts      : Array ClientLinkStartReceipt := #[]
   deriving Repr, Inhabited
@@ -546,7 +547,8 @@ def ClientLinkState.stepEndpointEpoch
       endpoint := if nextEp.isEmpty then cl.endpoint else nextEp
       serverBuild := nextBuild
       unsupportedLatched := latchedNext
-      connected := nextConnected }
+      connected := nextConnected
+      carriedMissions := if sameEp == 0 then #[] else cl.carriedMissions }
 
 /-- Enqueue one outbound client-link journal frame gated by `verifyJournalRingStep` (`op = 0`).
     Returns `"client_link_journal_backpressure"` at 256 unacked frames instead of overwriting. -/
@@ -560,13 +562,17 @@ def ClientLinkState.enqueueFrame
   let targetSeq := if cl.headSeq < 0xFFFFFFFFFFFFFFFF then cl.headSeq + 1 else cl.headSeq
   if verifyJournalRingStep 0 unackedU16 cl.maxCap cl.lastAckedSeq cl.headSeq targetSeq != 1 then
     throw "client_link_journal_backpressure"
+  let cleanMission := missionId.trimAscii.toString
   let frame : ClientLinkJournalFrame := {
     seq := targetSeq
-    missionId := missionId.trimAscii.toString
+    missionId := cleanMission
     payload := payload
   }
   let nextFrames := cl.unackedFrames.push frame
-  return (frame, { cl with headSeq := targetSeq, unackedFrames := nextFrames })
+  let nextCarried :=
+    if cleanMission.isEmpty || cl.carriedMissions.contains cleanMission then cl.carriedMissions
+    else cl.carriedMissions.push cleanMission
+  return (frame, { cl with headSeq := targetSeq, unackedFrames := nextFrames, carriedMissions := nextCarried })
 
 /-- Apply cumulative `ackSeq` gated by `verifyJournalRingStep` (`op = 1`). -/
 def ClientLinkState.ackUpTo
@@ -593,6 +599,11 @@ def ClientLinkState.hasPendingForMission (cl : ClientLinkState) (missionId : Str
   let clean := missionId.trimAscii.toString
   if clean.isEmpty then !cl.unackedFrames.isEmpty
   else cl.unackedFrames.any (fun f => f.missionId == clean)
+
+def ClientLinkState.hasCarriedMission (cl : ClientLinkState) (missionId : String) : Bool :=
+  let clean := missionId.trimAscii.toString
+  if clean.isEmpty then !cl.carriedMissions.isEmpty
+  else cl.carriedMissions.contains clean
 
 def ClientLinkState.toSummaryJson (cl : ClientLinkState) : JVal :=
   .obj #[
@@ -5892,7 +5903,7 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
         ])
     | _ =>
       let activeOk := st.clientLink.connected && !st.clientLink.unsupportedLatched
-      let drained := activeOk && !st.clientLink.hasPendingForMission missionId
+      let drained := activeOk && st.clientLink.hasCarriedMission missionId && !st.clientLink.hasPendingForMission missionId
       return .ok (.bool drained)
   | "client_link_set_capabilities" =>
     let connObj := (args.field? "connection").getD args

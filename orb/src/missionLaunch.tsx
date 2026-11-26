@@ -85,7 +85,7 @@ export function withInitialPrompt(items: StreamItem[], mission: Mission | null, 
   const key = receipt?.messageKey ?? `initial:${mission?.id ?? "launch"}`;
   const initialAt = mission?.created_at || undefined;
   if (first < 0) {
-    if (awaiting && mission?.history && mission.history.length > 1) {
+    if ((awaiting || items.length === 0) && mission?.history && mission.history.length > 1) {
       const seeded: StreamItem[] = [];
       let usedInitialKey = false;
       mission.history.forEach((entry, index) => {
