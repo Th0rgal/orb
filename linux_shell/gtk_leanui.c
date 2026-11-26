@@ -6,7 +6,6 @@
 
 static OrbSidebarPaint paint;
 static void *renderer;
-
 static void detach_gpu(OrbSidebar *s) {
     if (s->wl.surface && paint) {
         char req[64];
@@ -193,9 +192,10 @@ void orb_leanui_history(GtkWidget *view, gboolean back, gboolean forward) {
 void orb_leanui_optimistic(GtkWidget *view, const char *kind, const char *target, const char *ren_title) {
     OrbSidebar *s = view ? g_object_get_data(G_OBJECT(view), "orb-sidebar") : NULL;
     if (!s || !s->rows->len || !target || !*target) return;
-    g_autofree char *sel = NULL, *clean = ren_title ? g_strdup(ren_title) : NULL;
-    if (clean) g_strdelimit(clean, "\t\r\n", ' ');
-    else if (kind && (!g_strcmp0(kind, "mission") || !g_strcmp0(kind, "file"))) sel = g_strdup(target);
+    g_autofree char *sel = NULL, *clean = ren_title ? g_strdup(ren_title) : NULL, *ren_id = NULL;
+    if (clean) { g_strdelimit(clean, "\t\r\n", ' '); ren_id = g_str_has_prefix(target, "m:") ? g_strdup(target) : g_strdup_printf("m:%s", target); }
+    else if (kind && !g_strcmp0(kind, "mission")) sel = g_str_has_prefix(target, "m:") ? g_strdup(target) : g_strdup_printf("m:%s", target);
+    else if (kind && !g_strcmp0(kind, "file")) sel = g_strdup(target);
     else if (kind && !g_strcmp0(kind, "footer") && !g_strcmp0(target, "settings")) sel = g_strdup("nav:settings");
     else if (kind && !g_strcmp0(kind, "project")) sel = g_strdup("nav:new-agent");
     else if (kind && !g_strcmp0(kind, "nav")) {
@@ -210,7 +210,7 @@ void orb_leanui_optimistic(GtkWidget *view, const char *kind, const char *target
         if (!**ln) continue;
         g_auto(GStrv) c = g_strsplit(*ln, "\t", 11);
         if (g_strv_length(c) == 11) {
-            const char *nt = (clean && !g_strcmp0(c[1], target)) ? clean : c[3], *ns = sel ? (!g_strcmp0(c[1], sel) ? "1" : "0") : c[8];
+            const char *nt = (clean && (!g_strcmp0(c[1], target) || !g_strcmp0(c[1], ren_id))) ? clean : c[3], *ns = sel ? (!g_strcmp0(c[1], sel) ? "1" : "0") : c[8];
             if (g_strcmp0(nt, c[3]) || g_strcmp0(ns, c[8])) changed = TRUE;
             g_string_append_printf(next, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", c[0], c[1], c[2], nt, c[4], c[5], c[6], c[7], ns, c[9], c[10]);
         } else g_string_append_printf(next, "%s\n", *ln);
