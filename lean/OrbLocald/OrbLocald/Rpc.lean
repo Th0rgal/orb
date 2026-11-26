@@ -1679,9 +1679,9 @@ private def readUiPrefsFromDisk (path? : Option System.FilePath) : IO (Except St
 private def logsDirPath? (st : LocaldState) : Option System.FilePath :=
   (resolveOrbStateDir st).map (· / "logs")
 
-def ensurePersistedBindingsLoaded (stRef : IO.Ref LocaldState) : IO Unit := do
+def ensurePersistedBindingsLoaded (stRef : IO.Ref LocaldState) (forceReload : Bool := false) : IO Unit := do
   let st ← stRef.get
-  if st.bindingsLoaded then return ()
+  if st.bindingsLoaded && !forceReload then return ()
   match bindingsFilePath? st with
   | none =>
     stRef.modify fun s => { s with bindingsLoaded := true }
@@ -1720,14 +1720,28 @@ def ensurePersistedBindingsLoaded (stRef : IO.Ref LocaldState) : IO Unit := do
             else
               diskEntries := diskEntries.push (k, v)
           let stLoaded ← stRef.modifyGet fun s =>
-            if s.bindingsLoaded then (none, s)
+            if s.bindingsLoaded && !forceReload then (none, s)
             else
-              let merged := diskEntries.foldl (fun acc (k, v) =>
-                if acc.any (fun (ek, _) => ek == k) then acc else acc.push (k, v)) s.bindingsEntries
+              let diskNewer := diskRev > s.bindingsRevision
+              let (merged, mergedChanged) := diskEntries.foldl (fun (acc, ch) (k, v) =>
+                match acc.findIdx? (fun (ek, _) => ek == k) with
+                | none => (acc.push (k, v), true)
+                | some idx =>
+                  if diskNewer && renderCompact acc[idx]!.2 != renderCompact v then
+                    (acc.set! idx (k, v), true)
+                  else
+                    (acc, ch)) (s.bindingsEntries, false)
               let baseRev := max s.bindingsRevision (max diskRev merged.size)
-              let rev := if repairedAny then baseRev + 1 else baseRev
-              let s' := { s with bindingsLoaded := true, bindingsRevision := rev, bindingsEntries := merged }
-              (if repairedAny then some s' else none, s')
+              let rev :=
+                if repairedAny then baseRev + 1
+                else if mergedChanged && baseRev == s.bindingsRevision then s.bindingsRevision + 1
+                else baseRev
+              let s1 := { s with bindingsLoaded := true, bindingsRevision := rev, bindingsEntries := merged }
+              let s2 :=
+                if s.bindingsLoaded && mergedChanged then
+                  s1.publishChannelEvent "local_bindings" s1.bindingsSnapshotJson
+                else s1
+              (if repairedAny then some s2 else none, s2)
           if let some stToSave := stLoaded then
             let payload := (renderCompact stToSave.bindingsSnapshotJson ++ "\n").toUTF8
             discard <| OrbBin.PosixExt.writeAtomicPrivate0600 path payload
@@ -5904,11 +5918,11 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
         { s with clientLink := { s.clientLink with startReceipts := nextRecs } }
     return .ok .null
   | "local_bindings_refresh" =>
-    ensurePersistedBindingsLoaded stRef
+    ensurePersistedBindingsLoaded stRef true
     let cur ← stRef.get
     return .ok cur.bindingsSnapshotJson
   | "local_binding_set" =>
-    ensurePersistedBindingsLoaded stRef
+    ensurePersistedBindingsLoaded stRef true
     let bid := (args.fieldStr? "id").getD ""
     let bval := (args.field? "binding").getD (.obj #[])
     let ifAbsent := (args.fieldBool? "ifAbsent").getD false

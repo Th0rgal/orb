@@ -559,6 +559,30 @@ private def runDesktopReliabilityParityChecksPart1 (pDir : System.FilePath) (val
      | _ => false)
   if (← assertTrue "durable_local_bindings_and_origins_survive_daemon_restart" persistOk) then passed := passed + 1
 
+  -- D2. `local_bindings_refresh` and `local_binding_set` merge external additions written to `local-bindings.json` after initial load
+  let extBindsPath := System.FilePath.mk persistDir / "local-bindings.json"
+  IO.FS.writeFile extBindsPath
+    ("{\"revision\":51,\"bindings\":{\"m-persist-1\":{\"harness\":\"claudecode\",\"bin\":\"/usr/bin/true\",\"cwd\":\"" ++ allowedDir.toString ++ "\"},\"m-external-2\":{\"harness\":\"antigravity\",\"bin\":\"/usr/bin/true\",\"cwd\":\"" ++ allowedDir.toString ++ "\",\"sessionId\":\"sess-ext-2\"}}}\n")
+  let refreshedExt ← dispatchRpcCommand stP2 "local_bindings_refresh" (.obj #[])
+  let afterLocalSet ← dispatchRpcCommand stP2 "local_binding_set" (.obj #[
+    ("id", .str "m-local-3"),
+    ("binding", .obj #[("harness", .str "antigravity"), ("bin", .str "/usr/bin/true"), ("cwd", .str allowedDir.toString)])
+  ])
+  total := total + 1
+  let extMergeOk :=
+    (match refreshedExt with
+     | .ok jv =>
+       ((jv.field? "bindings").bind (·.field? "m-persist-1")).isSome &&
+       ((jv.field? "bindings").bind (·.field? "m-external-2")).isSome &&
+       (jv.fieldNat? "revision").getD 0 >= 51
+     | _ => false) &&
+    (match afterLocalSet with
+     | .ok jv =>
+       ((jv.field? "bindings").bind (·.field? "m-external-2")).isSome &&
+       ((jv.field? "bindings").bind (·.field? "m-local-3")).isSome
+     | _ => false)
+  if (← assertTrue "local_bindings_refresh_merges_external_disk_additions" extMergeOk) then passed := passed + 1
+
   -- D2. Shared `ui-prefs.json` (`desktop_prefs_load` / `desktop_prefs_patch`) across prod & dev daemons
   let patchRes ← dispatchRpcCommand stP1 "desktop_prefs_patch" (.obj #[
     ("set", .obj #[
