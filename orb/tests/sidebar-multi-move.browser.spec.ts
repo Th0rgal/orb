@@ -401,9 +401,9 @@ test('deleting a parent with unloaded server-side descendants or paused child re
   await dialog.getByRole('button',{name:'Delete',exact:true}).click();
   // Retry passes ?include_descendants=true, auto-acknowledges the hidden paused child, and completes deletion.
   await expect(dialog).toHaveCount(0);
+  await expect.poll(() => deleteSearches).toEqual(['','?include_descendants=true','?include_descendants=true']);
   expect(transcriptGets).toEqual([]);
   expect(acknowledged).toEqual([HIDDEN_PAUSED]);
-  expect(deleteSearches).toEqual(['','?include_descendants=true','?include_descendants=true']);
   await expect(tree.getByRole('button',{name:'Fredrik',exact:true})).toHaveCount(0);
 });
 
