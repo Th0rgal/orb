@@ -490,9 +490,9 @@ def listProjectDirectoryEntries (store : CoreStore) (scopedSlug rawRel : String)
               ("kind", .str (if isSubDir then "dir" else "file")),
               ("size", JVal.uint64 (cellU64 r 2))
             ])
-  -- Also surface mission folders in this project so folders created implicitly by missions appear cleanly
+  -- Also surface active (non-archived, non-superseded) mission folders in this project so folders created implicitly by missions appear cleanly without resurrecting deleted folders
   if let .ok fRows ← execParamQuery store.missionsDb
-      "SELECT DISTINCT COALESCE(folder,'') FROM missions WHERE COALESCE(project,'')=?1 AND COALESCE(folder,'')<>'';"
+      "SELECT DISTINCT COALESCE(folder,'') FROM missions WHERE COALESCE(project,'')=?1 AND COALESCE(folder,'')<>'' AND COALESCE(status,'') NOT IN ('acknowledged','archived') AND COALESCE(superseded_by_mission_id,'')='';"
       #[scopedSlug] then
     for i in [1:fRows.size] do
       let f := normalizeMissionFolder (cell fRows[i]! 0)
@@ -534,7 +534,7 @@ def transferProjectFileOrFolder
   let mut srcIsVirtualFolder := false
   if !srcExistsOnDisk then
     if let .ok mRows ← execParamQuery store.missionsDb
-        "SELECT COUNT(*) FROM missions WHERE COALESCE(project,'')=?1 AND (COALESCE(folder,'')=?2 OR COALESCE(folder,'') LIKE (?2 || '/%'));"
+        "SELECT COUNT(*) FROM missions WHERE COALESCE(project,'')=?1 AND (COALESCE(folder,'')=?2 OR COALESCE(folder,'') LIKE (?2 || '/%')) AND COALESCE(status,'') NOT IN ('acknowledged','archived') AND COALESCE(superseded_by_mission_id,'')='';"
         #[srcScopedSlug, srcRel] then
       if mRows.size > 1 && cellU64 mRows[1]! 0 > 0 then
         srcIsVirtualFolder := true

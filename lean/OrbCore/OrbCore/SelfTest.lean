@@ -2691,6 +2691,28 @@ private def runR7CoreTests (prodValid : CoreConfig) : IO UInt32 := do
        closeCoreStore store
        IO.eprintln s!"[orb-core-test] FAIL: removed project route {path}"
        return 1
+   -- Deleting the `crons` folder must not delete crons/automations and must not be resurrected by archived missions.
+   let mkCronsBody := "{\"path\":\"crons\"}"
+   let mkCronsResp ← dispatch s!"POST /api/projects/orb/file/mkdir HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {jwt}\r\nContent-Length: {mkCronsBody.utf8ByteSize}\r\n\r\n{mkCronsBody}"
+   let _ ← execParamQuery store.missionsDb
+     "INSERT INTO missions(id,title,status,backend,project,folder,owner_user_id) VALUES('m-arch-cron','Old cron run','acknowledged','codex','orb','crons','u-r7');" #[]
+   let _ ← execParamQuery store.missionsDb
+     "INSERT INTO mission_automations(id,mission_id,cron_expr,prompt,enabled,created_at) VALUES('auto-keep','m-arch-cron','0 * * * *','keep',1,'2026-11-26T00:00:00Z');" #[]
+   let _ ← execParamQuery store.projectsDb
+     "INSERT INTO project_crons(slug,job_id,folder) VALUES('orb','cron-keep','crons');" #[]
+   let delCronsResp ← dispatch s!"DELETE /api/projects/orb/file?path=crons HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {jwt}\r\n\r\n"
+   let filesAfterDel ← dispatch s!"GET /api/projects/orb/files HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {jwt}\r\n\r\n"
+   let filesAfterDelText := (filesAfterDel.map (·.body)).bind String.fromUTF8? |>.getD ""
+   let .ok pcKeep ← execParamQuery store.projectsDb "SELECT COUNT(*) FROM project_crons WHERE slug='orb' AND job_id='cron-keep';" #[] | do closeCoreStore store; return 1
+   let .ok maKeep ← execParamQuery store.missionsDb "SELECT COUNT(*) FROM mission_automations WHERE id='auto-keep';" #[] | do closeCoreStore store; return 1
+   if mkCronsResp.map (·.status) != some 200 ||
+       delCronsResp.map (·.status) != some 200 ||
+       filesAfterDel.map (·.status) != some 200 ||
+       (filesAfterDelText.splitOn "\"crons\"").length >= 2 ||
+       cell pcKeep[1]! 0 != "1" || cell maKeep[1]! 0 != "1" then
+     closeCoreStore store
+     IO.eprintln s!"[orb-core-test] FAIL: crons folder delete contract mismatch: files={filesAfterDelText}"
+     return 1
    let dryBody := "{\"service\":\"sandboxed-sh-dev\",\"dry_run\":true}"
    let noLease ← dispatch s!"POST /api/system/deploy HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {jwt}\r\nX-Paloma-Approval: approved\r\nContent-Length: {dryBody.utf8ByteSize}\r\n\r\n{dryBody}"
    let privExp := nowSec + 240

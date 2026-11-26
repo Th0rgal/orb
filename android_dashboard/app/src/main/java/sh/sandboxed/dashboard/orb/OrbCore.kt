@@ -1065,6 +1065,17 @@ object OrbMissionTree {
         return mission.hasTypedSuperseded()
     }
 
+    /** True when any active (non-archived, non-superseded) mission is filed in `folder` or a subfolder. */
+    fun hasBlockingFolderMissions(missions: List<OrbRow>, folder: String): Boolean {
+        val norm = folder.trim('/')
+        if (norm.isEmpty()) return false
+        return missions.any { m ->
+            if (isArchived(m) || isSuperseded(m)) return@any false
+            val f = (folderPath(m) ?: "").trim('/')
+            f == norm || f.startsWith("$norm/")
+        }
+    }
+
     /** True when a mission or any of its ancestors is superseded and this mission is not actively running. */
     fun isSupersededInTree(mission: OrbRow, byId: Map<String, OrbRow>): Boolean {
         if (isLive(mission)) return false

@@ -28,23 +28,30 @@ it("sends a transfer to the authoritative API, commits moved_missions, and surfa
   await expect(transferProjectFile("test", "context.md", "renamed.md")).rejects.toThrow("Update the backend");
 });
 
-it("blocks folder deletion when a nested agent exists in folder_prefix", async () => {
+it("blocks folder deletion when a nested active agent exists in folder_prefix", async () => {
   const { assertFolderHasNoWork } = await import('../src/fileActions');
   const fetch = vi.spyOn(globalThis, 'fetch')
-    .mockResolvedValueOnce(new Response(JSON.stringify([{id:'nested',project:'test',folder:'notes/deep',tags:[]}])));
-  await expect(assertFolderHasNoWork('test','notes')).rejects.toThrow('Move the agents');
+    .mockResolvedValueOnce(new Response(JSON.stringify([{id:'nested',project:'test',status:'completed',folder:'notes/deep',tags:[]}])));
+  await expect(assertFolderHasNoWork('test','notes')).rejects.toThrow('Move or archive the agents');
   expect(String(fetch.mock.calls[0][0])).toContain('folder_prefix=notes');
+  expect(String(fetch.mock.calls[0][0])).not.toContain('all=true');
 });
-it("allows a document folder without requesting the retired cron API", async () => {
+it("allows deleting a crons folder without requesting the retired cron API or blocking on archived/superseded missions", async () => {
   const { assertFolderHasNoWork } = await import('../src/fileActions');
-  const fetch = vi.spyOn(globalThis,'fetch').mockResolvedValue(new Response('[]'));
-  await expect(assertFolderHasNoWork('test','notes')).resolves.toBeUndefined();
+  const fetch = vi.spyOn(globalThis,'fetch').mockResolvedValue(new Response(JSON.stringify([
+    { id: 'arch-cron', project: 'test', status: 'acknowledged', folder: 'crons', tags: [] },
+    { id: 'sup-cron', project: 'test', status: 'completed', folder: 'crons/nightly', superseded_by_mission_id: 'next', tags: [] },
+  ])));
+  await expect(assertFolderHasNoWork('test','crons')).resolves.toBeUndefined();
   expect(fetch.mock.calls.some(call => String(call[0]).includes('/crons'))).toBe(false);
+  expect(String(fetch.mock.calls[0][0])).not.toContain('all=true');
 });
 
-it("synchronously flags loaded missions inside a folder", () => {
+it("synchronously flags only active non-superseded missions inside a folder", () => {
   expect(folderWorkError("test", "Audits", [])).toBeNull();
-  expect(folderWorkError("test", "Audits", [{ id: "m1", title: null, status: "completed", project: "test", folder: "Audits/sub", history: [] }])).toContain("Move the agents");
+  expect(folderWorkError("test", "Audits", [{ id: "m1", title: null, status: "completed", project: "test", folder: "Audits/sub", history: [] }])).toContain("Move or archive the agents");
+  expect(folderWorkError("test", "crons", [{ id: "m-arch", title: null, status: "acknowledged", project: "test", folder: "crons", history: [] }])).toBeNull();
+  expect(folderWorkError("test", "crons", [{ id: "m-sup", title: null, status: "completed", project: "test", folder: "crons/sub", superseded_by_mission_id: "m-next", history: [] }])).toBeNull();
   expect(folderWorkError("test", "Audits", [{ id: "m2", title: null, status: "completed", project: "other", folder: "Audits", history: [] }])).toBeNull();
   expect(folderWorkError("test", "Audits", [{ id: "m3", title: null, status: "completed", project: "test", folder: "", tags: ["orb-folder:Audits"], history: [] }])).toBeNull();
 });
