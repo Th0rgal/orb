@@ -16,6 +16,7 @@
  */
 
 import type { Mission, ProjectSummary } from "./api";
+import type { PendingMove } from "./moves";
 import { isBtwMission } from "./missionHierarchy";
 import { isArchived } from "./missionStatus";
 import { forkSource, hasTypedSuperseded, missionParent } from "./missionTree";
@@ -146,6 +147,66 @@ export function withLiveExecution(rows: readonly Mission[], live: ReadonlyMap<st
       queue_wait: owner.queue_wait,
     };
   });
+}
+
+/** Project optimistic file/folder moves (`moves.ts`) onto Native Chrome folder & file maps. */
+export function applyPendingFileMoves(
+  rawFolders: Readonly<Record<string, readonly string[]>>,
+  rawFiles: Readonly<Record<string, readonly string[]>>,
+  moves: ReadonlyMap<string, PendingMove>,
+): { folders: Record<string, string[]>; files: Record<string, string[]> } {
+  let hasFileMove = false;
+  for (const m of moves.values()) {
+    if (m.kind === "file") {
+      hasFileMove = true;
+      break;
+    }
+  }
+  if (!hasFileMove) {
+    return {
+      folders: rawFolders as Record<string, string[]>,
+      files: rawFiles as Record<string, string[]>,
+    };
+  }
+  const folders: Record<string, string[]> = {};
+  for (const [k, v] of Object.entries(rawFolders)) folders[k] = [...v];
+  const files: Record<string, string[]> = {};
+  for (const [k, v] of Object.entries(rawFiles)) files[k] = [...v];
+  const addUnique = (arr: string[], item: string) => {
+    if (item && !arr.includes(item)) arr.push(item);
+  };
+  for (const move of moves.values()) {
+    if (move.kind !== "file" || !move.fromProject || !move.fromPath) continue;
+    const srcSlug = move.fromProject;
+    const srcPath = move.fromPath;
+    if (move.directory) {
+      const prevFolders = folders[srcSlug] ?? [];
+      const movedSubs = prevFolders.filter((f) => f === srcPath || f.startsWith(`${srcPath}/`));
+      folders[srcSlug] = prevFolders.filter((f) => f !== srcPath && !f.startsWith(`${srcPath}/`));
+      const prevFiles = files[srcSlug] ?? [];
+      const movedSubFiles = prevFiles.filter((f) => f.startsWith(`${srcPath}/`));
+      files[srcSlug] = prevFiles.filter((f) => !f.startsWith(`${srcPath}/`));
+      if (!move.delete && move.toProject && move.path) {
+        const dstFolders = (folders[move.toProject] ??= []);
+        addUnique(dstFolders, move.path);
+        for (const sub of movedSubs) {
+          addUnique(dstFolders, move.path + sub.slice(srcPath.length));
+        }
+        if (movedSubFiles.length) {
+          const dstFiles = (files[move.toProject] ??= []);
+          for (const sf of movedSubFiles) {
+            addUnique(dstFiles, move.path + sf.slice(srcPath.length));
+          }
+        }
+      }
+    } else {
+      files[srcSlug] = (files[srcSlug] ?? []).filter((f) => f !== srcPath);
+      if (!move.delete && move.toProject && move.path) {
+        addUnique((files[move.toProject] ??= []), move.path);
+      }
+    }
+  }
+  return { folders, files };
 }
 
 export function buildNativeChromeSyncArgs(
@@ -287,7 +348,8 @@ export type NativeProjectAction =
   | "copy-file"
   | "rename-file"
   | "delete-file"
-  | "move-file";
+  | "move-file"
+  | "cancel-cut";
 const NATIVE_PROJECT_ACTIONS: readonly string[] = [
   "new-agent",
   "new-cloud-agent",
@@ -306,6 +368,7 @@ const NATIVE_PROJECT_ACTIONS: readonly string[] = [
   "rename-file",
   "delete-file",
   "move-file",
+  "cancel-cut",
 ];
 
 /** Notify native macOS/Linux shell when the titlebar sidebar toggle, history state, or Cmd+K shortcut fires inside WebView. */

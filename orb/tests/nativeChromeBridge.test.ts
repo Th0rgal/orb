@@ -1,7 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Mission } from "../src/api";
 import {
+  applyPendingFileMoves,
   createNativeChromeSyncer,
+  installNativeChromeWindowHandlers,
   serializeNativeChromeMission,
   withLiveExecution,
   type NativeChromeSyncSnapshot,
@@ -144,5 +146,48 @@ describe("createNativeChromeSyncer", () => {
     expect(parsed.args.selected).toBe("m:d186");
     expect(parsed.args.revision).toBe(301);
     syncer.dispose();
+  });
+});
+
+describe("applyPendingFileMoves and cancel-cut", () => {
+  it("optimistically moves cut folders, nested subfolders, and files into destination", () => {
+    const folders = { ethereum: ["audits", "audits/pareto", "audits/pareto/notes"], perso: ["rzr"] };
+    const files = { ethereum: ["audits/pareto/report.md", "readme.md"], perso: [] };
+    const moves = new Map([
+      [
+        "file:ethereum:audits/pareto",
+        {
+          kind: "file" as const,
+          fromProject: "ethereum",
+          toProject: "perso",
+          fromPath: "audits/pareto",
+          path: "rzr/pareto",
+          directory: true,
+        },
+      ],
+    ]);
+    const next = applyPendingFileMoves(folders, files, moves);
+    expect(next.folders.ethereum).toEqual(["audits"]);
+    expect(next.folders.perso).toEqual(["rzr", "rzr/pareto", "rzr/pareto/notes"]);
+    expect(next.files.ethereum).toEqual(["readme.md"]);
+    expect(next.files.perso).toEqual(["rzr/pareto/report.md"]);
+  });
+
+  it("dispatches cancel-cut through __ORB_NATIVE_PROJECT_ACTION__", () => {
+    const actions: Array<{ action: string; slug: string }> = [];
+    const cleanup = installNativeChromeWindowHandlers({
+      open: () => true,
+      leaveSettings: () => {},
+      getSidebarOpen: () => true,
+      setSidebarOpen: () => {},
+      projectAction: (action, slug) => {
+        actions.push({ action, slug });
+        return true;
+      },
+    });
+    const win = window as unknown as { __ORB_NATIVE_PROJECT_ACTION__?: (a: string, s: string) => boolean };
+    expect(win.__ORB_NATIVE_PROJECT_ACTION__?.("cancel-cut", "_")).toBe(true);
+    expect(actions).toEqual([{ action: "cancel-cut", slug: "_" }]);
+    cleanup();
   });
 });

@@ -13,19 +13,25 @@ const char *orb_menu_project_slug(const char *target) { return (!target || strnc
 #if defined(ORB_HAS_WEBKITGTK)
 static gboolean sidebar_cut_active;
 static GtkWidget *sel_list;
-static GHashTable *sel;
-static char *sel_anchor;
+static GHashTable *sel, *cut_set;
+static char *sel_anchor, *cut_proj, *cut_fld, *hov_id, *act_id;
 void orb_sidebar_mark_cut(gboolean active) { sidebar_cut_active = active; }
 gboolean orb_sidebar_has_cut(void) { return sidebar_cut_active; }
+void orb_sidebar_hover(const char *rid, gboolean enter) { if (enter && rid && *rid) { g_free(hov_id); hov_id = g_strdup(rid); } else if (!enter && (!rid || !g_strcmp0(hov_id, rid))) g_clear_pointer(&hov_id, g_free); }
+void orb_sidebar_set_active(const char *rid) { g_free(act_id); act_id = (rid && *rid) ? g_strdup(rid) : NULL; }
+void orb_sidebar_mark_cut_target(const char *ids, const char *proj, const char *fld, gboolean copy) {
+    sidebar_cut_active = TRUE; if (!cut_set) cut_set = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
+    g_hash_table_remove_all(cut_set); g_clear_pointer(&cut_proj, g_free); g_clear_pointer(&cut_fld, g_free);
+    if (!copy && ids && *ids) { char **v = g_strsplit(ids, " ", -1); for (char **p = v; *p; ++p) if (**p) g_hash_table_add(cut_set, g_str_has_prefix(*p, "m:") || g_str_has_prefix(*p, "pf:") || g_str_has_prefix(*p, "folder:") ? g_strdup(*p) : g_strdup_printf("m:%s", *p)); g_strfreev(v); }
+    if (!copy && proj && *proj && fld && *fld) { cut_proj = g_strdup(proj); cut_fld = g_strdup(fld); g_hash_table_add(cut_set, g_strdup_printf("folder:%s:%s", proj, fld)); }
+    if (sel_list) orb_sel_sync(sel_list);
+}
+void orb_sidebar_clear_cut(GtkWidget *wv) { sidebar_cut_active = FALSE; if (cut_set) g_hash_table_remove_all(cut_set); g_clear_pointer(&cut_proj, g_free); g_clear_pointer(&cut_fld, g_free); if (sel_list) orb_sel_sync(sel_list); if (wv) orb_eval_project_action(wv, "cancel-cut", "_", NULL); }
 typedef struct { GtkWidget *wv, *row; const char *action; char *id, *arg; } MenuAct;
 static void free_act(gpointer p, GClosure *cl) { (void)cl; MenuAct *a = p; g_free(a->id); g_free(a->arg); g_free(a); }
 static void run_action(GtkWidget *wv, const char *action, const char *id, const char *arg) {
     char *a = orb_json_escape_string(action), *i = orb_json_escape_string(id), *g = orb_json_escape_string(arg ? arg : "");
-    if (a && i && g) {
-        char *js = g_strdup_printf("window.__ORB_NATIVE_MISSION_ACTION__&&window.__ORB_NATIVE_MISSION_ACTION__(%s,%s,%s);", a, i, g);
-        webkit_web_view_evaluate_javascript(WEBKIT_WEB_VIEW(wv), js, -1, NULL, NULL, NULL, NULL, NULL);
-        g_free(js);
-    }
+    if (a && i && g) { char *js = g_strdup_printf("window.__ORB_NATIVE_MISSION_ACTION__&&window.__ORB_NATIVE_MISSION_ACTION__(%s,%s,%s);", a, i, g); webkit_web_view_evaluate_javascript(WEBKIT_WEB_VIEW(wv), js, -1, NULL, NULL, NULL, NULL, NULL); g_free(js); }
     free(a); free(i); free(g);
 }
 static gboolean destroy_later(gpointer w) {
@@ -36,8 +42,8 @@ static void on_item(GtkMenuItem *mi, gpointer ud) {
     (void)mi; MenuAct *a = ud;
     if (!strcmp(a->action, "rename")) orb_inline_rename(a->wv, a->row, "mission", a->id, a->arg);
     else if (!strcmp(a->action, "clear")) { if (sel_list) orb_sel_clear(sel_list); }
-    else if (!strcmp(a->action, "cut")) { sidebar_cut_active = TRUE; run_action(a->wv, "cut", a->id, ""); }
-    else if (!strcmp(a->action, "paste")) orb_eval_project_action(a->wv, "paste", a->arg, NULL);
+    else if (!strcmp(a->action, "cut")) { orb_sidebar_mark_cut_target(a->id, NULL, NULL, FALSE); run_action(a->wv, "cut", a->id, ""); }
+    else if (!strcmp(a->action, "paste")) { orb_sidebar_clear_cut(NULL); orb_eval_project_action(a->wv, "paste", a->arg, NULL); }
     else if (!strcmp(a->action, "delete") || !strcmp(a->action, "move") || !strcmp(a->action, "move-picker")) {
         run_action(a->wv, a->action, a->id, a->arg);
         if (sel_list) orb_sel_clear(sel_list);
@@ -90,14 +96,24 @@ static gboolean selectable(GtkWidget *row) {
 }
 static const char *row_id(GtkWidget *row) { return g_object_get_data(G_OBJECT(row), "orb-row-id"); }
 void orb_sel_sync(GtkWidget *list) {
-    sel_list = list; GList *rows = gtk_container_get_children(GTK_CONTAINER(list));
+    sel_list = list; GList *rows = gtk_container_get_children(GTK_CONTAINER(list)); size_t cfl = cut_fld ? strlen(cut_fld) : 0;
     GHashTable *live = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
     for (GList *l = rows; l; l = l->next) {
-        const char *id = row_id(l->data); gboolean on = sel && id && g_hash_table_contains(sel, id);
-        if (on) { g_hash_table_add(live, g_strdup(id)); gtk_style_context_add_class(gtk_widget_get_style_context(l->data), "orb-multi"); }
-        else gtk_style_context_remove_class(gtk_widget_get_style_context(l->data), "orb-multi");
+        const char *id = row_id(l->data), *rp = g_object_get_data(G_OBJECT(l->data), "orb-project"), *rf = g_object_get_data(G_OBJECT(l->data), "orb-folder");
+        gboolean on = sel && id && g_hash_table_contains(sel, id), in_cf = cut_proj && cut_fld && !g_strcmp0(rp, cut_proj) && rf && !strncmp(rf, cut_fld, cfl) && (!rf[cfl] || rf[cfl] == '/');
+        gboolean cut = in_cf || (cut_set && id && g_hash_table_contains(cut_set, id)); GtkStyleContext *sc = gtk_widget_get_style_context(l->data);
+        if (on) { g_hash_table_add(live, g_strdup(id)); gtk_style_context_add_class(sc, "orb-multi"); } else gtk_style_context_remove_class(sc, "orb-multi");
+        if (cut) gtk_style_context_add_class(sc, "orb-cut"); else gtk_style_context_remove_class(sc, "orb-cut");
+        if (!GTK_IS_OVERLAY(list)) gtk_widget_set_opacity(l->data, cut ? 0.45 : 1.0);
+        gtk_widget_queue_draw(l->data);
     }
     g_list_free(rows); if (sel) g_hash_table_destroy(sel); sel = live;
+}
+GtkWidget *orb_sidebar_target(GtkWindow *win, GtkWidget *list) {
+    GtkWidget *f = win ? gtk_window_get_focus(win) : NULL, *h = NULL, *a = NULL; if (f && selectable(f)) return f;
+    GList *rows = list ? gtk_container_get_children(GTK_CONTAINER(list)) : NULL;
+    for (GList *l = rows; l; l = l->next) { const char *id = row_id(l->data); if (!id || !selectable(l->data)) continue; if (hov_id && !strcmp(id, hov_id)) h = l->data; if (act_id && !strcmp(id, act_id)) a = l->data; }
+    return g_list_free(rows), h ? h : a;
 }
 gboolean orb_sel_clear(GtkWidget *list) {
     gboolean had = sel && g_hash_table_size(sel) > 0;
@@ -140,13 +156,13 @@ gboolean orb_sel_delete(GtkWidget *wv, GtkWidget *list, const char *fallback) {
 }
 gboolean orb_sidebar_cut_copy(GtkWidget *wv, GtkWidget *list, GtkWidget *focus, gboolean copy) {
     int n, others, archived; char *ids = sel_missions(&n, &others, &archived);
-    if (!copy && ids && !others) return sidebar_cut_active = TRUE, run_action(wv, "cut", ids, ""), g_free(ids), orb_sel_clear(list), TRUE;
+    if (!copy && ids && !others) return orb_sidebar_mark_cut_target(ids, NULL, NULL, FALSE), run_action(wv, "cut", ids, ""), g_free(ids), orb_sel_clear(list), TRUE;
     g_free(ids); if (!focus) return FALSE;
     const char *k = g_object_get_data(G_OBJECT(focus), "orb-kind"), *rid = row_id(focus), *proj = g_object_get_data(G_OBJECT(focus), "orb-project"), *fld = g_object_get_data(G_OBJECT(focus), "orb-folder");
     if (!k || !rid) return FALSE;
-    if (!strcmp(k, "mission") && !strncmp(rid, "m:", 2)) return copy ? run_action(wv, "copy-id", rid + 2, "") : (sidebar_cut_active = TRUE, run_action(wv, "cut", rid + 2, "")), TRUE;
-    if (!strcmp(k, "folder") && proj && *proj && fld && *fld) { g_autofree char *t = g_strdup_printf("%s:%s", proj, fld); return sidebar_cut_active = TRUE, orb_eval_project_action(wv, copy ? "copy" : "cut", t, NULL), TRUE; }
-    if (!strcmp(k, "file") && !strncmp(rid, "pf:", 3)) return sidebar_cut_active = TRUE, orb_eval_project_action(wv, copy ? "copy-file" : "cut-file", rid + 3, NULL), TRUE;
+    if (!strcmp(k, "mission") && !strncmp(rid, "m:", 2)) return copy ? run_action(wv, "copy-id", rid + 2, "") : (orb_sidebar_mark_cut_target(rid, NULL, NULL, FALSE), run_action(wv, "cut", rid + 2, "")), TRUE;
+    if (!strcmp(k, "folder") && proj && *proj && fld && *fld) { g_autofree char *t = g_strdup_printf("%s:%s", proj, fld); return orb_sidebar_mark_cut_target(NULL, proj, fld, copy), orb_eval_project_action(wv, copy ? "copy" : "cut", t, NULL), TRUE; }
+    if (!strcmp(k, "file") && !strncmp(rid, "pf:", 3)) return orb_sidebar_mark_cut_target(rid, NULL, NULL, copy), orb_eval_project_action(wv, copy ? "copy-file" : "cut-file", rid + 3, NULL), TRUE;
     return FALSE;
 }
 static void bulk_menu(GtkWidget *wv, GtkWidget *list, GtkWidget *menu) {

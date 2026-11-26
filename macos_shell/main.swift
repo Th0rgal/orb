@@ -340,6 +340,8 @@ final class OrbNativeChromeController: NSObject, NSSplitViewDelegate, NSTableVie
     private let contextMenu = NSMenu()
     private var activeTargetRowIndex: Int = -1
     private var hasSidebarCut = false
+    private var cutRowIds: Set<String> = []
+    private var cutFolderScope: (project: String, folder: String)?
     private weak var inlineEditor: NSTextField?
     private var inlineRenameContext: (rowIndex: Int, mode: String, id: String, original: String, cancelled: Bool)?
     private let topBarPane = NSView()
@@ -974,6 +976,7 @@ final class OrbNativeChromeController: NSObject, NSSplitViewDelegate, NSTableVie
             button.autoresizingMask = [.minXMargin]
             cell.addSubview(button)
         }
+        cell.alphaValue = isRowCut(item) ? 0.45 : 1.0
         return cell
     }
 
@@ -1101,14 +1104,78 @@ final class OrbNativeChromeController: NSObject, NSSplitViewDelegate, NSTableVie
         return false
     }
 
+    private func isRowCut(_ item: OrbSidebarRowItem) -> Bool {
+        if cutRowIds.contains(item.rowId) { return true }
+        if let scope = cutFolderScope, item.project == scope.project {
+            if item.folder == scope.folder || item.folder.hasPrefix(scope.folder + "/") {
+                return true
+            }
+        }
+        return false
+    }
+
+    private func reloadCutOpacity() {
+        let vis = sidebarTable.rows(in: sidebarTable.visibleRect)
+        guard vis.length > 0 else { return }
+        sidebarTable.reloadData(forRowIndexes: IndexSet(integersIn: vis.location..<(vis.location + vis.length)), columnIndexes: IndexSet(integer: 0))
+    }
+
+    private func markCutTarget(rowIds: [String], folderScope: (project: String, folder: String)?, copy: Bool) {
+        hasSidebarCut = true
+        cutRowIds.removeAll()
+        cutFolderScope = nil
+        if !copy {
+            for rid in rowIds where !rid.isEmpty { cutRowIds.insert(rid) }
+            cutFolderScope = folderScope
+        }
+        reloadCutOpacity()
+    }
+
+    func clearSidebarCut(notifyWebView: Bool) {
+        let had = hasSidebarCut || !cutRowIds.isEmpty || cutFolderScope != nil
+        hasSidebarCut = false
+        cutRowIds.removeAll()
+        cutFolderScope = nil
+        if had { reloadCutOpacity() }
+        if notifyWebView { evalProjectAction("cancel-cut", target: "_") }
+    }
+
+    private func hoveredSidebarRowIndex() -> Int? {
+        guard let win = hostWindow, !sidebarPane.isHidden else { return nil }
+        let loc = win.mouseLocationOutsideOfEventStream
+        let panePt = sidebarPane.convert(loc, from: nil)
+        guard sidebarPane.bounds.contains(panePt) else { return nil }
+        let tablePt = sidebarTable.convert(loc, from: nil)
+        let idx = sidebarTable.row(at: tablePt)
+        return (idx >= 0 && idx < rows.count) ? idx : nil
+    }
+
     func handleSidebarClipboard(action: String) -> Bool {
-        guard let win = hostWindow, win.firstResponder === sidebarTable else { return false }
-        let idx = (activeTargetRowIndex >= 0 && activeTargetRowIndex < rows.count) ? activeTargetRowIndex : sidebarTable.selectedRow
+        guard let win = hostWindow else { return false }
+        let tableFocused = (win.firstResponder === sidebarTable)
+        let hovIdx = hoveredSidebarRowIndex()
+        if !tableFocused && hovIdx == nil { return false }
+        if action == "paste" && !hasSidebarCut { return false }
+        if action == "copy" && !tableFocused {
+            guard let hi = hovIdx, rows[hi].kind == "folder" || rows[hi].kind == "file" else { return false }
+        }
+        let idx: Int
+        if let hi = hovIdx {
+            idx = hi
+        } else if activeTargetRowIndex >= 0 && activeTargetRowIndex < rows.count {
+            idx = activeTargetRowIndex
+        } else {
+            idx = sidebarTable.selectedRow
+        }
         guard idx >= 0, idx < rows.count else { return false }
         let item = rows[idx]
         if action == "paste" {
-            guard !item.project.isEmpty else { return false }
-            let dst = item.folder.isEmpty ? item.project : "\(item.project):\(item.folder)"
+            let proj = !item.project.isEmpty
+                ? item.project
+                : (item.kind == "project" && item.target.hasPrefix("project:") ? String(item.target.dropFirst(8)) : "")
+            guard !proj.isEmpty else { return false }
+            let dst = item.folder.isEmpty ? proj : "\(proj):\(item.folder)"
+            clearSidebarCut(notifyWebView: false)
             evalProjectAction("paste", target: dst)
             return true
         }
@@ -1118,18 +1185,18 @@ final class OrbNativeChromeController: NSObject, NSSplitViewDelegate, NSTableVie
             if copy {
                 evalMissionAction("copy-id", id: mid)
             } else {
-                hasSidebarCut = true
+                markCutTarget(rowIds: [item.rowId], folderScope: nil, copy: false)
                 evalMissionAction("cut", id: mid)
             }
             return true
         }
         if item.kind == "folder", !item.project.isEmpty, !item.folder.isEmpty {
-            hasSidebarCut = true
+            markCutTarget(rowIds: [item.rowId], folderScope: (item.project, item.folder), copy: copy)
             evalProjectAction(copy ? "copy" : "cut", target: "\(item.project):\(item.folder)")
             return true
         }
         if item.kind == "file", item.rowId.hasPrefix("pf:") {
-            hasSidebarCut = true
+            markCutTarget(rowIds: [item.rowId], folderScope: nil, copy: copy)
             evalProjectAction(copy ? "copy-file" : "cut-file", target: String(item.rowId.dropFirst(3)))
             return true
         }
@@ -1147,11 +1214,25 @@ final class OrbNativeChromeController: NSObject, NSSplitViewDelegate, NSTableVie
             beginInlineRename(rowIndex: rowIdx, mode: mode, id: id, currentTitle: arg)
         } else if act == "m" {
             let mact = (info["mact"] as? String) ?? ""
-            if mact == "cut" { hasSidebarCut = true }
+            if mact == "cut" {
+                let ids = id.split(separator: " ").map { $0.hasPrefix("m:") ? String($0) : "m:\($0)" }
+                markCutTarget(rowIds: ids, folderScope: nil, copy: false)
+            }
             evalMissionAction(mact, id: id, arg: arg)
         } else if act == "p" {
             let pact = (info["pact"] as? String) ?? ""
-            if ["cut", "copy", "cut-file", "copy-file"].contains(pact) { hasSidebarCut = true }
+            if pact == "paste" {
+                clearSidebarCut(notifyWebView: false)
+            } else if pact == "cut" {
+                let parts = id.split(separator: ":", maxSplits: 1).map(String.init)
+                if parts.count == 2 {
+                    markCutTarget(rowIds: ["folder:\(parts[0]):\(parts[1])"], folderScope: (parts[0], parts[1]), copy: false)
+                }
+            } else if pact == "cut-file" {
+                markCutTarget(rowIds: ["pf:\(id)"], folderScope: nil, copy: false)
+            } else if pact == "copy" || pact == "copy-file" {
+                markCutTarget(rowIds: [], folderScope: nil, copy: true)
+            }
             evalProjectAction(pact, target: id)
         }
     }
