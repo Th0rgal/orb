@@ -74,14 +74,14 @@ test('one collapsed archive spans projects, while completion stays in place; res
  await expect(projects.getByRole('button',{name:'Second project',exact:true})).toHaveAttribute('aria-expanded','true');
  await expect(page.getByRole('button',{name:'notes',exact:true})).toHaveAttribute('aria-expanded','true');
  await expect(page.getByRole('button',{name:'deep',exact:true})).toHaveAttribute('aria-expanded','true');
- expect(writes).toEqual([{path:'/api/control/missions/archived/status',body:{status:'paused'}}]);
+ await expect.poll(()=>writes).toEqual([{path:'/api/control/missions/archived/status',body:{status:'paused'}}]);
  expect(missions[2].folder).toBe('notes/deep');
  await page.screenshot({path:'/tmp/orb-shared-archives.png'});
  await restoredRow.click({button:'right'});await page.getByRole('menuitem',{name:'Delete agent…',exact:true}).click();
  await page.getByRole('dialog').getByRole('button',{name:'Delete',exact:true}).click();
  await expect(page.getByRole('dialog')).toHaveCount(0);
  await expect(restoredRow).toHaveCount(0);
- expect(writes).toEqual([
+ await expect.poll(()=>writes).toEqual([
   {path:'/api/control/missions/archived/status',body:{status:'paused'}},
   {path:'/api/control/missions/archived/status',body:{status:'acknowledged'}},
   {path:'/api/control/missions/archived',method:'DELETE'},

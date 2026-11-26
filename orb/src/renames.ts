@@ -70,6 +70,7 @@ export function withRenamedTitles<T extends { title?: string | null }>(kind: Ren
 }
 
 export const isRenamePending = (kind: RenameKind, id: string) => pending().has(keyOf(kind, id));
+export const pendingRenames = () => pending();
 
 /**
  * Show `title` now and send it with `save`. On failure the previous title
