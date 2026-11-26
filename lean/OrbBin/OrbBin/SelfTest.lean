@@ -1370,6 +1370,53 @@ def runAllTests : IO UInt32 := do
     let restored ← IO.FS.readBinFile (agyWs / ".agents" / "mcp_config.json")
     assertTrue "Antigravity overlay restores exact original bytes" (restored == origCfg)
 
+  -- Stale Orb-managed runtime entry (no sibling servers) is replaced and cleaned up on restore.
+  let staleOnlyWs := tmpDir / "agy-stale-only"
+  IO.FS.createDirAll (staleOnlyWs / ".agents")
+  let staleEntry := JVal.obj #[
+    ("command", .str "/usr/local/bin/sandboxed-mcp"),
+    ("args", .arr #[
+      .str "--api-url", .str "https://orbcore.thomas.md",
+      .str "--token-file", .str "/tmp/sandboxed-mcp-44f416f9-ad23-4a80-b093-1511c3de695a/credential",
+      .str "--mission-id", .str "f5e86c78-23ef-4745-9ea2-82e6a02e3188",
+      .str "--profile", .str "executor"
+    ])
+  ]
+  IO.FS.writeBinFile (staleOnlyWs / ".agents" / "mcp_config.json")
+    (renderPretty (.obj #[("mcpServers", .obj #[("sandboxed", staleEntry)])])).toUTF8
+  match (← installAntigravityOverlay staleOnlyWs agyInstallCfg) with
+  | .error e => throw <| IO.userError s!"Antigravity stale-only overlay recovery failed: {e}"
+  | .ok ov =>
+    restoreAntigravityOverlay ov
+    let existsAfter ← (staleOnlyWs / ".agents" / "mcp_config.json").pathExists
+    assertTrue "Antigravity stale-only overlay removes file on restore" (!existsAfter)
+
+  -- Stale Orb-managed runtime entry with sibling user server preserves sibling on restore.
+  let staleSiblingWs := tmpDir / "agy-stale-sibling"
+  IO.FS.createDirAll (staleSiblingWs / ".agents")
+  IO.FS.writeBinFile (staleSiblingWs / ".agents" / "mcp_config.json")
+    (renderPretty (.obj #[("mcpServers", .obj #[
+      ("user", .obj #[("command", .str "user-server")]),
+      ("sandboxed", staleEntry)
+    ])])).toUTF8
+  match (← installAntigravityOverlay staleSiblingWs agyInstallCfg) with
+  | .error e => throw <| IO.userError s!"Antigravity stale-sibling overlay recovery failed: {e}"
+  | .ok ov =>
+    restoreAntigravityOverlay ov
+    let restoredBytes ← IO.FS.readBinFile (staleSiblingWs / ".agents" / "mcp_config.json")
+    let .ok restoredJson := Json.parseBytes restoredBytes | throw <| IO.userError "restored mcp_config invalid JSON"
+    let srvs := restoredJson.fieldOrNull "mcpServers"
+    assertTrue "Antigravity stale-sibling preserves user server" (srvs.field? "user").isSome
+    assertTrue "Antigravity stale-sibling strips stale sandboxed entry" (srvs.field? "sandboxed").isNone
+
+  -- User-defined `sandboxed` MCP server is still rejected.
+  let userConflictWs := tmpDir / "agy-user-conflict"
+  IO.FS.createDirAll (userConflictWs / ".agents")
+  IO.FS.writeBinFile (userConflictWs / ".agents" / "mcp_config.json")
+    "{\"mcpServers\":{\"sandboxed\":{\"command\":\"custom-user-mcp\"}}}".toUTF8
+  let conflictAttempt ← installAntigravityOverlay userConflictWs agyInstallCfg
+  assertTrue "Antigravity rejects non-managed user sandboxed server" (isErr conflictAttempt)
+
   -- 8. Companion MCP tool counts + HS256 JWT minting
   assertEq "workspace-mcp tool count" OrbBin.WorkspaceMcp.toolDefinitions.size 8
   assertEq "desktop-mcp tool count" OrbBin.DesktopMcp.toolDefinitions.size 9
