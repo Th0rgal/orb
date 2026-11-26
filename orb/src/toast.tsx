@@ -1,7 +1,7 @@
 import { render } from "solid-js/web";
 import { For, Show, createContext, createEffect, createSignal, onCleanup, onMount, useContext, type Accessor, type JSX } from "solid-js";
 import { copyText } from "./clipboard";
-import { describeError } from "./ErrorNotice";
+import { describeError, renderInlineCode } from "./ErrorNotice";
 import { CheckIcon, CloseIcon, CopyIcon } from "./icons";
 import { swallow } from "./log";
 import { hasInteractiveOverlay, SlotActiveContext } from "./overlayLayer";
@@ -319,7 +319,7 @@ function ToastItem(p: { toast: Toast }) {
     <Show when={!showAlertIcon() && t().icon}><span class="toast-glyph" aria-hidden="true">{t().icon}</span></Show>
     <div class="toast-body">
       <span class="toast-title">{t().title}</span>
-      <Show when={t().message}><span class="toast-message">{t().message}</span></Show>
+      <Show when={t().message}><span class="toast-message">{renderInlineCode(t().message!)}</span></Show>
       <Show when={t().actions?.some(a => a.link)}>
         <div class="toast-links">
           <For each={t().actions?.filter(a => a.link)}>{a => <button type="button" class="toast-link" onClick={() => runAction(a)}>{a.label}</button>}</For>

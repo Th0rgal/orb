@@ -68,6 +68,13 @@ export function isCancellationRequestedNotice(text: string): boolean {
   return PARALLEL_CANCEL_REQUESTED.test(text.trim());
 }
 
+const TRANSIENT_NODE_NOTICE = /^(?:Node `[^`]+` answers ping but its API is unresponsive\.|Lost contact with remote node `[^`]+`; the turn remains owned\b)/i;
+
+/** Non-terminal remote-node reachability warning; superseded once the turn resumes activity or a duplicate arrives. */
+export function isTransientNodeNotice(text: string): boolean {
+  return TRANSIENT_NODE_NOTICE.test(text.trim());
+}
+
 /** Core marks the persisted text of a turn that was cut (Send now, Stop). */
 export const PARTIAL_TURN = "partial_turn_interrupted";
 export function isPartialTurn(data: Record<string, unknown> | undefined): boolean {

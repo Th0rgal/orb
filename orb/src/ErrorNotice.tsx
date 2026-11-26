@@ -1,54 +1,60 @@
 import { swallow } from "./log";
-import { Show, createMemo, createSignal, createEffect, type JSX } from "solid-js";
+import { For, Show, createMemo, createSignal, createEffect, type JSX } from "solid-js";
 import { copyText } from "./clipboard";
 import { CloseIcon, CopyIcon, CheckIcon } from "./icons";
 import { Dialog, DialogButton } from "./Dialog";
 import { harnessName } from "./harnesses";
+import { isTransientNodeNotice } from "./stream";
 import { providerLimit, resetPhrase } from "./usageLimit";
 
+export { isTransientNodeNotice };
 export type ErrorInfo = { title: string; message: string; tone?: "warning"; link?: { label: string; url: string }; nonResumable?: boolean };
 export type ProcessLaunchFailureKind = "arg_list_too_long" | "missing_binary" | "spawn_failed";
 
+/** Render inline backtick spans (e.g. ``Node `ashur` ``) as `<code>` elements without HTML injection. */
+export function renderInlineCode(text: string): JSX.Element {
+  if (!text.includes("`")) return text;
+  const parts = text.split(/(`[^`\n]+`)/g);
+  return parts.length <= 1 ? text : <For each={parts}>{(p) => (p.length >= 2 && p[0] === "`" && p[p.length - 1] === "`" ? <code>{p.slice(1, -1)}</code> : p)}</For>;
+}
+
+const CLI_PAT = "opencode|claude(?:code)?|codex|agy|antigravity|grok|vibe";
+const CLI_SH_RE = new RegExp(`\\.sandboxed-sh-(${CLI_PAT})-cmd\\.sh`, "i");
+const CLI_JOB_RE = new RegExp(`\\bRemote\\s+(${CLI_PAT})\\s+job\\b`, "i");
+const CLI_ERR_RE = new RegExp(`(?:^|:\\s*)(${CLI_PAT}):\\s*(?:Argument list too long|(?:command )?not found|No such file or directory|Permission denied|Exec format error)`, "im");
+const CLI_CNF_RE = new RegExp(`command not found:\\s*(${CLI_PAT})\\b`, "i");
+const MISSING_BIN_RE = new RegExp(`(?:\\.sandboxed-sh-[\\w-]+-cmd\\.sh[^\\n]*:\\s*(?:not found|No such file or directory)|(?:\\b(?:${CLI_PAT})\\b)[^\\n]*:\\s*(?:(?:command )?not found|No such file or directory)|command not found:\\s*(?:${CLI_PAT})\\b|(?:failed to (?:start|spawn|launch|exec)|posix_spawn)[^\\n]*(?:No such file or directory|\\bos error 2\\b|not found))`, "i");
+const SPAWN_FAIL_RE = new RegExp(`(?:\\.sandboxed-sh-[\\w-]+-cmd\\.sh[^\\n]*:\\s*(?:Permission denied|Exec format error)|(?:\\b(?:${CLI_PAT})\\b)[^\\n]*:\\s*(?:Permission denied|Exec format error)|(?:failed to (?:start|spawn|launch|exec)|posix_spawn)[^\\n]*(?:Permission denied|\\bos error (?:8|13)\\b|Exec format error)|Failed to (?:start|write) [^\\n]*(?:CLI|command script))`, "i");
+const PRESERVED = "Your workspace and conversation history are preserved.";
+const CONT_DIRECT = "then continue in this conversation directly without transferring again — or switch to another agent.";
+const CONV_SAVED = "Your conversation is saved";
+const CONT_STEP = "continue from the last completed step.";
+
 function inferLaunchHarness(raw: string, backend?: string | null): string {
   if (backend && backend.trim()) return harnessName(backend.trim()).replace(/\s+CLI$/, "");
-  const matched = raw.match(/\.sandboxed-sh-(opencode|claudecode|claude|codex|antigravity|agy|grok|vibe)-cmd\.sh/i)?.[1]
-    ?? raw.match(/\bRemote\s+(opencode|claudecode|claude|codex|antigravity|grok|vibe)\s+job\b/i)?.[1]
+  const matched = raw.match(CLI_SH_RE)?.[1]
+    ?? raw.match(CLI_JOB_RE)?.[1]
     ?? raw.match(/Failed to (?:start|spawn|launch|write)\s+(OpenCode|Claude Code|claudecode|claude|Codex|Antigravity|agy|Grok|Vibe)\b/i)?.[1]
-    ?? raw.match(/(?:^|:\s*)(opencode|claude|claudecode|codex|agy|antigravity|grok|vibe):\s*(?:Argument list too long|not found|command not found|No such file or directory|Permission denied|Exec format error)/im)?.[1]
-    ?? raw.match(/command not found:\s*(opencode|claude|claudecode|codex|agy|antigravity|grok|vibe)\b/i)?.[1];
+    ?? raw.match(CLI_ERR_RE)?.[1]
+    ?? raw.match(CLI_CNF_RE)?.[1];
   if (!matched) return "Agent";
   const key = matched.toLowerCase().replace(/\s+/g, "");
-  const normalized = key === "claude" ? "claudecode" : key === "agy" ? "antigravity" : key;
-  return harnessName(normalized).replace(/\s+CLI$/, "");
+  return harnessName(key === "claude" ? "claudecode" : key === "agy" ? "antigravity" : key).replace(/\s+CLI$/, "");
 }
 
 export function classifyProcessLaunchFailure(raw: string, backend?: string | null): (ErrorInfo & { kind: ProcessLaunchFailureKind; nonResumable: true }) | null {
+  const mk = (kind: ProcessLaunchFailureKind, agent: string, message: string) => ({ kind, nonResumable: true as const, title: `${agent} could not start`, message });
   if (/argument list too long|\bE2BIG\b|\bos error 7\b/i.test(raw)) {
     const agent = inferLaunchHarness(raw, backend);
-    return {
-      kind: "arg_list_too_long",
-      nonResumable: true,
-      title: `${agent} could not start`,
-      message: `The carried conversation history exceeded the system command-line limit before ${agent} could launch. Your workspace and conversation history are preserved. Update the backend so ${agent} receives large histories over stdin, then continue or send a message in this conversation directly without transferring again — or send a shorter message, switch agents, or continue in the original conversation.`,
-    };
+    return mk("arg_list_too_long", agent, `The carried conversation history exceeded the system command-line limit before ${agent} could launch. ${PRESERVED} Update the backend so ${agent} receives large histories over stdin, then continue or send a message in this conversation directly without transferring again — or send a shorter message, switch agents, or continue in the original conversation.`);
   }
-  if (/(?:\.sandboxed-sh-[\w-]+-cmd\.sh[^\n]*:\s*(?:not found|No such file or directory)|(?:\b(?:opencode|claude|claudecode|codex|agy|antigravity|grok|vibe)\b)[^\n]*:\s*(?:command not found|not found|No such file or directory)|command not found:\s*(?:opencode|claude|claudecode|codex|agy|antigravity|grok|vibe)\b|(?:failed to (?:start|spawn|launch|exec)|posix_spawn)[^\n]*(?:No such file or directory|\bos error 2\b|not found))/i.test(raw)) {
+  if (MISSING_BIN_RE.test(raw)) {
     const agent = inferLaunchHarness(raw, backend);
-    return {
-      kind: "missing_binary",
-      nonResumable: true,
-      title: `${agent} could not start`,
-      message: `The ${agent} CLI was not found on the execution machine. Your workspace and conversation history are preserved. Install or update ${agent} on that machine, then continue in this conversation directly without transferring again — or switch to another agent.`,
-    };
+    return mk("missing_binary", agent, `The ${agent} CLI was not found on the execution machine. ${PRESERVED} Install or update ${agent} on that machine, ${CONT_DIRECT}`);
   }
-  if (/(?:\.sandboxed-sh-[\w-]+-cmd\.sh[^\n]*:\s*(?:Permission denied|Exec format error)|(?:\b(?:opencode|claude|claudecode|codex|agy|antigravity|grok|vibe)\b)[^\n]*:\s*(?:Permission denied|Exec format error)|(?:failed to (?:start|spawn|launch|exec)|posix_spawn)[^\n]*(?:Permission denied|\bos error (?:8|13)\b|Exec format error)|Failed to (?:start|write) [^\n]*(?:CLI|command script))/i.test(raw)) {
+  if (SPAWN_FAIL_RE.test(raw)) {
     const agent = inferLaunchHarness(raw, backend);
-    return {
-      kind: "spawn_failed",
-      nonResumable: true,
-      title: `${agent} could not start`,
-      message: `The execution machine could not launch the ${agent} CLI process. Your workspace and conversation history are preserved. Check the ${agent} CLI installation or update the backend on that machine, then continue in this conversation directly without transferring again — or switch to another agent.`,
-    };
+    return mk("spawn_failed", agent, `The execution machine could not launch the ${agent} CLI process. ${PRESERVED} Check the ${agent} CLI installation or update the backend on that machine, ${CONT_DIRECT}`);
   }
   return null;
 }
@@ -63,17 +69,17 @@ export function describeError(raw: string, fallback = "Something went wrong", ba
   if (launch) return launch;
   if (/daybreak[^\n]*(?:isn|not)[^\n]*available/i.test(raw)) return {title:"Daybreak is unavailable for this account or model",message:"OpenAI refused Daybreak for the selected model on this connection. Check the account’s approved access or explicitly choose Standard. The model and program were not changed automatically."};
   if (/access_program_not_enabled/.test(raw)) return {title:"Cyber access is not enabled",message:"The account is not approved for this program and model. Check its Daybreak access or explicitly choose Standard. The selected model has not been changed."};
-  if (/unsupported_access_program/.test(raw)) return {title:"Cyber selection is unsupported on this connection",message:"This connection cannot apply the requested program reliably. Use a supported connection, or explicitly choose Automatic. Your conversation is saved."};
+  if (/unsupported_access_program/.test(raw)) return {title:"Cyber selection is unsupported on this connection",message:`This connection cannot apply the requested program reliably. Use a supported connection, or explicitly choose Automatic. ${CONV_SAVED}.`};
   if (/invalid_access_program/.test(raw)) return {title:"Cyber program and model are incompatible",message:"Choose a compatible cyber program or change the model. No alternative model was selected automatically."};
-  if (/cyberPolicy|cyber_policy/.test(raw)) return {title:"Request rejected by OpenAI’s cyber policy",message:"This request was restricted by the provider. Daybreak access does not allow every request. Your conversation is saved; the program has not been changed automatically."};
+  if (/cyberPolicy|cyber_policy/.test(raw)) return {title:"Request rejected by OpenAI’s cyber policy",message:`This request was restricted by the provider. Daybreak access does not allow every request. ${CONV_SAVED}; the program has not been changed automatically.`};
   const limit = providerLimit(raw);
   if (limit?.kind === "quota") return {
     tone: "warning",
     title: `${limit.provider ? `${limit.provider} usage` : "Usage"} limit reached`,
-    message: `${limit.resets ? `It resets ${resetPhrase(limit.resets)}. ` : ""}Your conversation is saved: resume it then, or switch to another account or model to continue now.`,
+    message: `${limit.resets ? `It resets ${resetPhrase(limit.resets)}. ` : ""}${CONV_SAVED}: resume it then, or switch to another account or model to continue now.`,
     link: limit.url ? { label: "View usage", url: limit.url } : undefined,
   };
-  if (limit?.kind === "rate") return { tone: "warning", title: `${limit.provider ?? "The provider"} is rate-limiting requests`, message: "Wait a moment, then retry. Your conversation is saved." };
+  if (limit?.kind === "rate") return { tone: "warning", title: `${limit.provider ?? "The provider"} is rate-limiting requests`, message: `Wait a moment, then retry. ${CONV_SAVED}.` };
   if (/\[claude-code:unrecognized_model\]/.test(raw)) return { title: "Claude Code does not recognize this model", message: "Update Claude Code on the machine running this conversation (claude update), then retry. If it persists, choose a model available to that Claude account." };
   const disk = raw.match(/\((\d+(?:\.\d+)?) GiB required\), but only (\d+(?:\.\d+)?) GiB is free/i);
   if (disk) return { title: "Not enough disk space", message: `${disk[2]} GiB available · ${disk[1]} GiB required, including the safety reserve. Choose another machine or free up space.` };
@@ -86,11 +92,18 @@ export function describeError(raw: string, fallback = "Something went wrong", ba
   if (busy) return { title: "Can’t change the track or PR while it runs", message: `This mission ${busy[1]}. Stop it or wait for it to finish, then change its track or PR.` };
   if (/REMOTE_JOB_STILL_RUNNING/.test(raw)) return { title: "A turn is still running", message: "Wait for it to finish before sending this follow-up. Your draft is kept." };
   if (/REMOTE_RESUME_REQUIRES_REPLACEMENT/.test(raw)) return { title: "Couldn’t resume this session", message: "Your draft is kept. Try again; if the problem persists, fork the conversation into a new mission." };
-  if (/There was a network issue connecting to the server/i.test(raw)) return { title: "Network issue connecting to the model server", message: "The connection dropped while the agent was working. Check your internet connection, then resume to continue from the last completed step." };
-  if (/Our servers are experiencing high traffic right now|UNAVAILABLE \(code 503\): The service is currently unavailable/i.test(raw)) return { tone: "warning", title: "The model server is experiencing high traffic", message: "Wait a moment, then resume to continue from the last completed step." };
+  const defaultFallback = fallback === "Something went wrong" || fallback === "Mission failed";
+  if (/Node `[^`]+` answers ping but its API is unresponsive/i.test(raw)) {
+    return { tone: "warning", title: defaultFallback ? "Execution node unresponsive" : fallback, message: raw.trim() };
+  }
+  if (/Lost contact with remote node `[^`]+`/i.test(raw)) {
+    return { tone: "warning", title: defaultFallback ? "Connection to execution node interrupted" : fallback, message: raw.trim() };
+  }
+  if (/There was a network issue connecting to the server/i.test(raw)) return { title: "Network issue connecting to the model server", message: `The connection dropped while the agent was working. Check your internet connection, then resume to ${CONT_STEP}` };
+  if (/Our servers are experiencing high traffic right now|UNAVAILABLE \(code 503\): The service is currently unavailable/i.test(raw)) return { tone: "warning", title: "The model server is experiencing high traffic", message: `Wait a moment, then resume to ${CONT_STEP}` };
   if (/No space left on device|ENOSPC/i.test(raw)) return { title: "Disk full on the execution machine", message: "The machine ran out of disk space while the agent was working. Free up space or move the conversation to another machine, then resume." };
-  if (/Antigravity ended its headless turn while background task\(s\).*were still running/i.test(raw)) return { title: "Antigravity turn ended while background tasks were still running", message: "Your conversation is saved. Resume to inspect task logs or continue from the last completed step." };
-  if (/Antigravity ended without a SUCCESS result/i.test(raw)) return { title: "Antigravity stopped before completing its turn", message: "The CLI exited early without a final result. Your conversation is saved; resume to continue from the last completed step." };
+  if (/Antigravity ended its headless turn while background task\(s\).*were still running/i.test(raw)) return { title: "Antigravity turn ended while background tasks were still running", message: `${CONV_SAVED}. Resume to inspect task logs or ${CONT_STEP}` };
+  if (/Antigravity ended without a SUCCESS result/i.test(raw)) return { title: "Antigravity stopped before completing its turn", message: `The CLI exited early without a final result. ${CONV_SAVED}; resume to ${CONT_STEP}` };
   const agyLimit = raw.match(/Antigravity prompts must be at most (\d+ KiB)/i);
   if (agyLimit) return { nonResumable: true, title: `Antigravity prompt exceeds ${agyLimit[1]}`, message: `Shorten the message or put large context in workspace files so the prompt stays within ${agyLimit[1]}. Your draft is kept.` };
   if (/Failed to fetch|NetworkError|Load failed|fetch failed/i.test(raw)) return { title: "Can’t reach the backend", message: "Check your connection and backend settings, then try again." };
@@ -139,20 +152,20 @@ export function ErrorNotice(p: { error: string; title?: string; backend?: string
   };
   const info = createMemo(() => describeError(p.error, p.title, p.backend));
   return <section class="error-notice" classList={{ warning: info().tone === "warning" }} role="alert">
-    <svg class="error-notice-icon" width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" aria-hidden="true"><circle cx="8" cy="8" r="6" /><path d="M8 4.5v4M8 10.5v1" /></svg>
-    <div class="error-notice-body"><strong>{info().title}</strong><p>{info().message}</p>
+    <svg class="error-notice-icon" width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><circle cx="8" cy="8" r="6.25" /><path d="M8 4.75v3.5" /><circle cx="8" cy="11.1" r="0.8" fill="currentColor" stroke="none" /></svg>
+    <div class="error-notice-body"><strong>{info().title}</strong><p>{renderInlineCode(info().message)}</p>
       <Show when={info().link}>{link => <div class="toast-links">
         <button type="button" class="toast-link" onClick={() => void import("./api").then(m => m.openExternalUrl(link().url)).catch(swallow("errorNotice.openLink"))}>{link().label}</button>
       </div>}</Show>
       <Show when={p.children}><div class="error-notice-actions">
         {p.children}
       </div></Show>
-      <Show when={info().message !== p.error}><details><summary>Technical details</summary><pre>{p.error}</pre></details></Show>
+      <Show when={info().message !== p.error.trim()}><details><summary>Technical details</summary><pre>{p.error}</pre></details></Show>
       <Show when={copyError()}><p class="error-copy-status" role="status">{copyError()}</p></Show>
     </div>
     <div class="toast-corner">
-      <Show when={p.onDismiss}><button type="button" class="icon-btn toast-icon-btn" aria-label="Dismiss error" onClick={() => p.onDismiss?.()}><CloseIcon size={13} /></button></Show>
-      <button type="button" class="icon-btn toast-icon-btn error-copy" aria-label={copied() ? "Error copied" : "Copy error"} title={copied() ? "Copied" : "Copy error"} onClick={() => void copy()}><Show when={copied()} fallback={<CopyIcon size={13} />}><CheckIcon size={13} /></Show></button>
+      <Show when={p.onDismiss}><button type="button" class="icon-btn toast-icon-btn" aria-label="Dismiss error" onClick={() => p.onDismiss?.()}><CloseIcon size={14} /></button></Show>
+      <button type="button" class="icon-btn toast-icon-btn error-copy" aria-label={copied() ? "Error copied" : "Copy error"} title={copied() ? "Copied" : "Copy error"} onClick={() => void copy()}><Show when={copied()} fallback={<CopyIcon size={14} />}><CheckIcon size={14} /></Show></button>
     </div>
   </section>;
 }
@@ -167,7 +180,7 @@ export function ErrorDialog(p: { error: string; title?: string; onClose: () => v
     <DialogButton onClick={copy}>{copied() ? "Copied" : "Copy error"}</DialogButton>
     <DialogButton variant="primary" onClick={p.onClose}>Close</DialogButton>
   </>}>
-    <div class="error-dialog" role="alert"><p>{info().message}</p>
+    <div class="error-dialog" role="alert"><p>{renderInlineCode(info().message)}</p>
       <Show when={info().message !== raw()}><details><summary>Technical details</summary><pre>{p.error}</pre></details></Show>
     </div>
   </Dialog>;

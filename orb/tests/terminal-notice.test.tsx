@@ -138,3 +138,24 @@ it("turns a silent remote end_turn without assistant text into an actionable war
   btn?.click();
   expect(resumed).toBe(1);
 });
+
+it("deduplicates repeated hung-node warnings and hides them once the turn resumes progress", () => {
+  const warningText = "Node `ashur` answers ping but its API is unresponsive.";
+  const repeated = buildTranscript([
+    storedToStream({ id: 1, sequence: 1, event_id: "u-1", event_type: "user_message", timestamp: "", content: "Run check", metadata: {} })!,
+    storedToStream({ id: 2, sequence: 2, event_id: "e-2", event_type: "error", timestamp: "", content: warningText, metadata: {} })!,
+    storedToStream({ id: 3, sequence: 3, event_id: "e-3", event_type: "error", timestamp: "", content: warningText, metadata: {} })!,
+  ]);
+  const { container: whileWaiting } = render(() => <Transcript items={visibleTranscript(repeated)} />);
+  const cards = whileWaiting.querySelectorAll(".error-notice.warning");
+  expect(cards).toHaveLength(1);
+  expect(cards[0].querySelector("code")?.textContent).toBe("ashur");
+
+  const recovered = applyStreamEvent(repeated, storedToStream({
+    id: 4, sequence: 4, event_id: "a-4", event_type: "assistant_message", timestamp: "",
+    content: "The node answered and the check passed.", metadata: { success: true },
+  })!);
+  const { container: afterRecovery } = render(() => <Transcript items={visibleTranscript(recovered)} />);
+  expect(afterRecovery.querySelectorAll(".error-notice")).toHaveLength(0);
+  expect(afterRecovery.textContent).toContain("The node answered and the check passed.");
+});

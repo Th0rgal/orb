@@ -8,7 +8,7 @@ import {
   orbWireTranscriptSliceStep,
 } from "./orbKernel";
 import { projectTranscriptCounts } from "./clientCore";
-import { isCancellationRequestedNotice, isGeneratedRemoteJobStatus, type StreamEvent } from "./stream";
+import { isCancellationRequestedNotice, isGeneratedRemoteJobStatus, isTransientNodeNotice, type StreamEvent } from "./stream";
 
 export type StreamItem =
   | { kind: "user"; key: string; text: string; images?: DraftImage[]; messageId?: string; eventId?: string; sequence?: number; source?: string; senderUsername?: string; queued?: boolean; attached?: boolean; receipt?: boolean; /** Server time the message was stored (ISO), when known. */ at?: string }
@@ -567,7 +567,14 @@ export class TranscriptReducer {
         this.tools.set(callId,this.items.length);
         this.items.push({kind:"tool",key:reused?`tool:${callId}:${this.items.length}`:`tool:${callId}`,callId,name:name||"tool",args:d.args??null,...(ev.type==="tool_result"?{result:d.result}:{}),...(d.truncated===true?{truncated:true}:{}),...(ev.sequence!=null?{sequence:ev.sequence}:{}),done:ev.type==="tool_result"});return;
       }
-      case "error": this.close(); this.items.push({kind:"error",key:this.key("error"),text:str(d.message)});return;
+      case "error": {
+        const message = str(d.message);
+        this.close();
+        const prev = this.items[this.items.length - 1];
+        if (message.trim() && prev?.kind === "error" && !prev.terminal && prev.text.trim() === message.trim()) return;
+        this.items.push({ kind: "error", key: this.key("error"), text: message });
+        return;
+      }
       case "mission_status_changed": {
         const status = str(d.status).toLowerCase();
         if (["completed", "failed", "not_feasible", "interrupted", "cancelled", "canceled"].includes(status)) {
@@ -719,8 +726,10 @@ export function stripGoalCompletionMarkers(items: StreamItem[]): StreamItem[] {
   return copy ?? items;
 }
 
-/** A delivered follow-up supersedes the previous attempt's terminal notice.
- * Keep the raw history intact, and do not dismiss failures for queued input. */
+/** A delivered follow-up supersedes the previous attempt's terminal notice, and
+ * subsequent turn progress (or a newer duplicate notice) supersedes a transient
+ * remote-node reachability warning. Keep the raw history intact, and do not
+ * dismiss failures for queued input. */
 export function visibleTranscript(items: StreamItem[]): StreamItem[] {
   let lastDelivered = -1;
   for (let i = items.length - 1; i >= 0; i--) {
@@ -730,8 +739,20 @@ export function visibleTranscript(items: StreamItem[]): StreamItem[] {
       break;
     }
   }
+  const supersededTransient = (index: number, item: StreamItem): boolean => {
+    if (item.kind !== "error" || !isTransientNodeNotice(item.text)) return false;
+    const trimmed = item.text.trim();
+    for (let j = index + 1; j < items.length; j++) {
+      const next = items[j];
+      if (next.kind === "tool" || next.kind === "think" || (next.kind === "text" && !!next.text.trim())) return true;
+      if (next.kind === "user" && !next.queued && !next.attached) return true;
+      if (next.kind === "error" && next.text.trim() === trimmed) return true;
+    }
+    return false;
+  };
   return withoutFiller(items.filter((item, index) =>
     !(item.kind === "error" && item.terminal && index < lastDelivered) &&
+    !supersededTransient(index, item) &&
     !(item.kind === "text" && item.goalMarkedText !== undefined && !item.text.trim()),
   ));
 }
