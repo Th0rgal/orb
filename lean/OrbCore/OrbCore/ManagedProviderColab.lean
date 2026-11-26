@@ -52,6 +52,12 @@ def colabValidName (name : String) : Bool :=
     readiness deadline that started before it. -/
 def colabAssignTimeoutSecs (candidates : Nat) : Nat := max 60 (min 180 (420 / max 1 candidates))
 
+/-- Total seconds `colab-api` may spend rotating across accounts and candidate
+    accelerators before returning a clean error, leaving headroom for worker
+    startup and tunnel health checks inside Core's HTTP read timeout. -/
+def colabTotalTimeoutSecs (candidates : Nat) : Nat :=
+  min 420 (max 210 (candidates * colabAssignTimeoutSecs candidates))
+
 def colabSpawnBody (spec : SpawnSpec) : Result JVal := do
   let some profile := colabProfile? spec.size | throw { code := "provider_invalid_size" }
   if !colabValidName spec.name then throw { code := "provider_invalid_name" }
@@ -59,7 +65,9 @@ def colabSpawnBody (spec : SpawnSpec) : Result JVal := do
   if !(#["", "orb-node-base", "provider-default"].contains spec.fromSnapshot) then
     throw { code := "provider_snapshots_unsupported" }
   return .obj #[("name", .str spec.name), ("accelerator", .arr (profile.accelerators.map .str)),
-    ("assign_timeout_secs", .nat (colabAssignTimeoutSecs profile.accelerators.size)), ("worker", .bool true)]
+    ("assign_timeout_secs", .nat (colabAssignTimeoutSecs profile.accelerators.size)),
+    ("total_timeout_secs", .nat (colabTotalTimeoutSecs profile.accelerators.size)),
+    ("worker", .bool true)]
 
 private def notebookPath (id : String) : String := "/notebooks/" ++ urlEncodeComponent id
 
@@ -129,23 +137,38 @@ def colab (api : Transport)
     (worker : String → String → Transport := fun url token => httpTransport url token)
     (cache : ColabAvailabilityCache := colabAvailabilityCache) (nowMs : IO Nat := IO.monoMsNow)
     (sleep : UInt32 → IO Unit := fun ms => do IO.sleep ms) : Provider :=
+  let ensureWorkerReady (url token : String) : IO (Result Unit) := do
+    let req : Request := { method := "GET", path := "/health", timeoutMs := 10000 }
+    let mut lastErr : ProviderError := { code := "provider_worker_unavailable" }
+    for attempt in [0:5] do
+      match ← call (worker url token) req with
+      | .ok _ => return .ok ()
+      | .error e =>
+        lastErr := e
+        if !(e.status == 0 || #[502, 503, 530].contains e.status) || attempt == 4 then
+          return .error e
+        sleep 2000
+    return .error lastErr
   let execOnce (id script : String) (timeout : UInt32) : IO (Result JVal) := do
     match ← colabWorker api id with
     | .error e => return .error e
     | .ok (url, token) =>
-      let request : Request := {
-        method := "POST"
-        path := "/exec"
-        body := some (.obj #[("cmd", .str script), ("timeout", .nat timeout.toNat)])
-        timeoutMs := timeout * 1000 + 30000
-      }
-      match ← call (worker url token) request with
+      match ← ensureWorkerReady url token with
       | .error e => return .error e
-      | .ok reply =>
-        -- A timed-out command has no exit code: that is a failure, never success.
-        if (reply.fieldInt? "exit_code").isNone || reply.fieldBool? "timed_out" == some true then
-          return .error { code := "provider_exec_failed" }
-        return .ok reply
+      | .ok () =>
+        let request : Request := {
+          method := "POST"
+          path := "/exec"
+          body := some (.obj #[("cmd", .str script), ("timeout", .nat timeout.toNat)])
+          timeoutMs := timeout * 1000 + 30000
+        }
+        match ← call (worker url token) request with
+        | .error e => return .error e
+        | .ok reply =>
+          -- A timed-out command has no exit code: that is a failure, never success.
+          if (reply.fieldInt? "exit_code").isNone || reply.fieldBool? "timed_out" == some true then
+            return .error { code := "provider_exec_failed" }
+          return .ok reply
   -- A quick tunnel drops requests for a moment now and then. Those answers come
   -- from the tunnel edge or from a record without a tunnel yet, before the
   -- worker ran anything, so one retry after re-reading the record is safe. A
@@ -186,13 +209,14 @@ def colab (api : Transport)
       match colabSpawnBody spec with
       | .error e => return .error e
       | .ok body =>
-        -- The service tries each accelerator in turn before it answers.
+        -- The service tries accounts and accelerators within `total_timeout_secs`,
+        -- then waits up to 60 s for the worker tunnel to pass `/health`.
         let candidates := ((colabProfile? spec.size).map (·.accelerators.size)).getD 1
         let request : Request := {
           method := "POST"
           path := "/notebooks"
           body := some body
-          timeoutMs := ((candidates * colabAssignTimeoutSecs candidates + 90) * 1000).toUInt32
+          timeoutMs := ((colabTotalTimeoutSecs candidates + 120) * 1000).toUInt32
         }
         cache.set none
         match ← call api request with
