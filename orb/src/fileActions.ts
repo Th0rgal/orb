@@ -11,6 +11,8 @@ import {
 import { writeClipboardReference } from "./clipboard";
 import { localContextFile } from "./projectContext";
 import { applyServerPlacementEvent, moveMission, moveMissions, planMissionMoves } from "./missionMove";
+import { isArchived } from "./missionStatus";
+import { isSupersededMission } from "./missionTree";
 
 export interface FileClipboard { slug: string; path: string; copy: boolean; directory?: boolean; backend: string; account: string; nonce: string }
 export type ClipboardItem =
@@ -113,15 +115,18 @@ const missionFolderIn = (slug: string, path: string, mission: Mission) => {
   return norm && containsFolder(path, norm) ? norm : undefined;
 };
 
-/** Synchronous check against missions already loaded in memory. */
+const isBlockingFolderMission = (mission: Mission) =>
+  !isArchived(mission.status) && !isSupersededMission(mission);
+
+/** Synchronous check against active (non-archived, non-superseded) missions already loaded in memory. */
 export function folderWorkError(
   slug: string,
   path: string,
   knownMissions: readonly Mission[],
   action = "deleting",
 ): string | null {
-  if (knownMissions.some(mission => missionFolderIn(slug, path, mission) !== undefined)) {
-    return `Move the agents out of this folder before ${action} it.`;
+  if (knownMissions.some(mission => isBlockingFolderMission(mission) && missionFolderIn(slug, path, mission) !== undefined)) {
+    return `Move or archive the agents in this folder before ${action} it.`;
   }
   return null;
 }
@@ -136,6 +141,7 @@ async function folderWork(slug: string, path: string, first = false) {
   const collect = (list: Mission[]) => {
     for (const mission of list) {
       allById.set(mission.id, mission);
+      if (first && !isBlockingFolderMission(mission)) continue;
       const at = missionFolderIn(slug, path, mission);
       if (at !== undefined) missions.set(mission.id, at);
     }
@@ -160,20 +166,20 @@ async function folderWork(slug: string, path: string, first = false) {
   if (missions.size) return { missions, allMissions: [] as Mission[] };
   for (let offset = 0; ; offset += 200) {
     const page = await api<Mission[]>(
-      `/api/control/missions?project=${encodeURIComponent(slug)}&folder_prefix=${encodeURIComponent(normPrefix)}&limit=${first ? 1 : 200}&offset=${offset}&all=true`,
+      `/api/control/missions?project=${encodeURIComponent(slug)}&folder_prefix=${encodeURIComponent(normPrefix)}&limit=200&offset=${offset}`,
     );
     checkConnection();
     collect(page);
-    if (first && missions.size) return { missions, allMissions: [] as Mission[] };
-    if (page.length < (first ? 1 : 200)) break;
+    if (missions.size) return { missions, allMissions: [] as Mission[] };
+    if (page.length < 200) break;
   }
   return { missions, allMissions: [] as Mission[] };
 }
 
-/** Keep executable work visible: removing documents must not orphan its folder. */
+/** Keep executable work visible: removing documents must not orphan active agents in its folder. */
 export async function assertFolderHasNoWork(slug: string, path: string, action = "deleting"): Promise<void> {
   const work = await folderWork(slug, path, true);
-  if (work.missions.size) throw new Error(`Move the agents out of this folder before ${action} it.`);
+  if (work.missions.size) throw new Error(`Move or archive the agents in this folder before ${action} it.`);
 }
 
 /** Fallback helper for local-context or cross-project folder moves; server-side `transfer_file` cascades same-project moves automatically. */
