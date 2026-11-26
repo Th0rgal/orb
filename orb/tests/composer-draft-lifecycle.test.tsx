@@ -82,4 +82,24 @@ it("performs zero saveComposerDraft writes when switching across untouched scope
   expect(saveComposerDraft).not.toHaveBeenCalled();
 });
 
+it("preserves caret position on mid-string edits and toggles has-value without clearing placeholder", () => {
+  vi.mocked(readComposerDraft).mockResolvedValue(undefined);
+  render(() => <Composer scope="m:caret" placeholder="Send follow-up" busy={false} onSend={() => {}} />);
+  const input = screen.getByPlaceholderText("Send follow-up") as HTMLTextAreaElement;
+  expect(input.classList.contains("has-value")).toBe(false);
+
+  // Typing in the middle of an existing draft must not reassign ta.value and jump the caret.
+  input.value = "the quick";
+  input.setSelectionRange(3, 3);
+  fireEvent.input(input);
+  expect(input.classList.contains("has-value")).toBe(true);
+  expect(input.selectionStart).toBe(3);
+  expect(input.selectionEnd).toBe(3);
+  expect(input.getAttribute("placeholder")).toContain("Send follow-up");
+
+  input.value = "";
+  fireEvent.input(input);
+  expect(input.classList.contains("has-value")).toBe(false);
+});
+
 

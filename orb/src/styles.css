@@ -785,6 +785,9 @@ textarea {
   color: var(--fg); font: 13px/20px var(--sans); padding: 2px 0; max-height: 220px;
 }
 textarea::placeholder { color: var(--placeholder); }
+/* WebKitGTK can leave the UA placeholder layer painted after programmatic or IM value updates. */
+.composer textarea.has-value::placeholder,
+textarea:not(:placeholder-shown)::placeholder { color: transparent; opacity: 0; }
 .picks { display: flex; align-items: center; gap: 2px; min-width: 0; height: 24px; }
 .picks-sep { color: var(--fg-4); font-size: 12px; padding: 0 2px; }
 .model-wrap { position: relative; min-width: 0; }

@@ -705,7 +705,7 @@ export function Composer(p: {
   createEffect(on([text, mode, images, fileChips], ([visible, m, attachedImages, files]) =>
     p.onDraft?.(draftOf(visible, m), attachedImages.length > 0 || files.length > 0)));
   const write = (visible: string) => {
-    ta.value = visible;
+    if (ta && ta.value !== visible) ta.value = visible;
     setText(visible);
     resize();
   };
@@ -1185,6 +1185,7 @@ export function Composer(p: {
         <ErrorToast error={imageError()} title="Couldn’t add the image" onDismiss={() => setImageError(null)} />
         <textarea readOnly={sendingLocked()}
           ref={ta}
+          class={text() ? "has-value" : undefined}
           aria-label={p.inputLabel}
           onPaste={event => {
             const others = Array.from(event.clipboardData?.files ?? []).filter(file => !file.type.startsWith("image/"));
@@ -1199,15 +1200,17 @@ export function Composer(p: {
             setSlashOff(false);
             setAtOff(false);
             setCaret(e.currentTarget.selectionStart ?? next.length);
-            if (!mode() && /^\/btw(?:\s|$)/.test(next) && p.onBtw) { enterMode('btw', next.replace(/^\/btw\s*/,'')); return; }
-            if (!mode() && /^\/plan(?:\s|$)/.test(next) && modes().some(m=>m.id==='plan')) {
-              enterMode('plan', next.replace(/^\/plan\s*/,'')); return;
-            }
-            if (!mode() || mode() === "goal") {
-              const absorbed = absorbGoalPrefix(next);
-              if (absorbed !== null && modes().some((it) => it.id === "goal")) {
-                enterMode("goal", absorbed);
-                return;
+            if (!e.isComposing) {
+              if (!mode() && /^\/btw(?:\s|$)/.test(next) && p.onBtw) { enterMode('btw', next.replace(/^\/btw\s*/,'')); return; }
+              if (!mode() && /^\/plan(?:\s|$)/.test(next) && modes().some(m=>m.id==='plan')) {
+                enterMode('plan', next.replace(/^\/plan\s*/,'')); return;
+              }
+              if (!mode() || mode() === "goal") {
+                const absorbed = absorbGoalPrefix(next);
+                if (absorbed !== null && modes().some((it) => it.id === "goal")) {
+                  enterMode("goal", absorbed);
+                  return;
+                }
               }
             }
             write(next);
