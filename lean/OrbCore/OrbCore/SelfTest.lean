@@ -8663,7 +8663,48 @@ def runSuite (emitLogPath? : Option String) : IO UInt32 := do
   let interruptText := String.fromUTF8! interruptResp.body
   if interruptResp.status != 409 || (interruptText.splitOn "interrupt_not_supported").length < 2 then
     closeCoreStore store
-    IO.eprintln s!"[orb-core-test] FAIL: interrupt send-now was not rejected truthfully ({interruptResp.status})"
+    IO.eprintln s!"[orb-core-test] FAIL: interrupt send-now on non-remote mission was not rejected truthfully ({interruptResp.status})"
+    return 1
+  -- Remote mission `send-now?interrupt=true`: promotes the waiting row to head, bumps `run_generation`,
+  -- cancels the active remote job ledger, retains the queue, and returns 200 `{promoted: true}`.
+  let mRemSn : MissionRecord := {
+    id := "m-remote-sendnow", title := "Remote SendNow", status := "active",
+    backend := "antigravity", modelOverride := "", workingDirectory := tmpRoot,
+    ownerUserId := fixtureAdminId,
+    tagsJson := "[\"remote-node:uruk\"]", placementKind := "remote",
+    runGeneration := 1, stateRevision := 1, updatedAt := "2026-11-26T00:00:00Z"
+  }
+  let .ok () ← upsertMission store mRemSn | do closeCoreStore store; return 1
+  let _ ← execParamQuery store.missionsDb
+    ("CREATE TABLE IF NOT EXISTS remote_node_jobs (" ++
+     "job_id TEXT PRIMARY KEY, mission_id TEXT NOT NULL DEFAULT '', node_id TEXT NOT NULL DEFAULT '', " ++
+     "state TEXT NOT NULL DEFAULT 'queued', payload_json TEXT NOT NULL DEFAULT '{}', " ++
+     "created_at TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL DEFAULT '');") #[]
+  let _ ← execParamQuery store.missionsDb
+    ("INSERT INTO remote_node_jobs(job_id,mission_id,node_id,state,payload_json,created_at,updated_at) " ++
+     "VALUES('job-remote-sn','m-remote-sendnow','uruk','running','{}','2026-11-26T00:00:00Z','2026-11-26T00:00:00Z');") #[]
+  discard <| enqueueStructuredFollowup store "core" "q-rem-1" "m-remote-sendnow" "first remote" "control" "2026-11-26T00:00:01Z"
+  discard <| enqueueStructuredFollowup store "core" "q-rem-2" "m-remote-sendnow" "second remote" "control" "2026-11-26T00:00:02Z"
+  let remIntRaw := s!"POST /api/control/queue/q-rem-2/send-now?interrupt=true HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {validJwt}\r\nContent-Length: 0\r\n\r\n".toUTF8
+  let .ok remIntReq := parseRequest remIntRaw none | do closeCoreStore store; return 1
+  let .ok remIntResp ← dispatchCoreRequest appSt remIntReq nowSec | do closeCoreStore store; return 1
+  let remIntText := String.fromUTF8! remIntResp.body
+  if remIntResp.status != 200 || (remIntText.splitOn "\"promoted\":true").length != 2 then
+    closeCoreStore store
+    IO.eprintln s!"[orb-core-test] FAIL: remote interrupt send-now failed: {remIntResp.status} {remIntText}"
+    return 1
+  let .ok (_, remQHead) ← sendTestHttp appSt validJwt "GET" "/api/control/queue?mission_id=m-remote-sendnow" "" nowSec
+    | do closeCoreStore store; return 1
+  if !remQHead.startsWith "[{\"id\":\"q-rem-2\"" then
+    closeCoreStore store
+    IO.eprintln s!"[orb-core-test] FAIL: remote interrupt send-now did not promote q-rem-2 to head: {remQHead}"
+    return 1
+  let remMetaRows ← execParamQuery store.missionsDb
+    "SELECT status, COALESCE(run_generation,0), (SELECT state FROM remote_node_jobs WHERE job_id='job-remote-sn') FROM missions WHERE id='m-remote-sendnow';" #[]
+  let .ok rmrs := remMetaRows | do closeCoreStore store; return 1
+  if rmrs.size ≤ 1 || (rmrs[1]![0]?).getD "" != "active" || (rmrs[1]![1]?).getD "" != "2" || (rmrs[1]![2]?).getD "" != "cancelled" then
+    closeCoreStore store
+    IO.eprintln s!"[orb-core-test] FAIL: remote interrupt send-now state mismatch: {repr rmrs}"
     return 1
   -- R18 FUP-01: collection DELETE clears the mission's whole waiting prefix.
   let clearQueueRaw := s!"DELETE /api/control/queue?mission_id=m-alpha HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {validJwt}\r\n\r\n".toUTF8

@@ -550,3 +550,31 @@ it('a failed remove shows a plain message, never the raw JSON body', async () =>
   await screen.findByRole('alert');
   expect(document.body.textContent).not.toMatch(/queue_step_failed|\{"error"/);
 });
+
+it('sendNow formats interrupt_not_supported cleanly and clears the banner once the message is delivered', async () => {
+  const { ApiError } = await import('../src/api');
+  const { createSignal } = await import('solid-js');
+  backend.list.mockResolvedValue([{ id: 'q-int', mission_id: 'remote', content: 'Explore the repo', source: 'remote-queue' }]);
+  backend.api.mockRejectedValue(new (ApiError as unknown as new (s: number, d: string) => Error)(409, '{"error":"interrupt_not_supported","message":"interrupt_not_supported"}'));
+  const [delivered, setDelivered] = createSignal<string[]>([]);
+  render(() => <RemoteQueue mission="remote" delivered={delivered()} onRows={() => {}} onCancel={() => {}}/>);
+  await screen.findByText('Explore the repo');
+  await fireEvent.click(screen.getByRole('button', { name: 'Send now: Explore the repo' }));
+  const alert = await screen.findByRole('alert');
+  expect(alert.textContent).toContain('stays queued for the next turn');
+  expect(alert.textContent).not.toContain('interrupt_not_supported');
+  // Once Core delivers the queued message into the transcript, the stale banner clears.
+  setDelivered(['q-int']);
+  await waitFor(() => expect(screen.queryByRole('alert')).toBeNull());
+});
+
+it('sendNow racing with already_claimed_or_delivered drops the card silently without an error alert', async () => {
+  const { ApiError } = await import('../src/api');
+  backend.list.mockResolvedValue([{ id: 'q-race', mission_id: 'remote', content: 'Already running', source: 'remote-queue' }]);
+  backend.api.mockRejectedValue(new (ApiError as unknown as new (s: number, d: string) => Error)(409, '{"error":"already_claimed_or_delivered","message":"already_claimed_or_delivered"}'));
+  render(() => <RemoteQueue mission="remote" onRows={() => {}} onCancel={() => {}}/>);
+  await screen.findByText('Already running');
+  await fireEvent.click(screen.getByRole('button', { name: 'Send now: Already running' }));
+  await waitFor(() => expect(screen.queryByText('Already running')).toBeNull());
+  expect(screen.queryByRole('alert')).toBeNull();
+});

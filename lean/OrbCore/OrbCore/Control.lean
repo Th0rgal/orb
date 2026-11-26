@@ -6954,15 +6954,73 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
       | .ok (.ok rec) =>
         return .ok (mkJson 200 s!"\{\"ok\":true,\"id\":{jsonEscape rec.messageId},\"phase\":{rec.phase.toNat}}")
 
-  if cleanPath.startsWith "/api/control/queue/" && cleanPath.endsWith "/send-now" then
-    let sHub ← match st.systemHub? with | some h => pure h | none => newSystemRuntimeHub
-    if let some (sCode, sCtype, sBody) ← dispatchResourcesAndSystemRoute
-        sHub st.store st.cfg.workingDir st.cfg.libraryRemote st.cfg.githubClientId
-        st.bunkerStateRef? st.managedStore? st.relayHub? st.broadcastHub?
-        req.method cleanPath rawTarget req.headers req.bodySlice.toByteArray
-        caller.userId caller.username st.bootstrapAdminId
-        (caller.isLegacyUnscoped || caller.role == "admin") caller.isLegacyUnscoped then
-      return .ok (hardenedDownloadResponse req.method cleanPath rawTarget req.bodySlice.toByteArray sCode sCtype sBody reqOrigin?)
+  if let some params := matchRoutePattern? "/api/control/queue/:id/send-now" rawTarget then
+    if req.method == "POST" then
+      let msgId := (params.find? (fun p => p.1 == "id")).map Prod.snd |>.getD ""
+      let qRows ← execParamQuery st.store.missionsDb
+        "SELECT mission_id, COALESCE(sequence,0), COALESCE(state,''), COALESCE(phase,0) FROM remote_message_queue WHERE user_id='core' AND message_id=?1 LIMIT 1;" #[msgId]
+      let .ok rs := qRows | return .ok (mkJson 500 "{\"error\":\"Queue query failed\"}")
+      if rs.size ≤ 1 then return .ok (mkJson 404 "{\"error\":\"message not in queue\"}")
+      let qMid := (rs[1]![0]?).getD ""
+      if let some (cCode, cBody) := (← authorizeMissionOp st caller qMid false) then
+        return .ok (mkJson cCode cBody)
+      let qState := (rs[1]![2]?).getD ""
+      let qPhase := ((rs[1]![3]?).bind String.toNat?).getD 0
+      if qState != "waiting" || qPhase != 0 then
+        return .ok (mkJson 409 "{\"error\":\"already_claimed_or_delivered\",\"message\":\"already_claimed_or_delivered\"}")
+      let qParams := parseQueryParams rawTarget
+      let interrupt := ((qParams.find? (fun p => p.1 == "interrupt")).map Prod.snd |>.getD "false") == "true"
+      let promoteWaitingHead : IO Bool := do
+        let mut promoted := false
+        if let .ok minRows ← execParamQuery st.store.missionsDb
+            "SELECT COALESCE(MIN(sequence), 0) FROM remote_message_queue WHERE user_id='core' AND mission_id=?1 AND state='waiting' AND COALESCE(phase,0)=0;"
+            #[qMid] then
+          if minRows.size > 1 then
+            let minSeq := ((minRows[1]![0]?).bind String.toInt?).getD 0
+            let curSeq := ((rs[1]![1]?).bind String.toInt?).getD 0
+            if curSeq > minSeq then
+              let _ ← execParamQuery st.store.missionsDb
+                "UPDATE remote_message_queue SET sequence=?2 WHERE user_id='core' AND message_id=?1;"
+                #[msgId, s!"{minSeq - 1}"]
+              promoted := true
+        return promoted
+      if !interrupt then
+        let promoted ← promoteWaitingHead
+        return .ok (mkJson 200 (renderCompact (.obj #[("ok", .bool true), ("delivered", .bool false), ("promoted", .bool promoted)])))
+      let some mr ← getMission? st.store qMid
+        | return .ok (mkJson 404 "{\"error\":\"mission_not_found\"}")
+      if ownerTerminalOfStatus mr.status == 1 then
+        return .ok (mkJson 200 (renderCompact (.obj #[("ok", .bool true), ("delivered", .bool false), ("promoted", .bool false)])))
+      let remoteNode? := (← resolveMissionRemoteNode? st.store st.managedStore? qMid).map (·.trimAscii.toString) |>.filter (!·.isEmpty)
+      if remoteNode?.isNone then
+        return .ok (mkJson 409 "{\"error\":\"interrupt_not_supported\",\"message\":\"interrupt_not_supported\"}")
+      -- Durable cancel-and-wake for remote missions: promote this waiting row to the
+      -- head, fence the active turn's `run_generation` (retaining `remote_message_queue`),
+      -- cancel any live remote job on the node, and wake the remote follow-up pump.
+      discard <| promoteWaitingHead
+      let nowIso := formatEpochIso8601Utc nowEpochSec
+      let fenceRes ← withImmediateTx st.store.missionsDb do
+        let upd ← execParamQueryUnlocked st.store.missionsDb
+          ("UPDATE missions SET status='active', run_generation=COALESCE(run_generation,1)+1, " ++
+           "state_revision=COALESCE(state_revision,0)+1, updated_at=?2 " ++
+           "WHERE id=?1 AND status NOT IN ('completed','succeeded','failed','cancelled','acknowledged','archived');")
+          #[qMid, nowIso]
+        if let .error e := upd then return .error e
+        let _ ← execParamQueryUnlocked st.store.missionsDb
+          ("UPDATE mission_runs SET execution_state='terminal', terminal_reason='send_now_interrupt', updated_at=?2 " ++
+           "WHERE mission_id=?1 AND execution_state NOT IN ('terminal','completed','failed','aborted');")
+          #[qMid, nowIso]
+        return .ok ()
+      if let .error e := fenceRes then
+        return .ok (mkJson 500 s!"\{\"error\":{jsonEscape e}}")
+      if let some sup := st.remoteSup? then
+        discard <| IO.asTask (prio := .dedicated) do
+          discard <| cancelActiveRemoteJobForMission st.store st.managedStore? st.relayHub? qMid "Interrupted by send-now"
+          let wakeEpoch ← nowEpoch
+          discard <| tickRemoteFollowupPump st.store st.managedStore? st.relayHub? st.broadcastHub? sup st.cfg.workingDir wakeEpoch
+      else
+        discard <| cancelActiveRemoteJobForMission st.store st.managedStore? st.relayHub? qMid "Interrupted by send-now"
+      return .ok (mkJson 200 (renderCompact (.obj #[("ok", .bool true), ("delivered", .bool false), ("promoted", .bool true)])))
 
   if let some params := matchRoutePattern? "/api/control/queue/:id" rawTarget then
     if req.method == "PATCH" then
