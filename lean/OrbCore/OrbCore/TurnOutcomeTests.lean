@@ -956,8 +956,16 @@ private def verifyAdminDirectAntigravityStaticTarget (root : String) : IO Unit :
         | throw (IO.userError "flapRows query failed")
       check ((flapRows[1]?.bind (·[0]?)).getD "" == "1")
         s!"expected 1 hung_node error across flapping incidents without progress, got {reprStr flapRows}"
+      let .ok pgWhileHung ← queryMissionEventsPage store "m-handoff" none none 50 #["error"] none none
+        | throw (IO.userError "pgWhileHung failed")
+      check ((pgWhileHung.eventsJson.splitOn "answers ping").length == 2)
+        s!"expected active hang to surface in queryMissionEventsPage, got {pgWhileHung.eventsJson}"
       discard <| appendMissionEvent store "m-handoff" "tool_result" "{\"id\":\"t1\",\"done\":true}" "2026-11-26T01:03:00Z"
       OrbCore.RemoteFleetAndRelay.observeNodeApi store "ashur" "online"  "2026-11-26T01:03:10Z" (pure true)
+      let .ok pgAfterOnline ← queryMissionEventsPage store "m-handoff" none none 50 #["error"] none none
+        | throw (IO.userError "pgAfterOnline failed")
+      check (pgAfterOnline.eventsJson == "[]")
+        s!"expected resolved hang to be omitted from queryMissionEventsPage once node recovers, got {pgAfterOnline.eventsJson}"
       OrbCore.RemoteFleetAndRelay.observeNodeApi store "ashur" "offline" "2026-11-26T01:04:00Z" (pure true)
       OrbCore.RemoteFleetAndRelay.observeNodeApi store "ashur" "offline" "2026-11-26T01:04:30Z" (pure true)
       let .ok flapRows2 ← execParamQuery db "SELECT COUNT(*) FROM mission_events WHERE mission_id='m-handoff' AND event_type='error';" #[]

@@ -57,6 +57,8 @@
   --plus-bg: #2c2c2c;
   --scroll-thumb: #e4e4e411;
   --scroll-thumb-hover: #e4e4e438;
+  --composer-thumb: rgb(255 255 255 / 16%);
+  --composer-thumb-hover: rgb(255 255 255 / 28%);
   --menu-bg: #191919;
   --overlay: rgba(0, 0, 0, 0.5);
   --shadow-lg: 0 10px 32px rgba(0, 0, 0, 0.5);
@@ -124,6 +126,8 @@
   --plus-bg: #e8e7e3;
   --scroll-thumb: #00000018;
   --scroll-thumb-hover: #00000030;
+  --composer-thumb: rgb(0 0 0 / 16%);
+  --composer-thumb-hover: rgb(0 0 0 / 28%);
   --menu-bg: #ffffff;
   --overlay: rgba(30, 30, 28, 0.32);
   --shadow-lg: 0 10px 32px rgba(30, 30, 28, 0.18);
@@ -700,7 +704,7 @@ html[data-window-focused="false"] :is(.shimmer, .spin, .mermaid-skeleton span, .
   grid-column: 1 / -1; grid-row: 1;
   align-items: flex-start; align-self: stretch; min-height: 44px;
 }
-.composer.tall .composer-field textarea { min-height: 44px; padding-left: 2px; align-self: stretch; }
+.composer.tall .composer-field textarea { min-height: 44px; padding-left: 2px; padding-right: 4px; align-self: stretch; }
 .composer.tall .plus-wrap { grid-column: 1; grid-row: 2; align-self: center; }
 .composer.tall .picks { grid-column: 2; grid-row: 2; justify-self: start; align-self: center; }
 .composer.tall .voice-slot { grid-column: 3; grid-row: 2; align-self: center; }
@@ -758,6 +762,22 @@ html[data-window-focused="false"] :is(.shimmer, .spin, .mermaid-skeleton span, .
   display: flex; align-items: center; gap: 8px; min-width: 0;
 }
 .composer-field textarea { flex: 1; min-width: 0; }
+.composer textarea { scrollbar-width: none; }
+.composer textarea::-webkit-scrollbar { display: none; }
+.composer-scroll-thumb {
+  position: absolute; top: 0; right: 5px; z-index: 2;
+  width: 5px; border-radius: 999px;
+  background: var(--composer-thumb);
+  touch-action: none; user-select: none;
+  transition: background-color var(--t) var(--ease);
+}
+.composer-scroll-thumb::before { content: ""; position: absolute; inset: 0 -4px; }
+.composer-scroll-thumb:hover, .composer-scroll-thumb.dragging { background: var(--composer-thumb-hover); }
+.composer-scroll-thumb[hidden], .composer.voice-on .composer-scroll-thumb { display: none; }
+textarea::-webkit-scrollbar { width: 9px; height: 9px; }
+textarea::-webkit-scrollbar-track { background: transparent; }
+textarea::-webkit-scrollbar-thumb { background: var(--composer-thumb); border: 2px solid transparent; background-clip: padding-box; border-radius: 999px; }
+textarea::-webkit-scrollbar-thumb:hover { background: var(--composer-thumb-hover); }
 .plus { width: 24px; height: 24px; border-radius: 50%; background: var(--plus-bg); color: var(--fg-3); display: grid; place-items: center; flex: none; }
 .plus:hover { background: var(--hover-2); color: var(--fg); }
 textarea {
@@ -4648,6 +4668,8 @@ select.orb-select-native:disabled { cursor: default; }
   .inbox-child-dot,
   .inbox-sk-dot,
   .lightbox-nav,
+  .transcript-scroll-thumb,
+  .composer-scroll-thumb,
   .st-pill::before {
     corner-shape: round;
   }

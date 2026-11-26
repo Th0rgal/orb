@@ -253,7 +253,7 @@ struct OrbSidebarRowItem: Equatable {
     let rowId: String
     let kind: String
     let depth: Int
-    let title: String
+    var title: String
     let subtitle: String
     let project: String
     let folder: String
@@ -341,7 +341,7 @@ final class OrbNativeChromeController: NSObject, NSSplitViewDelegate, NSTableVie
     private var activeTargetRowIndex: Int = -1
     private var hasSidebarCut = false
     private weak var inlineEditor: NSTextField?
-    private var inlineRenameContext: (mode: String, id: String, original: String, cancelled: Bool)?
+    private var inlineRenameContext: (rowIndex: Int, mode: String, id: String, original: String, cancelled: Bool)?
     private let topBarPane = NSView()
     private let backHistoryButton = NSButton()
     private let forwardHistoryButton = NSButton()
@@ -628,6 +628,18 @@ final class OrbNativeChromeController: NSObject, NSSplitViewDelegate, NSTableVie
             }
             DispatchQueue.main.async { completion(res) }
         }.resume()
+    }
+
+    func postRawLocaldJson(_ rawJson: String) {
+        guard let u = URL(string: "http://127.0.0.1:\(port)/__orb_rpc"),
+              let body = rawJson.data(using: .utf8) else { return }
+        var req = URLRequest(url: u)
+        req.httpMethod = "POST"
+        req.timeoutInterval = 2.0
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.setValue(token, forHTTPHeaderField: "X-Orb-Token")
+        req.httpBody = body
+        URLSession.shared.dataTask(with: req) { _, _, _ in }.resume()
     }
 
     func applyRowsPayload(_ rawRows: [[String: Any]]) {
@@ -1041,7 +1053,7 @@ final class OrbNativeChromeController: NSObject, NSSplitViewDelegate, NSTableVie
         editor.frame = NSRect(x: max(4, lbl.frame.minX - 4), y: 3, width: max(80, cell.bounds.width - lbl.frame.minX), height: 24)
         editor.autoresizingMask = [.width]
         editor.delegate = self
-        inlineRenameContext = (mode: mode, id: id, original: currentTitle, cancelled: false)
+        inlineRenameContext = (rowIndex: rowIndex, mode: mode, id: id, original: currentTitle, cancelled: false)
         cell.addSubview(editor)
         inlineEditor = editor
         hostWindow?.makeFirstResponder(editor)
@@ -1053,8 +1065,13 @@ final class OrbNativeChromeController: NSObject, NSSplitViewDelegate, NSTableVie
         inlineRenameContext = nil
         inlineEditor = nil
         let next = ed.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        let shouldCommit = commit && !ctx.cancelled && !next.isEmpty && next != ctx.original
+        if shouldCommit, ctx.rowIndex >= 0, ctx.rowIndex < rows.count {
+            rows[ctx.rowIndex].title = next
+            (sidebarTable.view(atColumn: 0, row: ctx.rowIndex, makeIfNecessary: false) as? NSTableCellView)?.textField?.stringValue = next
+        }
         ed.removeFromSuperview()
-        if commit && !ctx.cancelled && !next.isEmpty && next != ctx.original {
+        if shouldCommit {
             if ctx.mode == "mission" {
                 evalMissionAction("rename", id: ctx.id, arg: next)
             } else {
@@ -1731,6 +1748,13 @@ final class OrbAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, W
             }
             return
         }
+        if cmd == "native_chrome_sync_state" {
+            if let rawJson = dict["args"] as? String {
+                nativeChrome?.postRawLocaldJson(rawJson)
+            }
+            if let reqId = dict["id"] as? Int { replyToWebView(id: reqId, result: true) }
+            return
+        }
         let rawArgs = (dict["args"] as? [String: Any]) ?? [:]
         if cmd == "set_native_sidebar" {
             let open = (rawArgs["open"] as? Bool) ?? true
@@ -1921,7 +1945,7 @@ final class OrbAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, W
         let urlLit = Self.jsonStringLiteral("http://127.0.0.1:\(port)/__orb_rpc")
         let sseLit = Self.jsonStringLiteral("http://127.0.0.1:\(port)/__orb_events")
         let tokLit = Self.jsonStringLiteral(token)
-        let ncLine = nativeChrome ? "window.__ORB_NATIVE_CHROME__ = true;" : ""
+        let ncLine = nativeChrome ? "window.__ORB_NATIVE_CHROME__ = true; window.__ORB_NATIVE_SYNC_BRIDGE__ = true;" : ""
         return """
         (() => {
           if (document.documentElement) document.documentElement.dataset.platform = "macos";

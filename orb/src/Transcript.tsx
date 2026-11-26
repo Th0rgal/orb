@@ -30,6 +30,7 @@ import { isTaskTool, latestTaskList, parseTaskList, sameChecklist, sameTaskCardV
 import { messagePresentation, isAutomaticRecovery, isResumePrompt } from "./messagePresentation";
 import { computeDiffStats, narrationKeys, narrationLine, toolArgs, toolName, workKind, workSummary, type DiffStats, type TaskItem } from "./workModel";
 import { visibleTranscript, type StreamItem } from "./transcriptModel";
+import { isFleetNodeOnline } from "./machineLoad";
 import { collectFollowUps, isOrchestrationTool, isSubagentTool } from "./orchestrationModel";
 import { FollowUpsContext, OrchestrationCard } from "./OrchestrationCard";
 export { buildTranscript, applyStreamEvent, applyStreamEvents } from "./transcriptModel";
@@ -519,12 +520,12 @@ export function ThinkBlock(p: { item: Extract<StreamItem, { kind: "think" }> }) 
 type WorkItem = Extract<StreamItem, { kind: "tool" | "think" | "text" }>;
 type Grouped = StreamItem | { kind: "work"; key: string; items: WorkItem[] };
 
-function groupWork(input: StreamItem[], previous: Grouped[] = []): Grouped[] {
+function groupWork(input: StreamItem[], previous: Grouped[] = [], isNodeOnline?: (nodeId: string) => boolean): Grouped[] {
   const cached = new Map(previous.filter(x => x.kind === "work").map(x => [x.key, x]));
   const out: Grouped[] = [];
   // Dropping a filler bubble also rejoins the work around it, so one stretch of
   // tool calls reads as one fold instead of being split in two by a stray ".".
-  const items = visibleTranscript(input);
+  const items = visibleTranscript(input, isNodeOnline);
   const narration = narrationKeys(items, isOrchestrationTool);
   for (const it of items) {
     const last = out[out.length - 1];
@@ -722,7 +723,7 @@ export function Transcript(p: { sizeKey?: string; initialBottom?: boolean; backe
     const list = p.items, q = (it: StreamItem) => it.kind === "user" && it.queued, s = (it: StreamItem) => p.working === false && it.kind === "think" && !it.done;
     return list.some(it => q(it) || s(it)) ? list.filter(it => !q(it)).map(it => s(it) ? { ...it, done: true } : it) : list;
   });
-  const groups = createMemo<Grouped[]>((previous) => groupWork(nonQueuedItems(), previous), []);
+  const groups = createMemo<Grouped[]>((previous) => groupWork(nonQueuedItems(), previous, isFleetNodeOnline), []);
   /** Key of the last user turn, when nothing follows it yet. Compared by key
    * rather than identity: `reconcile` hands the loop store proxies, not the
    * original objects. */

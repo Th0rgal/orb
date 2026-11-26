@@ -12,7 +12,7 @@ import { movedMission, withMovedMissions } from "./moves";
 import { applyServerPlacementEvent, moveMissions, planMissionMoves } from "./missionMove";
 import { MissionBoardSection } from "./MissionBoard";
 import { MissionLookupContext } from "./orchestrationModel";
-import { renamedTitle, renameOptimistically, withRenamedTitles } from "./renames";
+import { renamedTitle, renameOptimistically, renameVersion, withRenamedTitles } from "./renames";
 import { readString, writeString } from "./storage";
 import { missionAssignedNode, nodeLabel } from "./machines/nodes";
 import { isLive, isWorking, missionActivity, presentedStatus } from "./missionStatus";
@@ -63,7 +63,8 @@ import { rememberLaunch, recalledLaunch, missionDestination, nativeLaunchWarning
 import { goalDraft, goalPrompt, planObjective, missionTitle, displayTitle, EMPTY_GOAL_ERROR, remoteGoalSupport, REMOTE_GOAL_UNSUPPORTED } from "./goal";
 import { chipToAttachment, type AttachChip } from "./attach";
 import { DEFAULT_PROJECT, ensureDefaultProject, projectChoices, requireLaunchProject } from "./defaultProject";
-import { ProjectPicker, ProjectCreation } from "./ProjectPicker";
+const ProjectPicker = lazy(() => import("./ProjectPicker").then(module => ({ default: module.ProjectPicker })));
+const ProjectCreation = lazy(() => import("./ProjectPicker").then(module => ({ default: module.ProjectCreation })));
 import { hasInteractiveOverlay, hasOverlay, overlayTrigger } from "./overlayLayer";
 import { For, Show, Switch, Match, Suspense, lazy, createMemo, createSignal, createEffect, on, onCleanup, onMount, batch, type JSX } from "solid-js";
 import { Portal } from "solid-js/web";
@@ -790,7 +791,7 @@ export default function App() {
       cfg,
     ).map(item => item.id);
   });
-  const inboxCount = () => inboxBadgeIds().length;
+  const inboxCount = createMemo(() => inboxBadgeIds().length);
   onMount(() => {
     // Web Inspector can read the actual badge inputs without opening a mission or fetching a transcript.
     const inspector = window as Window & { orbInboxBadgeIds?: () => string[] };
@@ -1105,7 +1106,7 @@ export default function App() {
   }
   /** Native sidebar context-menu actions, sharing the HTML sidebar's API calls. */
   const nativeMissionAction = (action: NativeMissionAction, id: string, arg: string): boolean => {
-    const settle = () => { void refreshMissions(); loadNativeArchived(); };
+    const settle = () => { void refreshMissions(); bumpProjects(); loadNativeArchived(); };
     if (action === "delete") {
       // One confirmation for the whole selection, through the headless sidebar's delete flow
       // (running workers, descendants). `arg` lists the selected ids; "current" is the open one.
@@ -1147,10 +1148,12 @@ export default function App() {
     if (!mission) return false;
     const fail = (title: string) => (error: unknown) => notify({ kind: "error", key: `native-action:${id}`, title, message: error instanceof Error ? error.message : String(error) });
     switch (action) {
-      case "rename":
-        if (!arg || arg === mission.title) return false;
-        void renameOptimistically("mission", id, arg, mission.title ?? null, () => renameMission(id, arg)).then(settle, swallow("app.nativeRename", { mission: id }));
+      case "rename": {
+        const prev = renamedTitle("mission", id, mission.title);
+        if (!arg || arg === prev) return false;
+        void renameOptimistically("mission", id, arg, prev ?? null, () => renameMission(id, arg)).then(settle, swallow("app.nativeRename", { mission: id }));
         return true;
+      }
       case "archive":
       case "restore": {
         // Runs through the HTML sidebar's `changeArchiveState` (headless ProjectFiles): same subtree
@@ -1220,12 +1223,16 @@ export default function App() {
     });
   });
   if (nativeChromeSyncer) {
+    let prevRenameMap = renameVersion();
     createEffect(() => {
       const canBack = hIdx() > 0;
       const canForward = hIdx() < history().length - 1;
       notifyNativeChromeShell("set_native_history", { can_back: canBack, can_forward: canForward });
     });
     createEffect(() => {
+      const curRenameMap = renameVersion();
+      const renameChanged = curRenameMap !== prevRenameMap;
+      prevRenameMap = curRenameMap;
       const scope = historyScope();
       const sel = selected();
       const inSet = onSettings();
@@ -1274,7 +1281,7 @@ export default function App() {
         completedMissions: compMissions,
         archivedMissions: archived,
         projectMissions: projMissions,
-      });
+      }, renameChanged);
     });
   }
 
@@ -1468,6 +1475,19 @@ export default function App() {
       }
       window.dispatchEvent(new CustomEvent("orb:refresh", { detail: { manual: true } }));
       void refreshMissions();
+      return;
+    }
+    if (
+      (e.metaKey || e.ctrlKey) &&
+      !e.altKey &&
+      !e.shiftKey &&
+      (e.code === "KeyA" || e.key.toLowerCase() === "a") &&
+      (e.target instanceof HTMLTextAreaElement ||
+        (e.target instanceof HTMLInputElement &&
+          /^(text|search|url|tel|password|email)$/i.test(e.target.type)))
+    ) {
+      e.preventDefault();
+      e.target.select();
       return;
     }
     if (hasOverlay()) return;
@@ -2041,17 +2061,19 @@ export default function App() {
                       <Ic.ChevronDown size={12} />
                     </button>
                     <Show when={envOpen() === "project"}>
-                      <ProjectPicker projects={isConnected() ? projectChoices(liveProjects()) : []}
-                        selected={newProject() ?? ""} canCreate={isConnected()}
-                        onSelect={(id) => { setNewFolder(null); setNewProject(id); setEnvOpen(null); }}
-                        onClose={() => setEnvOpen(null)}
-                        onCreate={() => { setProjectCreationAnchor(undefined); setEnvOpen(null); setNewProjectDraft(true); }}
-                        onMachine={() => {
-                          setProviderSubmenu(undefined);
-                          setAgentVmsOpen(sortedNodes().filter(isAgentSpawnedManagedNode).some(n => n.id === newMachine()));
-                          warmManagedCatalog();
-                          setEnvOpen("machine");
-                        }} />
+                      <Suspense>
+                        <ProjectPicker projects={isConnected() ? projectChoices(liveProjects()) : []}
+                          selected={newProject() ?? ""} canCreate={isConnected()}
+                          onSelect={(id) => { setNewFolder(null); setNewProject(id); setEnvOpen(null); }}
+                          onClose={() => setEnvOpen(null)}
+                          onCreate={() => { setProjectCreationAnchor(undefined); setEnvOpen(null); setNewProjectDraft(true); }}
+                          onMachine={() => {
+                            setProviderSubmenu(undefined);
+                            setAgentVmsOpen(sortedNodes().filter(isAgentSpawnedManagedNode).some(n => n.id === newMachine()));
+                            warmManagedCatalog();
+                            setEnvOpen("machine");
+                          }} />
+                      </Suspense>
                     </Show>
                   </div>
 
@@ -2545,7 +2567,7 @@ export default function App() {
       <Show when={ctx()}>
         {(c) => <PopupMenu x={c().x} y={c().y} items={c().items} onClose={() => setCtx(null)} />}
       </Show>
-      <Show when={newProjectDraft()}><ProjectCreation anchor={projectCreationAnchor()} existingIds={projectChoices(liveProjects()).map(p => p.id)} onCreate={submitNewProject} onClose={() => setNewProjectDraft(false)} /></Show>
+      <Show when={newProjectDraft()}><Suspense><ProjectCreation anchor={projectCreationAnchor()} existingIds={projectChoices(liveProjects()).map(p => p.id)} onCreate={submitNewProject} onClose={() => setNewProjectDraft(false)} /></Suspense></Show>
       <Show when={titleShareMission()}>
         {m => (
           <Suspense>

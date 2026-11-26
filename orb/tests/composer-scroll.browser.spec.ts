@@ -61,4 +61,11 @@ test("typing a long reply keeps the transcript and the caret line where they are
   }
   expect(await input.evaluate((el: HTMLTextAreaElement) => el.scrollHeight > el.clientHeight)).toBe(true);
   expect(hidden).toEqual([]);
+  const thumb = page.locator(".composer .composer-scroll-thumb");
+  await expect(thumb).toBeVisible();
+  const composerBox = (await page.locator(".composer").boundingBox())!;
+  const thumbBox = (await thumb.boundingBox())!;
+  expect(Math.round(thumbBox.width)).toBe(5);
+  // Flush near the outer right border of the composer card (~5px inset + 1px border = 6px).
+  expect(Math.round(composerBox.x + composerBox.width - (thumbBox.x + thumbBox.width))).toBeLessThanOrEqual(7);
 });

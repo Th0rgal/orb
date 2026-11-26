@@ -539,6 +539,24 @@ export default function SearchDialog(p: SearchDialogProps) {
   const handleDialogKeyDown = (e: KeyboardEvent) => {
     if (e.defaultPrevented || e.isComposing || composing) return;
     const target = e.target as HTMLElement | null;
+    if (
+      (e.metaKey || e.ctrlKey) &&
+      !e.altKey &&
+      !e.shiftKey &&
+      (e.code === "KeyA" || e.key.toLowerCase() === "a")
+    ) {
+      const active = document.activeElement;
+      if (
+        inputRef &&
+        (!(active instanceof HTMLInputElement || active instanceof HTMLTextAreaElement) ||
+          active === inputRef)
+      ) {
+        e.preventDefault();
+        if (active !== inputRef) inputRef.focus({ preventScroll: true });
+        inputRef.select();
+      }
+      return;
+    }
     if (target?.tagName === "SELECT") return;
     const count = activeItemsCount();
     if (e.key === "ArrowDown") {
