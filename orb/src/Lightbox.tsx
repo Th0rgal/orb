@@ -1,6 +1,6 @@
-import { Show, createSignal } from "solid-js";
+import { Show, Suspense, createSignal, lazy } from "solid-js";
 import { Dialog } from "./Dialog";
-import ImagePreview from "./ImagePreview";
+const ImagePreview = lazy(() => import("./ImagePreview"));
 import { createImageMenu } from "./imageActions";
 import { DownloadIcon } from "./icons";
 
@@ -16,7 +16,7 @@ export function Lightbox(p: { items: LightboxItem[]; index: number; onClose: () 
   return <Dialog size="fullscreen" actions={<button type="button" class="dlg-close dlg-action" aria-label="Download image" title="Save image as…" disabled={!item().src} onClick={menu.save}><DownloadIcon size={16}/></button>} class="dlg-lightbox" onKeyDown={e => {if (!e.isComposing && !e.altKey && !e.metaKey && !e.ctrlKey && ["ArrowLeft", "ArrowRight"].includes(e.key)) {e.preventDefault(); e.stopPropagation(); go(e.key === "ArrowLeft" ? -1 : 1);}}} title={item().label} hint={p.items.length > 1 ? `${index() + 1} / ${p.items.length} · ← →` : undefined} onClose={p.onClose}>
     <div class="lightbox-stage">
       <Show when={item().src} keyed fallback={<p class="file-muted">Loading image…</p>}>
-        {src => <ImagePreview name={item().label} path={item().path} src={src} />}
+        {src => <Suspense fallback={<p class="file-muted">Loading image…</p>}><ImagePreview name={item().label} path={item().path} src={src} /></Suspense>}
       </Show>
       <Show when={p.items.length > 1}>
         <button type="button" class="lightbox-nav prev" aria-label="Previous image" disabled={index() === 0} onClick={() => go(-1)}>‹</button>

@@ -52,7 +52,6 @@ import { connectionVersion } from "./api";
 import { localBinding } from "./localAgents";
 import * as Ic from "./icons";
 
-import ImagePreview from "./ImagePreview";
 import { imageByteLimit, imageMime } from "./imageTypes";
 import { scrollKeeper } from "./mission/scrollPolicy";
 
@@ -74,6 +73,8 @@ const pdfPreviewLazy = lazyRetry(() => {
   return import("./PdfPreview");
 });
 const DiffViewer = lazy(() => import("./DiffViewer"));
+const ImagePreview = lazy(() => import("./ImagePreview"));
+const FileGoToPath = lazy(() => import("./FileGoToPath"));
 function isStaleChunkError(err: unknown): boolean {
   const msg = err instanceof Error ? err.message : String(err ?? "");
   return /Importing a module script failed|Failed to fetch dynamically imported module|error loading dynamically imported module/i.test(msg);
@@ -191,6 +192,7 @@ export function FilePanelProvider(p: {
     // Split: the panel takes the window's right half at full height, the sidebar steps aside.
     [split, setSplit] = createSignal(false),
     [search, setSearch] = createSignal<string | null>(null),
+    [goOpen, setGoOpen] = createSignal(false),
     [results, setResults] = createSignal<FileRef[]>([]),
     [choices, setChoices] = createSignal<FileRef[]>([]),
     [notice, setNotice] = createSignal("");
@@ -326,6 +328,7 @@ export function FilePanelProvider(p: {
       setResults([]);
       setChoices([]);
       setSearch(null);
+      setGoOpen(false);
       setHistory([]);
       setHistoryIndex(-1);
     }),
@@ -352,6 +355,7 @@ export function FilePanelProvider(p: {
     setOpened(true);
     rightPaneFocused = true;
     setSearch(null);
+    setGoOpen(false);
     setChoices([]);
     setTabs((ts) => {
       const existing = ts.find((t) => identity(t) === key);
@@ -377,6 +381,24 @@ export function FilePanelProvider(p: {
       setHistory(next);
       setHistoryIndex(next.length - 1);
     }
+  }
+  function openFolder(source: string, path: string) {
+    setPanelTab("files");
+    setOpened(true);
+    setTree(true);
+    rightPaneFocused = true;
+    setSearch(null);
+    setGoOpen(false);
+    setChoices([]);
+    setExpanded((xs) => {
+      const next = new Set(xs);
+      next.add(source + ":");
+      const parts = path.split("/").filter(Boolean);
+      for (let i = 1; i <= parts.length; i++)
+        next.add(`${source}:${parts.slice(0, i).join("/")}`);
+      return [...next];
+    });
+    void list(source, path);
   }
   async function list(source: string, path: string) {
     const g = generation,
@@ -703,8 +725,18 @@ export function FilePanelProvider(p: {
       zenRestore = null;
       setOpened(true);
       rightPaneFocused = true;
+      setGoOpen(false);
       setSearch("");
       requestAnimationFrame(() => searchInput?.focus());
+      return;
+    }
+    if (opened() && hasPrimaryModifier(e) && !e.altKey && !e.shiftKey && (e.code === "KeyG" || e.key.toLowerCase() === "g")) {
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      setPanelTab("files");
+      setSearch(null);
+      setChoices([]);
+      setGoOpen(true);
       return;
     }
     if (
@@ -724,7 +756,8 @@ export function FilePanelProvider(p: {
     if (e.key === "Escape" && opened() && (maximized() || split() || panel?.contains(document.activeElement))) {
       e.preventDefault();
       e.stopImmediatePropagation();
-      if (search() !== null) setSearch(null);
+      if (goOpen()) setGoOpen(false);
+      else if (search() !== null) setSearch(null);
       else if (maximized()) setMaximized(false);
       else if (split()) setSplit(false);
       else { setOpened(false); rightPaneFocused = false; }
@@ -1104,11 +1137,25 @@ export function FilePanelProvider(p: {
                 aria-label="Find file"
                 onClick={() => {
                   setPanelTab("files");
+                  setGoOpen(false);
                   setSearch("");
                   requestAnimationFrame(() => searchInput?.focus());
                 }}
               >
                 <Ic.SearchIcon size={16} />
+              </button>
+              <button
+                aria-label="Go to path"
+                title="Go to path (⌘G)"
+                aria-keyshortcuts="Meta+G"
+                onClick={() => {
+                  setPanelTab("files");
+                  setSearch(null);
+                  setChoices([]);
+                  setGoOpen(true);
+                }}
+              >
+                <TreeIcon.FolderOpen size={16} />
               </button>
               <Show when={p.scope.mission?.id}>
                 <div class="file-panel-tabs" role="tablist" aria-label="Workspace view">
@@ -1213,6 +1260,23 @@ export function FilePanelProvider(p: {
                   </Show>
                 </div>
               </div>
+            </Show>
+            <Show when={goOpen()}>
+              <Suspense>
+                <FileGoToPath
+                  ensureRoots={ensureRoots}
+                  call={(source, op) => client.call(source, op)}
+                  mountLocalRoot={(dir) => client.mountLocalRoot(dir)}
+                  onAddSource={(src) =>
+                    setSources((prev) =>
+                      prev.some((s) => s.id === src.id) ? prev : [src, ...prev],
+                    )
+                  }
+                  onOpenFile={(ref) => openFile(ref)}
+                  onOpenFolder={openFolder}
+                  onClose={() => setGoOpen(false)}
+                />
+              </Suspense>
             </Show>
             <div class="file-body">
               <Show
@@ -1418,7 +1482,9 @@ export function FilePanelProvider(p: {
                               </Suspense>
                             </ErrorBoundary>
                           </Show>}>
-                            <ImagePreview name={selected()?.name ?? "Image"} path={selected()?.path} load={loadPreviewBytes} close={() => setShowImage(false)} />
+                            <Suspense fallback={<p class="file-muted">Loading image…</p>}>
+                              <ImagePreview name={selected()?.name ?? "Image"} path={selected()?.path} load={loadPreviewBytes} close={() => setShowImage(false)} />
+                            </Suspense>
                           </Show>
                         }
                       >

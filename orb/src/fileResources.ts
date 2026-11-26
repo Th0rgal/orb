@@ -89,7 +89,26 @@ export function createFileClient(scope: FileScope) {
       }),
     });
   let sources: FileSource[] = [];
+  const customLocalRoots: FileSource[] = [];
   const artifacts = new Map<string, string>();
+  function mountLocalRoot(dir: string): FileSource {
+    const norm = dir.replace(/\/+$/, "") || "/";
+    const existing = [...sources, ...customLocalRoots].find(
+      (s) => s.local && s.path?.replace(/\/+$/, "") === norm,
+    );
+    if (existing) return existing;
+    const label = norm.split("/").filter(Boolean).at(-1) ?? norm;
+    const root: FileSource = {
+      id: `local-path-${customLocalRoots.length + 1}`,
+      label: `${label} · local`,
+      path: norm,
+      available: true,
+      local: true,
+    };
+    customLocalRoots.push(root);
+    if (!sources.some((s) => s.id === root.id)) sources = [root, ...sources];
+    return root;
+  }
 
   async function roots() {
     const eventsPromise = scope.mission
@@ -164,6 +183,9 @@ export function createFileClient(scope: FileScope) {
         /* Artifacts unavailable; workspace reads remain available. */
       }
     }
+    for (const root of customLocalRoots) {
+      if (!sources.some((s) => s.id === root.id)) sources.unshift(root);
+    }
     return sources;
   }
   async function call(source: string, op: FileOp): Promise<FileReply> {
@@ -221,12 +243,13 @@ export function createFileClient(scope: FileScope) {
       const reply = await (root.local
         ? (() => {
             const invoke = nativeInvoke();
-            if (!invoke || !binding)
+            const localRoot = root.path ?? binding?.cwd;
+            if (!invoke || !localRoot)
               throw new Error(
                 "Open this mission on the computer that started it",
               );
             return invoke<FileReply>("browse_local_files", {
-              root: binding.cwd,
+              root: localRoot,
               request: {
                 path: "",
                 query: "",
@@ -272,10 +295,11 @@ export function createFileClient(scope: FileScope) {
     }
     if (root.local) {
       const invoke = nativeInvoke();
-      if (!invoke || !binding)
+      const localRoot = root.path ?? binding?.cwd;
+      if (!invoke || !localRoot)
         throw new Error("Open this mission on the computer that started it");
       return invoke<FileReply>("browse_local_files", {
-        root: binding.cwd,
+        root: localRoot,
         request: { path: "", query: "", paths: [], offset: 0, ...op },
       });
     }
@@ -378,7 +402,7 @@ export function createFileClient(scope: FileScope) {
     });
     return version === connectionVersion() ? result : null;
   }
-  return { roots, call, loadUploadedImage, loadImage, imagePreview: (path: string) => version === connectionVersion() ? imagePreview(previewScope, path) : undefined };
+  return { roots, call, mountLocalRoot, loadUploadedImage, loadImage, imagePreview: (path: string) => version === connectionVersion() ? imagePreview(previewScope, path) : undefined };
 }
 /** Why a source cannot be read, in the user's terms. */
 export function unavailableReason(id: string, root?: FileSource): string {
