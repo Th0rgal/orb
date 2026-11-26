@@ -120,13 +120,22 @@ void orb_wl_subsurface_draw_mask(cairo_t *cr, int width, int height, gboolean li
     cairo_set_operator(cr, CAIRO_OPERATOR_CLEAR);
     cairo_paint(cr);
     /* Compositors that round every wl_subsurface round the inner right corners too;
-     * square off the 12x12 top-right and bottom-right corners against the divider. */
+     * fill only the outer 10px corner spandrels at the sidebar's frosted alpha so the
+     * seam stays square without double-blending over the subsurface. */
     if (width > 12 && height > 24) {
+        const double r = 10.0;
         cairo_set_operator(cr, CAIRO_OPERATOR_SOURCE);
-        if (light) cairo_set_source_rgba(cr, 246.0 / 255.0, 246.0 / 255.0, 244.0 / 255.0, 1.0);
-        else cairo_set_source_rgba(cr, 18.0 / 255.0, 19.0 / 255.0, 19.0 / 255.0, 1.0);
-        cairo_rectangle(cr, width - 12, 0, 12, 12);
-        cairo_rectangle(cr, width - 12, height - 12, 12, 12);
+        if (light) cairo_set_source_rgba(cr, 249.0 / 255.0, 249.0 / 255.0, 247.0 / 255.0, 184.0 / 255.0);
+        else cairo_set_source_rgba(cr, 18.0 / 255.0, 19.0 / 255.0, 19.0 / 255.0, 199.0 / 255.0);
+        cairo_new_path(cr);
+        cairo_move_to(cr, width, 0);
+        cairo_line_to(cr, width - r, 0);
+        cairo_arc(cr, width - r, r, r, -G_PI_2, 0.0);
+        cairo_close_path(cr);
+        cairo_move_to(cr, width, height);
+        cairo_line_to(cr, width, height - r);
+        cairo_arc(cr, width - r, height - r, r, 0.0, G_PI_2);
+        cairo_close_path(cr);
         cairo_fill(cr);
     }
     cairo_restore(cr);
