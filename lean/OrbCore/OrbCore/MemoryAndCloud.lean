@@ -911,11 +911,13 @@ structure ForkMissionRequest where
   workingDir?      : Option String := none
   remoteNodeId?    : Option String := none
   title?           : Option String := none
-  sideQuestion     : Bool          := false
-  sidePrompt?      : Option String := none
-  incrementalSide  : Bool          := false
-  ownerUserId      : String        := ""
-  nowAt            : String
+  sideQuestion      : Bool          := false
+  sidePrompt?       : Option String := none
+  incrementalSide   : Bool          := false
+  replaceMessageId? : Option String := none
+  replacement?      : Option String := none
+  ownerUserId       : String        := ""
+  nowAt             : String
   deriving Repr, DecidableEq
 
 structure ForkMissionOutcome where
@@ -937,10 +939,13 @@ structure ForkMissionOutcome where
   tagsJson            : String
   deriving Repr, DecidableEq
 
-/-- Synthesize canonical `(role, content)` turns from `cloud_executions`, `missions.history_json`, or `mission_events`. -/
+/-- Synthesize canonical `(role, content)` turns from `cloud_executions`, `mission_events`, or `missions.history_json` fallback.
+    When `replaceMessageId?` is supplied, truncates at that message and replaces it with `replacement?`. -/
 def loadCanonicalMissionTurns (st : CoreStore) (missionId : String) (preferCloudExecutions : Bool)
+    (replaceMessageId? : Option String := none) (replacement? : Option String := none)
     : IO (Array (String × String)) := do
   let mut turns : Array (String × String) := #[]
+  let replaceTarget := (replaceMessageId?.map (·.trimAscii.toString)).getD ""
   if preferCloudExecutions then
     if let .ok cRows ← execParamQuery st.missionsDb
         "SELECT COALESCE(prompt,''), COALESCE(response_text,''), COALESCE(data,'{}') FROM cloud_executions WHERE mission_id=?1 ORDER BY revision DESC, created_at ASC, rowid ASC;"
@@ -966,6 +971,41 @@ def loadCanonicalMissionTurns (st : CoreStore) (missionId : String) (preferCloud
                   if !tres.trimAscii.toString.isEmpty then
                     turns := turns.push ("assistant", tres)
   if turns.isEmpty then
+    let effSeqExpr := "(CASE WHEN COALESCE(seq,0)>0 THEN seq ELSE COALESCE(sequence,0) END)"
+    if let .ok eRows ← execParamQuery st.missionsDb
+        (s!"SELECT event_type, COALESCE(event_id,''), COALESCE(payload,''), COALESCE(content,''), COALESCE(content_file,'') " ++
+         s!"FROM mission_events WHERE mission_id=?1 ORDER BY {effSeqExpr} ASC, id ASC;")
+        #[missionId] then
+      if eRows.size > 1 then
+        let mut replaced := false
+        for i in [1:eRows.size] do
+          if replaced then break
+          let r := eRows[i]!
+          let evType := (r[0]?).getD ""
+          let evId := ((r[1]?).getD "").trimAscii.toString
+          let rawPayload := (r[2]?).getD ""
+          let legacyContent := (r[3]?).getD ""
+          let legacyFile := (r[4]?).getD ""
+          let payload ← hydrateMissionEventPayload st.rootDir rawPayload "" "" "" legacyContent legacyFile ""
+          if let .ok jv := OrbBin.Json.parse payload then
+            let payloadId := ((jv.fieldStr? "id").getD "").trimAscii.toString
+            let isTarget := !replaceTarget.isEmpty && (evId == replaceTarget || payloadId == replaceTarget)
+            if isTarget then
+              replaced := true
+              if let some rep := replacement? then
+                let trimmedRep := rep.trimAscii.toString
+                if !trimmedRep.isEmpty then
+                  turns := turns.push ("user", trimmedRep)
+            else
+              let content :=
+                (jv.fieldStr? "content").orElse (fun _ => jv.fieldStr? "text")
+                |>.orElse (fun _ => jv.fieldStr? "message") |>.getD ""
+              if !content.trimAscii.toString.isEmpty then
+                if evType == "user_message" then
+                  turns := turns.push ("user", content)
+                else if evType == "assistant_message" || evType == "agent_message" then
+                  turns := turns.push ("assistant", content)
+  if turns.isEmpty then
     if let .ok hRows ← execParamQuery st.missionsDb
         "SELECT history_json FROM missions WHERE id=?1;" #[missionId] then
       if hRows.size > 1 then
@@ -976,29 +1016,6 @@ def loadCanonicalMissionTurns (st : CoreStore) (missionId : String) (preferCloud
             let content := (it.fieldStr? "content").getD ""
             if (role == "user" || role == "assistant") && !content.trimAscii.toString.isEmpty then
               turns := turns.push (role, content)
-  if turns.isEmpty then
-    let effSeqExpr := "(CASE WHEN COALESCE(seq,0)>0 THEN seq ELSE COALESCE(sequence,0) END)"
-    if let .ok eRows ← execParamQuery st.missionsDb
-        (s!"SELECT event_type, COALESCE(payload,''), COALESCE(content,''), COALESCE(content_file,'') " ++
-         s!"FROM mission_events WHERE mission_id=?1 ORDER BY {effSeqExpr} ASC, id ASC;")
-        #[missionId] then
-      if eRows.size > 1 then
-        for i in [1:eRows.size] do
-          let r := eRows[i]!
-          let evType := (r[0]?).getD ""
-          let rawPayload := (r[1]?).getD ""
-          let legacyContent := (r[2]?).getD ""
-          let legacyFile := (r[3]?).getD ""
-          let payload ← hydrateMissionEventPayload st.rootDir rawPayload "" "" "" legacyContent legacyFile ""
-          if let .ok jv := OrbBin.Json.parse payload then
-            let content :=
-              (jv.fieldStr? "content").orElse (fun _ => jv.fieldStr? "text")
-              |>.orElse (fun _ => jv.fieldStr? "message") |>.getD ""
-            if !content.trimAscii.toString.isEmpty then
-              if evType == "user_message" then
-                turns := turns.push ("user", content)
-              else if evType == "assistant_message" || evType == "agent_message" then
-                turns := turns.push ("assistant", content)
   return turns
 
 private def encodeTurnsHistoryJson (turns : Array (String × String)) (createdAt : String) : String :=
@@ -1043,7 +1060,7 @@ def forkOrHandoffMission
     | none => if srcIsCloud then "codex" else srcBackend
   let targetIsNative := isNativeWorkspaceBackendName targetBackend
 
-  let turns ← loadCanonicalMissionTurns st req.sourceMissionId srcIsCloud
+  let turns ← loadCanonicalMissionTurns st req.sourceMissionId srcIsCloud req.replaceMessageId? req.replacement?
   let hasHistoryTurns := !turns.isEmpty
 
   let remoteNodeClean? :=
