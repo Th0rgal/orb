@@ -2041,6 +2041,12 @@ def dispatchRemoteFleetAndRelayRoutes?
       if targetNode.isEmpty || targetNode == "local" || targetNode == "client" then
         discard <| execParamQuery store.missionsDb
           "UPDATE remote_node_jobs SET state='cancelled',updated_at=?2 WHERE job_id=?1;" #[jid, nowIso]
+        discard <| execParamQuery store.missionsDb
+          "UPDATE mission_runs SET execution_state='terminal',terminal_reason='cancelled',updated_at=?2 WHERE remote_job_id=?1 AND execution_state NOT IN ('terminal','completed','failed','aborted');"
+          #[jid, nowIso]
+        discard <| execParamQuery store.missionsDb
+          "UPDATE missions SET status='cancelled',terminal_reason='cancelled',state_revision=state_revision+1,updated_at=?2 WHERE placement_job_id=?1 AND status IN ('active','pending');"
+          #[jid, nowIso]
         discard <| execParamQuery store.projectsDb
           "UPDATE remote_jobs SET state='cancelled', heartbeat_at=?2, finished_at=COALESCE(finished_at,?2), updated_at=?2 WHERE job_id=?1;"
           #[jid, nowIso]
@@ -2074,6 +2080,12 @@ def dispatchRemoteFleetAndRelayRoutes?
           ]))
         discard <| execParamQuery store.missionsDb
           "UPDATE remote_node_jobs SET state='cancelled',updated_at=?2 WHERE job_id=?1;" #[jid, nowIso]
+        discard <| execParamQuery store.missionsDb
+          "UPDATE mission_runs SET execution_state='terminal',terminal_reason='cancelled',updated_at=?2 WHERE remote_job_id=?1 AND execution_state NOT IN ('terminal','completed','failed','aborted');"
+          #[jid, nowIso]
+        discard <| execParamQuery store.missionsDb
+          "UPDATE missions SET status='cancelled',terminal_reason='cancelled',state_revision=state_revision+1,updated_at=?2 WHERE placement_job_id=?1 AND status IN ('active','pending');"
+          #[jid, nowIso]
         discard <| execParamQuery store.projectsDb
           "UPDATE remote_jobs SET state='cancelled', heartbeat_at=?2, finished_at=COALESCE(finished_at,?2), updated_at=?2 WHERE job_id=?1;"
           #[jid, nowIso]

@@ -164,6 +164,22 @@ def verifyManagedWorkerLoss (root : String) : IO Unit := do
       (← cellOf store.missionsDb "SELECT state FROM remote_node_jobs WHERE job_id=?1;" #[dJob]) == "lost" &&
       (← cellOf store.projectsDb "SELECT state FROM remote_jobs WHERE job_id=?1;" #[dJob]) == "lost")
       "explicitly destroyed managed VM settles unreachable job without expiration row"
+    -- An active mission whose placement_job_id is already cancelled in remote_node_jobs
+    -- must be settled on startup reconciliation instead of staying active forever.
+    let cMid := "managed-cancelled-orphan-mission"
+    let cJob := "managed-cancelled-orphan-job"
+    insert store.missionsDb
+      "INSERT INTO missions(id,status,run_generation,placement_job_id,placement_kind) VALUES(?1,'active',1,?2,'managed');" #[cMid, cJob]
+    let .ok _ ← store.missionsDb.mu.atomically do
+      insertMissionRunUnlocked store.missionsDb "cancelled-orphan-run" cMid "1" "running" "" cJob "t0" true cJob dNode
+      | throw (IO.userError "cancelled orphan fixture run")
+    insert store.missionsDb
+      "INSERT INTO remote_node_jobs(job_id,mission_id,node_id,state,updated_at) VALUES(?1,?2,?3,'cancelled','t0');" #[cJob, cMid, dNode]
+    discard <| reattachActiveRemoteJobsOnStartup store (some mc) none none sup root
+    check ((← cellOf store.missionsDb "SELECT status FROM missions WHERE id=?1;" #[cMid]) == "cancelled" &&
+      (← cellOf store.missionsDb "SELECT terminal_reason FROM missions WHERE id=?1;" #[cMid]) == "cancelled" &&
+      (← cellOf store.missionsDb "SELECT execution_state FROM mission_runs WHERE mission_id=?1;" #[cMid]) == "terminal")
+      "startup reconciliation settles active mission whose remote_node_jobs row is already cancelled"
   finally
     closeCoreStore store
     closeManagedComputeStore mc
