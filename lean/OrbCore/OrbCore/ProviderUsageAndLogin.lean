@@ -2901,7 +2901,11 @@ def reconcileCliLoginCompletion
       discard <| execParamQuery store.missionsDb "DELETE FROM provider_auth_health WHERE account_key=?1;" #[k]
     cooldowns.modify (fun cs => cs.filter (fun c => !matchesLoginKey c.accountId))
     if let some tracker := tracker? then clearAccountHealthWhere tracker matchesLoginKey
-    for hp in affected do
+    let freshProviders ← loadHydratedProviders store workingDir
+    let freshAffected :=
+      let byId := freshProviders.filter (fun hp => ids.contains hp.id || (!completedProvId.isEmpty && hp.id == completedProvId))
+      if byId.isEmpty then affected else byId
+    for hp in freshAffected do
       refreshProviderUsageAsync hub hp
     result := { result with status := "completed", message? := some "Connected" }
     appendProviderAuditLog store sess.userId "" "login_complete" completedProvId
