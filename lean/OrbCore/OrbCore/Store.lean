@@ -27,7 +27,7 @@ open OrbBin.PosixExt
 open OrbBin.Sqlite
 open OrbCore.Spec
 
-export OrbBin.Sqlite (SqliteDb sqliteOpenRaw sqliteCloseRaw sqliteExecRaw sqliteQueryRowsRaw applyAdditiveAlters openSqliteDb)
+export OrbBin.Sqlite (SqliteDb sqliteOpenRaw sqliteCloseRaw closeSqliteDb sqliteExecRaw sqliteQueryRowsRaw applyAdditiveAlters openSqliteDb)
 
 @[extern "orb_core_epoch_sec"]
 opaque coreEpochSec : IO UInt64
@@ -1451,10 +1451,10 @@ def closeCoreStore (st : CoreStore) : IO Unit := do
       while waitTicks < 200 && (← dMu.atomically (do return (← get).draining)) do
         IO.sleep 2
         waitTicks := waitTicks + 1
-    st.missionsDb.mu.atomically (sqliteCloseRaw st.missionsDb.handle)
-    st.projectsDb.mu.atomically (sqliteCloseRaw st.projectsDb.handle)
-    st.askDb.mu.atomically (sqliteCloseRaw st.askDb.handle)
-    st.idempotencyDb.mu.atomically (sqliteCloseRaw st.idempotencyDb.handle)
+    closeSqliteDb st.missionsDb
+    closeSqliteDb st.projectsDb
+    closeSqliteDb st.askDb
+    closeSqliteDb st.idempotencyDb
 
 private def isIntegerCol (col : String) : Bool :=
   col == "enabled" || col == "revision" || col == "total_cost_cents" || col == "generation" ||
@@ -1558,11 +1558,14 @@ def rowsToJsonArray (rows : Array (Array String)) : String :=
       objs := objs.push ("{" ++ String.intercalate "," kvs.toList ++ "}")
     return "[" ++ String.intercalate "," objs.toList ++ "]"
 
-def execParamQueryUnlocked (db : SqliteDb) (sql : String) (params : Array String) : IO (Except String (Array (Array String))) :=
+def execParamQueryUnlocked (db : SqliteDb) (sql : String) (params : Array String) : IO (Except String (Array (Array String))) := do
+  if ← db.closedRef.get then return .error "sqlite_closed"
   sqliteQueryRowsRaw db.handle sql params
 
 def execParamQuery (db : SqliteDb) (sql : String) (params : Array String) : IO (Except String (Array (Array String))) :=
-  db.mu.atomically (sqliteQueryRowsRaw db.handle sql params)
+  db.mu.atomically do
+    if ← db.closedRef.get then return .error "sqlite_closed"
+    sqliteQueryRowsRaw db.handle sql params
 
 /-- Convert Unix epoch seconds (`1970-01-01T00:00:00Z = 0`) into canonical ISO-8601 UTC (`YYYY-MM-DDTHH:MM:SSZ`)
     using the Howard Hinnant civil-from-days algorithm (`0 import Lean`, `SM-07`). -/
@@ -1685,6 +1688,7 @@ def reapOrphanedMissionRuns (mDb : SqliteDb) (nowAt : String) : IO Nat := do
 /-- Execute `act` inside an atomic, mutex-serialized `BEGIN IMMEDIATE ... COMMIT` SQLite write transaction. -/
 def withImmediateTx {α : Type} (db : SqliteDb) (act : IO (Except String α)) : IO (Except String α) :=
   db.mu.atomically do
+    if ← db.closedRef.get then return .error "sqlite_closed"
     match ← sqliteExecRaw db.handle "BEGIN IMMEDIATE;" with
     | .error e => return .error s!"tx_begin_failed:{e}"
     | .ok () =>

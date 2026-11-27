@@ -533,7 +533,7 @@ def openManagedComputeStore (path : String) (coreDb? : Option SqliteDb := none) 
       dailyCapCeilingCents := devDailyCapCeiling (← IO.getEnv "ORB_DEV_DAILY_CAP_CENTS") }
 
 def closeManagedComputeStore (st : ManagedComputeStore) : IO Unit :=
-  st.db.mu.atomically (sqliteCloseRaw st.db.handle)
+  closeSqliteDb st.db
 
 def backfillManagedMachineOwner (st : ManagedComputeStore) (bootstrapAdminId : String) : IO (Except String Unit) := do
   if bootstrapAdminId.isEmpty then return .ok ()
