@@ -3466,6 +3466,16 @@ def runTests : IO UInt32 := do
      legacyScopeArgs.back? == some forkCmd &&
      systemdHelpSupportsExpandEnvironment "  --expand-environment=BOOL  Expand $" &&
      !systemdHelpSupportsExpandEnvironment "systemd-run 252 (252.26-1~deb12u2)")
+  let idxOomUser := (pureUserArgs.findIdx? (· == "--property=OOMPolicy=continue")).getD 999
+  let idxOomSys := (pureSysArgs.findIdx? (· == "--property=OOMPolicy=continue")).getD 999
+  let idxOomLegacy := (legacyScopeArgs.findIdx? (· == "--property=OOMPolicy=continue")).getD 999
+  let idxDashLegacy := (legacyScopeArgs.findIdx? (· == "--")).getD 999
+  check "buildSystemdScopeArgs passes --property=OOMPolicy=continue before '--' in all modes"
+    (idxOomUser < idxDashUser && idxOomSys < idxDashSys && idxOomLegacy < idxDashLegacy)
+  let oomErr? ← formatJobExitError 137 none true
+  let okOomErr? ← formatJobExitError 0 none true
+  check "formatJobExitError surfaces cgroup OOM kills on non-zero exit"
+    (oomErr? == some "command exited with Some(137): killed by cgroup OOM limit" && okOomErr? == none)
 
   let parentWs := System.FilePath.mk tmpRoot / "23bad383-5b27-4b83-9a84-d86d34223509"
   IO.FS.createDirAll parentWs
