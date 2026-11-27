@@ -3322,18 +3322,23 @@ select.orb-select-native:disabled { cursor: default; }
 }
 .directory-foot-btn.primary:hover { background: var(--hover-2); }
 
-.automatic-reminder { margin:22px 10px 18px; color:var(--fg-3); font-size:12px; }
-.automatic-reminder summary { display:flex; align-items:center; flex-wrap:wrap; gap:8px; cursor:pointer; list-style:none; }
-.automatic-reminder summary::-webkit-details-marker { display:none; }
-.automatic-reminder summary::after { content:'› View instructions'; color:var(--fg-4); font-size:11px; }
-.automatic-reminder[open] summary::after { content:'⌄ Hide instructions'; }
-.automatic-reminder strong { font-weight:500; color:var(--fg-2); }
-.reminder-origin { color:var(--fg-3); }
-.reminder-summary { flex-basis:100%; margin:0 0 0 20px; }
-.reminder-details { margin:10px 0 0 20px; padding-left:12px; border-left:1px solid var(--stroke); }
-.reminder-details pre { white-space:pre-wrap; overflow-wrap:anywhere; font:inherit; line-height:1.6; margin:0 0 8px; }
-.reminder-details [role=status] { margin-left:8px; }
+.automatic-reminder { margin: 6px 10px; color: var(--fg-3); font-size: 12.5px; }
+.automatic-reminder > summary {
+  display: flex; align-items: center; gap: 6px; min-height: 24px; min-width: 0;
+  cursor: pointer; list-style: none; border-radius: var(--radius-xs);
+}
+.automatic-reminder > summary::-webkit-details-marker { display: none; }
+.automatic-reminder > summary:hover { color: var(--fg-2); }
+.automatic-reminder > summary .chev { flex: none; opacity: .85; transition: transform .12s; }
+.automatic-reminder[open] > summary .chev { transform: rotate(90deg); }
+.automatic-reminder .reminder-icon { flex: none; }
+.automatic-reminder .reminder-label { flex: none; font-weight: 500; color: var(--fg-2); }
+.reminder-origin { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--fg-3); }
+.reminder-details { margin: 4px 0 6px 5px; padding-left: 12px; border-left: 1px solid var(--stroke-soft); font-size: 12px; }
+.reminder-details pre { white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; line-height: 1.55; margin: 0 0 8px; color: var(--fg-2); }
+.reminder-details [role=status] { margin-left: 8px; }
 .next-reminder { display:flex; gap:8px; color:var(--fg-3); font-size:12px; padding:10px; }
+.remote-goal-status { display: flex; align-items: center; gap: 8px; margin: 4px 10px; min-height: 24px; color: var(--fg-3); font-size: 12.5px; }
 
 /* Shared SSH connections use the same compact spacing as machine rows. */
 .ssh-address-book { margin: 22px 0; }

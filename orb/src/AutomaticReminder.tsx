@@ -2,6 +2,7 @@ import { useNow } from "./time";
 import {createEffect, createMemo, createSignal, on, onCleanup, Show} from 'solid-js';
 import {api, connectionVersion, isConnected} from './api';
 import {copyText} from './clipboard';
+import {ChevronRight} from './icons';
 import type {StreamItem} from './transcriptModel';
 import {isSchedulerSource} from './messagePresentation';
 
@@ -30,7 +31,7 @@ export function reminderMessages(items: StreamItem[]): Map<string, Reminder> {
 export function AutomaticReminder(p: {text: string; reminder: Reminder}) {
   const [copied, setCopied] = createSignal('');
   return <details class="automatic-reminder">
-    <summary><span aria-hidden="true">◷</span><strong>Automatic reminder</strong><span class="reminder-origin">{p.reminder.origin}<Show when={p.reminder.seconds}> · after {Math.round(p.reminder.seconds! / 60)} min</Show></span><span class="reminder-summary">Resume mission follow-up</span></summary>
+    <summary><ChevronRight size={12} class="chev" /><span class="reminder-icon" aria-hidden="true">◷</span><span class="reminder-label">Automatic reminder</span><span class="reminder-origin">· {p.reminder.origin}<Show when={p.reminder.seconds}> · after {Math.round(p.reminder.seconds! / 60)} min</Show></span></summary>
     <div class="reminder-details"><pre>{p.text}</pre><button class="s-btn sm" onClick={() => void copyText(p.text).then(() => setCopied('Copied'), () => setCopied('Copy failed'))}>Copy instructions</button><span role="status">{copied()}</span></div>
   </details>;
 }

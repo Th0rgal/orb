@@ -19,9 +19,12 @@ describe('automatic reminders',()=>{
   // Lean Core stamps a mission's own wakeups with source `wakeup` (ldgr, 2026-11-13).
   expect(reminderMessages([{kind:'user',key:'w',text:'Continuer T7.',source:'wakeup'}]).get('w')).toEqual({origin:'Mission scheduler'});
  });
- it('keeps instructions collapsed without editing or resend controls',()=>{
+ it('keeps instructions collapsed in a single-line summary without editing or resend controls',()=>{
   const {container}=render(()=><AutomaticReminder text="Full instructions" reminder={{origin:'Scheduled by Claude',seconds:1800}}/>);
   expect(container.querySelector('details')?.open).toBe(false);
+  expect(container.querySelector('summary')?.textContent).toContain('Automatic reminder');
+  expect(container.querySelector('summary')?.textContent).toContain('Scheduled by Claude · after 30 min');
+  expect(container.querySelector('.reminder-summary')).toBeNull();
   expect(screen.getByText('Full instructions')).toBeTruthy();
   expect(screen.queryByRole('button',{name:'Send again'})).toBeNull();
   expect(screen.queryByRole('button',{name:'Edit prompt'})).toBeNull();
