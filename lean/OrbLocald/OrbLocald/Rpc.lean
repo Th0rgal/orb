@@ -2938,6 +2938,8 @@ private def collectAllowedBrowseRoots (st : LocaldState) : IO (Array String) := 
   if !st.homeDir.trimAscii.toString.isEmpty then
     let h := System.FilePath.mk st.homeDir.trimAscii.toString
     rawRoots := rawRoots.push (h / ".orb" / "local-workspaces").toString
+    rawRoots := rawRoots.push (h / ".gemini" / "antigravity-cli" / "brain").toString
+    rawRoots := rawRoots.push (h / ".gemini" / "antigravity" / "brain").toString
   let mut canon : Array String := #[]
   for r in rawRoots do
     if let some rp ← canonicalizeExistingPath? r then
@@ -6585,10 +6587,39 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
       try
         let realFp := System.FilePath.mk targetReal
         let m ← realFp.metadata
-        if m.byteSize.toNat > 2 * 1024 * 1024 then
-          return .error "File is too large to preview"
-        let content ← IO.FS.readFile realFp
-        return .ok (.obj #[("content", .str content), ("size", JVal.nat m.byteSize.toNat)])
+        let totalSize := m.byteSize.toNat
+        let maxPreview : Nat := 2 * 1024 * 1024
+        let h ← IO.FS.Handle.mk realFp .read
+        let sniff ← h.read (Nat.min totalSize 8192).toUSize
+        let sniffNul := sniff.data.any (· == 0)
+        if sniffNul then
+          return .ok (.obj #[
+            ("content", .null),
+            ("binary", .bool true),
+            ("truncated", .bool false),
+            ("size", JVal.nat totalSize)
+          ])
+        let chunk ←
+          if totalSize <= 8192 then pure sniff
+          else do
+            let rest ← h.read (Nat.min (totalSize - 8192) (maxPreview - 8192)).toUSize
+            pure (sniff ++ rest)
+        let hasNul := chunk.data.any (· == 0)
+        match if hasNul then none else String.fromUTF8? chunk with
+        | some content =>
+          return .ok (.obj #[
+            ("content", .str content),
+            ("binary", .bool false),
+            ("truncated", .bool (totalSize > maxPreview)),
+            ("size", JVal.nat totalSize)
+          ])
+        | none =>
+          return .ok (.obj #[
+            ("content", .null),
+            ("binary", .bool true),
+            ("truncated", .bool false),
+            ("size", JVal.nat totalSize)
+          ])
       catch _ =>
         return .error "Could not read local file"
     else if action == "resolve" then
