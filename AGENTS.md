@@ -488,14 +488,20 @@ changes on dev first. The plan to put both on one base configuration, sync
 settings between them and give missions a dev pass is
 [docs/archive/plans/dev-prod-environments.md](docs/archive/plans/dev-prod-environments.md).
 
-Deploy with `orb-deploy [--detach] <sha|master> [--dev-only]` on agent-core
-(`scripts/ops/orb-deploy`): it builds that exact commit with the CI-parity
-command, runs the Core self-test, installs dev, health-checks, then prod with a
-backup and automatic rollback; `--detach` runs it as a transient unit
-(`journalctl -u orb-deploy`, log `/var/log/orb-deploy.log`). Missions use
+Deploy with `/usr/local/sbin/orb-deploy [--detach] <sha|master> [--dev-only]` on
+`agent-core` (`scripts/ops/orb-deploy`): it builds that exact commit with the
+CI-parity Lean command (`orb-core`, `sandboxed-node`, `sandboxed-mcp`), runs both
+`orb-core-test` and `orb-node-test`, installs and health-checks `dev`, stages
+the guest `sandboxed-node` release served by Core's `NodeRelease` endpoint, then
+promotes `prod` with a backup and automatic rollback; `--detach` runs it as a
+transient unit (`journalctl -u orb-deploy`, log `/var/log/orb-deploy.log`).
+Fleet nodes automatically pull and verify the new `sandboxed-node` binary and
+declarative harness CLI bundle (including `agy`) from Core when idle, with
+automatic rollback on crash before first heartbeat (`OrbNode/AutoUpdate.lean`),
+and remote harnesses use Core's Streamable HTTP MCP endpoint directly — no
+manual per-node SSH rollout is required for routine updates. Missions use
 `--dev-only` only. Do not deploy by copying binaries or with a bare
-`systemctl restart`. The legacy Rust `deploy` subcommand described in
-DEBUGGING.md no longer applies to the Lean server.
+`systemctl restart`.
 
 `orb-monitor` (`scripts/ops/orb-monitor`, every 5 min) checks Core health and
 build, proxy error rates, stalled missions, expiring or orphaned VMs, failed
