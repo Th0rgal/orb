@@ -721,3 +721,29 @@ it('settles local-only and unsynced local-origin follow-ups cleanly when Core la
   delete (window as any).__TAURI_INTERNALS__;
  }
 });
+
+it('does not re-append user_message when re-attaching a persisted userSynced accepted row and recovers on no local run', async () => {
+ mocks.active = false;
+ const key = 'followups:account:1';
+ mocks.store.set(key, [{
+  id: '00000000-0000-4000-8000-000000000080',
+  mission: 'mission',
+  text: 'already synced prompt',
+  request: { ...request, prompt: 'already synced prompt' },
+  kind: 'accepted',
+  userSynced: true,
+  receipt: { run_id: 'run-1', generation: 1 },
+ }]);
+ mocks.follow.mockRejectedValueOnce(new Error('no local run'));
+ stop = startLocalQueueWorker();
+ await vi.advanceTimersByTimeAsync(100);
+ expect(mocks.recover).toHaveBeenCalledWith('mission');
+ // Must not re-append user_message for the already-synced attempt before recovery re-launches it.
+ const firstAttemptAppends = mocks.append.mock.calls.filter(
+  (call: unknown[]) => call[1] === 'user' && call[3] === '00000000-0000-4000-8000-000000000080' && (call[4] as { run_id?: string } | undefined)?.run_id === 'run-1',
+ );
+ expect(firstAttemptAppends).toHaveLength(0);
+ // Recovery auto-resumes the lost turn once and settles cleanly.
+ expect(mocks.launch).toHaveBeenCalledTimes(1);
+ expect(queuedLocalMessages('mission')).toHaveLength(0);
+});

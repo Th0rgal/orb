@@ -811,16 +811,28 @@ private def runDesktopReliabilityParityChecksPart1 (pDir : System.FilePath) (val
   if (← assertTrue "sqlite_tail_sliced_ui_cache_and_draft_persistence" sqlCacheAndDraftsOk) then passed := passed + 1
 
   -- E. Token-scoped `__orb_poll_events` + per-SSE-subscriber broadcast (no multi-window event stealing)
+  -- Also verify `local_agents_subscribe` and `local_agents_poll` return "no local run" for missing runs.
   let stPub ← IO.mkRef ({ launchToken := validTok } : LocaldState)
+  let missingSub ← dispatchRpcCommand stPub "local_agents_subscribe" (.obj #[("id", .str "missing-run")])
+  let missingPoll ← dispatchRpcCommand stPub "local_agents_poll" (.obj #[("id", .str "missing-run")])
+  total := total + 1
+  let missingRunErrOk :=
+    (match missingSub with | .error e => (e.splitOn "no local run").length > 1 | _ => false) &&
+    (match missingPoll with | .error e => (e.splitOn "no local run").length > 1 | _ => false)
+  if (← assertTrue "local_agents_subscribe_and_poll_error_on_missing_run" missingRunErrOk) then passed := passed + 1
   let sid1 ← stPub.modifyGet LocaldState.registerSseSubscriber
   let sid2 ← stPub.modifyGet LocaldState.registerSseSubscriber
-  let tokA ← dispatchRpcCommand stPub "local_agents_subscribe" (.obj #[("id", .str "run-A")])
-  let tokB ← dispatchRpcCommand stPub "local_agents_subscribe" (.obj #[("id", .str "run-B")])
+  let tokA ← dispatchRpcCommand stPub "local_interaction_subscribe" (.obj #[("id", .str "run-A")])
+  let tokB ← dispatchRpcCommand stPub "local_interaction_subscribe" (.obj #[("id", .str "run-B")])
   let tA := match tokA with | .ok jv => jv.asNat?.getD 0 | _ => 0
   let tB := match tokB with | .ok jv => jv.asNat?.getD 0 | _ => 0
+  -- Drain initial snapshot events emitted by `local_interaction_subscribe`
+  let _ ← stPub.modifyGet (·.drainSseSubscriber sid1)
+  let _ ← stPub.modifyGet (·.drainSseSubscriber sid2)
+  let _ ← dispatchRpcCommand stPub "__orb_poll_events" (.obj #[("tokens", .arr #[JVal.nat tA, JVal.nat tB])])
   stPub.modify fun s =>
-    let s1 := s.publishChannelEvent "local_agents" (.obj #[("text", .str "delta-A")]) (some "run-A")
-    s1.publishChannelEvent "local_agents" (.obj #[("text", .str "delta-B")]) (some "run-B")
+    let s1 := s.publishChannelEvent "local_interaction" (.obj #[("text", .str "delta-A")]) (some "run-A")
+    s1.publishChannelEvent "local_interaction" (.obj #[("text", .str "delta-B")]) (some "run-B")
   let sseDrain1 ← stPub.modifyGet (·.drainSseSubscriber sid1)
   let sseDrain2 ← stPub.modifyGet (·.drainSseSubscriber sid2)
   let pollOnlyA ← dispatchRpcCommand stPub "__orb_poll_events" (.obj #[("tokens", .arr #[JVal.nat tA])])
@@ -1241,7 +1253,7 @@ private def runDesktopReliabilityParityChecksPart1 (pDir : System.FilePath) (val
 
   -- Live loopback SSE latency check on `streamLocalEventsSse` (< 50ms end-to-end wakeup)
   let stSseLive ← IO.mkRef ({ launchToken := validTok } : LocaldState)
-  let subLiveRes ← dispatchRpcCommand stSseLive "local_agents_subscribe" (.obj #[("id", .str "live-sse")])
+  let subLiveRes ← dispatchRpcCommand stSseLive "local_interaction_subscribe" (.obj #[("id", .str "live-sse")])
   let _ := subLiveRes
   let mut sseLatOk := false
   if let .ok (lfd, lport) ← LeanSys.Posix.tcpListen "127.0.0.1" 0 4 then
@@ -1257,7 +1269,7 @@ private def runDesktopReliabilityParityChecksPart1 (pDir : System.FilePath) (val
             let _ ← LeanSys.Posix.readStreamChunk cfd 512
             let tStart ← IO.monoMsNow
             stSseLive.modify fun s =>
-              s.publishChannelEvent "local_agents" (.obj #[("text", .str "fast-ping")]) (some "live-sse")
+              s.publishChannelEvent "local_interaction" (.obj #[("text", .str "fast-ping")]) (some "live-sse")
             if let .ok () ← LeanSys.Posix.pollReadable cfd 200 then
               let rx ← LeanSys.Posix.readStreamChunk cfd 1024
               let elapsed := (← IO.monoMsNow) - tStart

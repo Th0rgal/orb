@@ -5979,14 +5979,19 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
     let cleanId := rawId.trimAscii.toString
     let target? : Option String := if cleanId.isEmpty then none else some cleanId
     let mgr ← ensureWarmManager stRef
-    let snap? ← if cleanId.isEmpty then pure none else OrbBin.ClaudeControl.getRunState? mgr cleanId
-    let initEv? : Option JVal := snap?.map fun rs =>
-      .obj #[
-        ("text", .str rs.text),
-        ("reset", .bool true),
-        ("activities", .arr (rs.activities.map OrbBin.ClaudeControl.LocalActivityItem.toJVal)),
-        ("state", if rs.done then rs.toPollJVal else .null)
-      ]
+    let initEv? : Option JVal ←
+      if cleanId.isEmpty then
+        pure none
+      else
+        match ← OrbBin.ClaudeControl.getRunState? mgr cleanId with
+        | none => return .error "no local run"
+        | some rs =>
+          pure (some (.obj #[
+            ("text", .str rs.text),
+            ("reset", .bool true),
+            ("activities", .arr (rs.activities.map OrbBin.ClaudeControl.LocalActivityItem.toJVal)),
+            ("state", if rs.done then rs.toPollJVal else .null)
+          ]))
     let tok ← stRef.modifyGet fun s =>
       s.subscribe "local_agents" initEv? target?
     return .ok (JVal.nat tok)
@@ -7104,11 +7109,11 @@ def dispatchRpcCommand (stRef : IO.Ref LocaldState) (cmd : String) (args : JVal)
     let runId := (((args.fieldStr? "id").orElse (fun _ => args.fieldStr? "run_id")).orElse
       (fun _ => args.fieldStr? "runId")).getD ""
     if runId.trimAscii.toString.isEmpty then
-      return .ok (.obj #[("text", .str ""), ("done", .bool true), ("resumed", .bool false)])
+      return .error "no local run"
     let mgr ← ensureWarmManager stRef
     match ← OrbBin.ClaudeControl.getRunState? mgr runId.trimAscii.toString with
     | some rs => return .ok rs.toPollJVal
-    | none => return .ok (.obj #[("text", .str ""), ("done", .bool true), ("resumed", .bool false)])
+    | none => return .error "no local run"
   | "local_codex_speed_options" =>
     return .ok (.obj #[
       ("tiers", .arr #[
