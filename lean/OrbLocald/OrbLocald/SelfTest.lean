@@ -810,34 +810,6 @@ private def runDesktopReliabilityParityChecksPart1 (pDir : System.FilePath) (val
     isOkNull draftAfterDelete
   if (← assertTrue "sqlite_tail_sliced_ui_cache_and_draft_persistence" sqlCacheAndDraftsOk) then passed := passed + 1
 
-  -- E. Token-scoped `__orb_poll_events` + per-SSE-subscriber broadcast (no multi-window event stealing)
-  let stPub ← IO.mkRef ({ launchToken := validTok } : LocaldState)
-  let sid1 ← stPub.modifyGet LocaldState.registerSseSubscriber
-  let sid2 ← stPub.modifyGet LocaldState.registerSseSubscriber
-  let tokA ← dispatchRpcCommand stPub "local_agents_subscribe" (.obj #[("id", .str "run-A")])
-  let tokB ← dispatchRpcCommand stPub "local_agents_subscribe" (.obj #[("id", .str "run-B")])
-  let tA := match tokA with | .ok jv => jv.asNat?.getD 0 | _ => 0
-  let tB := match tokB with | .ok jv => jv.asNat?.getD 0 | _ => 0
-  stPub.modify fun s =>
-    let s1 := s.publishChannelEvent "local_agents" (.obj #[("text", .str "delta-A")]) (some "run-A")
-    s1.publishChannelEvent "local_agents" (.obj #[("text", .str "delta-B")]) (some "run-B")
-  let sseDrain1 ← stPub.modifyGet (·.drainSseSubscriber sid1)
-  let sseDrain2 ← stPub.modifyGet (·.drainSseSubscriber sid2)
-  let pollOnlyA ← dispatchRpcCommand stPub "__orb_poll_events" (.obj #[("tokens", .arr #[JVal.nat tA])])
-  let pollOnlyB ← dispatchRpcCommand stPub "__orb_poll_events" (.obj #[("tokens", .arr #[JVal.nat tB])])
-  total := total + 1
-  let multiWinOk :=
-    tA > 0 && tB > 0 && tA != tB &&
-    sseDrain1.size == 2 && sseDrain2.size == 2 &&
-    (match pollOnlyA, pollOnlyB with
-     | .ok (.arr #[evA]), .ok (.arr #[evB]) =>
-       evA.fieldNat? "token" == some tA &&
-       ((evA.field? "payload").bind (·.fieldStr? "text")) == some "delta-A" &&
-       evB.fieldNat? "token" == some tB &&
-       ((evB.field? "payload").bind (·.fieldStr? "text")) == some "delta-B"
-     | _, _ => false)
-  if (← assertTrue "per_sse_subscriber_broadcast_and_token_scoped_poll_events" multiWinOk) then passed := passed + 1
-
   -- F. `software_inventory` schema, `local_skills_sync`/`local_skills_status`, and `stage_upload_file`
   let stInv ← IO.mkRef ({
     launchToken := validTok,
@@ -1241,7 +1213,7 @@ private def runDesktopReliabilityParityChecksPart1 (pDir : System.FilePath) (val
 
   -- Live loopback SSE latency check on `streamLocalEventsSse` (< 50ms end-to-end wakeup)
   let stSseLive ← IO.mkRef ({ launchToken := validTok } : LocaldState)
-  let subLiveRes ← dispatchRpcCommand stSseLive "local_agents_subscribe" (.obj #[("id", .str "live-sse")])
+  let subLiveRes ← dispatchRpcCommand stSseLive "local_interaction_subscribe" (.obj #[("id", .str "live-sse")])
   let _ := subLiveRes
   let mut sseLatOk := false
   if let .ok (lfd, lport) ← LeanSys.Posix.tcpListen "127.0.0.1" 0 4 then
@@ -1257,7 +1229,7 @@ private def runDesktopReliabilityParityChecksPart1 (pDir : System.FilePath) (val
             let _ ← LeanSys.Posix.readStreamChunk cfd 512
             let tStart ← IO.monoMsNow
             stSseLive.modify fun s =>
-              s.publishChannelEvent "local_agents" (.obj #[("text", .str "fast-ping")]) (some "live-sse")
+              s.publishChannelEvent "local_interaction" (.obj #[("text", .str "fast-ping")]) (some "live-sse")
             if let .ok () ← LeanSys.Posix.pollReadable cfd 200 then
               let rx ← LeanSys.Posix.readStreamChunk cfd 1024
               let elapsed := (← IO.monoMsNow) - tStart
@@ -1580,13 +1552,55 @@ private def runBindingsRefreshMergeChecks (pDir : System.FilePath) (validTok : S
   let passed := if (← assertTrue "local_bindings_refresh_merges_external_disk_additions" ok) then 1 else 0
   return (passed, 1)
 
+private def runMultiWindowAndMissingRunChecks (validTok : String) : IO (Nat × Nat) := do
+  let mut passed : Nat := 0
+  let mut total : Nat := 0
+  let stPub ← IO.mkRef ({ launchToken := validTok } : LocaldState)
+  let missingSub ← dispatchRpcCommand stPub "local_agents_subscribe" (.obj #[("id", .str "missing-run")])
+  let missingPoll ← dispatchRpcCommand stPub "local_agents_poll" (.obj #[("id", .str "missing-run")])
+  total := total + 1
+  let missingRunErrOk :=
+    (match missingSub with | .error e => (e.splitOn "no local run").length > 1 | _ => false) &&
+    (match missingPoll with | .error e => (e.splitOn "no local run").length > 1 | _ => false)
+  if (← assertTrue "local_agents_subscribe_and_poll_error_on_missing_run" missingRunErrOk) then passed := passed + 1
+  let sid1 ← stPub.modifyGet LocaldState.registerSseSubscriber
+  let sid2 ← stPub.modifyGet LocaldState.registerSseSubscriber
+  let tokA ← dispatchRpcCommand stPub "local_interaction_subscribe" (.obj #[("id", .str "run-A")])
+  let tokB ← dispatchRpcCommand stPub "local_interaction_subscribe" (.obj #[("id", .str "run-B")])
+  let tA := match tokA with | .ok jv => jv.asNat?.getD 0 | _ => 0
+  let tB := match tokB with | .ok jv => jv.asNat?.getD 0 | _ => 0
+  let _ ← stPub.modifyGet (·.drainSseSubscriber sid1)
+  let _ ← stPub.modifyGet (·.drainSseSubscriber sid2)
+  let _ ← dispatchRpcCommand stPub "__orb_poll_events" (.obj #[("tokens", .arr #[JVal.nat tA, JVal.nat tB])])
+  stPub.modify fun s =>
+    let s1 := s.publishChannelEvent "local_interaction" (.obj #[("text", .str "delta-A")]) (some "run-A")
+    s1.publishChannelEvent "local_interaction" (.obj #[("text", .str "delta-B")]) (some "run-B")
+  let sseDrain1 ← stPub.modifyGet (·.drainSseSubscriber sid1)
+  let sseDrain2 ← stPub.modifyGet (·.drainSseSubscriber sid2)
+  let pollOnlyA ← dispatchRpcCommand stPub "__orb_poll_events" (.obj #[("tokens", .arr #[JVal.nat tA])])
+  let pollOnlyB ← dispatchRpcCommand stPub "__orb_poll_events" (.obj #[("tokens", .arr #[JVal.nat tB])])
+  total := total + 1
+  let multiWinOk :=
+    tA > 0 && tB > 0 && tA != tB &&
+    sseDrain1.size == 2 && sseDrain2.size == 2 &&
+    (match pollOnlyA, pollOnlyB with
+     | .ok (.arr #[evA]), .ok (.arr #[evB]) =>
+       evA.fieldNat? "token" == some tA &&
+       ((evA.field? "payload").bind (·.fieldStr? "text")) == some "delta-A" &&
+       evB.fieldNat? "token" == some tB &&
+       ((evB.field? "payload").bind (·.fieldStr? "text")) == some "delta-B"
+     | _, _ => false)
+  if (← assertTrue "per_sse_subscriber_broadcast_and_token_scoped_poll_events" multiWinOk) then passed := passed + 1
+  return (passed, total)
+
 private def runDesktopReliabilityParityChecks (tmpBase : String) (validTok : String) : IO (Nat × Nat) := do
   let pDir := System.FilePath.mk tmpBase / "parity-suite"
   IO.FS.createDirAll pDir
   let (p1, t1) ← runDesktopReliabilityParityChecksPart1 pDir validTok
   let (p2, t2) ← runLinuxPortalAndRevealChecks pDir validTok
   let (p3, t3) ← runBindingsRefreshMergeChecks pDir validTok
-  return (p1 + p2 + p3, t1 + t2 + t3)
+  let (p4, t4) ← runMultiWindowAndMissingRunChecks validTok
+  return (p1 + p2 + p3 + p4, t1 + t2 + t3 + t4)
 
 private def runWarmClaudeRpcE2eChecks (validTok tmpStateDir : String) : IO (Nat × Nat) := do
   let warmRpcDir := System.FilePath.mk tmpStateDir / "warm-rpc-repo"

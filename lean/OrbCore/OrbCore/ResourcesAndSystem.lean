@@ -2993,12 +2993,44 @@ def dispatchResourcesAndSystemRoute
         if op == "received" then
           let msgId := (reqJv.fieldStr? "message_id").getD ""
           return some (jsonResp 200 (.obj #[("received", .str msgId)]))
+        if op == "inspect" then
+          let activeRun? ← match ← execParamQuery store.missionsDb
+            ("SELECT id, generation FROM mission_runs " ++
+             "WHERE mission_id=?1 AND execution_state NOT IN ('terminal','completed','failed','aborted') " ++
+             "ORDER BY generation DESC, rowid DESC LIMIT 1;") #[mid] with
+            | .ok rows =>
+              match rows[1]? with
+              | some row =>
+                let rid := (row[0]?.getD "").trimAscii.toString
+                let rgen := ((row[1]?.getD "1").trimAscii.toString.toNat?).getD 1
+                pure (if rid.isEmpty then none else some (rid, rgen))
+              | none => pure none
+            | .error _ => pure none
+          match activeRun? with
+          | some (activeRunId, activeGen) =>
+            return some (jsonResp 200 (.obj #[("run_id", .str activeRunId), ("generation", JVal.nat activeGen)]))
+          | none =>
+            return some (jsonErr 409 "No active run on this computer")
         let runId ← match (reqJv.fieldStr? "run_id").bind parseUuidCanonical? with | some u => pure u | none => newUuidV4
-        let gen := (reqJv.fieldNat? "generation").getD 1
+        let reqGen := (reqJv.fieldNat? "generation").getD 0
+        let maxGen ← match ← execParamQuery store.missionsDb
+          "SELECT COALESCE(MAX(generation),0) FROM mission_runs WHERE mission_id=?1;" #[mid] with
+          | .ok rows =>
+            match rows[1]? with
+            | some row => pure (((row[0]?.getD "0").trimAscii.toString.toNat?).getD 0)
+            | none => pure 0
+          | .error _ => pure 0
+        let gen := if reqGen > maxGen then reqGen else maxGen + 1
         let nowIso := formatEpochIso8601Utc (← nowEpoch)
         if op == "begin" then
           let _ ← insertMissionRun store.missionsDb
             runId mid (toString gen) "running" "" "" nowIso true "orb-client"
+          let _ ← execParamStmt store.missionsDb
+            "UPDATE missions SET status='active', terminal_reason='', run_generation=CAST(?2 AS INTEGER), updated_at=?3, state_revision=state_revision+1 WHERE id=?1;"
+            #[mid, toString gen, nowIso]
+          publishControlEvent broadcastHub? "mission_status_changed" (renderCompact (.obj #[
+            ("type", .str "mission_status_changed"), ("mission_id", .str mid), ("status", .str "active"), ("updated_at", .str nowIso)
+          ])) (some mid)
           let prompt := (reqJv.fieldStr? "prompt").getD ""
           return some (jsonResp 200 (.obj #[("run_id", .str runId), ("generation", JVal.nat gen), ("prompt", .str prompt)]))
         return some (jsonResp 200 (.obj #[("run_id", .str runId), ("generation", JVal.nat gen)]))
@@ -3031,6 +3063,15 @@ def dispatchResourcesAndSystemRoute
         if (role != "user" && role != "assistant") || content.isEmpty then
           return some (jsonErr 400 "Valid role and non-empty content required")
         let evId ← match (reqJv.fieldStr? "id").bind parseUuidCanonical? with | some u => pure u | none => newUuidV4
+        let alreadyExists ← match ← execParamQuery store.missionsDb
+          "SELECT COUNT(*) FROM mission_events WHERE mission_id=?1 AND event_id=?2;" #[mid, evId] with
+          | .ok rows =>
+            match rows[1]? with
+            | some row => pure ((((row[0]?.getD "0").trimAscii.toString.toNat?).getD 0) > 0)
+            | none => pure false
+          | .error _ => pure false
+        if alreadyExists then
+          return some (jsonResp 200 (.obj #[("ok", .bool true), ("deduplicated", .bool true)]))
         let evType := if role == "user" then "user_message" else "assistant_message"
         let nowIso := formatEpochIso8601Utc (← nowEpoch)
         let payload := renderCompact (.obj #[("content", .str content), ("id", .str evId)])

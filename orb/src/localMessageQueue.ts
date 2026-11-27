@@ -533,10 +533,12 @@ export function startLocalQueueWorker(){
     // Begin observing output immediately. A slow transcript write must not hide it.
     const output=followLocal(row.mission,()=>{});
     const attemptRunId=row.receipt?.run_id;
-    const userSync=(nativeInvoke()?syncCoreOrSettleLocalOrigin(row.mission,()=>appendClientTranscript(row.mission,'user',row.text,row.id,row.receipt)):Promise.resolve(appendClientTranscript(row.mission,'user',row.text,row.id,row.receipt))).then(async()=>{
-     row.userSynced=true;
-     await update(key,row.id,stored=>{if(stored.receipt?.run_id===attemptRunId)stored.userSynced=true;});
-    }).catch(swallow("localQueue.syncUser", { mission: row.mission, message: row.id }));
+    const userSync=row.userSynced
+      ? Promise.resolve()
+      : (nativeInvoke()?syncCoreOrSettleLocalOrigin(row.mission,()=>appendClientTranscript(row.mission,'user',row.text,row.id,row.receipt)):Promise.resolve(appendClientTranscript(row.mission,'user',row.text,row.id,row.receipt))).then(async()=>{
+          row.userSynced=true;
+          await update(key,row.id,stored=>{if(stored.receipt?.run_id===attemptRunId)stored.userSynced=true;});
+        }).catch(swallow("localQueue.syncUser", { mission: row.mission, message: row.id }));
     const result=await output;await userSync;if(!valid())return;
     row={...row,result,resultId:crypto.randomUUID(),resultStatus:stopping.has(runKey)?'interrupted':undefined};
     await update(key,row.id,stored=>{stored.result=result;stored.resultId=row.resultId;stored.resultStatus=row.resultStatus;});

@@ -237,7 +237,10 @@ export function ChangeMachine(p: { mission: Mission; choices: HarnessChoice[]; c
   const stopSource = async () => {
     if (current().kind === "client") {
       await stopLocal(p.mission.id, { cancelWakeups: false });
-      const result = await pollLocal(p.mission.id);
+      const result = await pollLocal(p.mission.id).catch(error => {
+        if (/no local run/i.test(String(error))) return { done: true, text: "" };
+        throw error;
+      });
       if (!result.done) throw new Error("The local agent has not stopped yet.");
       // A normal completion handler may already have saved/settled this run.
       const latest = await getMission(p.mission.id, { includeHistory: false });
