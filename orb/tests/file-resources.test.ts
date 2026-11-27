@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import {
+  antigravityBrainReference,
   contextReferencePath,
   parseFileTarget,
   splitFileReferences,
@@ -122,6 +123,100 @@ describe("file references", () => {
         },
       ]);
     } finally {
+      globalThis.fetch = origFetch;
+    }
+  });
+  it("maps Antigravity brain artifact paths and rejects traversal", () => {
+    expect(
+      antigravityBrainReference(
+        "/home/thomas/.gemini/antigravity-cli/brain/a9d747d2-e45e-4308-b5e3-a79dd02188ce/razr_bonsai_demo.mp4",
+      ),
+    ).toEqual({
+      root: "/home/thomas/.gemini/antigravity-cli/brain/a9d747d2-e45e-4308-b5e3-a79dd02188ce",
+      rel: "razr_bonsai_demo.mp4",
+    });
+    expect(
+      antigravityBrainReference(
+        "/Users/thomas/.gemini/antigravity/brain/conv-1/scratch/clip.mp4",
+      ),
+    ).toEqual({
+      root: "/Users/thomas/.gemini/antigravity/brain/conv-1",
+      rel: "scratch/clip.mp4",
+    });
+    expect(
+      antigravityBrainReference(
+        "/home/thomas/.gemini/antigravity-cli/brain/conv-1/../../antigravity-oauth-token",
+      ),
+    ).toBeNull();
+    expect(antigravityBrainReference("/home/thomas/work/nixos/flake.nix")).toBeNull();
+  });
+  it("resolves local Antigravity brain file links via mounted local root without duplicates", async () => {
+    const { createFileClient } = await import("../src/fileResources");
+    const invokes: { cmd: string; args: Record<string, unknown> }[] = [];
+    const origTauri = (window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
+    const origFetch = globalThis.fetch;
+    (window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ = {
+      invoke: async (cmd: string, args: Record<string, unknown>) => {
+        invokes.push({ cmd, args });
+        const root = String(args.root ?? "");
+        const req = (args.request ?? {}) as { paths?: string[] };
+        if (root.endsWith("/brain/a9d747d2-e45e-4308-b5e3-a79dd02188ce")) {
+          return {
+            results: (req.paths ?? []).map((p) => ({
+              reference: p,
+              matches:
+                p === "razr_bonsai_demo.mp4"
+                  ? [{ name: "razr_bonsai_demo.mp4", path: "razr_bonsai_demo.mp4", kind: "file" }]
+                  : [],
+            })),
+          };
+        }
+        return {
+          results: (req.paths ?? []).map((p) => ({ reference: p, matches: [] })),
+        };
+      },
+    };
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify({ sources: [] }), { status: 200 })) as typeof fetch;
+    try {
+      const client = createFileClient({
+        mission: { id: "a90cca7c-d2b3-4512-9adc-6b32f135aef8" } as never,
+      });
+      await client.roots();
+      const wsRoot = client.mountLocalRoot("/home/thomas/work/nixos");
+      const raw =
+        "/home/thomas/.gemini/antigravity-cli/brain/a9d747d2-e45e-4308-b5e3-a79dd02188ce/razr_bonsai_demo.mp4";
+      const reply = await client.call(wsRoot.id, {
+        action: "resolve",
+        paths: [raw],
+      });
+      const mountedBrain = client
+        .currentSources()
+        .find((s) => s.local && s.path?.endsWith("/brain/a9d747d2-e45e-4308-b5e3-a79dd02188ce"));
+      expect(mountedBrain).toBeDefined();
+      expect(reply.results).toEqual([
+        {
+          reference: raw,
+          matches: [
+            {
+              name: "razr_bonsai_demo.mp4",
+              path: "razr_bonsai_demo.mp4",
+              kind: "file",
+              source: mountedBrain!.id,
+            },
+          ],
+        },
+      ]);
+      // Once mounted, resolving via the workspace root skips re-querying the brain root so there are no duplicate matches.
+      const before = invokes.length;
+      const second = await client.call(wsRoot.id, {
+        action: "resolve",
+        paths: [raw],
+      });
+      expect(second.results?.[0]?.matches).toEqual([]);
+      expect(invokes.slice(before).every((c) => c.args.root === "/home/thomas/work/nixos")).toBe(true);
+    } finally {
+      (window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ = origTauri;
       globalThis.fetch = origFetch;
     }
   });

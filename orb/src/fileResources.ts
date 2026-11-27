@@ -50,7 +50,7 @@ export interface FileRead {
 export interface FileReply {
   sources?: FileSource[];
   entries?: FileEntry[];
-  results?: { reference: string; matches: FileEntry[] }[];
+  results?: { reference: string; matches: (FileEntry & { source?: string })[] }[];
   content?: string | null;
   binary?: boolean;
   size?: number;
@@ -91,7 +91,7 @@ export function createFileClient(scope: FileScope) {
   let sources: FileSource[] = [];
   const customLocalRoots: FileSource[] = [];
   const artifacts = new Map<string, string>();
-  function mountLocalRoot(dir: string): FileSource {
+  function mountLocalRoot(dir: string, labelOverride?: string): FileSource {
     const norm = dir.replace(/\/+$/, "") || "/";
     const existing = [...sources, ...customLocalRoots].find(
       (s) => s.local && s.path?.replace(/\/+$/, "") === norm,
@@ -100,7 +100,7 @@ export function createFileClient(scope: FileScope) {
     const label = norm.split("/").filter(Boolean).at(-1) ?? norm;
     const root: FileSource = {
       id: `local-path-${customLocalRoots.length + 1}`,
-      label: `${label} · local`,
+      label: labelOverride ?? `${label} · local`,
       path: norm,
       available: true,
       local: true,
@@ -240,26 +240,111 @@ export function createFileClient(scope: FileScope) {
             ? stripRootPrefix(reference, root.path)
             : reference,
       );
-      const reply = await (root.local
-        ? (() => {
-            const invoke = nativeInvoke();
-            const localRoot = root.path ?? binding?.cwd;
-            if (!invoke || !localRoot)
-              throw new Error(
-                "Open this mission on the computer that started it",
-              );
-            return invoke<FileReply>("browse_local_files", {
+      if (root.local) {
+        const invoke = nativeInvoke();
+        const localRoot = root.path ?? binding?.cwd;
+        if (!invoke || !localRoot)
+          throw new Error(
+            "Open this mission on the computer that started it",
+          );
+        const brainEntries: { index: number; root: string; rel: string }[] = [];
+        const mainIndices: number[] = [];
+        const mainPaths: string[] = [];
+        const allowBrainFallback =
+          source === "local" ||
+          !sources.some((s) => s.id === "local" && s.available);
+        for (let i = 0; i < original.length; i++) {
+          const brain = allowBrainFallback
+            ? antigravityBrainReference(original[i])
+            : null;
+          if (
+            brain &&
+            !sources.some(
+              (s) => s.local && s.path?.replace(/\/+$/, "") === brain.root,
+            )
+          ) {
+            brainEntries.push({ index: i, ...brain });
+          } else {
+            mainIndices.push(i);
+            mainPaths.push(mapped[i]);
+          }
+        }
+        const results: {
+          reference: string;
+          matches: (FileEntry & { source?: string })[];
+        }[] = original.map((reference) => ({ reference, matches: [] }));
+        const tasks: Promise<void>[] = [];
+        if (mainPaths.length) {
+          tasks.push(
+            invoke<FileReply>("browse_local_files", {
               root: localRoot,
               request: {
                 path: "",
                 query: "",
                 offset: 0,
                 ...op,
-                paths: mapped,
+                paths: mainPaths,
               },
-            });
-          })()
-        : root.legacy && project
+            }).then((reply) => {
+              (reply.results ?? []).forEach((row, idx) => {
+                const origIdx = mainIndices[idx];
+                if (origIdx !== undefined) {
+                  results[origIdx] = {
+                    reference: original[origIdx],
+                    matches: row.matches ?? [],
+                  };
+                }
+              });
+            }),
+          );
+        }
+        if (brainEntries.length) {
+          const byBrainRoot = new Map<
+            string,
+            { index: number; rel: string }[]
+          >();
+          for (const entry of brainEntries) {
+            const list = byBrainRoot.get(entry.root) ?? [];
+            list.push({ index: entry.index, rel: entry.rel });
+            byBrainRoot.set(entry.root, list);
+          }
+          for (const [brainDir, items] of byBrainRoot) {
+            tasks.push(
+              invoke<FileReply>("browse_local_files", {
+                root: brainDir,
+                request: {
+                  path: "",
+                  query: "",
+                  offset: 0,
+                  ...op,
+                  paths: items.map((it) => it.rel),
+                },
+              })
+                .then((reply) => {
+                  let mounted: FileSource | undefined;
+                  (reply.results ?? []).forEach((row, idx) => {
+                    const item = items[idx];
+                    if (!item || !row.matches?.length) return;
+                    mounted ??= mountLocalRoot(brainDir, "Artifacts · local");
+                    results[item.index] = {
+                      reference: original[item.index],
+                      matches: row.matches.map((m) => ({
+                        ...m,
+                        source: mounted!.id,
+                      })),
+                    };
+                  });
+                })
+                .catch(() => {
+                  /* missing or ungranted brain folder never fails workspace resolution */
+                }),
+            );
+          }
+        }
+        await Promise.all(tasks);
+        return { results };
+      }
+      const reply = await (root.legacy && project
           ? (async () => ({
               results: await Promise.all(
                 mapped.map(async (reference) => {
@@ -402,7 +487,7 @@ export function createFileClient(scope: FileScope) {
     });
     return version === connectionVersion() ? result : null;
   }
-  return { roots, call, mountLocalRoot, loadUploadedImage, loadImage, imagePreview: (path: string) => version === connectionVersion() ? imagePreview(previewScope, path) : undefined };
+  return { roots, currentSources: () => [...sources], call, mountLocalRoot, loadUploadedImage, loadImage, imagePreview: (path: string) => version === connectionVersion() ? imagePreview(previewScope, path) : undefined };
 }
 /** Why a source cannot be read, in the user's terms. */
 export function unavailableReason(id: string, root?: FileSource): string {
@@ -421,6 +506,18 @@ function stripRootPrefix(reference: string, rootPath: string): string {
   if (normRoot && reference.startsWith(normRoot + "/"))
     return reference.slice(normRoot.length + 1);
   return reference;
+}
+/** Map local Antigravity brain artifact paths (`~/.gemini/antigravity(-cli)/brain/<id>/<rel>`) to their root + relative path. */
+export function antigravityBrainReference(
+  raw: string,
+): { root: string; rel: string } | null {
+  const clean = raw.replace(/\\/g, "/");
+  const m =
+    /^(\/(?:[^/]+\/)*\.gemini\/antigravity(?:-cli)?\/brain\/[^/]+)\/(.+)$/.exec(
+      clean,
+    );
+  if (!m || !m[2] || m[2].split("/").includes("..")) return null;
+  return { root: m[1], rel: m[2] };
 }
 /** Map materialized project-context replica paths (local, node, or container) back to project-relative paths. */
 export function contextReferencePath(

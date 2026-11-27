@@ -512,13 +512,17 @@ export function FilePanelProvider(p: {
                 for (const r of reply.results ?? [])
                   all.set(r.reference, [
                     ...(all.get(r.reference) ?? []),
-                    ...r.matches.map((m) => ({ ...m, source: root.id })),
+                    ...r.matches.map((m) => ({ ...m, source: m.source ?? root.id })),
                   ]);
               } catch {
                 /* unavailable sources never manufacture a link */
               }
             }),
         );
+      }
+      if (g === generation) {
+        const latest = c.currentSources();
+        if (latest.length !== sources().length) setSources(latest);
       }
       for (const [path, callbacks] of pending)
         callbacks.forEach((cb) =>
@@ -1505,13 +1509,15 @@ export function FilePanelProvider(p: {
                                   action: "resolve",
                                   paths: [path],
                                 })
-                                .then((r) =>
-                                  (r.results?.[0]?.matches ?? []).map((m) => ({
+                                .then((r) => {
+                                  const latest = client.currentSources();
+                                  if (latest.length !== sources().length) setSources(latest);
+                                  return (r.results?.[0]?.matches ?? []).map((m) => ({
                                     ...m,
-                                    source: ref.source,
+                                    source: m.source ?? ref.source,
                                     line: target.line,
-                                  })),
-                                );
+                                  }));
+                                });
                             },
                           }}
                         >

@@ -452,6 +452,43 @@ private def runDesktopReliabilityParityChecksPart1 (pDir : System.FilePath) (val
      | _ => false)
   if (← assertTrue "canonical_confinement_blocks_symlink_escape_and_slash_root" confOk) then passed := passed + 1
 
+  -- A2. Antigravity brain root confinement + binary file preview in `browse_local_files`
+  let agyCliDir := pDir / "home" / ".gemini" / "antigravity-cli"
+  let agyBrainConv := agyCliDir / "brain" / "a9d747d2-e45e-4308-b5e3-a79dd02188ce"
+  IO.FS.createDirAll agyBrainConv
+  IO.FS.writeFile (agyCliDir / "antigravity-oauth-token") "SECRET_TOKEN"
+  IO.FS.writeBinFile (agyBrainConv / "razr_bonsai_demo.mp4") (ByteArray.mk #[0x00, 0x00, 0x00, 0x18, 0x66, 0x74, 0x79, 0x70])
+  let rejAgyParent ← dispatchRpcCommand stConfRef "browse_local_files" (.obj #[
+    ("root", .str agyCliDir.toString),
+    ("request", .obj #[("action", .str "list"), ("path", .str "")])
+  ])
+  let okBrainResolve ← dispatchRpcCommand stConfRef "browse_local_files" (.obj #[
+    ("root", .str agyBrainConv.toString),
+    ("request", .obj #[("action", .str "resolve"), ("paths", .arr #[.str "razr_bonsai_demo.mp4"])])
+  ])
+  let okBrainBinaryRead ← dispatchRpcCommand stConfRef "browse_local_files" (.obj #[
+    ("root", .str agyBrainConv.toString),
+    ("request", .obj #[("action", .str "read"), ("path", .str "razr_bonsai_demo.mp4")])
+  ])
+  total := total + 1
+  let brainOk :=
+    rejAgyParent.isOk.not &&
+    (match okBrainResolve with
+     | .ok jv =>
+       match jv.fieldArr? "results" with
+       | some #[row] =>
+         match row.fieldArr? "matches" with
+         | some #[m] => m.fieldStr? "name" == some "razr_bonsai_demo.mp4"
+         | _ => false
+       | _ => false
+     | _ => false) &&
+    (match okBrainBinaryRead with
+     | .ok jv =>
+       jv.fieldBool? "binary" == some true &&
+       jv.fieldNat? "size" == some 8
+     | _ => false)
+  if (← assertTrue "antigravity_brain_browse_and_binary_read" brainOk) then passed := passed + 1
+
   -- B. Concurrent upload batch UUIDs: cancelling batch 1 does NOT revoke batch 2 from the same directory
   let batchDir := pDir / "shared-batch-dir"
   IO.FS.createDirAll batchDir
