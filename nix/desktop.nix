@@ -50,6 +50,7 @@ stdenv.mkDerivation {
     makeBinaryWrapper "$out/bin/.orb-webkit" "$out/bin/orb-webkit" \
       --set ORB_LOCALD_BIN "${core}/bin/orb-locald" --set ORB_UI_ROOT "${webUi}"
     install -m 0644 "$src/nix/orb-desktop.hyprland.conf" "$out/share/orb-desktop/hyprland.conf"
+    install -m 0644 "$src/nix/orb-desktop.hyprland.lua" "$out/share/orb-desktop/hyprland.lua"
     cat > "$out/bin/orb-desktop" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail

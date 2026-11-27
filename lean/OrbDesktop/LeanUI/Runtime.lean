@@ -811,9 +811,9 @@ def runWindow {σ : Type} (rt0 : RuntimeState σ)
         let animWaitMs : IO UInt64 := do
           let rem := 16 - (← IO.monoMsNow) % 16
           return (if rem == 0 then 16 else rem).toUInt64
-        if deferredByFrameCb then
-          if animationVisible rt then timedWait (← animWaitMs)
-          else timedWait 0xffffffff
+        -- A deferred frame resumes on `wl_callback.done`, so an animation needs no timer here:
+        -- an occluded window (no frame callbacks) must not wake 60 times a second.
+        if deferredByFrameCb then timedWait 0xffffffff
         else if !workPending rt.app then
           if animationVisible rt then timedWait (← animWaitMs)
           else if hasProducer rt.app then timedWait 0xffffffff else Wayland.waitEvents rt.wayland

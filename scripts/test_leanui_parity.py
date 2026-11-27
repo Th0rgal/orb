@@ -21,7 +21,7 @@ class ParityTests(unittest.TestCase):
     def test_split_diff_uses_shaped_code_runs(self):
         source = (ROOT / 'lean/OrbDesktop/OrbDesktop/Screens.lean').read_text()
         self.assertIn(
-            'buildSplitDiffRightPane theme rightW splitH runs.diffDelRuns runs.diffAddRuns',
+            'buildSplitDiffRightPane st.theme rightW splitH runs.diffDelRuns runs.diffAddRuns',
             source,
         )
         self.assertIn('shapedCodeLine halfW h codeL codeRunsL', source)

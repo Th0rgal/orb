@@ -73,8 +73,9 @@ def lowerScene (vw vh : Nat) (scene : Scene) : LoweredFrame := Id.run do
   let mut ops : Array RenderOp := #[]
   let mut clipStack : List Rect := [vp]
   let mut rclipStack : List UInt32 := [0]
-  -- Layer stack tracks (slot, opacity, clampedClip, skipped)
-  let mut layerStack : List (Nat × Nat × Rect × Bool) := []
+  -- Layer stack tracks (slot, opacity, clampedClip, skipped, rounded clips active at the push).
+  -- Those clips are set aside while the layer is drawn and applied once, by its composite.
+  let mut layerStack : List (Nat × Nat × Rect × Bool × List UInt32) := []
   let mut skipDepth : Nat := 0
   let mut needsLayers := false
   let mut needsBlur := false
@@ -112,14 +113,17 @@ def lowerScene (vw vh : Nat) (scene : Scene) : LoweredFrame := Id.run do
       let depth := layerStack.length
       if skipDepth > 0 || clamped.isEmpty || depth >= 4 then
         skipDepth := skipDepth + 1
-        layerStack := (depth, min opacity 255, clamped, true) :: layerStack
+        layerStack := (depth, min opacity 255, clamped, true, rclipStack) :: layerStack
       else
         needsLayers := true
         ops := ops.push (.layerPush depth clamped)
-        layerStack := (depth, min opacity 255, clamped, false) :: layerStack
+        layerStack := (depth, min opacity 255, clamped, false, rclipStack) :: layerStack
+      rclipStack := [0]
     | .layerPop =>
-      if let (slot, opacity, clamped, skipped) :: rest := layerStack then
+      if let (slot, opacity, clamped, skipped, outerRClips) :: rest := layerStack then
         layerStack := rest
+        rclipStack := outerRClips
+        let curRClip := outerRClips.head?.getD 0
         if skipped then
           skipDepth := skipDepth - 1
         else

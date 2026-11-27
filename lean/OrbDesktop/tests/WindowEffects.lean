@@ -24,6 +24,8 @@ def main : IO Unit := do
   let lightEff := Theme.withWindowEffects orbLightTheme
   check ((darkEff.palette.sidebar &&& 0xFF) == 199) "dark sidebar alpha must be 199 (78%)"
   check ((lightEff.palette.sidebar &&& 0xFF) == 184) "light sidebar alpha must be 184 (72%)"
+  check (darkEff.palette.sidebar >>> 8 == 0x121313 && lightEff.palette.sidebar >>> 8 == 0xF6F6F4)
+    "frosted sidebar tint must be the raw --bg-sidebar token (#121313 dark, #f6f6f4 light)"
   check ((darkEff.palette.canvas &&& 0xFF) == 255 && (darkEff.palette.header &&& 0xFF) == 255)
     "dark main surface must be 100% solid (255)"
   check ((lightEff.palette.canvas &&& 0xFF) == 255 && (lightEff.palette.header &&& 0xFF) == 255)

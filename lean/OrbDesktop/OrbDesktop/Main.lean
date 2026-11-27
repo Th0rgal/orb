@@ -261,6 +261,13 @@ private partial def scrollRegionsOf (b : ComputedBox) : List Runtime.ScrollRegio
     [{ id, bounds := b.contentRectSub, limitY, offsetY := (b.scrollOffset.getD (0, 0)).2, textLines := lines }]
   | _, _ => b.children.flatMap scrollRegionsOf
 
+/-- Regions of the visible running (`loader`) mission rows. An overlay that takes over input keeps
+    them beneath its full-window backdrop region: `hitTest` never returns them, and the spinner tick
+    still finds the rows it has to repaint. -/
+private def runningRowRegions (st : DesktopState) (regions : List (EntityId × Rect)) : List (EntityId × Rect) :=
+  regions.filter fun (id, _) => st.sidebarRows.any fun row =>
+    row.widgetId == id && row.kind == "mission" && liveBadgeKind row.status == "loader"
+
 /-- Render one frame of `DesktopState` via `OrbDesktop.buildDesktopScreen`, `Layout.layoutNode`,
 `Scene.buildSceneFromLayout`, and HarfBuzz/FreeType glyph shaping (`shapeDesktopRuns` + `Text.layoutTextRun`). -/
 def renderDesktopView (rt : Runtime.RuntimeState DesktopState) :
@@ -328,7 +335,7 @@ def renderDesktopView (rt : Runtime.RuntimeState DesktopState) :
     let overlay := buildSceneFromLayout sc rt.focus theme widget box (recordNodes := false) (focusVisible := rt.focusVisible)
     let outside : Rect := { x := 0, y := 0, w := availW, h := availH }
     return ((ac7.finishUploads, if liveWindow then 0 else pal.canvas, sceneOut.prims ++ clipOverlay overlay.prims,
-      (719, outside) :: overlay.hitRegionsSub, overlay.focusableOrder), [])
+      runningRowRegions st sceneOut.hitRegionsSub ++ (719, outside) :: overlay.hitRegionsSub, overlay.focusableOrder), [])
   if let .searchPalette spec := st.modal then
     let overRaw := buildSearchModalOverlay theme availW availH spec st.searchFilterTab
       st.searchProjectFilter st.searchTimeFilter st.searchSortOrder (!st.liveData) st.searchBuffer
@@ -340,10 +347,11 @@ def renderDesktopView (rt : Runtime.RuntimeState DesktopState) :
     let modalPrims :=
       let inner := sceneOut.prims ++ #[.backdropBlur (scaleSubPx sc (pxToSub 6))] ++ overScene.prims
       if liveWindow then
-        #[.layerPush 255] ++ inner ++ #[.clipPushRounded winClipRect winRadii, .layerPop, .clipPop]
+        #[.clipPushRounded winClipRect winRadii, .layerPush 255] ++ inner ++ #[.layerPop, .clipPop]
       else inner
     return ((ac7.finishUploads, clearColor, modalPrims,
-      (searchBackdropId, outside) :: overScene.hitRegionsSub, overScene.focusableOrder), [])
+      runningRowRegions st sceneOut.hitRegionsSub ++ (searchBackdropId, outside) :: overScene.hitRegionsSub,
+      overScene.focusableOrder), [])
   if !st.writeError.isEmpty then
     let w := min availW (pxToSub 440)
     let h := pxToSub 40
@@ -907,10 +915,11 @@ def liveViewportRegression : Bool := Id.run do
     atBottom.hitRegions.any (·.1 == 2)
 
 /-- Native U8 window-effects & badge parity self-test: checks live surface alphas (frosted sidebar
-    78% dark / 72% light, 100% solid main pane), 12px rounded window corners (including backdrop-blur
-    search modal via rounded-clipped `layerPop`), 60-step 4-quadrant active spinner + paused/Bot
+    78% dark / 72% light, 100% solid main pane), 12px rounded window corners (including the
+    backdrop-blur search modal, clipped once where its layer is composited), 60-step 4-quadrant active spinner + paused/Bot
     badges, 0-pixel-diff pure `--leanui` vs hybrid `EmbeddedSidebar` parity, and Vulkan 1.3 GPU
-    readback parity when an ICD is available. -/
+    readback parity when an ICD is available (`ORB_REQUIRE_WINDOW_EFFECTS_GPU=1` makes a missing
+    device a failure, so CI cannot skip it). -/
 def windowEffectsSelfTest : IO Unit := do
   let check (cond : Bool) (msg : String) : IO Unit := do
     unless cond do throw (IO.userError msg)
@@ -943,18 +952,20 @@ def windowEffectsSelfTest : IO Unit := do
     let availW := pxToSub logW
     let availH := pxToSub logH
     let theme := Theme.withWindowEffects st.theme
+    let spec : SearchDialogSpec := { inputWidgetId := 700, query := "u8", items := [] }
+    let st := if withModal then { st with modal := .searchPalette spec } else st
     let (ac1, tree) ← shapeStub ({ pageWidth := 1024, pageHeight := 1024, pad := 1 }) sc (buildDesktopScreen st availW availH {} true)
     let box := layoutNode sc none theme.palette.focusRing 0 0 availW availH tree.toLayoutNode
     let out := buildSceneFromLayout sc {} theme tree box (recordNodes := false)
     if !withModal then return (bw, bh, ac1.finishUploads, out.prims)
-    let overRaw := buildSearchModalOverlay theme availW availH { inputWidgetId := 700, query := "u8", items := [] } "All" "All projects" "Any time" "relevance" false {}
+    let overRaw := buildSearchModalOverlay theme availW availH spec "All" "All projects" "Any time" "relevance" false {}
     let (ac2, overTree) ← shapeStub ac1 sc overRaw
     let overBox := layoutNode sc none theme.palette.focusRing 0 0 availW availH overTree.toLayoutNode
     let overOut := buildSceneFromLayout sc {} theme overTree overBox (recordNodes := false)
     let winRect : Rect := ⟨0, 0, Int.ofNat bw, Int.ofNat bh⟩
     let winRad := scaleSubPx sc (pxToSub 12)
     let inner := out.prims ++ #[.backdropBlur (scaleSubPx sc (pxToSub 6))] ++ overOut.prims
-    return (bw, bh, ac2.finishUploads, #[.layerPush 255] ++ inner ++ #[.clipPushRounded winRect (winRad, winRad, winRad, winRad), .layerPop, .clipPop])
+    return (bw, bh, ac2.finishUploads, #[.clipPushRounded winRect (winRad, winRad, winRad, winRad), .layerPush 255] ++ inner ++ #[.layerPop, .clipPop])
   -- 1. Surface alphas, premultiplication, 12px corners (normal & backdrop-blur modal), dark/light × 1x/2x
   for isDark in [true, false] do
     let expSb : UInt8 := if isDark then 199 else 184
@@ -978,6 +989,19 @@ def windowEffectsSelfTest : IO Unit := do
     let (fbM, _) := Vulkan.rasterizeScene bw bh 0 acM primsM
     for (cx, cy) in [(0, 0), (bw - 1, 0), (0, bh - 1), (bw - 1, bh - 1)] do
       check (pxAt fbM bw cx cy == (0, 0, 0, 0)) s!"modal blur corner ({cx},{cy}) leaked (dark={isDark})"
+    -- The blur must not drag the transparent window corners into the solid main pane.
+    for (cx, cy) in [(bw - 14, 14), (bw - 20, 6), (bw - 6, 20), (bw - 14, bh - 15), (bw - 6, bh - 21)] do
+      let (_, _, _, a) := pxAt fbM bw cx cy
+      check (a == 255) s!"modal blur thinned the main pane at ({cx},{cy}): alpha={a} (dark={isDark})"
+  -- A rounded clip around an opacity layer attenuates its edge once, not once per nesting level.
+  let raster (scene : Scene) : Array UInt8 :=
+    (Vulkan.rasterizeScene 64 64 0 { pageWidth := 1024, pageHeight := 1024, pad := 1 } scene).1.data
+  let clip : Prim := .clipPushRounded ⟨8, 8, 48, 48⟩ (12, 12, 12, 12)
+  let fill : Prim := .rrect ⟨0, 0, 64, 64⟩ 0xFFFFFFFF (0, 0, 0, 0) (0, 0, 0, 0) 0
+  let flat := raster #[clip, fill, .clipPop]
+  check (flat.any fun a => a > 0 && a < 255) "rounded clip fixture has no anti-aliased edge"
+  check (raster #[clip, .layerPush 255, fill, .layerPop, .clipPop] == flat)
+    "a rounded clip around a layer must clip it once, exactly like the same fill without the layer"
   -- 2. Active 4-quadrant rotation, stationary paused bars, and awaiting_user Bot fallback
   let rasterLead (status : String) (phase : Nat) : IO ByteArray := do
     let (ac, n) ← shapeStub ({ pageWidth := 1024, pageHeight := 1024, pad := 1 }) 120 (liveMissionLead orbDarkTheme status phase)
@@ -1050,6 +1074,8 @@ def windowEffectsSelfTest : IO Unit := do
             check (pxAt gpuFb bw cx cy == (0, 0, 0, 0)) s!"GPU corner ({cx},{cy}) not transparent (modal={withModal})"
     finally
       Vk.destroyOffscreenReadback (← rbRef.get)
+  else if (← IO.getEnv "ORB_REQUIRE_WINDOW_EFFECTS_GPU") == some "1" then
+    throw (IO.userError "no Vulkan device for the GPU window-effects readback")
 
 /-- `--self-test`: check live viewports, embedded palette, window effects, and quiescent rendering. -/
 def runSelfTest (cfg : Runtime.RuntimeConfig) (initSt : DesktopState) : IO UInt32 := do
@@ -1075,7 +1101,26 @@ def runSelfTest (cfg : Runtime.RuntimeConfig) (initSt : DesktopState) : IO UInt3
   let rt0 := { rt0Raw with focus := initSt.initialFocusState }
   let mut rt ← Runtime.stepFrame rt0 (desktopReducer rt0) renderDesktopFrame
   rt ← Runtime.stepFrame rt (desktopReducer rt) renderDesktopFrame
+  -- An overlay owns the pointer, yet a running row beneath it keeps its spinner region.
+  let running : DesktopState := { DesktopState.liveUnavailable cfg.darkTheme cfg.scale120 with
+    expandedProjects := ["orb"], screen := .controlEmpty
+    sidebarRows :=
+      [ { widgetId := 130, rowId := "project:orb", kind := "project", depth := 0, title := "Orb" }
+      , { widgetId := 1001, rowId := "mission:m-active", kind := "mission", depth := 1, title := "Active", status := "active" } ] }
+  let mut overlayFault : Option String := none
+  for (name, over, backdrop) in
+      [ ("mission menu", { running with missionMenu := some { mission := "", x := 0, y := 0 } }, 719)
+      , ("search modal", { running with modal := .searchPalette defaultSearchDialogSpec }, searchBackdropId) ] do
+    let ((_, _, _, regions, _), _) ← renderDesktopView { rt with app := over }
+    match (runningRowRegions over regions).head? with
+    | none => overlayFault := some s!"{name} hides the running row from the spinner tick"
+    | some (_, row) =>
+      if hitTest regions row.x row.y != some backdrop then
+        overlayFault := some s!"{name} lets the pointer reach the row beneath it"
   Runtime.shutdownRuntime rt
+  if let some fault := overlayFault then
+    IO.eprintln s!"orb-desktop self-test: {fault}"
+    return 1
   if rt.framesRendered != 1 || rt.quiescentSkips < 1 then
     IO.eprintln s!"orb-desktop self-test: frames={rt.framesRendered}, skips={rt.quiescentSkips}"
     return 1
@@ -1085,11 +1130,8 @@ def runSelfTest (cfg : Runtime.RuntimeConfig) (initSt : DesktopState) : IO UInt3
 /-- Device-pixel damage covering every visible running (`loader`) mission row, or `none` when no
     spinner is on screen, so a spinner tick repaints only those rows. -/
 private def runningBadgeDamage (rt : Runtime.RuntimeState DesktopState) : Damage :=
-  rt.app.sidebarRows.foldl (fun damage row =>
-    if row.kind != "mission" || liveBadgeKind row.status != "loader" then damage else
-      match rt.hitRegions.find? (·.1 == row.widgetId) with
-      | none => damage
-      | some (_, rect) => Damage.add damage (roundRect rt.wayland.scale120 rect)) none
+  (runningRowRegions rt.app rt.hitRegions).foldl
+    (fun damage (_, rect) => Damage.add damage (roundRect rt.wayland.scale120 rect)) none
 
 /-- Main entry point for `OrbDesktop`. -/
 def main (args : List String) : IO UInt32 := do

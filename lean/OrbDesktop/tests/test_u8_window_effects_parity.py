@@ -8,7 +8,7 @@ fixture with active, paused, completed, failed, and awaiting_user missions.
 
 Verifies:
 1. Wayland `xdg_toplevel.set_app_id` == `"orb-desktop"` (parity with WebKit/hybrid
-   and `nix/orb-desktop.hyprland.conf`).
+   and `nix/orb-desktop.hyprland.{conf,lua}`).
 2. `wl_shm_pool.create_buffer` uses premultiplied `WL_SHM_FORMAT_ARGB8888` (`0`).
 3. Live premultiplied `ARGB8888` surfaces match WebKit/hybrid Linux alphas:
    - dark: sidebar `199/255` (78%), main canvas/header `255/255` (100% solid)
@@ -31,6 +31,7 @@ from http.server import ThreadingHTTPServer
 import json
 import os
 from pathlib import Path
+import re
 import struct
 import subprocess
 import sys
@@ -39,21 +40,21 @@ import threading
 import time
 import unittest
 
-try:
-    import numpy as np
-    from PIL import Image, ImageFilter
-    HAS_IMAGE_DEPS = True
-except ModuleNotFoundError:
-    np = Image = ImageFilter = None
-    HAS_IMAGE_DEPS = False
+import numpy as np
+from PIL import Image, ImageFilter
 
 
 ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import test_wayland_u6_session as u6  # noqa: E402
 
+CSS = (ROOT / "orb/src/styles.css").read_text(encoding="utf-8")
+
 # Main-pane rectangle (x0, y0, x1, y1) covered by the Ctrl+K search modal at 960x640.
 MODAL_REGION = (240, 80, 760, 520)
+# Its upper band is empty main pane: the scrim covers it, and the composer controls below, which
+# repaint when the startup model and machine fetches land, never reach it.
+MODAL_BACKDROP_BAND = (240, 80, 760, 220)
 # Status badge of the first (active) mission row in the sidebar at 960x640.
 ACTIVE_BADGE_REGION = (14, 320, 36, 346)
 
@@ -81,6 +82,19 @@ class U8WaylandCompositor(u6.WaylandTestCompositor):
         self.scale120 = scale120
         self.frame_history: list[bytes] = []
         super().__init__(runtime_dir, display_name, width=width, height=height)
+
+    def restart_frame_history(self) -> None:
+        with self._lock:
+            self.frame_history.clear()
+
+    def frames(self) -> list[bytes]:
+        """Committed frames since the last restart, oldest first (the serving thread appends them)."""
+        with self._lock:
+            return list(self.frame_history)
+
+    def frame(self) -> tuple[bytes, int, int]:
+        with self._lock:
+            return self.last_frame_bytes, self.last_frame_w, self.last_frame_h
 
     def _handle_request(self, obj_id: int, opcode: int, body: bytes, fds: list[int]) -> None:
         iface = self._objects.get(obj_id, "")
@@ -119,7 +133,7 @@ def bgra_premul_to_rgba_array(raw: bytes, w: int, h: int) -> "np.ndarray":
 def hyprland_vibrancy_composite(fg_premul_rgba: "np.ndarray", pad: int = 36) -> "Image.Image":
     """Composite a premultiplied RGBA window over a colorful wallpaper using Hyprland's blur+vibrancy model.
 
-    Matches `nix/orb-desktop.hyprland.conf`: `size=10, passes=3, vibrancy=0.25, vibrancy_darkness=0.25`.
+    Uses the optional blur tuning from `docs/ui/leanui-hyprland.md`: `size=10, passes=3, vibrancy=0.25, vibrancy_darkness=0.25`.
     """
     h, w, _ = fg_premul_rgba.shape
     cw, ch = w + 2 * pad, h + 2 * pad
@@ -152,21 +166,40 @@ def hyprland_vibrancy_composite(fg_premul_rgba: "np.ndarray", pad: int = 36) -> 
     return Image.fromarray(canvas, "RGB")
 
 
+def linux_tokens(is_dark: bool) -> dict[str, str]:
+    """Custom properties the WebKit client resolves on Linux: `:root`, then the theme and the
+    platform overrides of `orb/src/styles.css`, in cascade order."""
+    selectors = [":root"]
+    if not is_dark:
+        selectors.append(':root[data-theme="light"]')
+    selectors.append(':root[data-platform="linux"]')
+    if not is_dark:
+        selectors.append(':root[data-platform="linux"][data-theme="light"]')
+    tokens: dict[str, str] = {}
+    for selector in selectors:
+        block = re.search(r"^" + re.escape(selector) + r"\s*\{([^}]*)\}", CSS, re.M)
+        if block is None:
+            raise AssertionError(f"styles.css has no `{selector}` block")
+        tokens.update((name, value.strip()) for name, value in re.findall(r"(--[\w-]+)\s*:\s*([^;]+);", block.group(1)))
+    return tokens
+
+
+def premultiplied(tokens: dict[str, str], color: str, opacity: str | None = None) -> tuple[int, int, int, int]:
+    """`var(color)`, or `color-mix(in srgb, var(color) var(opacity), transparent)`, as a
+    premultiplied RGBA pixel."""
+    rgb = tokens[color].lstrip("#")
+    alpha = 255 if opacity is None else round(float(tokens[opacity].rstrip("%")) * 255 / 100)
+    return tuple((int(rgb[i : i + 2], 16) * alpha + 127) // 255 for i in (0, 2, 4)) + (alpha,)
+
+
 def build_webkit_reference_surface(w: int, h: int, is_dark: bool, sidebar_w: int = 220, radius: int = 12) -> "np.ndarray":
-    """Build the exact WebKit/hybrid Linux reference premultiplied RGBA surface mask from `orb/src/styles.css`."""
-    sb_rgb = (18, 19, 19) if is_dark else (249, 249, 247)
-    sb_a = 199 if is_dark else 184
-    main_rgb = (20, 20, 20) if is_dark else (255, 255, 255)
-    sep_rgb = (44, 44, 44) if is_dark else (232, 231, 226)
+    """Build the WebKit/hybrid Linux reference premultiplied RGBA surface from `orb/src/styles.css`:
+    `.sidebar` and `.main` backgrounds, the sidebar's `--stroke-soft` right border, 12px corners."""
+    tokens = linux_tokens(is_dark)
     surf = np.zeros((h, w, 4), dtype=np.uint8)
-    surf[:, : sidebar_w - 1, 0] = (sb_rgb[0] * sb_a + 127) // 255
-    surf[:, : sidebar_w - 1, 1] = (sb_rgb[1] * sb_a + 127) // 255
-    surf[:, : sidebar_w - 1, 2] = (sb_rgb[2] * sb_a + 127) // 255
-    surf[:, : sidebar_w - 1, 3] = sb_a
-    surf[:, sidebar_w - 1 : sidebar_w, :3] = sep_rgb
-    surf[:, sidebar_w - 1 : sidebar_w, 3] = 255
-    surf[:, sidebar_w:, :3] = main_rgb
-    surf[:, sidebar_w:, 3] = 255
+    surf[:, : sidebar_w - 1] = premultiplied(tokens, "--bg-sidebar", "--sidebar-opacity")
+    surf[:, sidebar_w - 1 : sidebar_w] = premultiplied(tokens, "--stroke-soft")
+    surf[:, sidebar_w:] = premultiplied(tokens, "--bg", "--surface-opacity")
     yy, xx = np.mgrid[0:h, 0:w].astype(np.float32) + 0.5
     hx, hy = w / 2.0, h / 2.0
     qx = np.maximum(np.abs(xx - hx) - hx + radius, 0.0)
@@ -287,16 +320,14 @@ class U8WindowEffectsParityTests(unittest.TestCase):
                 h_badge = comp.wait_region_change(*ACTIVE_BADGE_REGION, h_badge, timeout=10.0)
                 comp.wait_region_change(*ACTIVE_BADGE_REGION, h_badge, timeout=10.0)
                 # Collect live 60fps active-spinner frames.
-                comp.frame_history.clear()
-                u6._wait_until("active spinner frames", lambda: len(comp.frame_history) >= 8)
-                normal_frames = list(comp.frame_history)
-                normal_frame = comp.last_frame_bytes
-                w, h = comp.last_frame_w, comp.last_frame_h
+                comp.restart_frame_history()
+                normal_frames = u6._wait_until("active spinner frames", lambda: len(fs := comp.frames()) >= 8 and fs)
+                normal_frame, w, h = comp.frame()
 
                 # Open Search modal (Ctrl+K) with backdrop blur + scrim and verify corners remain transparent.
                 # The running badge commits a frame every 16 ms, so a whole-frame hash changes before the
-                # modal paints. Watch the modal region, which the sidebar spinner never touches.
-                h_before_modal = comp.region_hash(*MODAL_REGION)
+                # modal paints. Watch the main pane, which the sidebar spinner never touches.
+                h_before_modal = comp.region_hash(*MODAL_BACKDROP_BAND)
                 t_modal = time.monotonic()
                 comp.key_tap("k", u6.MOD_CTRL)
                 comp.wait_text_input(True, timeout=5.0)
@@ -306,18 +337,18 @@ class U8WindowEffectsParityTests(unittest.TestCase):
                 ref_center = bgra_premul_to_rgba_array(normal_frame, w, h)[my0:my1, mx0:mx1].astype(int)
 
                 def modal_painted():
-                    cur = bgra_premul_to_rgba_array(comp.last_frame_bytes, w, h)[my0:my1, mx0:mx1].astype(int)
+                    cur = bgra_premul_to_rgba_array(comp.frame()[0], w, h)[my0:my1, mx0:mx1].astype(int)
                     return float(np.abs(cur - ref_center).mean()) > 5.0
 
                 with contextlib.suppress(TimeoutError):
                     u6._wait_until("backdrop-blur search modal frame", modal_painted, timeout=10.0)
                 print(f"U8 modal latency: {(time.monotonic() - t_modal) * 1000:.0f} ms", file=sys.stderr)
-                modal_frame = comp.last_frame_bytes
+                modal_frame = comp.frame()[0]
                 comp.key_tap("esc", 0)
                 # Search results can repaint the modal after its first frame, so wait for the
                 # pre-modal pixels themselves instead of for any change.
                 u6._wait_until("Esc restores the pre-modal main pane",
-                               lambda: comp.region_hash(*MODAL_REGION) == h_before_modal)
+                               lambda: comp.region_hash(*MODAL_BACKDROP_BAND) == h_before_modal)
 
                 comp.send_close()
                 rc = proc.wait(timeout=10)
@@ -345,11 +376,11 @@ class U8WindowEffectsParityTests(unittest.TestCase):
                 comp.close()
                 server.shutdown()
 
-    @unittest.skipUnless(HAS_IMAGE_DEPS, "requires numpy and Pillow")
     def test_01_live_wayland_dark_light_transparency_corners_badges_and_side_by_side(self) -> None:
         for is_dark in (True, False):
             tag = "dark" if is_dark else "light"
-            exp_sb_alpha = 199 if is_dark else 184
+            exp_sb_alpha = premultiplied(linux_tokens(is_dark), "--bg-sidebar", "--sidebar-opacity")[3]
+            self.assertEqual(exp_sb_alpha, 199 if is_dark else 184)
             res = self._run_session(is_dark=is_dark, width=960, height=640)
             w, h = res["width"], res["height"]
             self.assertEqual((w, h), (960, 640))
@@ -378,6 +409,9 @@ class U8WindowEffectsParityTests(unittest.TestCase):
             for cx, cy in ((0, 0), (w - 1, 0), (0, h - 1), (w - 1, h - 1)):
                 self.assertEqual(tuple(int(v) for v in modal_rgba[cy, cx]), (0, 0, 0, 0),
                                  f"{tag} modal corner ({cx},{cy}) leaked blur/scrim")
+            # Its blur must not thin the solid main pane next to the rounded corners.
+            for cx, cy in ((w - 14, 14), (w - 6, 20), (w - 14, h - 15), (w - 6, h - 21)):
+                self.assertEqual(int(modal_rgba[cy, cx, 3]), 255, f"{tag} modal blur thinned the main pane at ({cx},{cy})")
             mx0, my0, mx1, my1 = MODAL_REGION
             modal_diff = float(np.abs(modal_rgba[my0:my1, mx0:mx1].astype(int) - rgba[my0:my1, mx0:mx1].astype(int)).mean())
             self.assertGreater(modal_diff, 5.0, f"{tag} Ctrl+K search modal did not render visibly (mean diff={modal_diff})")
@@ -406,6 +440,8 @@ class U8WindowEffectsParityTests(unittest.TestCase):
             # 6. Side-by-side Hyprland vibrancy composite vs WebKit/hybrid Linux reference surface
             ref_rgba = build_webkit_reference_surface(w, h, is_dark)
             self.assertEqual(int(rgba[540, 12, 3]), int(ref_rgba[540, 12, 3]))
+            sb_tint_delta = int(np.abs(rgba[540, 12].astype(int) - ref_rgba[540, 12].astype(int)).max())
+            self.assertLessEqual(sb_tint_delta, 1, f"{tag} sidebar tint {tuple(rgba[540, 12])} != {tuple(ref_rgba[540, 12])}")
             self.assertEqual(int(rgba[320, 500, 3]), int(ref_rgba[320, 500, 3]))
             self.assertEqual(int(rgba[0, 0, 3]), int(ref_rgba[0, 0, 3]))
             lean_comp = hyprland_vibrancy_composite(rgba)

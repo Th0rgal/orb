@@ -1384,7 +1384,7 @@ def buildDesktopScreen (st : DesktopState) (availW availH : SubPx)
             [leftTranscript, leftComposer]
         let rightPane : WidgetNode :=
           if st.sidePanelTab == "diff" then
-            buildSplitDiffRightPane theme rightW splitH runs.diffDelRuns runs.diffAddRuns st.diffMode st.diffRef true st.diffRefreshCount
+            buildSplitDiffRightPane st.theme rightW splitH runs.diffDelRuns runs.diffAddRuns st.diffMode st.diffRef true st.diffRefreshCount
           else
             let title := if st.sidePanelTab == "files" then "Files" else "Side question"
             let bodyMsg := if st.sidePanelTab == "files" then "Workspace files for this mission" else "Ask a side question without interrupting the main turn"
@@ -1430,9 +1430,9 @@ def buildDesktopScreen (st : DesktopState) (availW availH : SubPx)
           [leftTranscript, leftComposer]
       let rightPane :=
         if st.diffMode == "split" && st.diffRef == "Working tree vs HEAD" && st.diffRefreshCount == 0 then
-          buildSplitDiffRightPane theme rightW splitH runs.diffDelRuns runs.diffAddRuns
+          buildSplitDiffRightPane st.theme rightW splitH runs.diffDelRuns runs.diffAddRuns
         else
-          buildSplitDiffRightPane theme rightW splitH runs.diffDelRuns runs.diffAddRuns st.diffMode st.diffRef false st.diffRefreshCount
+          buildSplitDiffRightPane st.theme rightW splitH runs.diffDelRuns runs.diffAddRuns st.diffMode st.diffRef false st.diffRefreshCount
       let splitBody : WidgetNode :=
         WidgetNode.box
           (BoxStyle.row 0 |>.withFixedSize mainW splitH |>.withBg st.theme.palette.canvas)
@@ -1529,7 +1529,9 @@ def buildDesktopScreen (st : DesktopState) (availW availH : SubPx)
       (BoxStyle.row 0 |>.withFixedSize availW availH |>.withBg (if windowEffects then 0 else pal.canvas))
       (if st.sidebarHidden then [rightColumn] else [sidebarNode, rightColumn])
 
-  if windowEffects then
+  -- Under the search modal the window is rounded once, where its blurred layer is composited:
+  -- corners cut here would be transparent texels that the backdrop blur drags into the main pane.
+  if windowEffects && !(st.modal matches .searchPalette _) then
     WidgetNode.roundedClip
       (BoxStyle.row 0 |>.withFixedSize availW availH)
       (CornerRadii.uniform (pxToSub 12))
