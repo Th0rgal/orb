@@ -12,6 +12,7 @@ import OrbBin.PosixExt
 import OrbBin.Json
 import OrbNode.Spec
 import OrbNode.Posix
+import OrbNode.AutoUpdate
 import OrbNode.Lease
 import OrbNode.Store
 import OrbNode.LeanBuild
@@ -55,6 +56,10 @@ structure NodeConfig where
     "LEAN_NUM_THREADS", "LAKE_JOBS", "TURBO_LEAN_MAX_MEMORY_MB", "TURBO_LEAN_NO_AUDIT_CACHE"
   ]
   managedAuth         : ManagedAuthConfig := {}
+  autoUpdateEnabled   : Bool := true
+  autoUpdateStateDir  : String := ""
+  autoUpdatePollSecs  : Nat := 60
+  coreUrl?            : Option String := none
   deriving Repr, Inhabited
 
 def parseBindAddr (raw : String) : String × UInt16 :=
@@ -307,6 +312,17 @@ def loadConfigFromEnv : IO NodeConfig := do
   let capacitySettings := match resolvedSettings with
     | .ok settings => settings
     | .error _ => baseSettings
+  let autoUpdateDisabled :=
+    match (← IO.getEnv "SANDBOXED_NODE_AUTO_UPDATE") with
+    | some v =>
+      let lv := v.trimAscii.toString.toLower
+      lv == "0" || lv == "false" || lv == "no"
+    | none => false
+  let autoUpdateStateDir ← OrbNode.AutoUpdate.defaultStateDir workDir
+  let autoUpdatePollSecs := max 5 (((← IO.getEnv "SANDBOXED_NODE_UPDATE_POLL_SECS") >>= String.toNat?).getD 60)
+  let coreUrl? :=
+    ((← IO.getEnv "SANDBOXED_NODE_CORE_URL").orElse (fun _ => none)).map (·.trimAscii.toString)
+      |>.filter (!·.isEmpty)
   let cfg : NodeConfig := {
     bindHost := host
     bindPort := port
@@ -330,6 +346,10 @@ def loadConfigFromEnv : IO NodeConfig := do
     minFreeDiskBytes := capacitySettings.minFreeDiskBytes
     envAllowlist := allowKeys
     managedAuth := managedAuth
+    autoUpdateEnabled := !autoUpdateDisabled
+    autoUpdateStateDir := autoUpdateStateDir
+    autoUpdatePollSecs := autoUpdatePollSecs
+    coreUrl? := coreUrl?
   }
   return cfg
 
@@ -1577,6 +1597,9 @@ def buildHeartbeatJson (rt : NodeRuntime) : IO JVal := do
   let advAuth ← advertisedManagedAuth rt.cfg.managedAuth
   let buildSha ← resolveNodeBuildSha
   let binShas ← collectNodeBinaryShas
+  let cliVers ← if rt.cfg.autoUpdateStateDir.isEmpty then pure #[] else OrbNode.AutoUpdate.collectLocalCliVersions rt.cfg.autoUpdateStateDir
+  let autoUpdateSt ← if rt.cfg.autoUpdateStateDir.isEmpty then pure ({} : OrbNode.AutoUpdate.AutoUpdateState)
+    else OrbNode.AutoUpdate.loadAutoUpdateState rt.cfg.autoUpdateStateDir
   let buildVal : JVal := if buildSha.isEmpty then .null else .str buildSha
   return .obj #[
     ("resource_history", .arr #[]),
@@ -1589,6 +1612,8 @@ def buildHeartbeatJson (rt : NodeRuntime) : IO JVal := do
     ("build", buildVal),
     ("build_sha", buildVal),
     ("binary_sha256", binShas),
+    ("cli_versions", OrbNode.AutoUpdate.cliVersionsToJson cliVers),
+    ("auto_update", autoUpdateSt.toJson),
     ("protocol_version", JVal.nat 5),
     ("labels", .arr (labels.map .str)),
     ("cpu_total", JVal.nat st.cpuTotal.toNat),
@@ -1731,6 +1756,12 @@ private def prepareJobOutsideLockInner
         artifacts := arts.filterMap JVal.asStr?
     else
       envPairs ← prepareSharedMissionEnv cfg.workDir missionDir
+      if !cfg.autoUpdateStateDir.isEmpty then
+        let toolsBin := OrbNode.AutoUpdate.managedToolsBinDir cfg.autoUpdateStateDir
+        if ← (System.FilePath.mk toolsBin).pathExists then
+          let curPath := (envPairs.find? (fun (k, _) => k == "PATH")).map Prod.snd |>.getD "/usr/local/bin:/usr/bin:/bin"
+          if !(curPath.startsWith (toolsBin ++ ":")) then
+            envPairs := mergeEnvPair envPairs "PATH" s!"{toolsBin}:{curPath}"
       envPairs := mergeEnvPair envPairs "SANDBOXED_MISSION_ID" missionId
       envPairs := mergeEnvPair envPairs "SANDBOXED_JOB_ID" jid
       if let some envObj := (payload.field? "env") >>= JVal.asObj? then

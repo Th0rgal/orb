@@ -7,6 +7,7 @@
     prompt on stdin, streamed `session/update` lines on stdout (`--probe` checks support).
 -/
 import OrbNode.Posix
+import OrbNode.AutoUpdate
 import OrbNode.Store
 import OrbNode.Dial
 import OrbNode.Runner
@@ -108,6 +109,14 @@ def runCli (args : List String) : IO UInt32 := do
     if uid == 0 && !cfg.allowRoot then
       IO.eprintln "refusing to run sandboxed-node as UID 0 without SANDBOXED_NODE_ALLOW_ROOT=1"
       return 1
+    if cfg.autoUpdateEnabled && !cfg.autoUpdateStateDir.isEmpty then
+      match ← OrbNode.AutoUpdate.handleStartupUpdateCheck cfg.autoUpdateStateDir with
+      | .trampoline stagedPath =>
+        let _ ← OrbNode.Posix.execv stagedPath args.toArray
+        IO.eprintln s!"failed to exec staged sandboxed-node at {stagedPath}; falling back to base binary"
+      | .rolledBack reason =>
+        IO.eprintln s!"[sandboxed-node] recovered from failed update on startup ({reason})"
+      | .normal => pure ()
     let dialCred? ← match ← OrbNode.Dial.enrollFromEnv with
       | .ok c? => pure c?
       | .error err =>

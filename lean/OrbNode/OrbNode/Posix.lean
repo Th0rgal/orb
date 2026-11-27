@@ -41,6 +41,9 @@ opaque pollPid (pid : UInt64) : IO UInt64
 @[extern "orb_node_kill_pgrp"]
 opaque killPgrp (pid : UInt64) (sig : UInt32) : IO Unit
 
+@[extern "orb_node_execv"]
+opaque execv (prog : @& String) (args : @& Array String) : IO UInt32
+
 structure HostStats where
   cpuTotal       : UInt32
   memTotalBytes  : UInt64

@@ -409,6 +409,9 @@ set_build sandboxed-sh-prod "$SHA"; systemctl daemon-reload
 install -m 755 "$BIN" /usr/local/bin/orb-core.new && mv /usr/local/bin/orb-core.new /usr/local/bin/orb-core
 install -m 755 "$NODE_BIN" "$GUEST_NODE.new"
 mv "$GUEST_NODE.new" "$GUEST_NODE"
+mkdir -p "/usr/local/share/orb/releases/$SHA/bin"
+install -m 755 "$NODE_BIN" "/usr/local/share/orb/releases/$SHA/bin/sandboxed-node.new"
+mv "/usr/local/share/orb/releases/$SHA/bin/sandboxed-node.new" "/usr/local/share/orb/releases/$SHA/bin/sandboxed-node"
 GUEST_NODE_BUILD_SHA256="$(sha256sum "$NODE_BIN" | cut -d' ' -f1)"
 GUEST_NODE_SERVED_SHA256="$(sha256sum "$GUEST_NODE" | cut -d' ' -f1)"
 say "sandboxed-node guest sha256 served=$GUEST_NODE_SERVED_SHA256 built=$GUEST_NODE_BUILD_SHA256 commit=$SHA"
