@@ -40,6 +40,10 @@ def runStreaming : IO Unit := do
   runProtocolIncrementalRelay
   runMultiToolCutRecovery
   runPreCommitRecovery
+  runAnthropicServerToolTests
+  runPreCommitTimeoutClassification
+  runPinnedStreamNoFailover
+  runLargeIncrementalStreamBeyondCap
 where
  runRelayCut (withTool : Bool) : IO Unit := do
   -- The test client alone releases the upstream. A buffered relay cannot
@@ -378,6 +382,99 @@ where
   check (aComplete && (← aEmitted.get) == aExpected && aCopy == aExpected)
     s!"anthropic tool_use with input_json_delta must close cleanly after toolu_1 and drop toolu_2: complete={aComplete} body={String.fromUTF8? aCopy}"
 
+  -- (3) OpenAI Responses function_call cut recovery:
+  --     - preserves response.id from `response.created` and emits `event: response.completed`
+  --     - matches `output_item.added` (empty id) to `output_item.done` (populated id) via `output_index`
+  --     - drops unfinished second `function_call` item cleanly
+  --     - also verifies a Chat Completions tool named `"functionCall"` does NOT misclassify as Gemini.
+  let respCreated := "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_cut_42\",\"status\":\"in_progress\"}}\n\n"
+  let respTool1 :=
+    "event: response.output_item.added\ndata: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"function_call\",\"id\":\"\",\"call_id\":\"call_r1\",\"name\":\"bash\",\"arguments\":\"\"}}\n\n" ++
+    "event: response.function_call_arguments.delta\ndata: {\"type\":\"response.function_call_arguments.delta\",\"output_index\":0,\"delta\":\"{\\\"cmd\\\":\\\"ls\\\"}\"}\n\n" ++
+    "event: response.output_item.done\ndata: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"function_call\",\"id\":\"fc_1\",\"call_id\":\"call_r1\",\"name\":\"bash\",\"arguments\":\"{\\\"cmd\\\":\\\"ls\\\"}\"}}\n\n"
+  let respTool2Cut :=
+    "event: response.output_item.added\ndata: {\"type\":\"response.output_item.added\",\"output_index\":1,\"item\":{\"type\":\"function_call\",\"id\":\"fc_2\",\"call_id\":\"call_r2\",\"name\":\"bash\",\"arguments\":\"\"}}\n\n" ++
+    "event: response.function_call_arguments.delta\ndata: {\"type\":\"response.function_call_arguments.delta\",\"output_index\":1,\"delta\":\"{\\\"cmd\\\":\"}\n\n"
+  let respFinish :=
+    "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_cut_42\",\"status\":\"completed\"}}\n\n"
+  let .ok (rLfd, rPort) ← tcpListen "127.0.0.1" 0 4 | throw (IO.userError "responses tool cut: listen failed")
+  let rUpstream ← IO.asTask (prio := .dedicated) do
+    if let .ok cfd ← tcpAcceptPoll rLfd 5000 then
+      discard <| pollReadable cfd 2000
+      discard <| readStreamChunk cfd 65536
+      discard <| writeAll cfd (("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n" ++
+        "Transfer-Encoding: chunked\r\n\r\n").toUTF8 ++ encodeHttpChunk (respCreated ++ respTool1 ++ respTool2Cut).toUTF8) false
+      discard <| closeFd cfd
+    discard <| closeFd rLfd
+  let rCh : RoutingChain := {
+    id := "resp-tool", name := "resp-tool",
+    targets := #[{ accountId := "resp-tool", provider := "openai", baseUrl := s!"http://127.0.0.1:{rPort}", apiKey := "k", modelId := "m" }]
+  }
+  let rOut ← forwardProxyChain rCh "POST" "/v1/responses" #[] "{\"model\":\"m\",\"stream\":true}".toUTF8
+  let some rPump := rOut.stream? | throw (IO.userError "responses tool cut: missing pump")
+  let rEmitted ← IO.mkRef ByteArray.empty
+  let (rCopy, rComplete) ← rPump fun piece => do
+    rEmitted.modify (· ++ piece)
+    return true
+  IO.ofExcept rUpstream.get
+  let rExpected := (respCreated ++ respTool1 ++ respFinish).toUTF8
+  check (rComplete && (← rEmitted.get) == rExpected && rCopy == rExpected)
+    s!"responses tool_call cut must preserve response.id and close after output_index 0: complete={rComplete} body={String.fromUTF8? rCopy}"
+
+  let namedTool := "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_fc\",\"function\":{\"name\":\"functionCall\",\"arguments\":\"{}\"}}]}}]}\n\n"
+  let .ok (fcLfd, fcPort) ← tcpListen "127.0.0.1" 0 4 | throw (IO.userError "named functionCall tool: listen failed")
+  let fcUpstream ← IO.asTask (prio := .dedicated) do
+    if let .ok cfd ← tcpAcceptPoll fcLfd 5000 then
+      discard <| pollReadable cfd 2000
+      discard <| readStreamChunk cfd 65536
+      discard <| writeAll cfd (("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n" ++
+        "Transfer-Encoding: chunked\r\n\r\n").toUTF8 ++ encodeHttpChunk namedTool.toUTF8) false
+      discard <| closeFd cfd
+    discard <| closeFd fcLfd
+  let fcCh : RoutingChain := {
+    id := "fc-tool", name := "fc-tool",
+    targets := #[{ accountId := "fc-tool", provider := "openai", baseUrl := s!"http://127.0.0.1:{fcPort}", apiKey := "k", modelId := "m" }]
+  }
+  let fcOut ← forwardProxyChain fcCh "POST" "/v1/chat/completions" #[] "{\"model\":\"m\",\"stream\":true}".toUTF8
+  let some fcPump := fcOut.stream? | throw (IO.userError "named functionCall tool: missing pump")
+  let (fcCopy, fcComplete) ← fcPump (fun _ => pure true)
+  IO.ofExcept fcUpstream.get
+  check (fcComplete && fcCopy == (namedTool ++ finish).toUTF8)
+    s!"chat tool literally named functionCall must close as chat completions, not Gemini: {String.fromUTF8? fcCopy}"
+
+  -- (4) Anthropic zero-argument `tool_use` sending empty `"partial_json": ""` must keep `"{}"`
+  --     intact so both the zero-arg tool and subsequent complete tools close cleanly.
+  let anthZero :=
+    "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_zero\",\"name\":\"get_time\",\"input\":{}}}\n\n" ++
+    "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"\"}}\n\n" ++
+    "data: {\"type\":\"content_block_stop\",\"index\":0}\n\n"
+  let anthArg :=
+    "data: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_arg\",\"name\":\"bash\",\"input\":{}}}\n\n" ++
+    "data: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"cmd\\\":\\\"pwd\\\"}\"}}\n\n" ++
+    "data: {\"type\":\"content_block_stop\",\"index\":1}\n\n"
+  let anthCut2 :=
+    "data: {\"type\":\"content_block_start\",\"index\":2,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_cut\",\"name\":\"bash\",\"input\":{}}}\n\n" ++
+    "data: {\"type\":\"content_block_delta\",\"index\":2,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"cmd\\\":\"}}\n\n"
+  let .ok (zLfd, zPort) ← tcpListen "127.0.0.1" 0 4 | throw (IO.userError "anth zero-arg: listen failed")
+  let zUpstream ← IO.asTask (prio := .dedicated) do
+    if let .ok cfd ← tcpAcceptPoll zLfd 5000 then
+      discard <| pollReadable cfd 2000
+      discard <| readStreamChunk cfd 65536
+      discard <| writeAll cfd (("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n" ++
+        "Transfer-Encoding: chunked\r\n\r\n").toUTF8 ++ encodeHttpChunk (anthZero ++ anthArg ++ anthCut2).toUTF8) false
+      discard <| closeFd cfd
+    discard <| closeFd zLfd
+  let zCh : RoutingChain := {
+    id := "anth-zero", name := "anth-zero",
+    targets := #[{ accountId := "anth-zero", provider := "anthropic", baseUrl := s!"http://127.0.0.1:{zPort}", apiKey := "k", modelId := "m" }]
+  }
+  let zOut ← forwardProxyChain zCh "POST" "/v1/messages" #[] "{\"model\":\"m\",\"stream\":true}".toUTF8
+  let some zPump := zOut.stream? | throw (IO.userError "anth zero-arg: missing pump")
+  let (zCopy, zComplete) ← zPump (fun _ => pure true)
+  IO.ofExcept zUpstream.get
+  check (zComplete && zCopy == (anthZero ++ anthArg ++ anthFinish).toUTF8)
+    s!"anthropic zero-arg tool_use with empty partial_json must preserve both complete tools and drop toolu_cut: complete={zComplete} body={String.fromUTF8? zCopy}"
+
  runPreCommitRecovery : IO Unit := do
   -- Cut BEFORE any client-committed output (after leading keepalive comment + role-only + partial tool call):
   -- retry 0 tries same provider (returns 503), then falls back to t2 (cuts pre-commit),
@@ -469,6 +566,238 @@ where
   let some attRef := out.streamAttemptsRef? | throw (IO.userError "pre-commit recovery: missing attempts ref")
   check ((← selRef.get) == "t3" && (← attRef.get) == 3)
     s!"pre-commit recovery metadata expected account=t3 attempts=3, got account={← selRef.get} attempts={← attRef.get}"
+
+ runAnthropicServerToolTests : IO Unit := do
+  -- (a) Anthropic `server_tool_use` `input_json_delta` must NOT block subsequent `text_delta`
+  --     from streaming incrementally before upstream release.
+  let serverToolPrefix :=
+    "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_srv_1\"}}\n\n" ++
+    "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"server_tool_use\",\"id\":\"srvtoolu_1\",\"name\":\"web_search\",\"input\":{}}}\n\n" ++
+    "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"query\\\":\\\"orb\\\"}\"}}\n\n" ++
+    "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n"
+  let visibleText :=
+    "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"server-tool-answer\"}}\n\n"
+  let endFrames :=
+    "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n\n" ++
+    "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
+  let release ← IO.Promise.new
+  let .ok (lfd, port) ← tcpListen "127.0.0.1" 0 4 | throw (IO.userError "anth server_tool_use: listen failed")
+  let upstream ← IO.asTask (prio := .dedicated) do
+    if let .ok cfd ← tcpAcceptPoll lfd 5000 then
+      discard <| pollReadable cfd 2000
+      discard <| readStreamChunk cfd 65536
+      discard <| writeAll cfd (("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n" ++
+        "Transfer-Encoding: chunked\r\n\r\n").toUTF8 ++
+        encodeHttpChunk serverToolPrefix.toUTF8 ++ encodeHttpChunk visibleText.toUTF8) false
+      discard <| IO.wait release.result?
+      discard <| writeAll cfd (encodeHttpChunk endFrames.toUTF8 ++ encodeHttpChunk ByteArray.empty) false
+      discard <| closeFd cfd
+    discard <| closeFd lfd
+  let ch : RoutingChain := {
+    id := "srv-tool", name := "srv-tool",
+    targets := #[{ accountId := "srv-tool", provider := "anthropic", baseUrl := s!"http://127.0.0.1:{port}", apiKey := "k", modelId := "m" }]
+  }
+  let out ← forwardProxyChain ch "POST" "/v1/messages" #[] "{\"model\":\"m\",\"stream\":true}".toUTF8
+  let some pump := out.stream? | throw (IO.userError "anth server_tool_use: missing pump")
+  let .ok (cLfd, cPort) ← tcpListen "127.0.0.1" 0 1 | throw (IO.userError "anth server_tool_use: client listen")
+  let .ok client ← tcpConnect "127.0.0.1" cPort | throw (IO.userError "anth server_tool_use: client connect")
+  let .ok downstream ← tcpAcceptPoll cLfd 2000 | throw (IO.userError "anth server_tool_use: client accept")
+  discard <| closeFd cLfd
+  let relay ← IO.asTask (prio := .dedicated) do
+    try pump fun piece => do return (← writeAll downstream piece false).isOk
+    finally discard <| closeFd downstream
+  let expectedHead := (serverToolPrefix ++ visibleText).toUTF8
+  let mut gotHead := ByteArray.empty
+  try
+    while gotHead.size < expectedHead.size do
+      unless (← pollReadable client 5000).isOk do break
+      let part ← readStreamChunk client 65536
+      if part.isEmpty then break
+      gotHead := gotHead ++ part
+    check (gotHead == expectedHead) "anthropic server_tool_use must not block delayed text_delta before release"
+  finally
+    release.resolve ()
+  let mut rest := ByteArray.empty
+  while true do
+    unless (← pollReadable client 5000).isOk do break
+    let part ← readStreamChunk client 65536
+    if part.isEmpty then break
+    rest := rest ++ part
+  discard <| closeFd client
+  let (_, complete) ← IO.ofExcept relay.get
+  IO.ofExcept upstream.get
+  check (complete && rest == endFrames.toUTF8) "anthropic server_tool_use completes cleanly after release"
+
+  -- (b) Cut during/after `server_tool_use` before any visible `text_delta` or client `tool_use`
+  --     must NOT fabricate `stop_reason: "tool_use"`; it must retry cleanly into attempt 2.
+  let retryOk :=
+    "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"retried-clean\"}}\n\n" ++
+    endFrames
+  let .ok (c2Lfd, c2Port) ← tcpListen "127.0.0.1" 0 4 | throw (IO.userError "anth server_tool_use cut: listen failed")
+  let c2Hits ← IO.mkRef (0 : Nat)
+  let c2Up ← IO.asTask (prio := .dedicated) do
+    if let .ok cfd1 ← tcpAcceptPoll c2Lfd 5000 then
+      c2Hits.modify (· + 1)
+      discard <| pollReadable cfd1 2000
+      discard <| readStreamChunk cfd1 65536
+      discard <| writeAll cfd1 (("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n" ++
+        "Transfer-Encoding: chunked\r\n\r\n").toUTF8 ++ encodeHttpChunk serverToolPrefix.toUTF8) false
+      discard <| closeFd cfd1
+    if let .ok cfd2 ← tcpAcceptPoll c2Lfd 5000 then
+      c2Hits.modify (· + 1)
+      discard <| pollReadable cfd2 2000
+      discard <| readStreamChunk cfd2 65536
+      discard <| writeAll cfd2 (("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n" ++
+        "Transfer-Encoding: chunked\r\n\r\n").toUTF8 ++ encodeHttpChunk retryOk.toUTF8 ++ encodeHttpChunk ByteArray.empty) false
+      discard <| closeFd cfd2
+    discard <| closeFd c2Lfd
+  let c2Ch : RoutingChain := {
+    id := "srv-tool-cut", name := "srv-tool-cut",
+    targets := #[{ accountId := "srv-tool-cut", provider := "anthropic", baseUrl := s!"http://127.0.0.1:{c2Port}", apiKey := "k", modelId := "m" }]
+  }
+  let c2Out ← forwardProxyChain c2Ch "POST" "/v1/messages" #[] "{\"model\":\"m\",\"stream\":true}".toUTF8
+  let some c2Pump := c2Out.stream? | throw (IO.userError "anth server_tool_use cut: missing pump")
+  let (c2Copy, c2Complete) ← c2Pump (fun _ => pure true)
+  IO.ofExcept c2Up.get
+  check (c2Complete && c2Copy == retryOk.toUTF8 && (← c2Hits.get) == 2)
+    s!"cut after server_tool_use must retry instead of fabricating stop_reason=tool_use: hits={← c2Hits.get} body={String.fromUTF8? c2Copy}"
+
+ runPreCommitTimeoutClassification : IO Unit := do
+  -- Pre-commit idle timeout on attempt 1 followed by failed recovery probe (503) must preserve
+  -- `proxy_outcomes.status = "upstream_idle_timeout"` (not overwrite `bodyTimedOutRef` with false).
+  let .ok (uLfd, uPort) ← tcpListen "127.0.0.1" 0 4 | throw (IO.userError "pre-commit timeout: listen failed")
+  let upstream ← IO.asTask (prio := .dedicated) do
+    if let .ok ufd1 ← tcpAcceptPoll uLfd 5000 then
+      discard <| pollReadable ufd1 2000
+      discard <| readStreamChunk ufd1 65536
+      let roleOnly := "data: {\"choices\":[{\"delta\":{\"role\":\"assistant\"}}]}\n\n"
+      discard <| writeAll ufd1 (("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n" ++
+        "Transfer-Encoding: chunked\r\n\r\n").toUTF8 ++ encodeHttpChunk roleOnly.toUTF8) false
+      -- Stall past idleMs (150ms), then close cleanly on a background task so retry accept proceeds.
+      discard <| IO.asTask (prio := .dedicated) do
+        IO.sleep 1500
+        discard <| closeFd ufd1
+    if let .ok ufd2 ← tcpAcceptPoll uLfd 5000 then
+      discard <| pollReadable ufd2 2000
+      discard <| readStreamChunk ufd2 65536
+      discard <| writeAll ufd2 "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 12\r\n\r\n{\"e\":\"busy\"}".toUTF8 false
+      discard <| closeFd ufd2
+    discard <| closeFd uLfd
+  let root := s!"/tmp/orb-precommit-to-{← newUuidV4}"
+  let .ok store ← openCoreStore root | throw (IO.userError "pre-commit timeout: openCoreStore failed")
+  try
+    let managed ← IO.mkRef ({} : ManagedFleetState)
+    let chains ← IO.mkRef #[({
+      id := "pre-to", name := "pre-to",
+      targets := #[{ accountId := "pre-to-acct", provider := "openai", baseUrl := s!"http://127.0.0.1:{uPort}", apiKey := "k", modelId := "m" }]
+    } : RoutingChain)]
+    let cooldowns ← IO.mkRef (#[] : Array AccountCooldown)
+    let seq ← IO.mkRef (1 : UInt64)
+    let cfg : CoreConfig := {
+      workingDir := root
+      dashboardPassword := "pre-to-pass-1234"
+      proxySecret := "pre-to-secret-0123456789"
+      jwtSecret := "pre-to-jwt-secret-0123456789"
+    }
+    let app : CoreAppState := {
+      cfg := cfg, store := store, searchIdx? := none,
+      managedRef := managed, chainsRef := chains,
+      proxyCooldownsRef := cooldowns, seqRef := seq,
+      proxyStreamLimits? := some { idleMs := 150, totalMs := 10000, preHeadBudgetMs := 5000 }
+    }
+    let .ok (cLfd, cPort) ← tcpListen "127.0.0.1" 0 4 | throw (IO.userError "pre-commit timeout: client listen failed")
+    let srv ← IO.asTask (prio := .dedicated) do
+      if let .ok sfd ← tcpAcceptPoll cLfd 5000 then
+        handleClientConn app sfd false
+      discard <| closeFd cLfd
+    let reqBody := "{\"model\":\"pre-to\",\"stream\":true}"
+    let reqWire := s!"POST /v1/chat/completions HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {cfg.proxySecret}\r\nContent-Length: {reqBody.utf8ByteSize}\r\n\r\n{reqBody}"
+    if let .ok cfd ← tcpConnect "127.0.0.1" cPort then
+      discard <| writeAll cfd reqWire.toUTF8 false
+      let mut done := false
+      while !done do
+        match ← pollReadable cfd 5000 with
+        | .ok () =>
+          let part ← readStreamChunk cfd 65536
+          if part.isEmpty then done := true
+        | .error _ => done := true
+      discard <| closeFd cfd
+    let _ := srv.get
+    let _ := upstream.get
+    let .ok rows ← execParamQuery store.missionsDb
+        "SELECT status, http_status FROM proxy_outcomes ORDER BY id DESC LIMIT 1;" #[]
+      | throw (IO.userError "pre-commit timeout: query proxy_outcomes failed")
+    check (rows.size > 1 && rows[1]! == #["upstream_idle_timeout", "200"])
+      s!"pre-commit idle timeout followed by failed recovery probe must record upstream_idle_timeout: {rows}"
+  finally
+    closeCoreStore store
+    discard <| (IO.FS.removeDirAll root).toBaseIO
+
+ runPinnedStreamNoFailover : IO Unit := do
+  -- `headersAlreadyCommitted = true` + pinned account (`SM-21` sticky fence) must never retry
+  -- or fail over to an unpinned target when the pinned account cuts before visible text.
+  let .ok (lfdA, portA) ← tcpListen "127.0.0.1" 0 4 | throw (IO.userError "pinned stream: listenA failed")
+  let .ok (lfdB, portB) ← tcpListen "127.0.0.1" 0 4 | throw (IO.userError "pinned stream: listenB failed")
+  let hitsA ← IO.mkRef (0 : Nat)
+  let hitsB ← IO.mkRef (0 : Nat)
+  let upA ← IO.asTask (prio := .dedicated) do
+    if let .ok cfd ← tcpAcceptPoll lfdA 5000 then
+      hitsA.modify (· + 1)
+      discard <| pollReadable cfd 2000
+      discard <| readStreamChunk cfd 65536
+      let roleOnly := "data: {\"choices\":[{\"delta\":{\"role\":\"assistant\"}}]}\n\n"
+      discard <| writeAll cfd (("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n" ++
+        "Transfer-Encoding: chunked\r\n\r\n").toUTF8 ++ encodeHttpChunk roleOnly.toUTF8) false
+      discard <| closeFd cfd
+    discard <| closeFd lfdA
+  let upB ← IO.asTask (prio := .dedicated) do
+    if let .ok cfd ← tcpAcceptPoll lfdB 10000 then
+      discard <| pollReadable cfd 2000
+      unless (← readStreamChunk cfd 65536).isEmpty do
+        hitsB.modify (· + 1)
+        discard <| writeAll cfd "HTTP/1.1 200 OK\r\nContent-Length: 9\r\n\r\nunpinned!".toUTF8 false
+      discard <| closeFd cfd
+    discard <| closeFd lfdB
+  let pinChain : RoutingChain := {
+    id := "pin-stream", name := "pin-stream",
+    targets := #[
+      { accountId := "acct_A", provider := "openai", baseUrl := s!"http://127.0.0.1:{portA}", apiKey := "kA", modelId := "mA" },
+      { accountId := "acct_B", provider := "openai", baseUrl := s!"http://127.0.0.1:{portB}", apiKey := "kB", modelId := "mB" }
+    ]
+  }
+  let out ← forwardProxyChain pinChain "POST" "/v1/chat/completions" #[]
+    "{\"model\":\"pin-stream\",\"stream\":true}".toUTF8
+    (headersAlreadyCommitted := true) (pinnedAccount? := some "acct_A")
+  let some pump := out.stream? | throw (IO.userError "pinned stream: missing pump")
+  let (_, complete) ← pump (fun _ => pure true)
+  if let .ok wake ← tcpConnect "127.0.0.1" portB then discard <| closeFd wake
+  IO.ofExcept upA.get
+  IO.ofExcept upB.get
+  check (!complete && (← hitsA.get) == 1 && (← hitsB.get) == 0)
+    s!"pinned committed stream must never fail over to unpinned target: complete={complete} hitsA={← hitsA.get} hitsB={← hitsB.get}"
+
+ runLargeIncrementalStreamBeyondCap : IO Unit := do
+  -- Incrementally flushed streams exceeding `maxCopyBytes` must retain complete SSE tail frames
+  -- so `recoverBufferedStream`, `classifyProxyStreamOutcome`, and `extractProxyUsage` stay healthy.
+  let chunk := "data: {\"choices\":[{\"delta\":{\"content\":\"0123456789abcdef0123456789abcdef\"}}]}\n\n"
+  let finalFrame := "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":12,\"completion_tokens\":99}}\n\ndata: [DONE]\n\n"
+  let emittedCount ← IO.mkRef (0 : Nat)
+  let rawPump : BodyPump := fun emit => do
+    for _ in [0:12] do
+      if !(← emit chunk.toUTF8) then return (ByteArray.empty, false)
+    if !(← emit finalFrame.toUTF8) then return (ByteArray.empty, false)
+    return (ByteArray.empty, true)
+  let (copy, ok) ← recoverBufferedStream "text/event-stream" rawPump (pure ()) (fun _ => pure none) none
+    (fun piece => do
+      if !piece.isEmpty then emittedCount.modify (· + piece.size)
+      return true)
+    (maxCopyBytes := 512)
+  let totalSent := chunk.utf8ByteSize * 12 + finalFrame.utf8ByteSize
+  let streamClass := classifyProxyStreamOutcome "text/event-stream" true copy ok false
+  let usage := extractProxyUsage copy
+  check (ok && copy.size ≤ 512 && (← emittedCount.get) == totalSent &&
+      streamClass == "ok" && usage.input == 12 && usage.output == 99)
+    s!"stream exceeding maxCopyBytes must finish ok with bounded head+tail copy and intact usage: ok={ok} copySize={copy.size} sent={← emittedCount.get}/{totalSent} class={streamClass} usage=({usage.input},{usage.output})"
 
 def runStreamingPumpContracts : IO Unit := do
   let failures ← IO.mkRef (#[] : Array String)
