@@ -4873,6 +4873,30 @@ structure MissionEventsPage where
 def transcriptSpineEventTypes : Array String :=
   #["user_message", "assistant_message", "assistant_message_canonical", "todo", "error"]
 
+/-- Fast O(log N) sequence metadata for a mission using the existing `(mission_id, seq)`
+    and `(mission_id, sequence)` indexes. Returns `(maxSeq, useIndexedSequence)` where
+    `useIndexedSequence` is true iff every row of this mission has `sequence > 0` and
+    `seq` never exceeds `sequence`, allowing `queryMissionEventsPage` and
+    `queryMissionSyncReplayFrames` to scan `idx_events_mission` directly without a
+    full-mission table scan or `TEMP B-TREE FOR ORDER BY`. -/
+private def queryMissionSeqMeta (db : SqliteDb) (missionId : String) : IO (Except String (UInt64 × Bool)) := do
+  let sql :=
+    "SELECT " ++
+    "COALESCE((SELECT MAX(seq) FROM mission_events WHERE mission_id=?1 AND seq>0), 0), " ++
+    "COALESCE((SELECT MAX(sequence) FROM mission_events WHERE mission_id=?1), 0), " ++
+    "EXISTS(SELECT 1 FROM mission_events WHERE mission_id=?1 AND sequence IS NULL), " ++
+    "EXISTS(SELECT 1 FROM mission_events WHERE mission_id=?1 AND sequence<=0);"
+  let res ← execParamQuery db sql #[missionId]
+  let .ok rs := res | return .error "mission_events_max_failed"
+  let r := rs[1]?.getD #[]
+  let maxSeqCol : UInt64 := ((r[0]?.bind String.toNat?).getD 0).toUInt64
+  let maxSequenceCol : UInt64 := ((r[1]?.bind String.toNat?).getD 0).toUInt64
+  let hasNullSeq : Nat := (r[2]?.bind String.toNat?).getD 1
+  let hasZeroSeq : Nat := (r[3]?.bind String.toNat?).getD 1
+  let maxSeq := if maxSeqCol ≥ maxSequenceCol then maxSeqCol else maxSequenceCol
+  let useIndexedSequence := hasNullSeq == 0 && hasZeroSeq == 0 && (maxSeqCol == 0 || maxSeqCol == maxSequenceCol)
+  return .ok (maxSeq, useIndexedSequence)
+
 /-- Query a cursor-paginated slice of `mission_events` matching `X-Orb-Events-Protocol: 1` semantics
     across both native `seq`/`payload` rows and legacy `sequence`/`content` rows.
     Pushes `typesFilter` / `view=transcript` into SQL `WHERE` *before* `LIMIT` and projects oversized
@@ -4886,11 +4910,22 @@ def queryMissionEventsPage
     (view? : Option String := none) : IO (Except String MissionEventsPage) := do
   let clampedLim := max 1 (min 500 limit)
   let fetchLim := clampedLim + 1
-  let effSeqExpr := "(CASE WHEN COALESCE(seq,0)>0 THEN seq ELSE COALESCE(sequence,0) END)"
-  let maxRes ← execParamQuery st.missionsDb
-    s!"SELECT COALESCE(MAX({effSeqExpr}), 0) FROM mission_events WHERE mission_id=?1;" #[missionId]
-  let .ok maxRs := maxRes | return .error "mission_events_max_failed"
-  let maxSeq : UInt64 := (((maxRs[1]?.bind (·[0]?)).bind String.toNat?).getD 0).toUInt64
+  let (maxSeq, useIndexedSequence) ←
+    match ← queryMissionSeqMeta st.missionsDb missionId with
+    | .ok pair => pure pair
+    | .error e => return .error e
+  if let some s := sinceSeq? then
+    if s ≥ maxSeq then
+      return .ok {
+        eventsJson := "[]"
+        hasMore := false
+        nextCursor := none
+        pageMaxSeq := none
+        maxSeq := maxSeq
+      }
+  let effSeqExpr :=
+    if useIndexedSequence then "sequence"
+    else "(CASE WHEN COALESCE(seq,0)>0 THEN seq ELSE COALESCE(sequence,0) END)"
   let effTypes :=
     if !typesFilter.isEmpty then typesFilter
     else if view? == some "transcript" then transcriptSpineEventTypes
@@ -4955,7 +4990,8 @@ def queryMissionEventsPage
   let cols :=
     s!"id,{effSeqExpr} AS eff_seq,event_type,{payloadExpr},COALESCE(NULLIF(created_at,''),timestamp,'')," ++
     s!"COALESCE(event_id,''),COALESCE(tool_call_id,''),COALESCE(tool_name,''),{contentExpr},COALESCE(content_file,''),COALESCE(metadata,'')"
-  let sql := s!"SELECT {cols} FROM mission_events {whereSql} ORDER BY eff_seq {orderDir}, id {orderDir} LIMIT CAST(?{params.size} AS INTEGER);"
+  let orderCol := if useIndexedSequence then "sequence" else "eff_seq"
+  let sql := s!"SELECT {cols} FROM mission_events {whereSql} ORDER BY {orderCol} {orderDir}, id {orderDir} LIMIT CAST(?{params.size} AS INTEGER);"
   let rowsRes ← execParamQuery st.missionsDb sql params
   let .ok rs := rowsRes | return .error "mission_events_query_failed"
   let mut rawItems : Array (UInt64 × UInt64 × String × String × String) := Array.mkEmpty (if rs.size > 0 then rs.size - 1 else 0)
@@ -5003,11 +5039,14 @@ def queryMissionSyncReplayFrames
     (sinceSeq? : Option UInt64)
     (maxPayload? : Option Nat := some 4096)
     (maxReplay : Nat := 500) : IO (Except String (Array String × UInt64 × Bool)) := do
-  let effSeqExpr := "(CASE WHEN COALESCE(seq,0)>0 THEN seq ELSE COALESCE(sequence,0) END)"
-  let maxRes ← execParamQuery st.missionsDb
-    s!"SELECT COALESCE(MAX({effSeqExpr}), 0) FROM mission_events WHERE mission_id=?1;" #[missionId]
-  let .ok maxRs := maxRes | return .error "mission_events_max_failed"
-  let maxSeq : UInt64 := (((maxRs[1]?.bind (·[0]?)).bind String.toNat?).getD 0).toUInt64
+  let (maxSeq, useIndexedSequence) ←
+    match ← queryMissionSeqMeta st.missionsDb missionId with
+    | .ok pair => pure pair
+    | .error e => return .error e
+  let effSeqExpr :=
+    if useIndexedSequence then "sequence"
+    else "(CASE WHEN COALESCE(seq,0)>0 THEN seq ELSE COALESCE(sequence,0) END)"
+  let orderCol := if useIndexedSequence then "sequence" else "eff_seq"
   match sinceSeq? with
   | none => return .ok (#[], maxSeq, false)
   | some s =>
@@ -5018,7 +5057,7 @@ def queryMissionSyncReplayFrames
       (s!"SELECT {effSeqExpr} AS eff_seq,event_type,COALESCE(payload,''),COALESCE(NULLIF(created_at,''),timestamp,'')," ++
        "COALESCE(event_id,''),COALESCE(tool_call_id,''),COALESCE(tool_name,''),COALESCE(content,''),COALESCE(content_file,''),COALESCE(metadata,'') " ++
        "FROM mission_events WHERE mission_id=?1 AND NOT (event_type='error' AND CASE WHEN json_valid(payload) THEN json_extract(payload,'$.reason') END='hung_node' AND NOT EXISTS (SELECT 1 FROM node_api_hangs h WHERE h.node_id=json_extract(payload,'$.node_id') AND h.strikes>=2)) " ++
-       s!"AND {effSeqExpr}>CAST(?2 AS INTEGER) ORDER BY eff_seq ASC, id ASC LIMIT CAST(?3 AS INTEGER);")
+       s!"AND {effSeqExpr}>CAST(?2 AS INTEGER) ORDER BY {orderCol} ASC, id ASC LIMIT CAST(?3 AS INTEGER);")
       #[missionId, s!"{s}", s!"{fetchLim}"]
     let .ok rs := res | return .error "mission_events_replay_failed"
     let cnt := if rs.size > 0 then rs.size - 1 else 0

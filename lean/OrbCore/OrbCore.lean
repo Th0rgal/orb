@@ -28,6 +28,7 @@ import OrbCore.TelemetryAndVoice
 import OrbCore.MacTether
 import OrbCore.LegacyHydrate
 import OrbCore.SecretAndApproval
+import OrbCore.NodeRelease
 import OrbCore.RemoteFleetAndRelay
 import OrbCore.RemoteDispatch
 import OrbCore.ProjectFilesAndController

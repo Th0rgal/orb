@@ -151,3 +151,32 @@ it("adopts an in-flight prefetch on loadTranscript instead of aborting and fetch
   expect(snap.detailsPending).toBeUndefined();
   expect(snap.items.some(item => "text" in item && item.text.includes("Adopted!"))).toBe(true);
 });
+
+it("prunes optimistic liveTail user_message receipts once sequenced events confirm delivery", async () => {
+  const { applyLiveEventsToTranscriptCache } = await import("../src/missionCache");
+  putTranscript("m-livetail-prune", {
+    items: [],
+    stream: [
+      { type: "user_message", eventId: "u0", sequence: 1, data: { id: "u0", content: "initial" } },
+      { type: "assistant_message", eventId: "a0", sequence: 2, data: { content: "reply 0" } },
+    ],
+    fromLog: true,
+    cursor: 2,
+  });
+  // Optimistic unsequenced receipt added to liveTail
+  applyLiveEventsToTranscriptCache("m-livetail-prune", [
+    { type: "user_message", eventId: "u1", data: { id: "u1", content: "donne moi le pdf", queued: false, receipt: true } },
+  ]);
+  expect(peekReadyTranscript("m-livetail-prune")?.liveTail?.length).toBe(1);
+  // Server delivers sequenced user_message + assistant_message
+  applyLiveEventsToTranscriptCache("m-livetail-prune", [
+    { type: "user_message", eventId: "u1", sequence: 3, data: { id: "u1", content: "donne moi le pdf" } },
+    { type: "assistant_message", eventId: "a1", sequence: 4, data: { content: "Voici le PDF v1.1" } },
+  ]);
+  const snap = peekReadyTranscript("m-livetail-prune");
+  expect(snap?.liveTail).toBeUndefined();
+  expect(snap?.cursor).toBe(4);
+  const lastItem = snap?.items[snap.items.length - 1];
+  expect(lastItem?.kind).toBe("text");
+  expect("text" in lastItem! && lastItem.text).toContain("Voici le PDF v1.1");
+});

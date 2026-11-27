@@ -333,9 +333,17 @@ def loadOlderTurnsId : WidgetId := 975
 /-- Distance from the top of the transcript at which upward scroll fetches older history. -/
 @[inline] def transcriptNearTopSub : SubPx := pxToSub 180
 
+/-- Classification of a persisted turn for cross-page canonical deduplication. -/
+inductive HistoryTurnKind where
+  | other
+  | plainAssistant
+  | unmatchedCanonical
+  deriving Repr, Inhabited, BEq, DecidableEq
+
 /-- One page of persisted transcript turns (`(eventId, displayText)` oldest-first) plus paging state. -/
 structure HistoryBatch where
   turns : List (String × String)
+  turnKinds : List HistoryTurnKind := []
   hasMore : Bool := false
   nextCursor : Option Int := none
   deriving Repr, Inhabited, BEq
@@ -555,6 +563,9 @@ structure DesktopState where
   liveTurns : List String := []
   /-- Seen event/row IDs of persisted turns in `liveTurns`, for cross-page deduplication. -/
   liveTurnIds : List String := []
+  /-- Texts of loaded `assistant_message_canonical` turns that have not yet claimed an
+      earlier plain `assistant_message` across a page boundary. -/
+  unmatchedCanonicalTexts : List String := []
   /-- Number of leading turns in `liveTurns` backed by persisted Core history (excluding
       in-flight turns appended locally by `applyLiveText`). -/
   livePersistedCount : Nat := 0
@@ -701,7 +712,7 @@ def resetSelection (st : DesktopState) (card : Option MissionSummaryCard) : Desk
   let mid := if cloud.isSome then none else card.map (·.missionId)
   { st with
     unconfirmedSend := none, writeError := ""
-    voicePhase := .idle, voiceGeneration := st.voiceGeneration + 1, openMission := mid, missionMenu := none, stream := { shown := [], pending := [], renders := 1 }, liveTurns := [], liveTurnIds := [], livePersistedCount := 0, historyHasMore := false, historyNextCursor := none, historyLoading := false, historyLoadError := false, scroll := {}
+    voicePhase := .idle, voiceGeneration := st.voiceGeneration + 1, openMission := mid, missionMenu := none, stream := { shown := [], pending := [], renders := 1 }, liveTurns := [], liveTurnIds := [], unmatchedCanonicalTexts := [], livePersistedCount := 0, historyHasMore := false, historyNextCursor := none, historyLoading := false, historyLoadError := false, scroll := {}
     composer := { isRunning := card.any (·.isRunning) }
     messageSent := false, missionStopped := false, missionArchived := false, sidePanelOpen := false
     sidebarRows := st.sidebarRows.map fun row => { row with selected := row.widgetId == (card.map (·.widgetId)).getD 101 } }
@@ -2338,11 +2349,58 @@ def buildLiveTurnsNodes (theme : Theme) (colW width : SubPx) (turns : List Strin
     base := b
   return (rows.toList, base)
 
+/-- Resolve the exact logical `(availW, availH)` in `SubPx` used by `buildDesktopScreen`.
+When `logicalSubSize?` is supplied (the window's `Wayland.logicalSubSize`), it avoids
+fractional-HiDPI rounding drift from ceiling-rounded device `viewport`. -/
+def resolvedLogicalSubSize (scale120 : Nat) (viewport : Rect)
+    (logicalSubSize? : Option (SubPx × SubPx) := none) : SubPx × SubPx :=
+  match logicalSubSize? with
+  | some sz => sz
+  | none =>
+    let s := max 1 scale120
+    ((viewport.w.toNat * subPerPx * scaleDen) / s,
+     (viewport.h.toNat * subPerPx * scaleDen) / s)
+
+/-- Measure the current rendered transcript `(contentH, bodyH)` in `SubPx`, matching
+`buildMissionTranscriptBody` so scroll-anchor updates clamp against the actual layout. -/
+def measureTranscriptContentHeight (st : DesktopState) (scale120 : Nat) (viewport : Rect)
+    (logicalSubSize? : Option (SubPx × SubPx) := none) : SubPx × SubPx := Id.run do
+  let (availW, availH) := resolvedLogicalSubSize scale120 viewport logicalSubSize?
+  let mainW : SubPx := availW - st.sidebarWidth
+  let transcriptW : SubPx :=
+    if st.sidePanelOpen then mainW - min (pxToSub 480) (mainW / 2) else mainW
+  let colW : SubPx := min (pxToSub 748) (transcriptW - pxToSub 48)
+  let width : SubPx := transcriptTextWidth transcriptW
+  let bodyH : SubPx := availH - chromeHeaderHeightSub - chromeComposerHeightSub
+  let (priorRows, nextBand) := buildLiveTurnsNodes st.theme colW width st.liveTurns
+  let currentText := streamedText st
+  let streamRows :=
+    if currentText.isEmpty then [] else (buildOneLiveTurn st.theme colW width nextBand currentText).1
+  let mut totalH : SubPx := 0
+  let mut rowCount : Nat := 0
+  if st.showsHistoryBanner then
+    totalH := totalH + transcriptHistoryBannerHeightSub
+    rowCount := rowCount + 1
+  for row in priorRows do
+    let (_, rowH) := measureNode colW row.toLayoutNode
+    totalH := totalH + rowH
+    rowCount := rowCount + 1
+  for row in streamRows do
+    let (_, rowH) := measureNode colW row.toLayoutNode
+    totalH := totalH + rowH
+    rowCount := rowCount + 1
+  if st.selectedCard.isSome then
+    totalH := totalH + pxToSub 21
+    rowCount := rowCount + 1
+  let gaps : SubPx := if rowCount > 1 then (rowCount - 1) * transcriptColumnGapSub else 0
+  return (pxToSub 3 + totalH + gaps, bodyH)
+
 /-- Exact signed `SubPx` height change above the first previously-loaded turn when
 `addedTurns` are prepended and the top history banner toggles `hadBanner → willHaveBanner`. -/
 def measurePrependedHeightDelta (st : DesktopState) (scale120 : Nat) (viewport : Rect)
-    (addedTurns : List String) (hadBanner willHaveBanner : Bool) : Int := Id.run do
-  let availW : SubPx := (viewport.w.toNat * subPerPx * scaleDen) / max 1 scale120
+    (addedTurns : List String) (hadBanner willHaveBanner : Bool)
+    (logicalSubSize? : Option (SubPx × SubPx) := none) : Int := Id.run do
+  let (availW, _) := resolvedLogicalSubSize scale120 viewport logicalSubSize?
   let mainW : SubPx := availW - st.sidebarWidth
   let transcriptW : SubPx :=
     if st.sidePanelOpen then mainW - min (pxToSub 480) (mainW / 2) else mainW
@@ -2351,7 +2409,7 @@ def measurePrependedHeightDelta (st : DesktopState) (scale120 : Nat) (viewport :
   let (addedRows, _) := buildLiveTurnsNodes st.theme colW width addedTurns
   let mut delta : Int := 0
   for row in addedRows do
-    let (_, rowH) := measureNode transcriptW row.toLayoutNode
+    let (_, rowH) := measureNode colW row.toLayoutNode
     delta := delta + (rowH : Int) + (transcriptColumnGapSub : Int)
   let bannerStep : Int := (transcriptHistoryBannerHeightSub : Int) + (transcriptColumnGapSub : Int)
   if !hadBanner && willHaveBanner then
@@ -2359,6 +2417,14 @@ def measurePrependedHeightDelta (st : DesktopState) (scale120 : Nat) (viewport :
   else if hadBanner && !willHaveBanner then
     delta := delta - bannerStep
   return delta
+
+private def eraseFirstText (target : String) : List String → Bool × List String
+  | [] => (false, [])
+  | x :: xs =>
+    if x == target then (true, xs)
+    else
+      let (hit, rest) := eraseFirstText target xs
+      (hit, x :: rest)
 
 /-- Access loss (Core unreachable or an invalid projection) is not a turn boundary: the
 shown content came from a stream the client can no longer read, so clear the earlier
@@ -2369,135 +2435,183 @@ def clearLiveTranscript (st : DesktopState) : DesktopState :=
   { st with
     liveTurns := []
     liveTurnIds := []
+    unmatchedCanonicalTexts := []
     livePersistedCount := 0
     historyHasMore := false
     historyNextCursor := none
     historyLoading := false
     historyLoadError := false
+    scroll := {}
     stream := { st.stream with shown := [], pending := [] } }
 
-/-- Cold open or recovery of a persisted mission: the Core `/open` window owns the
-initial completed turns and continuation cursor; the live bubble keeps owning the
-current turn. When persisted history is already loaded and overlaps the incoming
-`/open` tail (e.g. recovery after a transient 5xx/network outage without an `'X'`
-clear), merge only newer tail turns onto the existing paged prefix so previously
-paged older turns, `historyNextCursor`, `historyHasMore`, and scroll offset survive
-without jumps. Empty, foreign or identical batches are no-ops. -/
-def applyHistoryBatch (scale : Nat) (viewport : Rect) (st : DesktopState) (mission : String)
-    (batch : HistoryBatch) : DesktopState × Damage := Id.run do
+/-- Cold open or recovery of a persisted mission: returns `(nextState, damage, replaced)`
+where `replaced = true` only when the full persisted window and paging cursor were replaced
+(never on a tail-only recovery merge, which preserves already-paged older turns, cursor state,
+and any in-flight `historyLoading` request). -/
+def applyHistoryBatchEx (scale : Nat) (viewport : Rect) (st : DesktopState) (mission : String)
+    (batch : HistoryBatch) : DesktopState × Damage × Bool := Id.run do
   if !st.liveData || st.screen != .missionTranscript || st.openMission != some mission then
-    return (st, none)
+    return (st, none, false)
+  let kindsArr := batch.turnKinds.toArray
   let mut seen : Std.HashSet String := {}
-  let mut entries : Array (String × String) := #[]
+  let mut entries : Array (String × String × HistoryTurnKind) := #[]
   let mut texts : Array String := #[]
   let mut ids : Array String := #[]
+  let mut unmatchedCanon : Array String := #[]
+  let mut rawIdx : Nat := 0
   for (tid, txt) in batch.turns do
+    let kind := kindsArr[rawIdx]?.getD .other
+    rawIdx := rawIdx + 1
     if txt.isEmpty then continue
     if !tid.isEmpty then
       if seen.contains tid then continue
       seen := seen.insert tid
       ids := ids.push tid
-    entries := entries.push (tid, txt)
+    entries := entries.push (tid, txt, kind)
     texts := texts.push txt
+    if kind == .unmatchedCanonical then
+      unmatchedCanon := unmatchedCanon.push txt
   let hasMore := batch.hasMore && batch.nextCursor.isSome
   let nextCursor := if hasMore then batch.nextCursor else none
   if texts.isEmpty && !hasMore then
-    return (st, none)
+    return (st, none, false)
   -- Recovery merge path: if persisted turns are already loaded and overlap the
-  -- incoming `/open` tail, keep all already-paged older turns and cursor state.
+  -- incoming `/open` tail, keep all already-paged older turns, cursor state,
+  -- and any in-flight older-page fetch.
   if !st.liveTurnIds.isEmpty then
     let existingIds : Std.HashSet String := Std.HashSet.ofList st.liveTurnIds
     let mut lastOverlap : Option Nat := none
     for i in [:entries.size] do
-      let (tid, _) := entries[i]!
+      let (tid, _, _) := entries[i]!
       if !tid.isEmpty && existingIds.contains tid then
         lastOverlap := some i
     if let some idx := lastOverlap then
       let mut addedTexts : Array String := #[]
       let mut addedIds : Array String := #[]
+      let mut addedCanon : Array String := #[]
       for i in [idx + 1 : entries.size] do
-        let (tid, txt) := entries[i]!
+        let (tid, txt, kind) := entries[i]!
         if !tid.isEmpty && existingIds.contains tid then continue
         if !tid.isEmpty then addedIds := addedIds.push tid
         addedTexts := addedTexts.push txt
+        if kind == .unmatchedCanonical then
+          addedCanon := addedCanon.push txt
       let prefixLen := min st.livePersistedCount st.liveTurns.length
       let mergedTurns := st.liveTurns.take prefixLen ++ addedTexts.toList
       let mergedIds := st.liveTurnIds ++ addedIds.toList
+      let mergedCanon := st.unmatchedCanonicalTexts ++ addedCanon.toList
       let mergedCount := mergedTurns.length
       let turnsAdvanced := mergedTurns != st.liveTurns || mergedIds != st.liveTurnIds ||
-        mergedCount != st.livePersistedCount
-      if !turnsAdvanced && !st.historyLoading && !st.historyLoadError then
-        return (st, none)
+        mergedCount != st.livePersistedCount || mergedCanon != st.unmatchedCanonicalTexts
+      if !turnsAdvanced then
+        return (st, none, false)
       -- When persisted history advances past the previously-streamed turn (e.g. after
       -- a live Send or degraded recovery), clear `stream` so the accompanying empty `B`
       -- turn-boundary frame does not archive the already-persisted turn a second time.
-      let nextStream :=
-        if turnsAdvanced then { st.stream with shown := [], pending := [] } else st.stream
       return ({ st with
         liveTurns := mergedTurns
         liveTurnIds := mergedIds
+        unmatchedCanonicalTexts := mergedCanon
         livePersistedCount := mergedCount
-        historyLoading := false
-        historyLoadError := false
-        stream := nextStream },
-        some (transcriptDamageRect scale viewport st.sidebarWidth))
+        stream := { st.stream with shown := [], pending := [] } },
+        some (transcriptDamageRect scale viewport st.sidebarWidth), false)
   let textList := texts.toList
   let idList := ids.toList
+  let canonList := unmatchedCanon.toList
   if st.liveTurns == textList && st.liveTurnIds == idList &&
+      st.unmatchedCanonicalTexts == canonList &&
       (st.liveTurnIds.isEmpty || st.livePersistedCount == textList.length) &&
       st.historyHasMore == hasMore && st.historyNextCursor == nextCursor &&
       !st.historyLoading && !st.historyLoadError then
-    return (st, none)
+    return (st, none, false)
   return ({ st with
     liveTurns := textList
     liveTurnIds := idList
+    unmatchedCanonicalTexts := canonList
     livePersistedCount := textList.length
     historyHasMore := hasMore
     historyNextCursor := nextCursor
     historyLoading := false
     historyLoadError := false
     stream := { st.stream with shown := [], pending := [] } },
-    some (transcriptDamageRect scale viewport st.sidebarWidth))
+    some (transcriptDamageRect scale viewport st.sidebarWidth), true)
+
+/-- Cold open or recovery of a persisted mission: the Core `/open` window owns the
+initial completed turns and continuation cursor; the live bubble keeps owning the
+current turn. Empty, foreign or identical batches are no-ops. -/
+def applyHistoryBatch (scale : Nat) (viewport : Rect) (st : DesktopState) (mission : String)
+    (batch : HistoryBatch) : DesktopState × Damage :=
+  let (st', dmg, _) := applyHistoryBatchEx scale viewport st mission batch
+  (st', dmg)
 
 /-- Compatibility wrapper for callers passing plain turn strings without paging metadata. -/
 def applyHistoryTurns (scale : Nat) (viewport : Rect) (st : DesktopState) (mission : String)
     (turns : List String) : DesktopState × Damage :=
   applyHistoryBatch scale viewport st mission { turns := turns.map (fun t => ("", t)) }
 
-/-- Prepend an on-demand older history page while deduplicating by event/row ID,
-verifying the originating cursor still matches `st.historyNextCursor` (when supplied),
-and preserving the reader's scroll anchor so the currently visible turn does not jump. -/
+/-- Prepend an on-demand older history page while deduplicating by event/row ID and
+cross-page `assistant_message` / `assistant_message_canonical` claims, verifying the
+originating cursor still matches `st.historyNextCursor` (when supplied), and preserving
+the reader's scroll anchor so the currently visible turn does not jump. -/
 def applyOlderHistoryBatch (scale : Nat) (viewport : Rect) (st : DesktopState) (mission : String)
-    (batch : HistoryBatch) (requestedCursor : Option Int := none) : DesktopState × Damage := Id.run do
+    (batch : HistoryBatch) (requestedCursor : Option Int := none)
+    (logicalSubSize? : Option (SubPx × SubPx) := none) : DesktopState × Damage := Id.run do
   if !st.liveData || st.screen != .missionTranscript || st.openMission != some mission then
     return (st, none)
   if let some req := requestedCursor then
     if !st.historyHasMore || st.historyNextCursor != some req then
       return (st, none)
+  let kindsArr := batch.turnKinds.toArray
   let mut seen : Std.HashSet String := Std.HashSet.ofList st.liveTurnIds
-  let mut addedTexts : Array String := #[]
-  let mut addedIds : Array String := #[]
+  let mut uniqueEntries : Array (String × String × HistoryTurnKind) := #[]
+  let mut rawIdx : Nat := 0
   for (tid, txt) in batch.turns do
+    let kind := kindsArr[rawIdx]?.getD .other
+    rawIdx := rawIdx + 1
     if txt.isEmpty then continue
     if !tid.isEmpty then
       if seen.contains tid then continue
       seen := seen.insert tid
-      addedIds := addedIds.push tid
-    addedTexts := addedTexts.push txt
+    uniqueEntries := uniqueEntries.push (tid, txt, kind)
+  -- Scan newest-to-oldest so any already-loaded unmatched `assistant_message_canonical`
+  -- claims its matching earlier plain `assistant_message` across the page boundary.
+  let mut remainingCanon : List String := st.unmatchedCanonicalTexts
+  let mut revTexts : Array String := #[]
+  let mut revIds : Array String := #[]
+  let mut revNewCanon : Array String := #[]
+  for revIdx in [:uniqueEntries.size] do
+    let i := uniqueEntries.size - 1 - revIdx
+    let (tid, txt, kind) := uniqueEntries[i]!
+    if !tid.isEmpty then revIds := revIds.push tid
+    if kind == .plainAssistant then
+      let (claimed, nextCanon) := eraseFirstText txt remainingCanon
+      if claimed then
+        remainingCanon := nextCanon
+        continue
+    revTexts := revTexts.push txt
+    if kind == .unmatchedCanonical then
+      revNewCanon := revNewCanon.push txt
+  let addedList := revTexts.reverse.toList
+  let addedIdsList := revIds.reverse.toList
+  let nextCanonList := revNewCanon.reverse.toList ++ remainingCanon
   let hadBanner := st.showsHistoryBanner
   let hasMore := batch.hasMore && batch.nextCursor.isSome
   let nextCursor := if hasMore then batch.nextCursor else none
   let willHaveBanner := st.liveData && hasMore
-  let addedList := addedTexts.toList
+  let (oldContentH, bodyH) := measureTranscriptContentHeight st scale viewport logicalSubSize?
+  let delta := measurePrependedHeightDelta st scale viewport addedList hadBanner willHaveBanner logicalSubSize?
+  let newContentH : SubPx := (max 0 ((oldContentH : Int) + delta)).toNat
+  let newLimit := scrollLimit newContentH bodyH
   let scroll' :=
-    if st.scroll.pinned then st.scroll
+    if st.scroll.pinned && oldContentH > bodyH then st.scroll
     else
-      let delta := measurePrependedHeightDelta st scale viewport addedList hadBanner willHaveBanner
-      let adjusted : SubPx := (max 0 ((st.scroll.topSub : Int) + delta)).toNat
-      { st.scroll with topSub := adjusted }
+      let oldOffset := (st.scroll.onLayout oldContentH bodyH).topSub
+      let adjusted : SubPx := (max 0 ((oldOffset : Int) + delta)).toNat
+      { pinned := false, topSub := min newLimit adjusted }
   return ({ st with
     liveTurns := addedList ++ st.liveTurns
-    liveTurnIds := addedIds.toList ++ st.liveTurnIds
+    liveTurnIds := addedIdsList ++ st.liveTurnIds
+    unmatchedCanonicalTexts := nextCanonList
     livePersistedCount := st.livePersistedCount + addedList.length
     historyHasMore := hasMore
     historyNextCursor := nextCursor

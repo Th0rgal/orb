@@ -1198,6 +1198,7 @@ def main (args : List String) : IO UInt32 := do
             (fun rt => do
               let vp := rt.viewportDeviceRect
               let (st, damage) ← readLiveFrame slot rt.wayland.scale120 vp rt.app notify
+                (logicalSubSize? := some rt.wayland.logicalSubSize)
               if traceInbox && st.inboxAvailable &&
                   (!rt.app.inboxAvailable || st.inboxItems != rt.app.inboxItems || st.inboxEnabled != rt.app.inboxEnabled) then
                 let ids := if st.inboxEnabled then st.inboxItems.map (·.mission) else []

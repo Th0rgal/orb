@@ -2411,4 +2411,160 @@ def dispatchMcpToolCall
   | _ =>
     return mcpErr "unknown_tool" s!"Unknown or unsupported MCP tool `{toolName}`"
 
+/-! ## Direct Streamable HTTP MCP JSON-RPC 2.0 Endpoint (`POST /api/mcp/rpc`) -/
+
+def mcpRpcSupportedProtocolVersions : Array String :=
+  #["2025-06-18", "2025-03-26", "2024-11-05"]
+
+def negotiateMcpProtocolVersion (requested? : Option String) : String :=
+  match requested? with
+  | some v =>
+    let clean := v.trimAscii.toString
+    if mcpRpcSupportedProtocolVersions.contains clean then clean else "2025-03-26"
+  | none => "2025-03-26"
+
+def mcpRpcError (idVal : JVal) (code : Int) (message : String) : JVal :=
+  .obj #[
+    ("jsonrpc", .str "2.0"),
+    ("id", idVal),
+    ("error", .obj #[
+      ("code", JVal.int code),
+      ("message", .str message)
+    ])
+  ]
+
+def mcpRpcSuccess (idVal : JVal) (result : JVal) : JVal :=
+  .obj #[
+    ("jsonrpc", .str "2.0"),
+    ("id", idVal),
+    ("result", result)
+  ]
+
+/-- Convert internal `McpGateway` `{ ok, result, error }` reply into standard MCP `CallToolResult`. -/
+def convertGatewayReplyToMcpCallResult (httpStatus : Nat) (rawReply : String) : JVal :=
+  match OrbBin.Json.parse rawReply with
+  | .ok jv =>
+    if httpStatus < 300 && jv.fieldBool? "ok" == some true then
+      let resVal := jv.fieldOrNull "result"
+      let txt := renderCompact resVal
+      let baseFields : Array (String × JVal) := #[
+        ("content", .arr #[.obj #[("type", .str "text"), ("text", .str txt)]]),
+        ("isError", .bool false)
+      ]
+      let fields :=
+        if resVal.asObj?.isSome then baseFields.push ("structuredContent", resVal)
+        else baseFields
+      .obj fields
+    else
+      let errPayload :=
+        match jv.field? "error" with
+        | some e => renderCompact e
+        | none => rawReply
+      .obj #[
+        ("content", .arr #[.obj #[("type", .str "text"), ("text", .str errPayload)]]),
+        ("isError", .bool true)
+      ]
+  | .error _ =>
+    .obj #[
+      ("content", .arr #[.obj #[("type", .str "text"), ("text", .str rawReply)]]),
+      ("isError", .bool (httpStatus >= 300))
+    ]
+
+private def catalogToolsJValForRole (role : String) : JVal :=
+  let raw := (OrbBin.McpCatalog.catalogPrettyJsonForRole role).getD
+    ((OrbBin.McpCatalog.catalogPrettyJsonForRole "executor").getD "[]")
+  match OrbBin.Json.parse raw with
+  | .ok (.arr items) => .arr items
+  | _ => .arr #[]
+
+private def isValidJsonRpcIdVal : JVal → Bool
+  | .str _ => true
+  | .num _ => true
+  | _ => false
+
+/-- Handle a single JSON-RPC 2.0 Streamable HTTP MCP message.
+    Returns `none` for JSON-RPC notifications (no `id` field). -/
+private def handleSingleStreamableMcpRpc
+    (claims : McpSessionClaims)
+    (msg : JVal)
+    (executeTool : String → JVal → IO (Nat × String)) : IO (Option JVal) := do
+  if msg.asObj?.isNone then
+    return some (mcpRpcError .null (-32600) "Invalid Request")
+  let method := (msg.fieldStr? "method").getD ""
+  match msg.field? "id" with
+  | none =>
+    -- Notification (e.g. `notifications/initialized`, `notifications/cancelled`): no response body.
+    return none
+  | some idVal =>
+    if (msg.fieldStr? "jsonrpc") != some "2.0" || method.isEmpty || !isValidJsonRpcIdVal idVal then
+      return some (mcpRpcError (if isValidJsonRpcIdVal idVal then idVal else .null) (-32600) "Invalid Request")
+    let params := (msg.field? "params").getD (.obj #[])
+    match method with
+    | "initialize" =>
+      let proto := negotiateMcpProtocolVersion (params.fieldStr? "protocolVersion")
+      return some (mcpRpcSuccess idVal (.obj #[
+        ("protocolVersion", .str proto),
+        ("capabilities", .obj #[
+          ("tools", .obj #[("listChanged", .bool false)])
+        ]),
+        ("serverInfo", .obj #[
+          ("name", .str "sandboxed"),
+          ("version", .str "1.3.0")
+        ])
+      ]))
+    | "ping" =>
+      return some (mcpRpcSuccess idVal (.obj #[]))
+    | "tools/list" =>
+      let roleNorm := normalizeMcpRole claims.role
+      let toolsArr := catalogToolsJValForRole roleNorm
+      return some (mcpRpcSuccess idVal (.obj #[("tools", toolsArr)]))
+    | "resources/list" =>
+      return some (mcpRpcSuccess idVal (.obj #[("resources", .arr #[])]))
+    | "resources/templates/list" =>
+      return some (mcpRpcSuccess idVal (.obj #[("resourceTemplates", .arr #[])]))
+    | "prompts/list" =>
+      return some (mcpRpcSuccess idVal (.obj #[("prompts", .arr #[])]))
+    | "tools/call" =>
+      let toolName := ((params.fieldStr? "name").getD "").trimAscii.toString
+      if toolName.isEmpty then
+        return some (mcpRpcError idVal (-32602) "Invalid params: missing tool name")
+      let args := (params.field? "arguments").getD (.obj #[])
+      if args.asObj?.isNone then
+        return some (mcpRpcError idVal (-32602) "Invalid params: arguments must be an object")
+      let (httpSt, rawReply) ← executeTool toolName args
+      return some (mcpRpcSuccess idVal (convertGatewayReplyToMcpCallResult httpSt rawReply))
+    | _ =>
+      return some (mcpRpcError idVal (-32601) s!"Method not found: {method}")
+
+/-- Streamable HTTP MCP JSON-RPC 2.0 handler (`POST /api/mcp/rpc`).
+    Supports single requests, notifications (`202 Accepted`), and JSON-RPC batch arrays,
+    delegating tool execution to Core's unified authorization & `McpGateway` dispatcher. -/
+def handleStreamableMcpRpc
+    (claims : McpSessionClaims)
+    (rawBody : ByteArray)
+    (executeTool : String → JVal → IO (Nat × String)) : IO (Nat × Option String) := do
+  match OrbBin.Json.parseBytes rawBody with
+  | .error _ =>
+    return (400, some (renderCompact (mcpRpcError .null (-32700) "Parse error")))
+  | .ok (.arr batch) =>
+    if batch.isEmpty then
+      return (400, some (renderCompact (mcpRpcError .null (-32600) "Invalid Request")))
+    let mut responses : Array JVal := #[]
+    for item in batch do
+      if let some resp ← handleSingleStreamableMcpRpc claims item executeTool then
+        responses := responses.push resp
+    if responses.isEmpty then
+      return (202, none)
+    else
+      return (200, some (renderCompact (.arr responses)))
+  | .ok single =>
+    match ← handleSingleStreamableMcpRpc claims single executeTool with
+    | none => return (202, none)
+    | some resp =>
+      let isReqErr :=
+        match resp.field? "error" >>= (·.fieldInt? "code") with
+        | some (-32600) => true
+        | _ => false
+      return (if isReqErr then 400 else 200, some (renderCompact resp))
+
 end OrbCore.McpGateway

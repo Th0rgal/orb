@@ -19,6 +19,7 @@ import OrbNode.Transfer
 import OrbNode.Runner
 import OrbNode.Server
 import OrbNode.Main
+import OrbNode.AutoUpdateTests
 
 open LeanSys.Auth
 open OrbBin.PosixExt
@@ -3620,6 +3621,7 @@ def runTests : IO UInt32 := do
   check "runServerLoop serves /heartbeat promptly under LEAN_NUM_THREADS=1 without background pool starvation" hb1tOk
 
   runOpenLedgerDeltaPerfTests check tmpRoot missionId
+  OrbNode.AutoUpdateTests.run check tmpRoot
 
   let _ ← IO.Process.output { cmd := "rm", args := #["-rf", tmpRoot] }
   let passed ← passedRef.get
