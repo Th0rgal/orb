@@ -4137,6 +4137,74 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
           req.headers req.bodySlice.toByteArray "" true true nowEpochSec (formatEpochIso8601Utc nowEpochSec) st.managedProvisioningOverride? then
         return .ok { status := bStatus, contentType := bCtype, corsOrigin? := reqOrigin?, body := bBody }
 
+  -- 5b. Core-Driven Node Auto-Update Release Manifest, Heartbeat & Binary Distribution
+  --     Authenticated by static node Bearer token, managed machine node token (+ x-orb-machine-id),
+  --     or an admin user session (for manifest/binary inspection).
+  if cleanPath == "/api/node-releases/heartbeat" ||
+      cleanPath == "/api/node-releases/manifest" ||
+      cleanPath.startsWith "/api/node-releases/binaries/" then
+    let bearerTok := (extractBearerToken? req.headers nowEpochSec).getD ""
+    let mut authedNode? : Option (String × Bool) := none -- (nodeId, isAdminCaller)
+    if let some staticNodeId ← authenticateStaticNodeToken? bearerTok then
+      authedNode? := some (staticNodeId, false)
+    if authedNode?.isNone then
+      if let some mst := st.managedStore? then
+        let mid := (lookupHeaderCI req.headers "x-orb-machine-id").getD ""
+        if !mid.isEmpty && !bearerTok.isEmpty then
+          let boot? := ((lookupHeaderCI req.headers "x-orb-boot-epoch").bind String.toNat?).map Nat.toUInt64
+          if let .ok _ ← authenticateNodeToken mst mid bearerTok boot? then
+            authedNode? := some (s!"managed-{mid}", false)
+    if authedNode?.isNone then
+      if let some caller ← resolveCallerPrincipal? st req.headers nowEpochSec then
+        if !caller.disabled && (caller.role == "admin" || caller.isLegacyUnscoped) then
+          authedNode? := some ("admin", true)
+    let some (authedNodeId, isAdminCaller) := authedNode?
+      | return .ok (mkJson 401 "{\"error\":\"node_unauthorized\"}")
+    let qArch :=
+      match rawTarget.splitOn "?" with
+      | _ :: qs =>
+        let qStr := String.intercalate "?" qs
+        let found := (qStr.splitOn "&").findSome? fun pair =>
+          match pair.splitOn "=" with
+          | ["arch", v] => some ((percentDecodeStrict v).getD v)
+          | _ => none
+        found.getD "x86_64"
+      | [] => "x86_64"
+    let cordons ← loadPersistedNodeCordons st.store.rootDir
+    let nodeCordoned := !isAdminCaller && cordons.contains authedNodeId
+    if req.method == "GET" && cleanPath == "/api/node-releases/manifest" then
+      let manifest ← OrbCore.NodeRelease.buildNodeReleaseManifestJVal st.store.rootDir qArch nodeCordoned
+      return .ok (mkJson 200 (renderCompact manifest))
+    if req.method == "POST" && cleanPath == "/api/node-releases/heartbeat" then
+      let bodyJv := (OrbBin.Json.parseBytes req.bodySlice.toByteArray).toOption.getD (.obj #[])
+      let reqArch := (bodyJv.fieldStr? "arch").getD qArch
+      let effNodeId :=
+        if isAdminCaller then ((bodyJv.fieldStr? "node_id").filter (!·.isEmpty)).getD authedNodeId
+        else authedNodeId
+      let effCordoned := cordons.contains effNodeId
+      OrbCore.NodeRelease.recordNodeUpdateReport st.store.rootDir effNodeId bodyJv (formatEpochIso8601Utc nowEpochSec)
+      let manifest ← OrbCore.NodeRelease.buildNodeReleaseManifestJVal st.store.rootDir reqArch effCordoned
+      let resp := JVal.obj #[
+        ("ok", .bool true),
+        ("node_id", .str effNodeId),
+        ("cordoned", .bool effCordoned),
+        ("release_manifest", manifest)
+      ]
+      return .ok (mkJson 200 (renderCompact resp))
+    if req.method == "GET" && cleanPath.startsWith "/api/node-releases/binaries/" then
+      let binName := (cleanPath.drop "/api/node-releases/binaries/".length).toString
+      match ← OrbCore.NodeRelease.resolveReleaseBinaryBytes? binName qArch with
+      | none => return .ok (mkJson 404 "{\"error\":\"release_binary_unavailable\"}")
+      | some (_, bytes, sha) =>
+        return .ok {
+          status := 200
+          contentType := "application/octet-stream"
+          corsOrigin? := reqOrigin?
+          extraHdrs := #[("X-Orb-Sha256", sha)]
+          body := bytes
+        }
+    return .ok (mkJson 405 "{\"error\":\"method_not_allowed\"}")
+
   -- 6. Protected Routes (`require_auth` + `resolveCallerPrincipal?`)
   let some caller ← resolveCallerPrincipal? st req.headers nowEpochSec
     | return .ok (mkJson 401 "{\"error\":\"unauthorized\"}")

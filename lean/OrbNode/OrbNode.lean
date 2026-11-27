@@ -1,6 +1,7 @@
 import OrbNode.Spec
 import OrbNode.MutantSuite
 import OrbNode.Posix
+import OrbNode.AutoUpdate
 import OrbNode.Lease
 import OrbNode.Store
 import OrbNode.Dial

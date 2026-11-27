@@ -7,6 +7,7 @@
     prompt on stdin, streamed `session/update` lines on stdout (`--probe` checks support).
 -/
 import OrbNode.Posix
+import OrbNode.AutoUpdate
 import OrbNode.Store
 import OrbNode.Dial
 import OrbNode.Runner
@@ -108,6 +109,28 @@ def runCli (args : List String) : IO UInt32 := do
     if uid == 0 && !cfg.allowRoot then
       IO.eprintln "refusing to run sandboxed-node as UID 0 without SANDBOXED_NODE_ALLOW_ROOT=1"
       return 1
+    if cfg.autoUpdateEnabled && !cfg.autoUpdateStateDir.isEmpty then
+      match ← OrbNode.AutoUpdate.handleStartupUpdateCheck cfg.autoUpdateStateDir with
+      | .trampoline stagedPath =>
+        OrbNode.Posix.installSignals
+        match ← (IO.Process.spawn { cmd := stagedPath, args := args.toArray }).toBaseIO with
+        | .ok child =>
+          let pid : Int64 := Int64.ofNat child.pid.toNat
+          while true do
+            let sigs ← OrbNode.Posix.pollSignals
+            if (sigs &&& 1) != 0 then
+              let _ ← OrbBin.PosixExt.killSig pid 15
+            if (sigs &&& 2) != 0 then
+              let _ ← OrbBin.PosixExt.killSig pid 1
+            if let some rc ← child.tryWait then
+              return rc
+            IO.sleep 100
+          return 0
+        | .error e =>
+          IO.eprintln s!"failed to spawn staged sandboxed-node at {stagedPath} ({e}); falling back to base binary"
+      | .rolledBack reason =>
+        IO.eprintln s!"[sandboxed-node] recovered from failed update on startup ({reason})"
+      | .normal => pure ()
     let dialCred? ← match ← OrbNode.Dial.enrollFromEnv with
       | .ok c? => pure c?
       | .error err =>
