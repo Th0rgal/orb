@@ -288,105 +288,35 @@ Thomas's or Ben's server.
 
 ## Deploying Updates
 
-### Production: one command over SSH (standard operator deploy)
+### Production & Dev: one command over SSH (`orb-deploy`)
 
 ```bash
-ssh agent-core '/usr/local/bin/sandboxed-sh-prod deploy --service sandboxed-sh-prod.service --ref origin/master'
+ssh agent-core '/usr/local/sbin/orb-deploy --detach <sha|master>'
+# Dev-only (missions must use --dev-only):
+ssh agent-core '/usr/local/sbin/orb-deploy --detach <sha|master> --dev-only'
 ```
 
-This runs the **same deploy routine** as `POST /api/system/deploy`
-(`run_deploy` in `src/api/system.rs`), printing its progress: fetch and check
-out the ref in the source checkout, `cargo build` (debug) of `sandboxed-sh`,
-`sandboxed-mcp` and `palomactl`, `.pre-deploy-<sha>` backups, install (rolled
-back if an install fails), recycle stale companions, then a guarded restart
-(stop, wait for the port, SIGTERM/SIGKILL a lingering holder, start). The
-restarted service must answer `/api/health` within `DEPLOY_HEALTH_TIMEOUT_SECS`
-(default 120); otherwise the previous binaries are restored and the service is
-restarted again. The command waits for that and exits non-zero on failure or
-rollback. The outcome is also written to `/var/lib/sandboxed-sh/last_deploy_result`.
+`orb-deploy` (`scripts/ops/orb-deploy`) builds that exact Lean commit on
+`agent-core` (`orb-core`, `sandboxed-node`, `sandboxed-mcp`), runs both
+`orb-core-test` and `orb-node-test`, installs and health-checks `dev` (`:3002`),
+publishes the guest `sandboxed-node` binary served by Core's `NodeRelease`
+endpoint, and promotes `prod` (`:3000`) with a timestamped backup and automatic
+rollback if `/api/health` does not report the exact target SHA.
 
-- Run it as root on the host. SSH access is already full trust, so no Touch ID
-  grant is involved. It reads only `PORT`, `HOST`, `WORKING_DIR` and the repo
-  path from the unit's `EnvironmentFile=` / `Environment=`. It never reads the
-  live process environment and never adopts loader, shell, git or cargo
-  variables.
-- The same refusals as the API apply: the binary must serve the unit passed in
-  `--service` (`sandboxed-sh-dev deploy --service sandboxed-sh-prod.service` is
-  refused), missions mid-turn, a deploy in the last 5 minutes. `--force`
-  overrides the last two; record and resume interrupted missions afterwards.
-- Other flags: `--repo <path>`, `--skip-build`, `--help`.
-- **This is also the sanctioned fallback** when the Orb approval UI, the
-  privilege broker or the API itself is down: the CLI does not need a
-  running service.
-- Missions deploy through the API with a `service_deploy` grant (see below).
-- Do not copy over the live production binary or run a bare
-  `systemctl restart` for a deploy: the CLI exists so that every deploy gets
-  backups, the port guard and the health-checked rollback.
-
-**Always use debug builds** (`cargo build`) instead of release (`cargo build --release`).
-Debug builds compile in ~1 minute vs ~5+ minutes for release. The performance
-difference is negligible for this I/O-bound service.
-
-### ⚠️ Cross-Platform Warning
-
-**Never copy a locally-built binary to the server if you're on macOS.** The binary
-format differs between platforms:
-- macOS produces Mach-O executables (won't run on Linux)
-- Linux requires ELF executables
-
-If you copy a macOS binary, the service will fail with `exit code 203/EXEC`.
-
-### Recommended: Build on Server
-
-Sync source code and build directly on the server:
-
-```bash
-# Sync source (backend-only; avoids copying client/docs trees)
-rsync -avz --exclude '.lake' --exclude '.git' --exclude 'orb' --exclude 'docs-site' \
-  --exclude 'ios_dashboard' --exclude 'android_dashboard' \
-  -e ssh \
-  /Users/thomas/work/orb/ agent-core:/opt/sandboxed-sh-dev/
-
-# Build on server (debug mode)
-ssh agent-core "cd /opt/sandboxed-sh-dev && source ~/.cargo/env && cargo build"
-
-# Copy binaries (main + MCP tools) and restart
-# Note: stop service first to avoid "Text file busy" when replacing MCP binaries.
-ssh agent-core "systemctl stop sandboxed-sh-dev && \
-  cp /opt/sandboxed-sh-dev/target/debug/sandboxed-sh /usr/local/bin/sandboxed-sh-dev && \
-  cp /opt/sandboxed-sh-dev/target/debug/workspace-mcp /usr/local/bin/ && \
-  cp /opt/sandboxed-sh-dev/target/debug/desktop-mcp /usr/local/bin/ && \
-  cp /opt/sandboxed-sh-dev/target/debug/orchestrator-mcp /usr/local/bin/ && \
-  systemctl start sandboxed-sh-dev"
-
-# Verify health
-curl https://agent-backend-dev.thomas.md/api/health
-```
-
-### Alternative: Cross-compile (if you have cross set up)
-
-```bash
-# Build (debug mode - always use this)
-cargo build
-
-# Deploy to Thomas / agent-core (dev first, then promote to prod)
-scp target/debug/sandboxed_sh agent-core:/usr/local/bin/sandboxed-sh-dev
-ssh agent-core "systemctl restart sandboxed-sh-dev"
-
-# After testing, deploy production with the operator command above
-# (`sandboxed-sh-prod deploy --service sandboxed-sh-prod.service`), or from a
-# mission through POST /api/system/deploy with a grant. Never copy over the
-# live production binary.
-
-# Deploy to Ben
-scp target/debug/sandboxed_sh ben-backend:/usr/local/bin/sandboxed-sh
-ssh ben-backend "systemctl restart sandboxed-sh"
-```
-
-**Faster compilation tips:**
-- Use `cargo check` for syntax/type validation without producing a binary
-- Build on the server (has 8 cores) rather than transferring the binary
-- Install `sccache` for caching compiled dependencies across builds
+- `--detach` runs as transient unit `orb-deploy.service` so a dropped SSH
+  session never aborts the build (`journalctl -u orb-deploy`, log
+  `/var/log/orb-deploy.log`).
+- **Fleet nodes auto-update when idle** (`OrbCore/NodeRelease.lean` +
+  `OrbNode/AutoUpdate.lean`): nodes pull the new `sandboxed-node` binary and
+  declarative harness CLI bundle (including `agy`) from Core, verify SHA-256 +
+  ELF header, trampoline into the new binary, and automatically roll back on
+  crash before first heartbeat. Remote harnesses also use Core's Streamable HTTP
+  MCP endpoint directly. Manual per-node SSH rollouts (`--rollout-nodes`) are
+  only needed for emergency recovery.
+- Do not copy over the live production binary or run a bare `systemctl restart`
+  for a deploy. Never copy a macOS binary to Linux (`exit code 203/EXEC`).
+- Note: the legacy Rust `sandboxed-sh-prod deploy` / `cargo build` flow is
+  retired (zero Rust files remain in the repository).
 
 ## Hot-Swapping via the MCP (preferred over raw systemctl)
 
