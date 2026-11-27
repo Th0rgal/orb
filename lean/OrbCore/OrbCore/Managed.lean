@@ -384,7 +384,7 @@ def managedComputeDdl : String :=
   "bandwidth_limits_json TEXT NOT NULL DEFAULT ''," ++
   "updated_at INTEGER NOT NULL DEFAULT 0);" ++
   "CREATE TABLE IF NOT EXISTS managed_cost_reservations(" ++
-  "id TEXT PRIMARY KEY,machine_id TEXT NOT NULL,owner_user_id TEXT NOT NULL,day_start INTEGER NOT NULL,cents INTEGER NOT NULL);" ++
+  "id TEXT PRIMARY KEY,machine_id TEXT NOT NULL,owner_user_id TEXT NOT NULL,day_start INTEGER NOT NULL,cents INTEGER NOT NULL,pool_id TEXT NOT NULL DEFAULT '');" ++
   "CREATE TABLE IF NOT EXISTS managed_resume_intents(" ++
   "id TEXT PRIMARY KEY,machine_id TEXT NOT NULL,expected_boot INTEGER NOT NULL," ++
   "old_provider_id TEXT NOT NULL,new_provider_id TEXT NOT NULL DEFAULT ''," ++
@@ -408,6 +408,8 @@ def managedAdditiveAlters : Array String := #[
   "CREATE UNIQUE INDEX IF NOT EXISTS idx_managed_provider_identity ON managed_machines(provider,provider_id) WHERE provider_id<>'';",
   "CREATE UNIQUE INDEX IF NOT EXISTS idx_managed_request ON managed_machines(provider,request_key) WHERE request_key<>'';",
   "CREATE INDEX IF NOT EXISTS managed_cost_reservation_day ON managed_cost_reservations(owner_user_id,day_start);",
+  "ALTER TABLE managed_cost_reservations ADD COLUMN pool_id TEXT NOT NULL DEFAULT '';",
+  "CREATE INDEX IF NOT EXISTS managed_cost_reservation_pool ON managed_cost_reservations(pool_id,day_start);",
   "INSERT OR IGNORE INTO managed_cost_reservations(id,machine_id,owner_user_id,day_start,cents) SELECT 'create:'||id,id,owner_user_id,(created_at_sec/86400)*86400,spent_cents FROM managed_machines WHERE created_at_sec>0;",
   "CREATE TABLE IF NOT EXISTS mission_budgets(mission_id TEXT PRIMARY KEY,budget_deci_milli_usd INTEGER,reset_period TEXT NOT NULL DEFAULT 'total',vm_limits_json TEXT NOT NULL DEFAULT '',bandwidth_limits_json TEXT NOT NULL DEFAULT '',updated_at INTEGER NOT NULL DEFAULT 0);"
 ]
@@ -527,7 +529,7 @@ def openManagedComputeStore (path : String) (coreDb? : Option SqliteDb := none) 
   match ← openSqliteDb path managedComputeDdl managedAdditiveAlters false with
   | .error e => return .error e
   | .ok db => return .ok {
-      db := db, coreDb? := coreDb?, instanceName := ← currentManagedInstance,
+      db := db, coreDb? := coreDb?, missionsDb? := coreDb?, instanceName := ← currentManagedInstance,
       dailyCapCeilingCents := devDailyCapCeiling (← IO.getEnv "ORB_DEV_DAILY_CAP_CENTS") }
 
 def closeManagedComputeStore (st : ManagedComputeStore) : IO Unit :=
@@ -925,7 +927,7 @@ private def managedMissionOwner (db : SqliteDb) (missionId : String) : IO (Excep
     missions database only the mission itself is visible. -/
 private def managedMissionLineage (st : ManagedComputeStore) (missionId ownerUserId : String) :
     IO (Except String (Array String)) := do
-  let some db := st.missionsDb? | return .ok #[missionId]
+  let some db := st.missionsDb?.orElse (fun _ => st.coreDb?) | return .ok #[missionId]
   match ← managedMissionOwner db missionId with
   | .error e => return .error e
   | .ok none => return .ok #[missionId]
@@ -955,7 +957,7 @@ private def managedMissionLineage (st : ManagedComputeStore) (missionId ownerUse
     machines whose compute usage belongs to the mission's bandwidth pool. -/
 private def managedMissionSubtree (st : ManagedComputeStore) (missionId ownerUserId : String) :
     IO (Except String (Array String)) := do
-  let some db := st.missionsDb? | return .ok #[missionId]
+  let some db := st.missionsDb?.orElse (fun _ => st.coreDb?) | return .ok #[missionId]
   match ← managedMissionOwner db missionId with
   | .error e => return .error e
   | .ok none => return .ok #[missionId]
@@ -1071,9 +1073,92 @@ private def admitMissionConcurrencyTx (st : ManagedComputeStore)
           if providerActive ≥ cap then return .error "managed_provider_mission_concurrency_limit_reached"
   return .ok ()
 
+private def managedBudgetWindowStartSec (resetPeriod : String) (nowEpoch : UInt64) : UInt64 :=
+  let rp := resetPeriod.trimAscii.toString.toLower
+  if rp == "daily" then
+    (nowEpoch / 86400) * 86400
+  else if rp == "weekly" then
+    let d := nowEpoch / 86400
+    let dow := (d + 3) % 7
+    (d - dow) * 86400
+  else 0
+
+/-- Compute subtree reservation spend (cents) and carved child pool total (deci-milli-USD)
+    for `poolId` inside a held `st.db` transaction (`FLT-08`).
+    Returns `(uncarvedSpendCents, carvedChildrenBudgetDm, carvedChildrenOverrunDm, totalSubtreeSpendCents)`. -/
+private def queryMissionPoolUsageTx (st : ManagedComputeStore) (poolId ownerUserId resetPeriod : String)
+    (nowEpoch : UInt64) (excludeCarvedChild? : Option String := none) :
+    IO (Except String (UInt64 × UInt64 × UInt64 × UInt64)) := do
+  let .ok subtree ← managedMissionSubtree st poolId ownerUserId
+    | return .error "managed_mission_lineage_read_failed"
+  let winStart := managedBudgetWindowStartSec resetPeriod nowEpoch
+  let ph := String.intercalate "," (List.replicate subtree.size "?")
+  -- Load explicit dollar budgets for all strict descendants in this subtree
+  let .ok descBudgets ← execParamQueryUnlocked st.db
+      s!"SELECT mission_id, COALESCE(budget_deci_milli_usd,-1) FROM mission_budgets WHERE mission_id IN ({ph}) AND budget_deci_milli_usd IS NOT NULL AND CAST(budget_deci_milli_usd AS TEXT)<>'';"
+      subtree
+    | return .error "managed_mission_budget_read_failed"
+  let mut budgetedDescendants : Array (String × UInt64) := #[]
+  for i in [1:descBudgets.size] do
+    let dMid := (cell descBudgets[i]! 0).trimAscii.toString
+    let rawB := (cell descBudgets[i]! 1).trimAscii.toString
+    if dMid != poolId && excludeCarvedChild? != some dMid then
+      if let some dm := rawB.toNat? then
+        budgetedDescendants := budgetedDescendants.push (dMid, dm.toUInt64)
+  -- Identify top-level carved children (those whose nearest budgeted ancestor is `poolId`)
+  let mut topCarved : Array (String × UInt64) := #[]
+  for (dMid, dm) in budgetedDescendants do
+    let .ok dLin ← managedMissionLineage st dMid ownerUserId
+      | return .error "managed_mission_lineage_read_failed"
+    let mut hasCloserBudgetedAncestor := false
+    for anc in dLin do
+      if anc == dMid then continue
+      if anc == poolId then break
+      if budgetedDescendants.any (fun p => p.1 == anc) then
+        hasCloserBudgetedAncestor := true
+        break
+    if !hasCloserBudgetedAncestor then
+      topCarved := topCarved.push (dMid, dm)
+  -- Gather all missions belonging to carved descendant subtrees
+  let mut carvedMissions : Array String := #[]
+  let mut carvedBudgetSumDm : UInt64 := 0
+  let mut carvedOverrunSumDm : UInt64 := 0
+  for (cMid, cBudgetDm) in topCarved do
+    carvedBudgetSumDm := carvedBudgetSumDm + cBudgetDm
+    let .ok cSub ← managedMissionSubtree st cMid ownerUserId
+      | return .error "managed_mission_lineage_read_failed"
+    for cm in cSub do
+      if !carvedMissions.contains cm then carvedMissions := carvedMissions.push cm
+    let cPh := String.intercalate "," (List.replicate cSub.size "?")
+    let .ok cSpendRows ← execParamQueryUnlocked st.db
+        s!"SELECT COALESCE(SUM(r.cents),0) FROM managed_cost_reservations r LEFT JOIN managed_machines m ON m.id=r.machine_id WHERE (r.pool_id IN ({cPh}) OR (r.pool_id='' AND m.owner_mission IN ({cPh}))) AND r.day_start>=CAST(? AS INTEGER);"
+        (cSub ++ cSub ++ #[s!"{winStart}"])
+      | return .error "managed_mission_budget_read_failed"
+    let cSpendDm := (if cSpendRows.size > 1 then cellU64 cSpendRows[1]! 0 else 0) * 100
+    if cSpendDm > cBudgetDm then
+      carvedOverrunSumDm := carvedOverrunSumDm + (cSpendDm - cBudgetDm)
+  -- Total reservations across entire subtree (including pool_id attribution even after machine reassignment)
+  let .ok totalRows ← execParamQueryUnlocked st.db
+      s!"SELECT COALESCE(SUM(r.cents),0) FROM managed_cost_reservations r LEFT JOIN managed_machines m ON m.id=r.machine_id WHERE (r.pool_id IN ({ph}) OR (r.pool_id='' AND m.owner_mission IN ({ph}))) AND r.day_start>=CAST(? AS INTEGER);"
+      (subtree ++ subtree ++ #[s!"{winStart}"])
+    | return .error "managed_mission_budget_read_failed"
+  let totalSpendCents := if totalRows.size > 1 then cellU64 totalRows[1]! 0 else 0
+  -- Uncarved missions owned by `poolId` itself (not inside any carved child subtree)
+  let uncarved := subtree.filter (fun m => !carvedMissions.contains m)
+  let uncarvedSpendCents ←
+    if uncarved.isEmpty then pure 0
+    else
+      let uPh := String.intercalate "," (List.replicate uncarved.size "?")
+      let .ok uRows ← execParamQueryUnlocked st.db
+          s!"SELECT COALESCE(SUM(r.cents),0) FROM managed_cost_reservations r LEFT JOIN managed_machines m ON m.id=r.machine_id WHERE (r.pool_id IN ({uPh}) OR (r.pool_id='' AND m.owner_mission IN ({uPh}))) AND r.day_start>=CAST(? AS INTEGER);"
+          (uncarved ++ uncarved ++ #[s!"{winStart}"])
+        | return .error "managed_mission_budget_read_failed"
+      pure (if uRows.size > 1 then cellU64 uRows[1]! 0 else 0)
+  return .ok (uncarvedSpendCents, carvedBudgetSumDm, carvedOverrunSumDm, totalSpendCents)
+
 private def admitManagedCostTx (st : ManagedComputeStore) (fleet : ManagedFleetState)
     (provider size ownerUserId missionId : String) (cost ttlMinutes nowEpoch : UInt64) (newSlot : Bool)
-    (userAdmission? : Option ManagedUserAdmission) : IO (Except String ManagedFleetState) := do
+    (userAdmission? : Option ManagedUserAdmission) : IO (Except String (ManagedFleetState × String)) := do
   if ttlMinutes < 5 || ttlMinutes > 720 then return .error "managed_ttl_invalid"
   let .ok counts ← execParamQueryUnlocked st.db
       "SELECT COUNT(*) FROM managed_machines m WHERE phase_code IN (0,1) OR EXISTS(SELECT 1 FROM managed_resume_intents r WHERE r.machine_id=m.id AND r.state IN ('pending','aborting'));" #[]
@@ -1114,44 +1199,51 @@ private def admitManagedCostTx (st : ManagedComputeStore) (fleet : ManagedFleetS
   match ← admitMissionConcurrencyTx st provider missionId ownerUserId newSlot with
   | .ok () => pure ()
   | .error e => return .error e
+  let mut chargedPoolId := ""
   if !missionId.isEmpty then
-    -- A child mission shares its ancestors' dollar pools. The managed DB does
-    -- not hold the mission tree, so walk it through Core's DB and then admit
-    -- against every ancestor budget that covers this lineage.
-    match st.coreDb? with
-    | some coreDb =>
-      let mut lineage : Array String := #[missionId]
-      let mut cursor := missionId
-      let mut depth := 0
-      while depth < 32 && !cursor.isEmpty do
-        depth := depth + 1
-        let .ok pRows ← execParamQuery coreDb
-            "SELECT COALESCE(parent_mission_id,'') FROM missions WHERE id=?1 LIMIT 1;" #[cursor]
-          | return .error "managed_mission_lineage_read_failed"
-        if pRows.size ≤ 1 then break
-        let parent := (cell pRows[1]! 0).trimAscii.toString
-        if parent.isEmpty || lineage.contains parent then break
-        lineage := lineage.push parent
-        cursor := parent
+    -- FLT-08: resolve same-owner mission lineage (self first, then ancestors) and
+    -- enforce every governing dollar pool covering this mission, including
+    -- cumulative descendant spend, carved child pools, and reset periods.
+    -- Even without a linked Core DB, `managedMissionLineage` returns `#[missionId]`
+    -- so direct mission budgets are always enforced.
+    let .ok lineage ← managedMissionLineage st missionId ownerUserId
+      | return .error "managed_mission_lineage_read_failed"
+    if !lineage.isEmpty then
       let placeholders := String.intercalate "," (List.replicate lineage.size "?")
       let .ok bRows ← execParamQueryUnlocked st.db
-          s!"SELECT mission_id, COALESCE(budget_deci_milli_usd,-1) FROM mission_budgets WHERE mission_id IN ({placeholders});"
+          s!"SELECT mission_id, COALESCE(budget_deci_milli_usd,-1), COALESCE(reset_period,'total') FROM mission_budgets WHERE mission_id IN ({placeholders}) AND budget_deci_milli_usd IS NOT NULL AND CAST(budget_deci_milli_usd AS TEXT)<>'';"
           lineage
         | return .error "managed_mission_budget_read_failed"
+      let mut budgetMap : Array (String × UInt64 × String) := #[]
       for i in [1:bRows.size] do
         let ownerMid := (cell bRows[i]! 0).trimAscii.toString
-        let budgetUnits := ((cell bRows[i]! 1).trimAscii.toString.toInt?).getD (-1)
-        if budgetUnits < 0 then continue
-        let .ok spendRows ← execParamQueryUnlocked st.db
-            ("SELECT COALESCE(SUM(r.cents),0) FROM managed_cost_reservations r " ++
-             "JOIN managed_machines m ON m.id=r.machine_id WHERE m.owner_mission=?1;") #[ownerMid]
-          | return .error "managed_mission_budget_read_failed"
-        if spendRows.size ≤ 1 then return .error "managed_mission_budget_read_failed"
-        let spent := cellU64 spendRows[1]! 0
-        let requestedUnits := (spent + cost) * 100
-        if budgetUnits ≥ 0 && requestedUnits.toNat > budgetUnits.toNat then
-          return .error s!"mission_budget_exceeded:{ownerMid}"
-    | none => pure ()
+        let rawB := (cell bRows[i]! 1).trimAscii.toString
+        let rp := (cell bRows[i]! 2).trimAscii.toString
+        if let some dm := rawB.toNat? then
+          budgetMap := budgetMap.push (ownerMid, dm.toUInt64, rp)
+      let mut foundNearest := false
+      for poolMid in lineage do
+        if let some (_, budgetDm, rp) := budgetMap.find? (fun p => p.1 == poolMid) then
+          let .ok (uncarvedCents, carvedDm, carvedOverrunDm, totalCents) ←
+            queryMissionPoolUsageTx st poolMid ownerUserId rp nowEpoch
+            | return .error "managed_mission_budget_read_failed"
+          let costDm := cost * 100
+          if !foundNearest then
+            -- Nearest governing pool is directly charged for this reservation.
+            chargedPoolId := poolMid
+            foundNearest := true
+            let committedDm := uncarvedCents * 100 + carvedDm + carvedOverrunDm + costDm
+            let totalDm := totalCents * 100 + costDm
+            if committedDm > budgetDm || totalDm > budgetDm then
+              return .error s!"mission_budget_exceeded:{poolMid}"
+          else
+            -- Ancestor pool above an already-carved child pool: child's carve is already
+            -- reserved in `carvedDm`, so enforce total subtree spend never exceeds ancestor
+            -- ceiling and ancestor uncarved + carved commitments stay within cap.
+            let totalDm := totalCents * 100 + costDm
+            let committedDm := uncarvedCents * 100 + carvedDm + carvedOverrunDm
+            if totalDm > budgetDm || committedDm > budgetDm then
+              return .error s!"mission_budget_exceeded:{poolMid}"
     let .ok budgetRows ← execParamQueryUnlocked st.db
         "SELECT bandwidth_limits_json FROM mission_budgets WHERE mission_id=?1;" #[missionId]
       | return .error "managed_bandwidth_read_failed"
@@ -1220,13 +1312,14 @@ private def admitManagedCostTx (st : ManagedComputeStore) (fleet : ManagedFleetS
         admitManagedSpawnMultiUser { current with machines := #[] } cost spent
           (some budget.capCents) ttlMinutes.toUInt32 != 0 then
       return .error "managed_user_spend_cap_exceeded"
-  return .ok current
+  return .ok (current, chargedPoolId)
 
 private def chargeManagedCostTx (st : ManagedComputeStore) (current : ManagedFleetState)
-    (reservationId machineId ownerUserId : String) (cost nowEpoch : UInt64) : IO (Except String Unit) := do
+    (reservationId machineId ownerUserId : String) (cost nowEpoch : UInt64)
+    (poolId : String := "") : IO (Except String Unit) := do
   let .ok _ ← execParamQueryUnlocked st.db
-      "INSERT INTO managed_cost_reservations(id,machine_id,owner_user_id,day_start,cents) VALUES(?1,?2,?3,?4,?5);"
-      #[reservationId, machineId, ownerUserId, s!"{(nowEpoch / 86400) * 86400}", s!"{cost}"]
+      "INSERT INTO managed_cost_reservations(id,machine_id,owner_user_id,day_start,cents,pool_id) VALUES(?1,?2,?3,?4,?5,?6);"
+      #[reservationId, machineId, ownerUserId, s!"{(nowEpoch / 86400) * 86400}", s!"{cost}", poolId]
     | return .error "managed_cost_reservation_failed"
   match ← execParamQueryUnlocked st.db
       ("INSERT INTO managed_fleet_state(singleton_id,enabled,boat_enabled,daily_cap_cents,spent_today_cents,max_concurrent) " ++
@@ -1235,6 +1328,48 @@ private def chargeManagedCostTx (st : ManagedComputeStore) (current : ManagedFle
         s!"{current.dailyCapCents}", s!"{current.spentTodayCents + cost}", s!"{current.maxConcurrent}"] with
   | .error e => return .error e
   | .ok _ => return .ok ()
+
+/-- Refund a cost reservation row when provider creation fails definitively (4xx) before any VM exists (`FLT-08`). -/
+def refundManagedCostReservation (st : ManagedComputeStore) (reservationId : String) : IO (Except String Unit) :=
+  withImmediateTx st.db do
+    let .ok rows ← execParamQueryUnlocked st.db
+        "SELECT cents FROM managed_cost_reservations WHERE id=?1 LIMIT 1;" #[reservationId]
+      | return .error "managed_refund_read_failed"
+    if rows.size ≤ 1 then return .ok ()
+    let cents := cellU64 rows[1]! 0
+    let .ok _ ← execParamQueryUnlocked st.db
+        "DELETE FROM managed_cost_reservations WHERE id=?1;" #[reservationId]
+      | return .error "managed_refund_delete_failed"
+    if cents > 0 then
+      discard <| execParamQueryUnlocked st.db
+        "UPDATE managed_fleet_state SET spent_today_cents=MAX(0,spent_today_cents-?1) WHERE singleton_id=1;"
+        #[s!"{cents}"]
+    return .ok ()
+
+/-- Validate that carving `requestedBudgetDm` for `missionId` fits inside its nearest
+    budgeted ancestor pool's remaining headroom (`FLT-08`). -/
+def validateMissionBudgetCarve (st : ManagedComputeStore) (missionId ownerUserId : String)
+    (requestedBudgetDm : UInt64) (nowEpoch : UInt64) : IO (Except String Unit) :=
+  withImmediateTx st.db do
+    let .ok lineage ← managedMissionLineage st missionId ownerUserId
+      | return .error "managed_mission_lineage_read_failed"
+    for anc in lineage do
+      if anc == missionId then continue
+      let .ok bRows ← execParamQueryUnlocked st.db
+          "SELECT COALESCE(budget_deci_milli_usd,-1), COALESCE(reset_period,'total') FROM mission_budgets WHERE mission_id=?1 AND budget_deci_milli_usd IS NOT NULL AND CAST(budget_deci_milli_usd AS TEXT)<>'';"
+          #[anc]
+        | return .error "managed_mission_budget_read_failed"
+      if bRows.size > 1 then
+        if let some ancCapDm := (cell bRows[1]! 0).trimAscii.toString.toNat? then
+          let rp := (cell bRows[1]! 1).trimAscii.toString
+          let .ok (uncarvedCents, otherCarvedDm, otherOverrunDm, _) ←
+            queryMissionPoolUsageTx st anc ownerUserId rp nowEpoch (some missionId)
+            | return .error "managed_mission_budget_read_failed"
+          let usedWithoutSelf := uncarvedCents * 100 + otherCarvedDm + otherOverrunDm
+          if usedWithoutSelf + requestedBudgetDm > ancCapDm.toUInt64 then
+            return .error s!"mission_budget_carve_exceeds_parent:{anc}"
+          break
+    return .ok ()
 
 private def extensionFromRow (r : Array String) : ManagedExtensionIntent := {
   id := cell r 0, machineId := cell r 1, bootEpoch := cellU64 r 2, providerId := cell r 3,
@@ -1292,7 +1427,7 @@ def prepareManagedExtension (st : ManagedComputeStore) (fleet : ManagedFleetStat
     let .ok oldQuote := quote m.size m.ttlMinutes | return .error "managed_extension_quote_invalid"
     let .ok newQuote := quote m.size ttl | return .error "managed_extension_quote_invalid"
     let cost := newQuote - oldQuote
-    let current ← match ← admitManagedCostTx st fleet m.provider m.size m.ownerUserId m.ownerMission cost ttl nowEpoch false budget? with
+    let (current, chargedPoolId) ← match ← admitManagedCostTx st fleet m.provider m.size m.ownerUserId m.ownerMission cost ttl nowEpoch false budget? with
       | .ok value => pure value
       | .error e => return .error e
     let intent : ManagedExtensionIntent := {
@@ -1303,7 +1438,7 @@ def prepareManagedExtension (st : ManagedComputeStore) (fleet : ManagedFleetStat
         "INSERT INTO managed_extension_intents(id,machine_id,boot_epoch,provider_id,minutes,old_expiry,new_expiry,new_ttl,cost) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9);"
         #[key,m.id,s!"{vm.nodeBootEpoch}",m.providerId,s!"{minutes}",s!"{m.expiresAtSec}",s!"{newExpiry}",s!"{ttl}",s!"{cost}"]
       | return .error "managed_extension_already_pending"
-    let .ok () ← chargeManagedCostTx st current s!"extend:{key}" m.id m.ownerUserId cost nowEpoch
+    let .ok () ← chargeManagedCostTx st current s!"extend:{key}" m.id m.ownerUserId cost nowEpoch chargedPoolId
       | return .error "managed_extension_cost_failed"
     return .ok intent
 
@@ -1425,7 +1560,7 @@ def provisionManagedMachine (st : ManagedComputeStore) (fleet : ManagedFleetStat
     expiresAtSec := if machine.expiresAtSec == 0 then nowEpoch + machine.ttlMinutes * 60 else machine.expiresAtSec
   }
   withImmediateTx st.db do
-    let current ← match ← admitManagedCostTx st fleet machine.provider machine.size machine.ownerUserId
+    let (current, chargedPoolId) ← match ← admitManagedCostTx st fleet machine.provider machine.size machine.ownerUserId
          machine.ownerMission machine.spentCents machine.ttlMinutes nowEpoch true userAdmission? with
       | .ok value => pure value
       | .error e => return .error e
@@ -1437,7 +1572,7 @@ def provisionManagedMachine (st : ManagedComputeStore) (fleet : ManagedFleetStat
       | .error e => return .error e
       | .ok () =>
         match ← chargeManagedCostTx st current s!"create:{machine.id}" machine.id
-            machine.ownerUserId machine.spentCents nowEpoch with
+            machine.ownerUserId machine.spentCents nowEpoch chargedPoolId with
         | .error e => return .error e
         | .ok _ => return .ok reserved
 
@@ -1508,7 +1643,7 @@ def prepareManagedResume (st : ManagedComputeStore) (fleet : ManagedFleetState)
       return .error "vm_resume_rejected"
     if deadlineSec ≤ nowEpoch || m.spentCents + cost < m.spentCents then
       return .error "managed_resume_invalid"
-    let current ← match ← admitManagedCostTx st fleet m.provider m.size m.ownerUserId m.ownerMission cost ttl nowEpoch true userAdmission? with
+    let (current, chargedPoolId) ← match ← admitManagedCostTx st fleet m.provider m.size m.ownerUserId m.ownerMission cost ttl nowEpoch true userAdmission? with
       | .ok value => pure value
       | .error e => return .error e
     let intent : ManagedResumeIntent := {
@@ -1522,7 +1657,7 @@ def prepareManagedResume (st : ManagedComputeStore) (fleet : ManagedFleetState)
         "INSERT INTO managed_resume_intents(id,machine_id,expected_boot,old_provider_id,old_ttl,old_expiry,new_ttl,new_expiry,deadline_sec) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9);"
         #[intent.id, machineId, s!"{successor}", intent.oldProviderId, s!"{intent.oldTtl}", s!"{intent.oldExpiry}", s!"{ttl}", s!"{intent.newExpiry}", s!"{deadlineSec}"]
       | return .error "managed_resume_already_pending"
-    let .ok () ← chargeManagedCostTx st current s!"resume:{requestKey}" m.id m.ownerUserId cost nowEpoch
+    let .ok () ← chargeManagedCostTx st current s!"resume:{requestKey}" m.id m.ownerUserId cost nowEpoch chargedPoolId
       | return .error "managed_resume_cost_reservation_failed"
     let .ok () ← upsertMachineTx st.db { m with spentCents := m.spentCents + cost, lastPollSec := 0 } slice
       | return .error "managed_resume_store_failed"
@@ -2420,5 +2555,62 @@ def renderMissionBudgetJson
   s!"\"own_vm_limits\":{ownVmJson},\"vm_limits_mode\":{vmModeJson},\"vm_limits_pool_id\":{vmPoolIdJson},\"effective_vm_limits\":{effVmJson}," ++
   s!"\"own_bandwidth_limits\":{ownBwJson},\"bandwidth_mode\":{bwModeJson},\"bandwidth_pool_id\":{bwPoolIdJson},\"effective_bandwidth\":{effBwJson}," ++
   "\"children\":[]}"
+
+/-- Lineage- and carving-aware renderer for `GET/PUT /api/control/missions/:id/budget` (`FLT-08`).
+    Resolves inherited ancestor pools, real reservation spend across the pool subtree,
+    carved descendant pools, and live headroom. -/
+def renderMissionBudgetJsonWithStore
+    (st : ManagedComputeStore)
+    (fleet : ManagedFleetState)
+    (cfg : MissionBudgetConfig)
+    (ownerUserId : String)
+    (nowEpochSec : UInt64) : IO String := do
+  let base := renderMissionBudgetJson fleet cfg nowEpochSec
+  let .ok baseJv := OrbBin.Json.parse base | return base
+  let .ok lineage ← managedMissionLineage st cfg.missionId ownerUserId | return base
+  let mut effPoolId? : Option String := none
+  let mut effCapDm : UInt64 := 0
+  let mut effResetPeriod := "total"
+  for anc in lineage do
+    let ancCfg ← getMissionBudgetConfig st anc
+    if let some dm := ancCfg.budgetDeciMilliUsd? then
+      effPoolId? := some anc
+      effCapDm := dm
+      effResetPeriod := if isValidBudgetResetPeriod ancCfg.resetPeriod then ancCfg.resetPeriod else "total"
+      break
+  let some effPoolId := effPoolId? | return base
+  let usageRes ← withImmediateTx st.db do
+    queryMissionPoolUsageTx st effPoolId ownerUserId effResetPeriod nowEpochSec
+  let .ok (uncarvedCents, carvedDm, carvedOverrunDm, totalCents) := usageRes | return base
+  let .ok subtree ← managedMissionSubtree st effPoolId ownerUserId | return base
+  let subMachines := fleet.machines.filter (fun m => subtree.contains m.ownerMission)
+  let liveMachines := subMachines.filter (fun m => m.status == "ready" || m.status == "provisioning")
+  let spentDm : UInt64 := uncarvedCents * 100
+  let totalSpentDm : UInt64 := totalCents * 100
+  let usedDm : UInt64 := spentDm + carvedDm + carvedOverrunDm
+  let availDm : UInt64 := if effCapDm > usedDm then effCapDm - usedDm else 0
+  let (pStart?, pEnd?) := budgetResetWindowBounds effResetPeriod nowEpochSec
+  let poolObj : JVal := .obj #[
+    ("pool_id", .str effPoolId),
+    ("budget_usd", .num (formatDeciMilliUsd effCapDm)),
+    ("spent_usd", .num (formatDeciMilliUsd spentDm)),
+    ("lifetime_spent_usd", .num (formatDeciMilliUsd totalSpentDm)),
+    ("reserved_usd", .num (formatDeciMilliUsd spentDm)),
+    ("carved_usd", .num (formatDeciMilliUsd carvedDm)),
+    ("persistent_carved_usd", .num (formatDeciMilliUsd carvedDm)),
+    ("available_usd", .num (formatDeciMilliUsd availDm)),
+    ("live_machines", JVal.nat liveMachines.size),
+    ("live_leases", .arr #[]),
+    ("reset_period", .str effResetPeriod),
+    ("period_started_at", match pStart? with | some s => .str s | none => .null),
+    ("period_resets_at", match pEnd? with | some s => .str s | none => .null)
+  ]
+  let modeStr := if effPoolId == cfg.missionId then "own" else "inherited"
+  let out := baseJv
+    |>.setField "pool_id" (.str effPoolId)
+    |>.setField "mode" (.str modeStr)
+    |>.setField "pool" poolObj
+    |>.setField "max_grant_usd" (.num (formatDeciMilliUsd availDm))
+  return OrbBin.Json.renderCompact out
 
 end OrbCore.Managed

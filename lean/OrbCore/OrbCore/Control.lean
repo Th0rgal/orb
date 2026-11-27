@@ -48,6 +48,7 @@ import OrbCore.DevOperator
 import OrbCore.McpGateway
 import OrbCore.Maintenance
 import OrbNetLeaf.TlsHttp
+import OrbNetLeaf.Pty
 import OrbNetLeaf.Gzip
 
 namespace OrbCore.Control
@@ -1424,15 +1425,27 @@ structure CoreHttpResponse where
   bodyStream? : Option ((ByteArray → IO Bool) → IO Bool) := none
   deriving Inhabited
 
+/-- Bridge every persisted `appendMissionEvent` onto `BroadcastHub` with its exact
+    SQLite `mission_events.seq` (`RUN-05`). Call once at Core startup (or in tests) so
+    local harness turns, HTTP messages, tool calls/results, and recovery receipts all
+    stream live to SSE subscribers with durable cursor IDs. -/
+def attachSseEventBridge (store : CoreStore) (hub : BroadcastHub) : IO (IO Unit) := do
+  markBroadcastHubBridged hub
+  registerMissionEventListener store fun mid seq evType payloadJson _createdAt => do
+    publishControlEvent (some hub) evType payloadJson (some mid) (some seq)
+
 /-- Build a held-open `text/event-stream` response for the control SSE routes.
     `initialFrame` is emitted as the first chunk, then queued `BroadcastHub` frames are relayed
-    (filtered to this caller's visible missions and `kindsFilter`), with `: keep-alive` comments
-    between idle periods and a `stream_lagged` notice when the 256-frame subscriber queue overflows.
+    (filtered to this caller's visible missions and `kindsFilter`, deduplicating any buffered
+    events whose `seq ≤ lastSnapshotSeq`), with `: keep-alive` comments between idle periods
+    and a `stream_lagged` notice when the 256-frame subscriber queue overflows.
     The stream ends when the client disconnects or the caller's session is no longer valid. -/
 def sseStreamResponse (st : CoreAppState) (caller : CallerPrincipal) (reqOrigin? : Option String)
     (missionFilter? : Option String) (kindsFilter : Array String) (initialFrame : String)
     (preRegisteredSub? : Option SseSubscriber := none)
-    (reqHdrs : Array (String × String) := #[]) : CoreHttpResponse :=
+    (reqHdrs : Array (String × String) := #[])
+    (lastSnapshotSeq : UInt64 := 0)
+    (initialLagged : Bool := false) : CoreHttpResponse :=
   let visibleMissionUncached (liveCaller : CallerPrincipal) (mid? : Option String) : IO Bool := do
     match mid? with
     | none =>
@@ -1467,7 +1480,7 @@ def sseStreamResponse (st : CoreAppState) (caller : CallerPrincipal) (reqOrigin?
     status := 200
     contentType := "text/event-stream"
     corsOrigin? := reqOrigin?
-    extraHdrs := #[("Cache-Control", "no-cache")]
+    extraHdrs := #[]
     body := ByteArray.empty
     bodyStream? := some fun emit => do
       let some hub := st.broadcastHub?
@@ -1477,6 +1490,9 @@ def sseStreamResponse (st : CoreAppState) (caller : CallerPrincipal) (reqOrigin?
         | none => registerSseSubscriberFull hub missionFilter?
       try
         if !(← emit initialFrame.toUTF8) then return false
+        if initialLagged then
+          let lagFrame := formatSseFrame "stream_lagged" "{\"reason\":\"replay_truncated\"}" (if lastSnapshotSeq > 0 then some lastSnapshotSeq else none)
+          if !(← emit lagFrame.toUTF8) then return false
         let keepAliveMs : Nat := max 20 (st.sseKeepAliveMs?.getD 15000)
         let callerRevalidateMs : Nat := 1000
         let missionVisTtlMs : Nat := 1000
@@ -1486,6 +1502,7 @@ def sseStreamResponse (st : CoreAppState) (caller : CallerPrincipal) (reqOrigin?
         let mut cachedCaller? : Option CallerPrincipal := some caller
         let mut missionVisCache : Array (String × Nat × Bool) := #[]
         let mut running := true
+        let mut maxEmittedSeq : UInt64 := lastSnapshotSeq
         while running do
           let nowCheckMs ← IO.monoMsNow
           if nowCheckMs - lastCallerCheckMs ≥ callerRevalidateMs then
@@ -1505,24 +1522,33 @@ def sseStreamResponse (st : CoreAppState) (caller : CallerPrincipal) (reqOrigin?
           if !events.isEmpty then
             for ev in events do
               if running then
-                let allowed ← match ev.missionId? with
-                  | none => visibleMissionUncached liveCaller none
-                  | some mid =>
-                    if liveCaller.isLegacyUnscoped then
-                      visibleMissionUncached liveCaller (some mid)
+                -- Deduplicate buffered events already included in the initial snapshot (`RUN-05`).
+                let isDup := missionFilter?.isSome &&
+                  match ev.seq? with
+                  | some s => s ≤ maxEmittedSeq
+                  | none => false
+                if !isDup then
+                  let allowed ← match ev.missionId? with
+                    | none => visibleMissionUncached liveCaller none
+                    | some mid =>
+                      if liveCaller.isLegacyUnscoped then
+                        visibleMissionUncached liveCaller (some mid)
+                      else
+                        let evNowMs ← IO.monoMsNow
+                        match missionVisCache.find? (fun (m, ts, _) => m == mid && evNowMs - ts < missionVisTtlMs) with
+                        | some (_, _, ok) => pure ok
+                        | none =>
+                          let ok ← visibleMissionUncached liveCaller (some mid)
+                          missionVisCache := (missionVisCache.filter (fun (m, ts, _) => m != mid && evNowMs - ts < missionVisTtlMs)).push (mid, evNowMs, ok)
+                          pure ok
+                  if allowed && kindsAllows ev.eventType then
+                    if !(← emit ev.frame.toUTF8) then
+                      running := false
                     else
-                      let evNowMs ← IO.monoMsNow
-                      match missionVisCache.find? (fun (m, ts, _) => m == mid && evNowMs - ts < missionVisTtlMs) with
-                      | some (_, _, ok) => pure ok
-                      | none =>
-                        let ok ← visibleMissionUncached liveCaller (some mid)
-                        missionVisCache := (missionVisCache.filter (fun (m, ts, _) => m != mid && evNowMs - ts < missionVisTtlMs)).push (mid, evNowMs, ok)
-                        pure ok
-                if allowed && kindsAllows ev.eventType then
-                  if !(← emit ev.frame.toUTF8) then
-                    running := false
-                  else
-                    lastActivityMs ← IO.monoMsNow
+                      if missionFilter?.isSome then
+                        if let some s := ev.seq? then
+                          if s > maxEmittedSeq then maxEmittedSeq := s
+                      lastActivityMs ← IO.monoMsNow
           else
             let nowMs ← IO.monoMsNow
             if nowMs - lastActivityMs ≥ keepAliveMs then
@@ -1551,6 +1577,7 @@ private def reasonPhrase : Nat → String
   | 413 => "Payload Too Large"
   | 422 => "Unprocessable Entity"
   | 429 => "Too Many Requests"
+  | 501 => "Not Implemented"
   | 502 => "Bad Gateway"
   | 503 => "Service Unavailable"
   | _   => "Internal Server Error"
@@ -2294,50 +2321,247 @@ private def handleProxyRequest (st : CoreAppState) (req : HttpRequest) (cleanPat
     accountBody out.body
     return { status := out.status, contentType := out.contentType, corsOrigin? := reqOrigin?, extraHdrs := diagHdrs, body := out.body }
 
-/-- Observe local harness processes independently of the HTTP accept loop. A
-    non-stopping run whose pid disappeared without a reader callback would
-    otherwise leave its mission `active` forever. The conditional database
-    update and receipt make the observation idempotent with the reader. -/
-def tickLocalHarnessSupervisor (st : CoreAppState) (nowIso : String) : IO Nat := do
+/-- Observe local harness processes (both one-shot `activeGroupsRef` and warm Claude
+    `warmProcsRef`) independently of the HTTP accept loop (`RUN-02`).
+    Detects vanished PIDs, unreaped zombies (`observeProcStat`), and live-but-silent
+    processes exceeding `MISSION_STUCK_SECONDS` (default 900s, min 30s), while leaving
+    explicitly paused/awaiting/terminal missions untouched. -/
+def tickLocalHarnessSupervisor (st : CoreAppState) (nowIso : String)
+    (nowEpochOverride? : Option UInt64 := none)
+    (stuckSecondsOverride? : Option UInt64 := none) : IO Nat := do
   let some mgr := st.warmMgr?
     | return 0
+  let nowSec ← match nowEpochOverride? with | some t => pure t | none => coreEpochSec
+  let stuckSecs : UInt64 ← match stuckSecondsOverride? with
+    | some s => pure (max 30 s)
+    | none =>
+      let envVal := ((← IO.getEnv "MISSION_STUCK_SECONDS").bind String.toNat?).getD 900
+      pure (max 30 envVal).toUInt64
   let runs ← mgr.runsRef.get
-  let pids ← mgr.activeGroupsRef.get
+  let activeGroups ← mgr.activeGroupsRef.get
+  let warmProcs ← mgr.warmProcsRef.get
   let mut observed : Nat := 0
   for (mid, runRef) in runs do
     let run ← runRef.get
     if run.done || run.stopping then continue
-    let pid? := (pids.find? (fun p => p.1 == mid)).map fun p => p.2.pid
+    let pid? : Option Int64 :=
+      ((activeGroups.find? (fun p => p.1 == mid)).map fun p => p.2.pid)
+        |>.orElse (fun _ => (warmProcs.find? (fun p => p.1 == mid)).map fun p => p.2.pid)
     let some pid := pid?
       | continue
-    let alive ← (System.FilePath.mk s!"/proc/{pid}").pathExists
-    if alive then continue
+    let procObs ← OrbCore.HarnessSessionRegistry.observeProcStat (if pid < 0 then 0 else pid.toInt.toNat.toUInt32)
+    let procDead := procObs.procMissing != 0 || procObs.isZombieOrDeadState != 0
+    let lastProg := run.lastProgressEpoch
+    let isStuck := !procDead && lastProg > 0 && nowSec ≥ lastProg + stuckSecs
+    if !procDead && !isStuck then continue
+    let reason := if procDead then "local_harness_exited" else "local_harness_stuck"
     let claim ← execParamQuery st.store.missionsDb
-        ("UPDATE missions SET status='interrupted', terminal_reason='local_harness_exited', " ++
+        ("UPDATE missions SET status='interrupted', terminal_reason=?4, " ++
          "state_revision=state_revision+1, updated_at=?2 " ++
          "WHERE id=?1 AND status='active' AND run_generation=CAST(?3 AS INTEGER) RETURNING id;")
-        #[mid, nowIso, s!"{run.generation}"]
+        #[mid, nowIso, s!"{run.generation}", reason]
     let .ok claimRows := claim | continue
     if claimRows.size <= 1 then continue
-    runRef.modify fun r => { r with done := true, error? := some "local_harness_exited" }
+    runRef.modify fun r => { r with done := true, error? := some reason }
+    -- Stop/reap the stuck or zombie process group and clear its manager entry.
+    OrbBin.ClaudeControl.stopHarnessRun mgr mid
     discard <| execParamQuery st.store.missionsDb
-      ("UPDATE mission_runs SET execution_state='terminal', terminal_reason='local_harness_exited', updated_at=?2 " ++
+      ("UPDATE mission_runs SET execution_state='terminal', terminal_reason=?4, updated_at=?2 " ++
        "WHERE mission_id=?1 AND generation=CAST(?3 AS INTEGER) AND execution_state NOT IN ('terminal','completed','failed','aborted');")
-      #[mid, nowIso, s!"{run.generation}"]
+      #[mid, nowIso, s!"{run.generation}", reason]
     let payload := renderCompact (.obj #[
       ("status", .str "interrupted"),
-      ("reason", .str "local_harness_exited"),
+      ("reason", .str reason),
       ("reattached", .bool false)
     ])
     discard <| appendMissionEvent st.store mid "recovery_receipt" payload nowIso
+    let stPl := renderCompact (.obj #[("status", .str "interrupted"), ("reason", .str reason)])
+    discard <| appendMissionEvent st.store mid "mission_status_changed" stPl nowIso
+    if !(← isBroadcastHubBridged st.broadcastHub?) then
+      publishControlEvent st.broadcastHub? "mission_status_changed" stPl (some mid)
     observed := observed + 1
   return observed
+
+/-- Same-boot watcher for missions parked in `status='waiting_background'` (`RUN-02`).
+    When a same-boot mission's background durable job reaches a terminal state (or exceeds
+    `SANDBOXED_BG_AUTORESUME_TIMEOUT_SECS`, default 1800s), settles it back to `awaiting_user`
+    and emits a visible `background_task_completed` event so armed continuations or follow-ups
+    resume promptly without touching paused/terminal missions. -/
+def tickBackgroundShellWatcher (st : CoreAppState) (nowSec : UInt64)
+    (timeoutOverride? : Option UInt64 := none) : IO Nat := do
+  let nowIso := formatEpochIso8601Utc nowSec
+  let maxWaitSecs : UInt64 ← match timeoutOverride? with
+    | some t => pure (max 10 t)
+    | none =>
+      let v := ((← IO.getEnv "SANDBOXED_BG_AUTORESUME_TIMEOUT_SECS").bind String.toNat?).getD 1800
+      pure (max 10 v).toUInt64
+  let .ok rows ← execParamQuery st.store.missionsDb
+      ("SELECT id, COALESCE(updated_at,''), COALESCE(placement_job_id,'') FROM missions " ++
+       "WHERE status='waiting_background' AND COALESCE(node_boot_epoch,0)=CAST(?1 AS INTEGER) " ++
+       "ORDER BY updated_at ASC LIMIT 64;")
+      #[s!"{st.store.bootEpoch}"] | return 0
+  let mut woken : Nat := 0
+  for i in [1:rows.size] do
+    let mid := (cell rows[i]! 0).trimAscii.toString
+    let updatedAt := (cell rows[i]! 1).trimAscii.toString
+    let jobId := (cell rows[i]! 2).trimAscii.toString
+    if mid.isEmpty then continue
+    let mut reason? : Option String := none
+    if !jobId.isEmpty then
+      if let .ok jRows ← execParamQuery st.store.missionsDb
+          "SELECT state FROM remote_node_jobs WHERE job_id=?1 AND state IN ('succeeded','failed','cancelled','lost','terminal','completed','aborted') LIMIT 1;"
+          #[jobId] then
+        if jRows.size > 1 then reason? := some s!"background_job_{cell jRows[1]! 0}"
+      if reason?.isNone then
+        if let .ok pRows ← execParamQuery st.store.projectsDb
+            "SELECT state FROM remote_jobs WHERE job_id=?1 AND state IN ('succeeded','failed','cancelled','lost','terminal','completed','aborted') LIMIT 1;"
+            #[jobId] then
+          if pRows.size > 1 then reason? := some s!"background_job_{cell pRows[1]! 0}"
+    if reason?.isNone then
+      if let some updEp := parseIso8601EpochU64? updatedAt then
+        if nowSec ≥ updEp + maxWaitSecs then
+          reason? := some "background_wait_timeout"
+    if let some reason := reason? then
+      let .ok changed ← execParamQuery st.store.missionsDb
+          ("UPDATE missions SET status='awaiting_user', terminal_reason=?2, state_revision=state_revision+1, updated_at=?3 " ++
+           "WHERE id=?1 AND status='waiting_background' RETURNING id;")
+          #[mid, reason, nowIso] | continue
+      if changed.size > 1 then
+        let pl := renderCompact (.obj #[("status", .str "awaiting_user"), ("reason", .str reason), ("job_id", .str jobId)])
+        discard <| appendMissionEvent st.store mid "background_task_completed" pl nowIso
+        discard <| appendMissionEvent st.store mid "mission_status_changed" pl nowIso
+        if !(← isBroadcastHubBridged st.broadcastHub?) then
+          publishControlEvent st.broadcastHub? "mission_status_changed" pl (some mid)
+        woken := woken + 1
+  return woken
+
+/-- Metadata for one observed Core systemd `.scope` unit (`RUN-03`). -/
+structure CoreScopeEntry where
+  unitName    : String
+  missionId   : String
+  startedSec  : UInt64 := 0
+  isNodeScope : Bool := false
+  deriving Repr, BEq
+
+/-- Parse `orb-mission-<mid>.scope` / `sandboxed-mission-<mid>.scope` unit names while
+    explicitly excluding `orb-node-*` scopes owned by `OrbNode`. -/
+def parseCoreScopeUnit? (unitName : String) : Option (String × Bool) :=
+  let u := unitName.trimAscii.toString
+  if !u.endsWith ".scope" then none
+  else if u.startsWith "orb-node-" || u.startsWith "sandboxed-node-" then
+    some ("", true)
+  else if u.startsWith "orb-mission-" then
+    let inner := ((u.drop 12).dropEnd 6).toString
+    if inner.isEmpty then none else some (inner, false)
+  else if u.startsWith "sandboxed-mission-" then
+    let inner := ((u.drop 18).dropEnd 6).toString
+    if inner.isEmpty then none else some (inner, false)
+  else none
+
+/-- Periodic Core scope and local-process teardown backstop (`RUN-03`):
+    1. Reaps orphaned SQLite `mission_runs` for terminal/archived missions.
+    2. Stops any lingering `warmMgr` local process group whose mission reached a terminal/archived state.
+    3. Enumerates Core-owned systemd `.scope` units (never touching `orb-node-*` scopes or
+       scopes belonging to active/running/waiting_background missions) and tears down verified
+       orphaned or zombie-aged (`SCOPE_ZOMBIE_MAX_AGE_HOURS`, default 12h) scopes. -/
+def reapOrphanedCoreScopes
+    (st : CoreAppState)
+    (nowSec : UInt64)
+    (listScopes? : Option (IO (Array CoreScopeEntry)) := none)
+    (stopScope? : Option (String → IO Bool) := none) : IO Nat := do
+  let nowIso := formatEpochIso8601Utc nowSec
+  let mut reaped ← reapOrphanedMissionRuns st.store.missionsDb nowIso
+  -- 1. Stop any lingering local `warmMgr` process group whose mission is terminal/archived.
+  if let some mgr := st.warmMgr? then
+    let ag ← mgr.activeGroupsRef.get
+    let wp ← mgr.warmProcsRef.get
+    let mut mids : Array String := #[]
+    for (m, _) in ag do if !mids.contains m then mids := mids.push m
+    for (m, _) in wp do if !mids.contains m then mids := mids.push m
+    for mid in mids do
+      if let some mr ← getMission? st.store mid then
+        if #["completed", "cancelled", "failed", "not_feasible", "acknowledged"].contains mr.status then
+          OrbBin.ClaudeControl.stopHarnessRun mgr mid
+          reaped := reaped + 1
+  -- 2. Verified systemd `.scope` backstop (honors `SCOPE_REAPER_ENABLED`, default true).
+  let enabledStr := ((← IO.getEnv "SCOPE_REAPER_ENABLED").getD "1").trimAscii.toString.toLower
+  if enabledStr == "0" || enabledStr == "false" || enabledStr == "no" then
+    return reaped
+  let zombieMaxHours := ((← IO.getEnv "SCOPE_ZOMBIE_MAX_AGE_HOURS").bind String.toNat?).getD 12
+  let zombieMaxSecs : UInt64 := (max 1 zombieMaxHours).toUInt64 * 3600
+  let defaultListScopes : IO (Array CoreScopeEntry) := do
+    if !(← (System.FilePath.mk "/usr/bin/systemctl").pathExists) then return #[]
+    let out ← try IO.Process.output {
+        cmd := "/usr/bin/systemctl"
+        args := #["list-units", "--type=scope", "--state=running,active,failed", "--no-legend", "--plain", "orb-mission-*.scope", "sandboxed-mission-*.scope"]
+      } catch _ => return #[]
+    if out.exitCode != 0 then return #[]
+    let mut entries : Array CoreScopeEntry := #[]
+    for ln in out.stdout.splitOn "\n" do
+      let u := ((ln.trimAscii.toString.splitOn " ").headD "").trimAscii.toString
+      if let some (mid, isNode) := parseCoreScopeUnit? u then
+        entries := entries.push { unitName := u, missionId := mid, startedSec := 0, isNodeScope := isNode }
+    return entries
+  let defaultStopScope (unitName : String) : IO Bool := do
+    if !(← (System.FilePath.mk "/usr/bin/systemctl").pathExists) then return false
+    let r ← try IO.Process.output {
+        cmd := "/usr/bin/systemctl"
+        args := #["stop", "--no-block", unitName]
+      } catch _ => return false
+    return r.exitCode == 0
+  let scopes ← listScopes?.getD defaultListScopes
+  let doStop := stopScope?.getD defaultStopScope
+  for sc in scopes do
+    if sc.isNodeScope || sc.unitName.isEmpty then continue
+    let shouldReap ←
+      if sc.missionId.isEmpty then pure false
+      else match ← getMission? st.store sc.missionId with
+        | none => pure true -- Old-boot / deleted mission scope
+        | some mr =>
+          if #["active", "running", "pending", "waiting_background"].contains mr.status then
+            pure (sc.startedSec > 0 && nowSec ≥ sc.startedSec + zombieMaxSecs)
+          else
+            pure true
+    if shouldReap then
+      if ← doStop sc.unitName then
+        reaped := reaped + 1
+  return reaped
+
+/-- Bounded graceful drain of all local/warm harness runs on `SIGTERM`/`SIGINT` (`RUN-01`).
+    Stops every local process group cleanly and atomically records `interrupted` +
+    `terminal_reason='core_shutdown'` + durable `recovery_receipt` for active turns. -/
+def drainLocalHarnessRunsOnShutdown (st : CoreAppState) : IO Nat := do
+  let some mgr := st.warmMgr? | return 0
+  let nowIso := formatEpochIso8601Utc (← coreEpochSec)
+  let interrupted ← OrbBin.ClaudeControl.drainAllHarnessRuns mgr
+  let mut recorded : Nat := 0
+  for (mid, gen) in interrupted do
+    let .ok changed ← execParamQuery st.store.missionsDb
+        ("UPDATE missions SET status='interrupted', terminal_reason='core_shutdown', " ++
+         "state_revision=state_revision+1, updated_at=?2 " ++
+         "WHERE id=?1 AND status='active' AND run_generation=CAST(?3 AS INTEGER) RETURNING id;")
+        #[mid, nowIso, s!"{gen}"] | continue
+    if changed.size > 1 then
+      discard <| execParamQuery st.store.missionsDb
+        ("UPDATE mission_runs SET execution_state='terminal', terminal_reason='core_shutdown', updated_at=?2 " ++
+         "WHERE mission_id=?1 AND generation=CAST(?3 AS INTEGER) AND execution_state NOT IN ('terminal','completed','failed','aborted');")
+        #[mid, nowIso, s!"{gen}"]
+      let payload := renderCompact (.obj #[
+        ("status", .str "interrupted"),
+        ("reason", .str "core_shutdown"),
+        ("reattached", .bool false)
+      ])
+      discard <| appendMissionEvent st.store mid "recovery_receipt" payload nowIso
+      recorded := recorded + 1
+  return recorded
 
 /-- Map structured `HarnessCallbacks` from `OrbBin.ClaudeControl` onto persisted `mission_events` rows
     and record pending `control_request` call IDs so `POST /api/control/tool_result` can route answers cleanly. -/
 def buildCoreHarnessCallbacks (st : CoreAppState) (missionId : String) (generation? : Option UInt64 := none) : OrbBin.ClaudeControl.HarnessCallbacks := {
   onStructuredEvent := fun evType payload => do
     let nowSec ← coreEpochSec
+    if let some mgr := st.warmMgr? then
+      OrbBin.ClaudeControl.touchRunProgress mgr missionId nowSec
     let ts := formatEpochIso8601Utc nowSec
     if evType == "tool_call" then
       let cid := (payload.fieldStr? "tool_call_id").getD ""
@@ -2433,7 +2657,8 @@ def buildCoreHarnessCallbacks (st : CoreAppState) (missionId : String) (generati
         (finalSnap.inputTokens?.getD 0).toNat (finalSnap.outputTokens?.getD 0).toNat (finalSnap.cacheReadTokens?.getD 0).toNat
     let stPl := renderCompact (.obj #[("status", .str nextStatus), ("content", .str finalSnap.text)])
     discard <| appendMissionEvent st.store missionId "mission_status_changed" stPl ts
-    publishControlEvent st.broadcastHub? "mission_status_changed" stPl (some missionId)
+    if !(← isBroadcastHubBridged st.broadcastHub?) then
+      publishControlEvent st.broadcastHub? "mission_status_changed" stPl (some missionId)
 }
 
 /-- Resolve a confined git workspace directory for a non-client mission under `st.cfg.workingDir`. -/
@@ -2878,13 +3103,21 @@ private def launchBtwSideAgent (st : CoreAppState) (caller : CallerPrincipal) (s
           match ← submitRemoteMissionTurn st.store st.managedStore? st.relayHub? st.broadcastHub? sup st.cfg.workingDir spec nowEpochSec with
           | .ok _ => effStatus := "active"
           | .error dispErr =>
-            if !rentedVmId.isEmpty then
-              if let some mst := st.managedStore? then
-                let mf0 ← st.managedRef.get
-                discard <| runConfiguredManagedLifecycle mst
-                  { store := st.store, fleet := mf0, override? := st.managedProvisioningOverride? } rentedVmId "destroy" nowEpochSec
-            cleanupUnbornBtw
-            return (remoteDispatchHttpStatus dispErr, s!"\{\"error\":{jsonEscape dispErr}}")
+            if dispErr.startsWith "remote_dispatch_uncertain:" || dispErr.startsWith "remote_accept_persist_failed:" then
+              -- Preserve the side mission and rented VM when acceptance is uncertain (`FLT-05`)
+              -- so startup/periodic reconciliation can probe and attach the original job ID.
+              discard <| execParamQuery st.store.missionsDb
+                "UPDATE missions SET status='pending',updated_at=?2 WHERE id=?1 AND status='awaiting_user';"
+                #[out.missionId, nowIso]
+              effStatus := "pending"
+            else
+              if !rentedVmId.isEmpty then
+                if let some mst := st.managedStore? then
+                  let mf0 ← st.managedRef.get
+                  discard <| runConfiguredManagedLifecycle mst
+                    { store := st.store, fleet := mf0, override? := st.managedProvisioningOverride? } rentedVmId "destroy" nowEpochSec
+              cleanupUnbornBtw
+              return (remoteDispatchHttpStatus dispErr, s!"\{\"error\":{jsonEscape dispErr}}")
       | none =>
         if st.warmMgr?.isSome then
           let effModel :=
@@ -2895,6 +3128,9 @@ private def launchBtwSideAgent (st : CoreAppState) (caller : CallerPrincipal) (s
           | .error launchErr =>
             cleanupUnbornBtw
             return (502, s!"\{\"error\":{jsonEscape launchErr}}")
+        else
+          cleanupUnbornBtw
+          return (503, "{\"error\":\"side_agent_runner_unavailable\"}")
     let rnJson := match effRemoteNodeId? with | some rn => jsonEscape rn | none => "null"
     let modOvJson := if out.modelOverride.isEmpty then "null" else jsonEscape out.modelOverride
     let effJson := if out.modelEffort.isEmpty then "null" else jsonEscape out.modelEffort
@@ -3540,11 +3776,11 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
         (matchRoutePattern? "/api/workspaces/:id/shell" rawTarget).isSome) &&
        !wsCaller.isLegacyUnscoped && wsCaller.role != "admin" then
       return .ok (mkJson 403 "{\"error\":\"admin_required\"}")
-    -- Only the control sync socket is a real bidirectional live transport. The
-    -- other legacy upgrade paths have no session loop; answering 501 keeps the
-    -- client from believing it holds a stream that Core never pumps.
-    if cleanPath != "/api/control/sync" then
-      return .ok (mkJson 501 "{\"error\":\"websocket_transport_not_implemented\",\"supported\":\"/api/control/sync\"}")
+    -- `/api/control/sync`, `/api/console/ws`, `/api/workspaces/:id/shell`, and `/api/monitoring/ws`
+    -- are live endpoint-specific WebSocket transports (`RUN-06`). `/api/desktop/stream` has no
+    -- Core compositor frame producer yet and fails closed with `501 Not Implemented`.
+    if cleanPath == "/api/desktop/stream" then
+      return .ok (mkJson 501 "{\"error\":\"desktop_stream_not_implemented\",\"supported\":[\"/api/control/sync\",\"/api/console/ws\",\"/api/workspaces/:id/shell\",\"/api/monitoring/ws\"]}")
     let negProto? := negotiateWsSubprotocol? req.headers
     match buildWebSocketUpgradeResponse? req negProto? with
     | some raw101 => return .error raw101
@@ -4037,15 +4273,40 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
             let (code, body) ← launchBtwSideAgent st { asker with userId := if asker.userId.isEmpty then owner else asker.userId }
               srcMid (.obj #[("side_question", .str question)]) idem nowEpochSec
             pure (if code < 300 then .ok body else .error body))
-          (some fun mid callId answers => do
+          (some fun mid rawCallId answers => do
+            let mut callId := rawCallId.trimAscii.toString
+            if callId.startsWith NativeGoalApproval.ticketPrefix then
+              let action := (answers.fieldStr? "action").getD "accept"
+              let ownerUid := (mcpCaller?.map (·.userId)).getD ""
+              let answered? ← NativeGoalApproval.answer st.store callId ownerUid mid action nowEpochSec
+              if let some am := answered? then
+                let pl := renderCompact (.obj #[("tool_call_id", .str callId), ("tool_name", .str "ui_native_request"),
+                  ("result", .obj #[("action", .str action)])])
+                discard <| appendMissionEvent st.store am "tool_result" pl (formatEpochIso8601Utc nowEpochSec)
+                if !(← isBroadcastHubBridged st.broadcastHub?) then
+                  publishControlEvent st.broadcastHub? "tool_result" pl (some am)
+              return .ok answered?.isSome
             match st.warmMgr? with
             | none => pure (.error "warm harness manager unavailable")
             | some mgr =>
-              let ok ← OrbBin.ClaudeControl.respondToControlRequest mgr mid callId
-                (.obj #[("action", .str "accept"), ("answers", answers)])
+              -- Support omitted `tool_call_id` per MCP catalog: auto-select if exactly 1 pending question,
+              -- or return an explicit error listing pending IDs if several are pending (`MCP-07`).
+              if callId.isEmpty then
+                let pending ← OrbBin.ClaudeControl.pendingControlRequestsFor mgr mid
+                if pending.isEmpty then
+                  return .ok false
+                else if pending.size > 1 then
+                  let ids := String.intercalate ", " (pending.toList.map (·.requestId))
+                  return .error s!"multiple_pending_questions:{ids}"
+                else
+                  callId := pending[0]!.requestId
+              let resultVal := .obj #[("action", .str "accept"), ("answers", answers)]
+              let ok ← OrbBin.ClaudeControl.respondToControlRequest mgr mid callId resultVal
               if ok then
                 if let some ref := st.pendingControlCallsRef? then
                   ref.modify fun xs => xs.filter (fun p => p.1 != callId)
+                let pl := renderCompact (.obj #[("tool_call_id", .str callId), ("tool_name", .str "AskUserQuestion"), ("result", resultVal)])
+                discard <| appendMissionEvent st.store mid "tool_result" pl (formatEpochIso8601Utc nowEpochSec)
               pure (.ok ok))
           st.cloudHub?
         return .ok (mkJson 200 outJson)
@@ -4845,7 +5106,11 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
       let cfg ← match st.managedStore? with
         | some mst => getMissionBudgetConfig mst mid
         | none => pure { missionId := mid }
-      return .ok (mkJson 200 (renderMissionBudgetJson live cfg nowEpochSec))
+      let ownerUid := if caller.isLegacyUnscoped then "" else caller.userId
+      let rendered ← match st.managedStore? with
+        | some mst => renderMissionBudgetJsonWithStore mst live cfg ownerUid nowEpochSec
+        | none => pure (renderMissionBudgetJson live cfg nowEpochSec)
+      return .ok (mkJson 200 rendered)
     else if req.method == "PUT" || req.method == "PATCH" then
       if let some (cCode, cBody) := (← authorizeMissionOp st caller mid true) then
         return .ok (mkJson cCode cBody)
@@ -4857,14 +5122,18 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
         | return .ok (mkJson 400 "{\"error\":\"invalid_json\"}")
       let cur ← getMissionBudgetConfig mst mid
       let mut nextCfg := cur
+      let ownerUid := if caller.isLegacyUnscoped then "" else caller.userId
       if let some bv := jv.field? "budget_usd" then
         if bv.isNull then
           nextCfg := { nextCfg with budgetDeciMilliUsd? := none, resetPeriod := "total" }
         else
-          match parseDeciMilliUsd? bv 100 1000000000 with
-          | some dm => nextCfg := { nextCfg with budgetDeciMilliUsd? := some dm }
+          match parseDeciMilliUsd? bv 0 1000000000 with
+          | some dm =>
+            if let .error carveErr ← validateMissionBudgetCarve mst mid ownerUid dm nowEpochSec then
+              return .ok (mkJson 409 s!"\{\"error\":{jsonEscape carveErr},\"message\":\"Requested child budget exceeds available parent pool headroom\"}")
+            nextCfg := { nextCfg with budgetDeciMilliUsd? := some dm }
           | none =>
-            return .ok (mkJson 400 "{\"error\":\"invalid_budget\",\"message\":\"budget_usd must be null or between 0.01 and 100000\"}")
+            return .ok (mkJson 400 "{\"error\":\"invalid_budget\",\"message\":\"budget_usd must be null or between 0 and 100000\"}")
       if let some rpv := jv.field? "budget_reset_period" then
         if !rpv.isNull then
           match rpv.asStr? with
@@ -4895,7 +5164,8 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
         | .ok l => st.managedRef.set l; pure l
         | .error _ => pure mf0
       let savedCfg ← getMissionBudgetConfig mst mid
-      return .ok (mkJson 200 (renderMissionBudgetJson live savedCfg nowEpochSec))
+      let rendered ← renderMissionBudgetJsonWithStore mst live savedCfg ownerUid nowEpochSec
+      return .ok (mkJson 200 rendered)
 
   -- Mission Remote Wait Arm (`POST /api/control/missions/:id/remote-wait`)
   if let some params := matchRoutePattern? "/api/control/missions/:id/remote-wait" rawTarget then
@@ -5618,10 +5888,15 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
               | .ok _ =>
                 initStatus ← if remoteGoal then pure (((← getMission? st.store mid).map (·.status)).getD "active") else pure "active"
               | .error dispErr =>
-                if remoteGoal && (dispErr == "remote_goal_dispatch_fenced" || dispErr.startsWith "remote_dispatch_uncertain:" ||
-                    dispErr.startsWith "remote_accept_persist_failed:") then
-                  -- Stop or reconciliation owns the durable mission and its job now.
-                  initStatus := ((← getMission? st.store mid).map (·.status)).getD "awaiting_user"
+                if dispErr.startsWith "remote_dispatch_uncertain:" || dispErr.startsWith "remote_accept_persist_failed:" ||
+                    (remoteGoal && dispErr == "remote_goal_dispatch_fenced") then
+                  -- Preserve the mission and any rented VM on uncertain remote acceptance (`FLT-05`)
+                  -- so startup/periodic reconciliation can probe and attach the original job ID.
+                  if !remoteGoal then
+                    discard <| execParamQuery st.store.missionsDb
+                      "UPDATE missions SET status='pending',updated_at=?2 WHERE id=?1 AND status='awaiting_user';"
+                      #[mid, nowIso]
+                  initStatus := ((← getMission? st.store mid).map (·.status)).getD "pending"
                 else
                   if !rentedVmId.isEmpty then
                     if let some mst := st.managedStore? then
@@ -5846,18 +6121,21 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
     let profileRaw := ((qParams.find? (fun p => p.1 == "profile")).bind (fun p => percentDecodeStrict p.2)).getD ""
     let effKinds := if !kindsFilter.isEmpty then kindsFilter
       else if profileRaw == "presentation" then #["mission_presentation"] else #[]
+    let lastEventId? := (lookupHeaderCI req.headers "last-event-id").bind (fun s => s.trimAscii.toString.toNat?.map UInt64.ofNat)
     let sinceSeq? := (((qParams.find? (fun p => p.1 == "since_seq" || p.1 == "since")).bind (fun p => percentDecodeStrict p.2)).bind String.toNat?).map UInt64.ofNat
+      |>.orElse (fun _ => lastEventId?)
     if let some mid := missionFilter? then
       if let some (cCode, cBody) := (← authorizeMissionOp st caller mid false) then
         return .ok (mkJson cCode cBody)
       let preSub? ← match st.broadcastHub? with
         | some hub => some <$> registerSseSubscriberFull hub (some mid)
         | none => pure none
-      let evJson ← match ← queryMissionEventsPage st.store mid sinceSeq? none 100 #[] none with
-        | .ok pg => pure pg.eventsJson
-        | .error _ => pure "[]"
-      let initFrame := formatSseFrame "snapshot" s!"\{\"mission_id\":{jsonEscape mid},\"events\":{evJson}}" (some 1)
-      return .ok (sseStreamResponse st caller reqOrigin? (some mid) effKinds initFrame preSub? req.headers)
+      let (evJson, snapSeq, snapLagged) ← match ← queryMissionEventsPage st.store mid sinceSeq? none 500 #[] none with
+        | .ok pg => pure (pg.eventsJson, pg.pageMaxSeq.getD (sinceSeq?.getD 0), pg.hasMore)
+        | .error _ => pure ("[]", sinceSeq?.getD 0, false)
+      let initId? := if snapSeq > 0 then some snapSeq else sinceSeq?
+      let initFrame := formatSseFrame "snapshot" s!"\{\"mission_id\":{jsonEscape mid},\"events\":{evJson}}" initId?
+      return .ok (sseStreamResponse st caller reqOrigin? (some mid) effKinds initFrame preSub? req.headers snapSeq snapLagged)
     let preSub? ← match st.broadcastHub? with
       | some hub => some <$> registerSseSubscriberFull hub none
       | none => pure none
@@ -5865,7 +6143,7 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
     let listBody ← match ← listMissionsJson st.store none callerOpt { limit? := some 200 } with
       | .ok j => pure j
       | .error _ => pure "[]"
-    let initFrame := formatSseFrame "missions_snapshot" s!"\{\"missions\":{listBody}}" (some 1)
+    let initFrame := formatSseFrame "missions_snapshot" s!"\{\"missions\":{listBody}}" lastEventId?
     return .ok (sseStreamResponse st caller reqOrigin? none effKinds initFrame preSub? req.headers)
 
   if let some params := matchRoutePattern? "/api/control/missions/:id/stream" rawTarget then
@@ -5874,15 +6152,23 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
       if let some (cCode, cBody) := (← authorizeMissionOp st caller mid false) then
         return .ok (mkJson cCode cBody)
       let qParams := parseQueryParams rawTarget
+      let kindsRaw := ((qParams.find? (fun p => p.1 == "kinds")).bind (fun p => percentDecodeStrict p.2)).getD ""
+      let kindsFilter : Array String := ((kindsRaw.splitOn ",").map (·.trimAscii.toString)).toArray.filter (!·.isEmpty)
+      let profileRaw := ((qParams.find? (fun p => p.1 == "profile")).bind (fun p => percentDecodeStrict p.2)).getD ""
+      let effKinds := if !kindsFilter.isEmpty then kindsFilter
+        else if profileRaw == "presentation" then #["mission_presentation"] else #[]
+      let lastEventId? := (lookupHeaderCI req.headers "last-event-id").bind (fun s => s.trimAscii.toString.toNat?.map UInt64.ofNat)
       let sinceSeq? := (((qParams.find? (fun p => p.1 == "since_seq" || p.1 == "since")).bind (fun p => percentDecodeStrict p.2)).bind String.toNat?).map UInt64.ofNat
+        |>.orElse (fun _ => lastEventId?)
       let preSub? ← match st.broadcastHub? with
         | some hub => some <$> registerSseSubscriberFull hub (some mid)
         | none => pure none
-      let evJson ← match ← queryMissionEventsPage st.store mid sinceSeq? none 100 #[] none with
-        | .ok pg => pure pg.eventsJson
-        | .error _ => pure "[]"
-      let initFrame := formatSseFrame "snapshot" s!"\{\"mission_id\":{jsonEscape mid},\"events\":{evJson}}" (some 1)
-      return .ok (sseStreamResponse st caller reqOrigin? (some mid) #[] initFrame preSub? req.headers)
+      let (evJson, snapSeq, snapLagged) ← match ← queryMissionEventsPage st.store mid sinceSeq? none 500 #[] none with
+        | .ok pg => pure (pg.eventsJson, pg.pageMaxSeq.getD (sinceSeq?.getD 0), pg.hasMore)
+        | .error _ => pure ("[]", sinceSeq?.getD 0, false)
+      let initId? := if snapSeq > 0 then some snapSeq else sinceSeq?
+      let initFrame := formatSseFrame "snapshot" s!"\{\"mission_id\":{jsonEscape mid},\"events\":{evJson}}" initId?
+      return .ok (sseStreamResponse st caller reqOrigin? (some mid) effKinds initFrame preSub? req.headers snapSeq snapLagged)
 
   if req.method == "GET" && cleanPath == "/api/control/sync" then
     let callerOpt := if caller.isLegacyUnscoped then none else some caller.userId
@@ -6917,25 +7203,17 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
         return .ok (mkJson 500 s!"\{\"error\":{jsonEscape e}}")
 
   -- Collection cancel: clients should not have to know every queued id to
-  -- clear a mission's pending prefix. Item DELETE remains the single-item form.
+  -- clear a mission's pending prefix. Item DELETE remains the single-item form (`FUP-01`).
   if req.method == "DELETE" && cleanPath == "/api/control/queue" then
     let missionId := ((parseQueryParams rawTarget).find? (fun p => p.1 == "mission_id")).map Prod.snd |>.getD ""
     if missionId.isEmpty then
       return .ok (mkJson 400 "{\"error\":\"missing_mission_id\"}")
     if let some (cCode, cBody) := (← authorizeMissionOp st caller missionId false) then
       return .ok (mkJson cCode cBody)
-    let qRows ← execParamQuery st.store.missionsDb
-      "SELECT message_id FROM remote_message_queue WHERE user_id='core' AND mission_id=?1 AND state='waiting' AND COALESCE(phase,0)=0 ORDER BY rowid ASC;"
-      #[missionId]
-    let .ok rs := qRows | return .ok (mkJson 500 "{\"error\":\"queue_read_failed\"}")
-    let mut cancelled : Nat := 0
-    for i in [1:rs.size] do
-      let messageId := (cell rs[i]! 0).trimAscii.toString
-      if messageId.isEmpty then continue
-      match ← stepQueueItem st.store "core" messageId 5 "0" s!"{st.store.bootEpoch}" "0" s!"{nowEpochSec}" 0 0 "" with
-      | .ok (.ok _) => cancelled := cancelled + 1
-      | _ => pure ()
-    return .ok (mkJson 200 s!"\{\"ok\":true,\"mission_id\":{jsonEscape missionId},\"cancelled\":{cancelled}}")
+    match ← cancelMissionWaitingQueue st.store "core" missionId s!"{nowEpochSec}" with
+    | .error e => return .ok (mkJson 500 s!"\{\"error\":{jsonEscape e}}")
+    | .ok cancelled =>
+      return .ok (mkJson 200 s!"\{\"ok\":true,\"mission_id\":{jsonEscape missionId},\"cancelled\":{cancelled}}")
 
   if let some params := matchRoutePattern? "/api/control/queue/:id/step" rawTarget then
     if req.method == "POST" then
@@ -6990,7 +7268,9 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
     if req.method == "POST" then
       let msgId := (params.find? (fun p => p.1 == "id")).map Prod.snd |>.getD ""
       let qRows ← execParamQuery st.store.missionsDb
-        "SELECT mission_id, COALESCE(sequence,0), COALESCE(state,''), COALESCE(phase,0) FROM remote_message_queue WHERE user_id='core' AND message_id=?1 LIMIT 1;" #[msgId]
+        ("SELECT mission_id, COALESCE(sequence,0), COALESCE(state,''), COALESCE(phase,0)," ++
+         "CASE WHEN json_valid(payload) AND json_extract(payload,'$.job_id') IS NOT NULL THEN 1 ELSE 0 END " ++
+         "FROM remote_message_queue WHERE user_id='core' AND message_id=?1 LIMIT 1;") #[msgId]
       let .ok rs := qRows | return .ok (mkJson 500 "{\"error\":\"Queue query failed\"}")
       if rs.size ≤ 1 then return .ok (mkJson 404 "{\"error\":\"message not in queue\"}")
       let qMid := (rs[1]![0]?).getD ""
@@ -6998,61 +7278,106 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
         return .ok (mkJson cCode cBody)
       let qState := (rs[1]![2]?).getD ""
       let qPhase := ((rs[1]![3]?).bind String.toNat?).getD 0
-      if qState != "waiting" || qPhase != 0 then
+      let qHasJob := ((rs[1]![4]?).bind String.toNat?).getD 0 != 0
+      if qState != "waiting" || qPhase != 0 || qHasJob then
         return .ok (mkJson 409 "{\"error\":\"already_claimed_or_delivered\",\"message\":\"already_claimed_or_delivered\"}")
       let qParams := parseQueryParams rawTarget
       let interrupt := ((qParams.find? (fun p => p.1 == "interrupt")).map Prod.snd |>.getD "false") == "true"
-      let promoteWaitingHead : IO Bool := do
-        let mut promoted := false
-        if let .ok minRows ← execParamQuery st.store.missionsDb
-            "SELECT COALESCE(MIN(sequence), 0) FROM remote_message_queue WHERE user_id='core' AND mission_id=?1 AND state='waiting' AND COALESCE(phase,0)=0;"
-            #[qMid] then
-          if minRows.size > 1 then
-            let minSeq := ((minRows[1]![0]?).bind String.toInt?).getD 0
-            let curSeq := ((rs[1]![1]?).bind String.toInt?).getD 0
-            if curSeq > minSeq then
-              let _ ← execParamQuery st.store.missionsDb
-                "UPDATE remote_message_queue SET sequence=?2 WHERE user_id='core' AND message_id=?1;"
-                #[msgId, s!"{minSeq - 1}"]
-              promoted := true
-        return promoted
+      -- Promote `msgId` ahead of the mission's waiting prefix using the table-wide
+      -- minimum `sequence - 1` so `sequence INTEGER PRIMARY KEY` can NEVER collide
+      -- with another mission's row or a previously delivered row (`FUP-02`).
+      let promoteWaitingHeadUnlocked : IO (Except String Bool) := do
+        let .ok curRows ← execParamQueryUnlocked st.store.missionsDb
+            ("SELECT COALESCE(sequence,0), COALESCE(state,''), COALESCE(phase,0)," ++
+             "CASE WHEN json_valid(payload) AND json_extract(payload,'$.job_id') IS NOT NULL THEN 1 ELSE 0 END " ++
+             "FROM remote_message_queue WHERE user_id='core' AND message_id=?1 LIMIT 1;") #[msgId]
+          | return .error "queue_read_failed"
+        if curRows.size ≤ 1 then return .error "message_not_in_queue"
+        if (curRows[1]![1]?).getD "" != "waiting" || ((curRows[1]![2]?).bind String.toNat?).getD 0 != 0 ||
+            ((curRows[1]![3]?).bind String.toNat?).getD 0 != 0 then
+          return .error "already_claimed_or_delivered"
+        let curSeq := ((curRows[1]![0]?).bind String.toInt?).getD 0
+        let .ok minRows ← execParamQueryUnlocked st.store.missionsDb
+            ("SELECT COALESCE(MIN(sequence), 0) FROM remote_message_queue " ++
+             "WHERE user_id='core' AND mission_id=?1 AND state='waiting' AND COALESCE(phase,0)=0 " ++
+             "AND (NOT json_valid(payload) OR json_extract(payload,'$.job_id') IS NULL);") #[qMid]
+          | return .error "queue_read_failed"
+        let missionMinSeq := if minRows.size > 1 then ((minRows[1]![0]?).bind String.toInt?).getD curSeq else curSeq
+        if curSeq ≤ missionMinSeq then
+          return .ok false
+        let .ok globalRows ← execParamQueryUnlocked st.store.missionsDb
+            "SELECT COALESCE(MIN(sequence), 1) FROM remote_message_queue;" #[]
+          | return .error "queue_read_failed"
+        let globalMinSeq := if globalRows.size > 1 then ((globalRows[1]![0]?).bind String.toInt?).getD 1 else 1
+        let targetSeq := min (missionMinSeq - 1) (globalMinSeq - 1)
+        if let .error e ← execParamQueryUnlocked st.store.missionsDb
+            "UPDATE remote_message_queue SET sequence=?2 WHERE user_id='core' AND message_id=?1 AND state='waiting' AND COALESCE(phase,0)=0;"
+            #[msgId, s!"{targetSeq}"] then
+          return .error e
+        return .ok true
       if !interrupt then
-        let promoted ← promoteWaitingHead
-        return .ok (mkJson 200 (renderCompact (.obj #[("ok", .bool true), ("delivered", .bool false), ("promoted", .bool promoted)])))
+        match ← withImmediateTx st.store.missionsDb promoteWaitingHeadUnlocked with
+        | .error "already_claimed_or_delivered" =>
+          return .ok (mkJson 409 "{\"error\":\"already_claimed_or_delivered\",\"message\":\"already_claimed_or_delivered\"}")
+        | .error "message_not_in_queue" =>
+          return .ok (mkJson 404 "{\"error\":\"message not in queue\"}")
+        | .error e =>
+          return .ok (mkJson 500 s!"\{\"error\":{jsonEscape e}}")
+        | .ok promoted =>
+          return .ok (mkJson 200 (renderCompact (.obj #[("ok", .bool true), ("mission_id", .str qMid), ("delivered", .bool false), ("promoted", .bool promoted)])))
       let some mr ← getMission? st.store qMid
         | return .ok (mkJson 404 "{\"error\":\"mission_not_found\"}")
-      if ownerTerminalOfStatus mr.status == 1 then
-        return .ok (mkJson 200 (renderCompact (.obj #[("ok", .bool true), ("delivered", .bool false), ("promoted", .bool false)])))
+      let isTerminalStatus := ownerTerminalOfStatus mr.status == 1 ||
+        #["succeeded", "acknowledged", "archived"].contains mr.status
+      if isTerminalStatus then
+        return .ok (mkJson 200 (renderCompact (.obj #[("ok", .bool true), ("mission_id", .str qMid), ("delivered", .bool false), ("promoted", .bool false)])))
       let remoteNode? := (← resolveMissionRemoteNode? st.store st.managedStore? qMid).map (·.trimAscii.toString) |>.filter (!·.isEmpty)
       if remoteNode?.isNone then
         return .ok (mkJson 409 "{\"error\":\"interrupt_not_supported\",\"message\":\"interrupt_not_supported\"}")
-      -- Durable cancel-and-wake for remote missions: promote this waiting row to the
-      -- head, fence the active turn's `run_generation` (retaining `remote_message_queue`),
-      -- cancel any live remote job on the node, and wake the remote follow-up pump.
-      discard <| promoteWaitingHead
+      let some sup := st.remoteSup?
+        | return .ok (mkJson 503 "{\"error\":\"remote_dispatch_unavailable\",\"message\":\"remote_dispatch_unavailable\"}")
+      -- Atomically promote this waiting row to the head and fence the active turn's
+      -- `run_generation` (retaining `remote_message_queue`), then cancel any live remote
+      -- job and wake the follow-up pump only once cancel is confirmed (or no live job existed).
       let nowIso := formatEpochIso8601Utc nowEpochSec
       let fenceRes ← withImmediateTx st.store.missionsDb do
+        let .ok _ ← promoteWaitingHeadUnlocked | return .error "queue_promote_failed"
         let upd ← execParamQueryUnlocked st.store.missionsDb
           ("UPDATE missions SET status='active', run_generation=COALESCE(run_generation,1)+1, " ++
            "state_revision=COALESCE(state_revision,0)+1, updated_at=?2 " ++
-           "WHERE id=?1 AND status NOT IN ('completed','succeeded','failed','cancelled','acknowledged','archived');")
+           "WHERE id=?1 AND status NOT IN ('completed','succeeded','failed','cancelled','acknowledged','archived') RETURNING id;")
           #[qMid, nowIso]
-        if let .error e := upd then return .error e
-        let _ ← execParamQueryUnlocked st.store.missionsDb
-          ("UPDATE mission_runs SET execution_state='terminal', terminal_reason='send_now_interrupt', updated_at=?2 " ++
-           "WHERE mission_id=?1 AND execution_state NOT IN ('terminal','completed','failed','aborted');")
-          #[qMid, nowIso]
-        return .ok ()
-      if let .error e := fenceRes then
+        match upd with
+        | .error e => return .error e
+        | .ok rows =>
+          if rows.size ≤ 1 then return .ok false
+          let _ ← execParamQueryUnlocked st.store.missionsDb
+            ("UPDATE mission_runs SET execution_state='terminal', terminal_reason='send_now_interrupt', updated_at=?2 " ++
+             "WHERE mission_id=?1 AND execution_state NOT IN ('terminal','completed','failed','aborted');")
+            #[qMid, nowIso]
+          return .ok true
+      match fenceRes with
+      | .error e =>
+        if e == "queue_promote_failed" then
+          return .ok (mkJson 409 "{\"error\":\"already_claimed_or_delivered\",\"message\":\"already_claimed_or_delivered\"}")
         return .ok (mkJson 500 s!"\{\"error\":{jsonEscape e}}")
-      if let some sup := st.remoteSup? then
+      | .ok false =>
+        return .ok (mkJson 200 (renderCompact (.obj #[("ok", .bool true), ("mission_id", .str qMid), ("delivered", .bool false), ("promoted", .bool false)])))
+      | .ok true =>
         discard <| IO.asTask (prio := .dedicated) do
-          discard <| cancelActiveRemoteJobForMission st.store st.managedStore? st.relayHub? qMid "Interrupted by send-now"
-          let wakeEpoch ← nowEpoch
-          discard <| tickRemoteFollowupPump st.store st.managedStore? st.relayHub? st.broadcastHub? sup st.cfg.workingDir wakeEpoch
-      else
-        discard <| cancelActiveRemoteJobForMission st.store st.managedStore? st.relayHub? qMid "Interrupted by send-now"
-      return .ok (mkJson 200 (renderCompact (.obj #[("ok", .bool true), ("delivered", .bool false), ("promoted", .bool true)])))
+          let hadLive : Bool ← match ← execParamQuery st.store.missionsDb
+              "SELECT 1 FROM remote_node_jobs WHERE mission_id=?1 AND state NOT IN ('terminal','completed','succeeded','failed','aborted','cancelled','lost') LIMIT 1;"
+              #[qMid] with
+            | .ok rows => pure (decide (rows.size > 1))
+            | .error _ => pure false
+          let cancelled ← cancelActiveRemoteJobForMission st.store st.managedStore? st.relayHub? qMid "Interrupted by send-now"
+          -- Only wake the pump immediately if there was no live remote job or cancellation
+          -- was confirmed; if the node is partitioned, `cancel_requested` stays durable so
+          -- the poller finishes cancelling before the pump submits the next turn (`FUP-02`).
+          if !hadLive || cancelled then
+            let wakeEpoch ← nowEpoch
+            discard <| tickRemoteFollowupPump st.store st.managedStore? st.relayHub? st.broadcastHub? sup st.cfg.workingDir wakeEpoch
+        return .ok (mkJson 200 (renderCompact (.obj #[("ok", .bool true), ("mission_id", .str qMid), ("delivered", .bool false), ("promoted", .bool true)])))
 
   if let some params := matchRoutePattern? "/api/control/queue/:id" rawTarget then
     if req.method == "PATCH" then
@@ -7855,34 +8180,53 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
         match ← contextManifestJson st.store proj with
         | .error e => return .ok (mkJson 500 s!"\{\"error\":{jsonEscape e}}")
         | .ok firstBody =>
+          let resolveLiveCtxCaller? : IO (Option CallerPrincipal) := do
+            if !req.headers.isEmpty then
+              resolveCallerPrincipal? st req.headers (← coreEpochSec) (allowWsSubproto := true)
+            else if caller.isLegacyUnscoped then
+              return some caller
+            else
+              match ← getUserById? st.store caller.userId with
+              | none => return none
+              | some u =>
+                if u.disabled || u.sessionEpoch != caller.sessionEpoch then return none
+                return some (CallerPrincipal.ofUserRecord u false)
+          let keepAliveMs : Nat := max 20 (st.sseKeepAliveMs?.getD 15000)
           return .ok {
             status := 200,
             contentType := "text/event-stream",
             corsOrigin? := reqOrigin?,
-            extraHdrs := #[("Cache-Control", "no-cache"), ("X-Accel-Buffering", "no")],
+            extraHdrs := #[],
             body := ByteArray.empty,
             bodyStream? := some fun emit => do
-              if !(← emit s!"data: {firstBody}\n\n".toUTF8) then return false
+              let mut rev : UInt64 := 1
+              if !(← emit (formatSseFrame "changed" firstBody (some rev)).toUTF8) then return false
               let mut lastBody := firstBody
-              let mut lastEmitMs := ← IO.monoMsNow
+              let mut lastEmitMs ← IO.monoMsNow
+              let mut lastCheckMs := lastEmitMs
               let mut running := true
               while running do
-                IO.sleep 1000
-                match ← contextManifestJson st.store proj with
-                | .ok body =>
-                  if body != lastBody then
-                    lastBody := body
-                    lastEmitMs ← IO.monoMsNow
-                    if !(← emit s!"data: {body}\n\n".toUTF8) then running := false
-                | .error e =>
-                  discard <| emit s!"event: error\ndata: \{\"error\":{jsonEscape e}}\n\n".toUTF8
-                  running := false
-                if running then
-                  let nowMs ← IO.monoMsNow
-                  if nowMs - lastEmitMs ≥ 15000 then
-                    lastEmitMs := nowMs
-                    if !(← emit ": keep-alive\n\n".toUTF8) then running := false
-              return true
+                IO.sleep 100
+                let nowMs ← IO.monoMsNow
+                if nowMs - lastCheckMs ≥ 1000 then
+                  lastCheckMs := nowMs
+                  if (← resolveLiveCtxCaller?).isNone then
+                    running := false
+                    break
+                  match ← contextManifestJson st.store proj with
+                  | .ok body =>
+                    if body != lastBody then
+                      lastBody := body
+                      rev := rev + 1
+                      lastEmitMs := nowMs
+                      if !(← emit (formatSseFrame "changed" body (some rev)).toUTF8) then running := false
+                  | .error e =>
+                    discard <| emit (formatSseFrame "error" s!"\{\"error\":{jsonEscape e}}" none).toUTF8
+                    running := false
+                if running && nowMs - lastEmitMs ≥ keepAliveMs then
+                  lastEmitMs := nowMs
+                  if !(← emit ": keep-alive\n\n".toUTF8) then running := false
+              return false
           }
       else if kind == "blobs" && req.method == "POST" && arg.isEmpty then
         let qParams := parseQueryParams rawTarget
@@ -8282,21 +8626,216 @@ def dispatchCoreRequest (st : CoreAppState) (req : HttpRequest) (nowEpochSec : U
     return .ok (maybeGzipHttpResponse req resp)
   | .error raw101 => return .error raw101
 
-/-- Bounded RFC 6455 WebSocket session loop after `101 Switching Protocols`:
-    handles client `ping` (`pong` reply), `close` (echo `1000` close), and JSON messages cleanly. -/
-private def runWebSocketSessionLoop (cfd : Fd) : IO Unit := do
-  let readyHello := "{\"type\":\"ready\",\"server\":\"sandboxed-sh\"}".toUTF8
-  if let some helloFrame := encodeFrame? { fin := true, opcode := .text, payload := readyHello } none then
-    discard <| writeAll cfd helloFrame false
+/-- Live bidirectional PTY shell WebSocket transport for `/api/console/ws` and
+    `/api/workspaces/:id/shell` (`RUN-06`). Allocates a real CLOEXEC PTY via
+    `OrbNetLeaf.Pty`, spawns an interactive shell in `cwd`, bridges WebSocket input/resize
+    and PTY stdout across arbitrary idle intervals (>2s, zero fixed step cap, 15s WS ping
+    keepalive, 1s auth revalidation), and tears down the child process group on close. -/
+def runPtyWebSocketSessionLoop
+    (st : CoreAppState)
+    (wsCaller : CallerPrincipal)
+    (cfd : Fd)
+    (cwd : String)
+    (reqHdrs : Array (String × String) := #[]) : IO Unit := do
+  let .ok pty ← OrbNetLeaf.Pty.openPty 24 80
+    | do
+      if let some cls := makeServerClose? 1011 "pty_open_failed" then
+        discard <| writeAll cfd cls false
+      return ()
+  let shellBin := ((← IO.getEnv "SHELL").filter (!·.trimAscii.toString.isEmpty)).getD "/bin/sh"
+  let spawnRes ← OrbNetLeaf.Pty.spawnPtyShell pty.slaveFd cwd shellBin
+  -- Parent closes slave FD immediately so child exit delivers EOF on masterFd.
+  discard <| closeFd pty.slaveFd
+  let childPid : UInt32 ← match spawnRes with
+    | .ok pid => pure pid
+    | .error _ =>
+      discard <| closeFd pty.masterFd
+      if let some cls := makeServerClose? 1011 "pty_spawn_failed" then
+        discard <| writeAll cfd cls false
+      return ()
+  try
+    let readyHello := renderCompact (.obj #[("type", .str "ready"), ("transport", .str "pty"), ("pid", JVal.nat childPid.toNat)])
+    if let some helloFrame := encodeFrame? { fin := true, opcode := .text, payload := readyHello.toUTF8 } none then
+      discard <| writeAll cfd helloFrame false
+    let mut rxBuf := ByteArray.empty
+    let mut openConn := true
+    let startMs ← IO.monoMsNow
+    let mut lastPingMs := startMs
+    let mut lastAuthMs := startMs
+    while openConn do
+      let nowMs ← IO.monoMsNow
+      if nowMs - lastAuthMs ≥ 1000 then
+        lastAuthMs := nowMs
+        let live? ←
+          if !reqHdrs.isEmpty then
+            resolveCallerPrincipal? st reqHdrs (← coreEpochSec) (allowWsSubproto := true)
+          else if wsCaller.isLegacyUnscoped then pure (some wsCaller)
+          else
+            match ← getUserById? st.store wsCaller.userId with
+            | none => pure none
+            | some u => pure (if u.disabled || u.sessionEpoch != wsCaller.sessionEpoch then none else some wsCaller)
+        if live?.isNone then
+          if let some cls := makeServerClose? 1008 "session_expired" then
+            discard <| writeAll cfd cls false
+          openConn := false
+          break
+      -- Poll PTY output first (non-blocking 0ms) then WS socket (50ms) so both sides stay responsive.
+      match ← pollReadable pty.masterFd 0 with
+      | .ok () =>
+        let ptyChunk ← readStreamChunk pty.masterFd 16384
+        if ptyChunk.isEmpty then
+          openConn := false
+          break
+        else
+          let outPayload :=
+            match String.fromUTF8? ptyChunk with
+            | some txt =>
+              encodeFrame? { fin := true, opcode := .text, payload := (renderCompact (.obj #[("type", .str "output"), ("data", .str txt)])).toUTF8 } none
+            | none =>
+              encodeFrame? { fin := true, opcode := .binary, payload := ptyChunk } none
+          if let some frm := outPayload then
+            if !(← writeAll cfd frm false).isOk then
+              openConn := false
+              break
+      | .error _ => pure ()
+      match ← pollReadable cfd 50 with
+      | .error _ =>
+        -- Check if child exited quietly while WS is idle
+        let waitSt ← OrbBin.PosixExt.waitpidWnohang (Int64.ofNat childPid.toNat)
+        if waitSt != 0xFFFFFFFF then
+          openConn := false
+        else if nowMs - lastPingMs ≥ 15000 then
+          lastPingMs := nowMs
+          if let some pingFrm := encodeFrame? { fin := true, opcode := .ping, payload := "keepalive".toUTF8 } none then
+            if !(← writeAll cfd pingFrm false).isOk then
+              openConn := false
+      | .ok () =>
+        let chunk ← readStreamChunk cfd 65536
+        if chunk.isEmpty then
+          openConn := false
+        else
+          rxBuf := rxBuf ++ chunk
+          let mut moreFrames := true
+          while moreFrames && openConn do
+            match decodeFramePrefix rxBuf true with
+            | .error _ =>
+              openConn := false
+              moreFrames := false
+            | .ok none =>
+              moreFrames := false
+            | .ok (some (frame, consumed)) =>
+              rxBuf := rxBuf.extract consumed rxBuf.size
+              match frame.opcode with
+              | .ping =>
+                if let some pong := makeServerPong? frame.payload then
+                  if !(← writeAll cfd pong false).isOk then openConn := false
+              | .pong =>
+                lastPingMs := nowMs
+              | .close =>
+                if let some cls := makeServerClose? 1000 "" then
+                  discard <| writeAll cfd cls false
+                openConn := false
+              | .text =>
+                let txt := (String.fromUTF8? frame.payload).getD ""
+                match OrbBin.Json.parse txt with
+                | .ok (.obj fields) =>
+                  let jv := JVal.obj fields
+                  let msgType := (jv.fieldStr? "type").getD ""
+                  if msgType == "resize" then
+                    let rows := ((jv.fieldNat? "rows").getD 24).toUInt16
+                    let cols := ((jv.fieldNat? "cols").getD 80).toUInt16
+                    discard <| OrbNetLeaf.Pty.resizePty pty.masterFd rows cols
+                  else if msgType == "input" then
+                    if let some data := jv.fieldStr? "data" then
+                      discard <| writeAll pty.masterFd data.toUTF8 false
+                  else if msgType == "ping" then
+                    if let some pf := encodeFrame? { fin := true, opcode := .text, payload := "{\"type\":\"pong\"}".toUTF8 } none then
+                      discard <| writeAll cfd pf false
+                  else
+                    discard <| writeAll pty.masterFd frame.payload false
+                | _ =>
+                  discard <| writeAll pty.masterFd frame.payload false
+              | .binary =>
+                discard <| writeAll pty.masterFd frame.payload false
+              | _ => pure ()
+    if openConn then
+      if let some cls := makeServerClose? 1000 "" then
+        discard <| writeAll cfd cls false
+  finally
+    discard <| closeFd pty.masterFd
+    let pgid : Int64 := -(Int64.ofNat childPid.toNat)
+    discard <| OrbBin.PosixExt.killSig pgid 15
+    IO.sleep 50
+    discard <| OrbBin.PosixExt.killSig pgid 9
+    discard <| OrbBin.PosixExt.waitpidBlock (Int64.ofNat childPid.toNat)
+
+/-- Live host & mission monitoring WebSocket transport for `/api/monitoring/ws` (`RUN-06`).
+    Streams periodic live metrics frames across arbitrary idle periods without any 64-step cap,
+    revalidates caller auth every 1s, and handles ping/pong/close cleanly. -/
+def runMonitoringWebSocketSessionLoop
+    (st : CoreAppState)
+    (wsCaller : CallerPrincipal)
+    (cfd : Fd)
+    (intervalMs : Nat := 1000)
+    (reqHdrs : Array (String × String) := #[]) : IO Unit := do
+  let cadenceMs := max 100 (min intervalMs 15000)
+  let buildMetricsFrame : IO String := do
+    let nowSec ← coreEpochSec
+    let activeCnt ← match ← execParamQuery st.store.missionsDb
+        "SELECT COUNT(*) FROM missions WHERE status IN ('active','running','pending','queued');" #[] with
+      | .ok rs => pure (if rs.size > 1 then ((rs[1]![0]?).bind String.toNat?).getD 0 else 0)
+      | .error _ => pure 0
+    let runningRuns ← match ← execParamQuery st.store.missionsDb
+        "SELECT COUNT(*) FROM mission_runs WHERE execution_state NOT IN ('terminal','completed','failed','aborted');" #[] with
+      | .ok rs => pure (if rs.size > 1 then ((rs[1]![0]?).bind String.toNat?).getD 0 else 0)
+      | .error _ => pure 0
+    let loadAvg ← try
+        let raw ← IO.FS.readFile "/proc/loadavg"
+        pure ((raw.trimAscii.toString.splitOn " ").headD "0.00")
+      catch _ => pure "0.00"
+    return renderCompact (.obj #[
+      ("type", .str "metrics"),
+      ("timestamp", .str (formatEpochIso8601Utc nowSec)),
+      ("active_missions", JVal.nat activeCnt),
+      ("active_runs", JVal.nat runningRuns),
+      ("load_1m", .str loadAvg)
+    ])
+  let firstPayload ← buildMetricsFrame
+  if let some firstFrm := encodeFrame? { fin := true, opcode := .text, payload := firstPayload.toUTF8 } none then
+    if !(← writeAll cfd firstFrm false).isOk then return ()
   let mut rxBuf := ByteArray.empty
-  let mut steps : Nat := 0
   let mut openConn := true
-  while openConn && steps < 64 do
-    steps := steps + 1
-    match ← pollReadable cfd 2000 with
-    | .error _ => openConn := false
+  let startMs ← IO.monoMsNow
+  let mut lastEmitMs := startMs
+  let mut lastAuthMs := startMs
+  while openConn do
+    let nowMs ← IO.monoMsNow
+    if nowMs - lastAuthMs ≥ 1000 then
+      lastAuthMs := nowMs
+      let live? ←
+        if !reqHdrs.isEmpty then
+          resolveCallerPrincipal? st reqHdrs (← coreEpochSec) (allowWsSubproto := true)
+        else if wsCaller.isLegacyUnscoped then pure (some wsCaller)
+        else
+          match ← getUserById? st.store wsCaller.userId with
+          | none => pure none
+          | some u => pure (if u.disabled || u.sessionEpoch != wsCaller.sessionEpoch then none else some wsCaller)
+      if live?.isNone then
+        if let some cls := makeServerClose? 1008 "session_expired" then
+          discard <| writeAll cfd cls false
+        openConn := false
+        break
+    if nowMs - lastEmitMs ≥ cadenceMs then
+      lastEmitMs := nowMs
+      let payload ← buildMetricsFrame
+      if let some frm := encodeFrame? { fin := true, opcode := .text, payload := payload.toUTF8 } none then
+        if !(← writeAll cfd frm false).isOk then
+          openConn := false
+          break
+    match ← pollReadable cfd 100 with
+    | .error _ => pure ()
     | .ok () =>
-      let chunk ← readStreamChunk cfd 65536
+      let chunk ← readStreamChunk cfd 16384
       if chunk.isEmpty then
         openConn := false
       else
@@ -8309,19 +8848,12 @@ private def runWebSocketSessionLoop (cfd : Fd) : IO Unit := do
           match frame.opcode with
           | .ping =>
             if let some pong := makeServerPong? frame.payload then
-              discard <| writeAll cfd pong false
+              if !(← writeAll cfd pong false).isOk then openConn := false
           | .close =>
             if let some cls := makeServerClose? 1000 "" then
               discard <| writeAll cfd cls false
             openConn := false
-          | .text | .binary =>
-            let ack := "{\"type\":\"ack\"}".toUTF8
-            if let some ackFrame := encodeFrame? { fin := true, opcode := .text, payload := ack } none then
-              discard <| writeAll cfd ackFrame false
           | _ => pure ()
-  if openConn then
-    if let some cls := makeServerClose? 1000 "" then
-      discard <| writeAll cfd cls false
 
 /-- Per-mission subscription entry on `/api/control/sync`, buffering concurrent live events
     while `replaying == true` so replay frames always precede live frames in strict `seq` order. -/
@@ -8813,11 +9345,27 @@ def handleClientConn (st : CoreAppState) (cfd : Fd) (allowKeepAlive : Bool := fa
         let wrote := (← writeAll cfd rawUpgrade101 false).isOk
         if wrote then
           let cleanP := (req.path.splitOn "?").headD req.path
-          if cleanP == "/api/control/sync" then
-            if let some wsCaller ← resolveCallerPrincipal? st req.headers nowSec (allowWsSubproto := true) then
+          if let some wsCaller ← resolveCallerPrincipal? st req.headers nowSec (allowWsSubproto := true) then
+            if cleanP == "/api/control/sync" then
               runSyncWebSocketSessionLoop st wsCaller cfd (if allowKeepAlive then none else some 64) req.headers
-          else
-            runWebSocketSessionLoop cfd
+            else if cleanP == "/api/monitoring/ws" then
+              let qParams := parseQueryParams req.path
+              let ivMs := ((qParams.find? (fun p => p.1 == "interval_ms")).bind (fun p => p.2.toNat?)).getD 1000
+              runMonitoringWebSocketSessionLoop st wsCaller cfd ivMs req.headers
+            else if cleanP == "/api/console/ws" then
+              let cwd := if st.cfg.workingDir.trimAscii.toString.isEmpty then "/" else st.cfg.workingDir
+              runPtyWebSocketSessionLoop st wsCaller cfd cwd req.headers
+            else if let some wsParams := matchRoutePattern? "/api/workspaces/:id/shell" req.path then
+              let wid := (wsParams.find? (fun p => p.1 == "id")).map Prod.snd |>.getD ""
+              let mut shellCwd := st.cfg.workingDir
+              if !wid.isEmpty then
+                if let .ok wRows ← execParamQuery st.store.missionsDb "SELECT COALESCE(path,'') FROM workspaces WHERE id=?1 LIMIT 1;" #[wid] then
+                  if wRows.size > 1 then
+                    let p := (cell wRows[1]! 0).trimAscii.toString
+                    if !p.isEmpty then
+                      if let .ok safeDir ← confineWorkingDirectory st.cfg.workingDir p then
+                        shellCwd := safeDir
+              runPtyWebSocketSessionLoop st wsCaller cfd shellCwd req.headers
         keepGoing := false
   discard <| closeFd cfd
 
@@ -9006,15 +9554,44 @@ def runCoreServer (cfg : CoreConfig) (maxRequests? : Option Nat := none) : IO UI
     let lostTurns ← interruptTurnsLostToRestart store.missionsDb
     if lostTurns > 0 then
       IO.eprintln s!"[sandboxed-sh] {lostTurns} mission turn(s) lost to the restart marked interrupted"
+    -- Bridge all persisted `appendMissionEvent` rows onto `BroadcastHub` with exact SQLite `seq` (`RUN-05`).
+    let unsubSseBridge ← attachSseEventBridge store broadcastHub
+    -- Event-driven Core scope teardown listener (`RUN-03`): when a mission transitions to a
+    -- terminal/archived state, schedule grace-bounded cleanup of any lingering local process group.
+    let unsubScopeListener ← registerMissionEventListener store fun mid _seq evType payloadJson _createdAt => do
+      if evType == "mission_status_changed" then
+        if let .ok jv := OrbBin.Json.parse payloadJson then
+          let stName := (jv.fieldStr? "status").getD ""
+          if #["completed", "cancelled", "failed", "not_feasible", "acknowledged"].contains stName then
+            let graceSecs := ((← IO.getEnv "SCOPE_TEARDOWN_GRACE_SECS").bind String.toNat?).getD 30
+            discard <| IO.asTask (prio := .dedicated) do
+              if graceSecs > 0 then IO.sleep (min graceSecs 300 * 1000).toUInt32
+              if !(← store.closedRef.get) then
+                if let some mr ← getMission? store mid then
+                  if #["completed", "cancelled", "failed", "not_feasible", "acknowledged"].contains mr.status then
+                    OrbBin.ClaudeControl.stopHarnessRun warmMgr mid
     -- Only the process that owns the port fences receipts a previous process left
     -- open: such a spawn cannot be resumed or safely replayed.
     if let .error e ← ManagedSpawnActions.fenceInterrupted store then
       IO.eprintln s!"[sandboxed-sh] managed spawn action recovery failed: {e}"
     if let .error e ← McpGateway.fenceInterruptedGenericActions store then
       IO.eprintln s!"[sandboxed-sh] generic action recovery failed: {e}"
+    -- Install SIGTERM/SIGINT trap so production Core drains gracefully instead of exiting abruptly (`RUN-01`).
+    if maxRequests?.isNone then
+      OrbBin.PosixExt.installTermTrap
     IO.eprintln s!"[sandboxed-sh] listening on http://{bindHost}:{boundPort} (dev_mode={cfg.devMode})"
     if maxRequests?.isNone then
       startCloudSupervisorLoop cloudHub store (some broadcastHub) cfg.port
+      -- Dedicated single-owner telemetry flusher independent of the HTTP accept loop (`RUN-12`).
+      discard <| IO.asTask (prio := .dedicated) do
+        while !(← store.closedRef.get) do
+          IO.sleep 30000
+          if (← store.closedRef.get) then break
+          try
+            let curSec ← coreEpochSec
+            discard <| drainTelemetryBatches telemetrySink curSec
+          catch e =>
+            IO.eprintln s!"[sandboxed-sh] telemetry flush failed: {e}"
       discard <| IO.asTask (prio := .dedicated) do
         -- An error in one pass must never end the scheduler for the life of the process.
         try
@@ -9023,19 +9600,20 @@ def runCoreServer (cfg : CoreConfig) (maxRequests? : Option Nat := none) : IO UI
             IO.eprintln s!"[sandboxed-sh] re-attached {reattached} active remote-node job(s)"
         catch e =>
           IO.eprintln s!"[sandboxed-sh] remote job re-attach failed: {e}"
-        while true do
+        while !(← store.closedRef.get) do
            try
              discard <| tickContinuationScheduler store (some managedStore) (some relayHub) (some broadcastHub) remoteSup (some warmMgr) cfg.workingDir (some (launchLocalWakeup appState))
              let nowSec ← coreEpochSec
              discard <| tickLocalHarnessSupervisor appState (formatEpochIso8601Utc nowSec)
-             discard <| reapOrphanedMissionRuns store.missionsDb (formatEpochIso8601Utc nowSec)
+             discard <| tickBackgroundShellWatcher appState nowSec
+             discard <| reapOrphanedCoreScopes appState nowSec
              discard <| tickRemoteFollowupPump store (some managedStore) (some relayHub) (some broadcastHub) remoteSup cfg.workingDir nowSec
            catch e =>
              IO.eprintln s!"[sandboxed-sh] wake-up scheduler pass failed: {e}"
           IO.sleep 2000
       discard <| IO.asTask (prio := .dedicated) (providerUsageUpkeepLoop providerHub store cfg.workingDir)
       discard <| IO.asTask (prio := .dedicated) do
-        while true do
+        while !(← store.closedRef.get) do
           try
             monitorStaticNodeApis store
             discard <| reconcileUncertainRemoteSubmissions store (some managedStore) (some relayHub) (some broadcastHub) remoteSup cfg.workingDir false
@@ -9046,7 +9624,7 @@ def runCoreServer (cfg : CoreConfig) (maxRequests? : Option Nat := none) : IO UI
         let mut checkedDestroyed : Array String := #[]
         let mut lastSampledMinute : UInt64 := 0
         let mut maintTracker : OrbCore.Maintenance.Tracker := {}
-        while true do
+        while !(← store.closedRef.get) do
           let cached ← managedRef.get
           let observedAt ← coreEpochSec
           let (nextMaint, maintReport) ← OrbCore.Maintenance.tick store cfg.workingDir observedAt maintTracker
@@ -9100,9 +9678,12 @@ def runCoreServer (cfg : CoreConfig) (maxRequests? : Option Nat := none) : IO UI
     if !notifySock.isEmpty then
       discard <| sdNotifyRaw notifySock s!"READY=1\nSTATUS=Listening on {bindHost}:{boundPort}\n"
     let mut lastWatchdogSec : UInt64 := nowBootSec
-    let mut lastTelFlushSec : UInt64 := nowBootSec
     let mut served : Nat := 0
-    while (match maxRequests? with | some lim => decide (served < lim) | none => true) do
+    let mut keepServing : Bool := true
+    while keepServing && (match maxRequests? with | some lim => decide (served < lim) | none => true) do
+      if maxRequests?.isNone && (← OrbBin.PosixExt.pollTermTrap) != 0 then
+        keepServing := false
+        break
       match ← tcpAcceptPoll listenFd 250 with
       | .error _ =>
         if maxRequests?.isNone then
@@ -9110,9 +9691,6 @@ def runCoreServer (cfg : CoreConfig) (maxRequests? : Option Nat := none) : IO UI
           if !notifySock.isEmpty && !simulateWedge && curSec ≥ lastWatchdogSec + wdIntervalSec then
             lastWatchdogSec := curSec
             discard <| sdNotifyRaw notifySock "WATCHDOG=1\n"
-          if curSec ≥ lastTelFlushSec + 30 then
-            lastTelFlushSec := curSec
-            discard <| IO.asTask (prio := .dedicated) (do discard <| flushTelemetryOnce telemetrySink curSec)
       | .ok cfd =>
         if maxRequests?.isSome then
           handleClientConn appState cfd false
@@ -9123,14 +9701,16 @@ def runCoreServer (cfg : CoreConfig) (maxRequests? : Option Nat := none) : IO UI
             if curSec ≥ lastWatchdogSec + wdIntervalSec then
               lastWatchdogSec := curSec
               discard <| sdNotifyRaw notifySock "WATCHDOG=1\n"
-          if maxRequests?.isNone then
-            let curSec ← coreEpochSec
-            if curSec ≥ lastTelFlushSec + 30 then
-              lastTelFlushSec := curSec
-              discard <| IO.asTask (prio := .dedicated) (do discard <| flushTelemetryOnce telemetrySink curSec)
         served := served + 1
     if !notifySock.isEmpty then
       discard <| sdNotifyRaw notifySock "STOPPING=1\n"
+    -- Bounded graceful drain of local/warm harnesses and final telemetry flush (`RUN-01`, `RUN-12`).
+    let drainedLocal ← drainLocalHarnessRunsOnShutdown appState
+    if drainedLocal > 0 then
+      IO.eprintln s!"[sandboxed-sh] gracefully drained {drainedLocal} active local harness run(s)"
+    discard <| drainTelemetryBatches telemetrySink (← coreEpochSec) 3
+    unsubScopeListener
+    unsubSseBridge
     discard <| closeFd listenFd
     stopMacTetherRuntime macTetherRt
     closeManagedComputeStore managedStore

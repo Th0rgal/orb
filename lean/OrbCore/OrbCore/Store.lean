@@ -1608,45 +1608,74 @@ def interruptTurnsLostToRestart (mDb : SqliteDb) : IO Nat := do
      "job_id TEXT PRIMARY KEY, mission_id TEXT NOT NULL DEFAULT '', node_id TEXT NOT NULL DEFAULT '', " ++
      "state TEXT NOT NULL DEFAULT 'queued', payload_json TEXT NOT NULL DEFAULT '{}', " ++
      "created_at TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL DEFAULT '');") #[]
-  let res ← execParamQuery mDb
-    ("UPDATE missions SET status='interrupted',terminal_reason='core_restarted',state_revision=state_revision+1 " ++
-     "WHERE status='active' AND COALESCE(placement_kind,'')<>'client' " ++
-     "AND NOT EXISTS (SELECT 1 FROM mission_runs r WHERE r.mission_id=missions.id AND r.execution_state NOT IN ('terminal','completed','failed','aborted')) " ++
-     "AND NOT EXISTS (SELECT 1 FROM remote_node_jobs j WHERE j.mission_id=missions.id AND j.state NOT IN ('succeeded','failed','cancelled','lost','terminal','completed','aborted')) " ++
-     "RETURNING id;") #[]
-  match res with
-  | .ok rows =>
-    let lost := if rows.size == 0 then #[] else rows.extract 1 rows.size
-    let nowIso := formatEpochIso8601Utc (← coreEpochSec)
-    -- A restart must leave an explicit, client-visible recovery receipt for every
-    -- turn it could not reattach. Marking the mission is not enough: the receipt
-    -- records that Core owned this turn and intentionally did not start a duplicate.
-    for row in lost do
-      let mid := (row[0]?).getD ""
-      if mid.isEmpty then continue
-      let seqRes ← execParamQuery mDb
-        nextEventSeqSql
-        #[mid]
-      let nextSeq : UInt64 :=
-        match seqRes with
-        | .ok srs => (((srs[1]?.bind (·[0]?)).bind String.toNat?).getD 1).toUInt64
-        | .error _ => 1
-      discard <| execParamQuery mDb
-        "INSERT INTO mission_events(mission_id,seq,sequence,event_type,payload,created_at,timestamp) VALUES(?1,?2,?2,'recovery_receipt',?3,?4,?4);"
-        #[mid, s!"{nextSeq}", "{\"status\":\"interrupted\",\"reason\":\"core_restarted\",\"reattached\":false}", nowIso]
-    return lost.size
+  let nowIso := formatEpochIso8601Utc (← coreEpochSec)
+  -- Atomically interrupt every active non-client mission that has no surviving
+  -- remote job (including missions whose only non-terminal `mission_runs` rows
+  -- are local/non-remote rows belonging to the dead Core process), close those
+  -- dead local run rows, and emit one durable `recovery_receipt` per mission.
+  let txRes : Except String Nat ← mDb.mu.atomically do
+    match ← sqliteExecRaw mDb.handle "BEGIN IMMEDIATE;" with
+    | .error e => return .error e
+    | .ok () =>
+      let res ← execParamQueryUnlocked mDb
+        ("UPDATE missions SET status='interrupted',terminal_reason='core_restarted',state_revision=state_revision+1,updated_at=?1 " ++
+         "WHERE status='active' AND COALESCE(placement_kind,'')<>'client' " ++
+         "AND NOT EXISTS (SELECT 1 FROM mission_runs r WHERE r.mission_id=missions.id AND r.execution_state NOT IN ('terminal','completed','failed','aborted') " ++
+         "  AND (COALESCE(r.remote_job_id,'')<>'' OR COALESCE(r.owner_actor_id,'') LIKE 'remote-job:%' OR COALESCE(r.scope_unit,'') LIKE 'remote-node:%' OR COALESCE(r.remote_job_id,'')='' AND COALESCE(r.scope_unit,'')='' AND COALESCE(r.owner_actor_id,'')='')) " ++
+         "AND NOT EXISTS (SELECT 1 FROM remote_node_jobs j WHERE j.mission_id=missions.id AND j.state NOT IN ('succeeded','failed','cancelled','lost','terminal','completed','aborted')) " ++
+         "RETURNING id;") #[nowIso]
+      -- Also settle local-scoped active missions whose non-terminal `mission_runs` row has a `local-proc:` / `local-run:` scope
+      let localRes ← execParamQueryUnlocked mDb
+        ("UPDATE missions SET status='interrupted',terminal_reason='core_restarted',state_revision=state_revision+1,updated_at=?1 " ++
+         "WHERE status='active' AND COALESCE(placement_kind,'')<>'client' " ++
+         "AND EXISTS (SELECT 1 FROM mission_runs r WHERE r.mission_id=missions.id AND r.execution_state NOT IN ('terminal','completed','failed','aborted') " ++
+         "  AND COALESCE(r.remote_job_id,'')='' AND (COALESCE(r.owner_actor_id,'') LIKE 'local-%' OR COALESCE(r.scope_unit,'') LIKE 'local-%')) " ++
+         "AND NOT EXISTS (SELECT 1 FROM remote_node_jobs j WHERE j.mission_id=missions.id AND j.state NOT IN ('succeeded','failed','cancelled','lost','terminal','completed','aborted')) " ++
+         "RETURNING id;") #[nowIso]
+      match res, localRes with
+      | .ok rows1, .ok rows2 =>
+        let mut lost : Array String := #[]
+        for i in [1:rows1.size] do
+          let mid := (rows1[i]![0]?).getD ""
+          if !mid.isEmpty && !lost.contains mid then lost := lost.push mid
+        for i in [1:rows2.size] do
+          let mid := (rows2[i]![0]?).getD ""
+          if !mid.isEmpty && !lost.contains mid then lost := lost.push mid
+        for mid in lost do
+          discard <| execParamQueryUnlocked mDb
+            ("UPDATE mission_runs SET execution_state='terminal',terminal_reason='core_restarted',updated_at=?2 " ++
+             "WHERE mission_id=?1 AND COALESCE(remote_job_id,'')='' AND execution_state NOT IN ('terminal','completed','failed','aborted');")
+            #[mid, nowIso]
+          let seqRes ← execParamQueryUnlocked mDb nextEventSeqSql #[mid]
+          let nextSeq : UInt64 :=
+            match seqRes with
+            | .ok srs => (((srs[1]?.bind (·[0]?)).bind String.toNat?).getD 1).toUInt64
+            | .error _ => 1
+          discard <| execParamQueryUnlocked mDb
+            "INSERT INTO mission_events(mission_id,seq,sequence,event_type,payload,created_at,timestamp) VALUES(?1,?2,?2,'recovery_receipt',?3,?4,?4);"
+            #[mid, s!"{nextSeq}", "{\"status\":\"interrupted\",\"reason\":\"core_restarted\",\"reattached\":false}", nowIso]
+        match ← sqliteExecRaw mDb.handle "COMMIT;" with
+        | .ok () => return .ok lost.size
+        | .error e =>
+          discard <| sqliteExecRaw mDb.handle "ROLLBACK;"
+          return .error e
+      | .error e, _ | _, .error e =>
+        discard <| sqliteExecRaw mDb.handle "ROLLBACK;"
+        return .error e
+  match txRes with
+  | .ok n => return n
   | .error _ => return 0
 
-/-- Settle runs whose mission already reached a terminal state. Old Core execution
-    scopes have no independent provider object to enumerate, so this is the
-    periodic ownership backstop: a run can never outlive the mission that owns it.
-    It deliberately leaves `awaiting_user` and `waiting_background` missions alone. -/
+/-- Settle runs whose mission already reached a terminal or archived state.
+    This is the periodic ownership backstop: a run can never outlive the mission
+    that owns it. It deliberately leaves `awaiting_user` and `waiting_background`
+    missions alone. -/
 def reapOrphanedMissionRuns (mDb : SqliteDb) (nowAt : String) : IO Nat := do
   let res ← execParamQuery mDb
     ("UPDATE mission_runs SET execution_state='terminal',terminal_reason='orphaned_scope',updated_at=?1 " ++
      "WHERE execution_state NOT IN ('terminal','completed','failed','aborted') " ++
      "AND EXISTS (SELECT 1 FROM missions m WHERE m.id=mission_runs.mission_id " ++
-     "AND m.status IN ('completed','cancelled','failed','not_feasible')) RETURNING mission_id;") #[nowAt]
+     "AND m.status IN ('completed','cancelled','failed','not_feasible','acknowledged')) RETURNING mission_id;") #[nowAt]
   match res with
   | .ok rows => return rows.size - 1
   | .error _ => return 0

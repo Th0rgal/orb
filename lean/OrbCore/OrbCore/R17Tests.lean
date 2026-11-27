@@ -42,18 +42,21 @@ def run (root : String) : IO Unit := do
       let raw ← OrbCore.McpGateway.dispatchMcpToolCall store none none none {} root c tool args now
       let .ok value := OrbBin.Json.parse raw | throw (IO.userError "R17 MCP JSON")
       return value
-    let grantArgs (pause : String) : JVal := .obj #[
+    let grantArgs (pause key : String) : JVal := .obj #[
       ("slug", .str "r17-project"), ("autonomy_level", .str "observe"),
-      ("pause_reason", .str pause), ("idempotency_key", .str "r17-grant-1")
+      ("pause_reason", .str pause), ("idempotency_key", .str key)
     ]
-    let granted ← call operator "set_project_grant" (grantArgs "hold")
+    let granted ← call operator "set_project_grant" (grantArgs "hold" "r17-grant-1")
     check (granted.fieldBool? "ok" == some true) "MCP set_project_grant persists"
     check ((granted.fieldOrNull "result").fieldStr? "autonomy_level" == some "observe")
       "MCP set_project_grant reports stored grant"
-    let cleared ← call operator "set_project_grant" (grantArgs "")
+    let conflict ← call operator "set_project_grant" (grantArgs "" "r17-grant-1")
+    check ((conflict.fieldOrNull "error").fieldStr? "code" == some "conflict")
+      "MCP set_project_grant rejects conflicting reuse of idempotency_key"
+    let cleared ← call operator "set_project_grant" (grantArgs "" "r17-grant-2")
     check ((cleared.fieldOrNull "result").fieldOrNull "pause_reason" == .null)
       "MCP set_project_grant clears an explicit empty field"
-    let denied ← call executor "set_project_grant" (grantArgs "hold")
+    let denied ← call executor "set_project_grant" (grantArgs "hold" "r17-grant-3")
     check ((denied.fieldOrNull "error").fieldStr? "code" == some "forbidden")
       "MCP set_project_grant requires operator"
     for tool in #["start_workspace_job", "get_workspace_job", "cancel_workspace_job"] do

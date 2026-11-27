@@ -229,6 +229,23 @@ def buildClaudeControlResponse (pending : PendingControlRequest) (answer : JVal)
   let innerResp : JVal :=
     if pending.method == "claude_questions" then
       let answersVal := match answer.field? "answers" with
+        | some (.arr rows) =>
+          -- Convert MCP `string[][]` positional answers onto Claude's `{question: answer}` object
+          Id.run do
+            let questions := (pending.originalInput.fieldArr? "questions").getD #[]
+            let mut pairs : Array (String × JVal) := #[]
+            for i in [:rows.size] do
+              let qText :=
+                match questions[i]? with
+                | some qObj => (qObj.fieldStr? "question").orElse (fun _ => qObj.fieldStr? "header") |>.getD s!"q{i}"
+                | none => s!"q{i}"
+              let joined :=
+                match rows[i]! with
+                | .arr opts => String.intercalate ", " (opts.filterMap JVal.asStr? |>.toList)
+                | .str s => s
+                | other => renderCompact other
+              pairs := pairs.push (qText, .str joined)
+            return .obj pairs
         | some a => a
         | none => .obj #[]
       let updated := upsertJsonField pending.originalInput "answers" answersVal
@@ -352,6 +369,7 @@ structure LocalRunState where
   outputTokens?    : Option UInt64 := none
   cacheReadTokens? : Option UInt64 := none
   costCents        : UInt64 := 0
+  lastProgressEpoch : UInt64 := 0
   deriving Repr, BEq, Inhabited
 
 def LocalRunState.toPollJVal (s : LocalRunState) : JVal := Id.run do
@@ -1043,6 +1061,21 @@ private def writeWarmStdinLine (entry : WarmClaudeEntry) (jsonLine : String) : I
       return false
     return true
 
+/-- Inspect pending interactive `control_request` items on `id` (`AskUserQuestion`, plan, permission). -/
+def pendingControlRequestsFor (mgr : WarmHarnessManager) (id : String) : IO (Array PendingControlRequest) := do
+  let warm? ← mgr.mu.atomically do
+    let ws ← mgr.warmProcsRef.get
+    pure ((ws.find? (fun (k, _) => k == id)).map Prod.snd)
+  match warm? with
+  | none => return #[]
+  | some entry => entry.pendingReqsRef.get
+
+/-- Record recent progress epoch on an active local run (`RUN-02` inactivity supervision). -/
+def touchRunProgress (mgr : WarmHarnessManager) (id : String) (nowSec : UInt64) : IO Unit := do
+  let runs ← mgr.runsRef.get
+  if let some (_, r) := runs.find? (fun (k, _) => k == id) then
+    r.modify fun s => { s with lastProgressEpoch := nowSec }
+
 /-- Answer a pending interactive `control_request` (`AskUserQuestion`, `ExitPlanMode`, or tool `permission`) on `id`. -/
 def respondToControlRequest
     (mgr : WarmHarnessManager)
@@ -1119,6 +1152,27 @@ def stopHarnessRun (mgr : WarmHarnessManager) (id : String) : IO Unit := do
       ("reset", .bool false),
       ("state", finalSt.toPollJVal)
     ])
+
+/-- Gracefully stop all active one-shot and warm local harness process groups during Core shutdown (`RUN-01`).
+    Returns `(missionId, generation)` for runs that were still active (non-done) when drained. -/
+def drainAllHarnessRuns (mgr : WarmHarnessManager) : IO (Array (String × UInt64)) := do
+  let runs ← mgr.runsRef.get
+  let ws ← mgr.warmProcsRef.get
+  let ag ← mgr.activeGroupsRef.get
+  let mut ids : Array String := #[]
+  let mut activeInterrupted : Array (String × UInt64) := #[]
+  for (mid, ref) in runs do
+    let st ← ref.get
+    if !st.done && !st.stopping then
+      activeInterrupted := activeInterrupted.push (mid, st.generation)
+    if !ids.contains mid then ids := ids.push mid
+  for (mid, _) in ws do
+    if !ids.contains mid then ids := ids.push mid
+  for (mid, _) in ag do
+    if !ids.contains mid then ids := ids.push mid
+  for mid in ids do
+    stopHarnessRun mgr mid
+  return activeInterrupted
 
 /-- Extract short summary label for a Claude tool call (`Bash`, `Edit`, `Write`, `Read`, etc.). -/
 private def toolActivityLabel (toolName : String) (input : JVal) : String × Option String :=
@@ -1369,6 +1423,8 @@ private def launchOrReuseWarmClaude
             if !ln.isEmpty then
               if let .ok ev := OrbBin.Json.parse ln then
                 let cb ← getCallbacksFor mgr missionId
+                let nowSec ← nowEpoch
+                stRef.modify fun s => { s with lastProgressEpoch := nowSec }
                 if let some ctrlReq := parseClaudeControlRequest? ev then
                   entry.writeMu.atomically do
                     let ps ← entry.pendingReqsRef.get
@@ -1383,7 +1439,6 @@ private def launchOrReuseWarmClaude
                   ])
                   cb.onControlRequest ctrlReq
                 else
-                  let nowSec ← nowEpoch
                   let nowMs := nowSec * 1000
                   let (delta, turnDone, err?) ← ingestClaudeStdoutEvent stRef ev nowMs skipZeroRef
                   let snap ← stRef.get
@@ -2110,6 +2165,7 @@ def startHarnessTurn
   if prevTurns == 0 then
     discard <| captureCheckpoint effectiveCwd id 0 s!"pre-{generation}" shortLabel
 
+  let startEpoch ← nowEpoch
   let initState : LocalRunState := {
     runId := id
     generation := generation
@@ -2124,6 +2180,7 @@ def startHarnessTurn
     activities := #[]
     turnCount := prevTurns
     model? := model?.map (·.trimAscii.toString) |>.filter (!·.isEmpty)
+    lastProgressEpoch := startEpoch
   }
   let state? ← mgr.registration.atomically do
     if !(← launchAllowed) then return none
@@ -2193,6 +2250,8 @@ def startHarnessTurn
       registerGroup sp
       return sp
     let handleLine : String → IO Unit := fun ln => do
+      let nowSec ← nowEpoch
+      stRef.modify fun s => { s with lastProgressEpoch := nowSec }
       let parsed := parseOneShotHarnessEvent harness ln
       if let some sid := parsed.sessionId? then
         stRef.modify fun s => { s with sessionId? := some sid }

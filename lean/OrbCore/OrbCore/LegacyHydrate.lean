@@ -334,6 +334,7 @@ structure SseQueuedEvent where
   eventType  : String
   missionId? : Option String
   frame      : String
+  seq?       : Option UInt64 := none
   deriving Repr, DecidableEq, Inhabited
 
 structure SseSubscriber where
@@ -345,10 +346,20 @@ structure SseSubscriber where
 
 structure BroadcastHub where
   mu : Std.Mutex (UInt64 × Array SseSubscriber)
+  bridgedRef : IO.Ref Bool
 
 def newBroadcastHub : IO BroadcastHub := do
   let mu ← Std.Mutex.new ((0 : UInt64), (#[] : Array SseSubscriber))
-  return { mu }
+  let bridgedRef ← IO.mkRef false
+  return { mu, bridgedRef }
+
+def markBroadcastHubBridged (hub : BroadcastHub) : IO Unit :=
+  hub.bridgedRef.set true
+
+def isBroadcastHubBridged (hub? : Option BroadcastHub) : IO Bool :=
+  match hub? with
+  | none => pure false
+  | some h => h.bridgedRef.get
 
 def formatSseFrame (eventType payloadJson : String) (seqId? : Option UInt64 := none) : String :=
   let idLine := match seqId? with | some n => s!"id: {n}\n" | none => ""
@@ -359,7 +370,8 @@ def formatSseFrame (eventType payloadJson : String) (seqId? : Option UInt64 := n
 def publishControlEvent
     (hub? : Option BroadcastHub)
     (eventType payloadJson : String)
-    (missionId? : Option String := none) : IO Unit := do
+    (missionId? : Option String := none)
+    (eventSeq? : Option UInt64 := none) : IO Unit := do
   let some hub := hub? | return ()
   let subs ← hub.mu.atomically do
     let (seq, xs) ← get
@@ -368,8 +380,9 @@ def publishControlEvent
     return (nextSeq, xs)
   let safeType := ((eventType.splitOn "\n").headD "message").trimAscii.toString
   let cleanMid? := missionId?.map (·.trimAscii.toString) |>.filter (!·.isEmpty)
-  let frame := formatSseFrame safeType payloadJson (some subs.1)
-  let item : SseQueuedEvent := { eventType := safeType, missionId? := cleanMid?, frame := frame }
+  let effId := eventSeq?.getD subs.1
+  let frame := formatSseFrame safeType payloadJson (some effId)
+  let item : SseQueuedEvent := { eventType := safeType, missionId? := cleanMid?, frame := frame, seq? := eventSeq? }
   for sub in subs.2 do
     let matchesMission :=
       match sub.missionFilter?, cleanMid? with
