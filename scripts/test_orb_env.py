@@ -5,6 +5,7 @@ import importlib.machinery
 import io
 import json
 from pathlib import Path
+import re
 import stat
 import subprocess
 import tempfile
@@ -51,21 +52,68 @@ class OrbEnvTest(unittest.TestCase):
             env.migration_policy(bad, {}, {})
 
     def test_managed_default_provider_is_accepted_by_check(self):
-        base = {"SANDBOXED_MANAGED_DEFAULT_PROVIDER": "leanci"}
+        managed_lean = (SCRIPT.parents[2] / "lean/OrbCore/OrbCore/Managed.lean").read_text()
+        match = re.search(r"def knownProviders\s*:\s*Array String\s*:=\s*#\[([^\]]+)\]", managed_lean)
+        self.assertIsNotNone(match, "knownProviders definition missing from Managed.lean")
+        lean_providers = frozenset(re.findall(r'"([^"]+)"', match.group(1)))
+        self.assertEqual(env.KNOWN_MANAGED_PROVIDERS, lean_providers)
         overlay = {"ORB_INSTANCE": "dev", "PORT": "3002", "WORKING_DIR": "/var/lib/dev",
                    "JWT_SECRET": "dev-secret"}
-        env.check(base, overlay)
+        # Unset (omitted) leaves Core's built-in leanci default active.
+        env.check({}, overlay)
+        for value in ("leanci", "lean.ci", '" LeanCI "', "'lean.ci'", "boat",
+                      "hetzner", "vastai", "scaleway", "colab"):
+            with self.subTest(value=value):
+                env.check({"SANDBOXED_MANAGED_DEFAULT_PROVIDER": value}, overlay)
+
+    def test_managed_default_provider_rejects_invalid_and_wrong_layer_without_leaking_values(self):
+        overlay = {"ORB_INSTANCE": "dev", "PORT": "3002", "WORKING_DIR": "/var/lib/dev",
+                   "JWT_SECRET": "dev-secret"}
+        for raw_value in ("", '"   "', "nope", "secret-bogus-provider", '"\u00a0leanci\u00a0"'):
+            with self.subTest(raw_value=raw_value):
+                with self.assertRaisesRegex(
+                    env.InvalidConfig,
+                    "SANDBOXED_MANAGED_DEFAULT_PROVIDER must be a known managed provider",
+                ) as caught:
+                    env.check({"SANDBOXED_MANAGED_DEFAULT_PROVIDER": raw_value}, overlay)
+                self.assertNotIn("secret-bogus-provider", str(caught.exception))
+        with self.assertRaisesRegex(
+            env.InvalidConfig,
+            "keys in the wrong layer: SANDBOXED_MANAGED_DEFAULT_PROVIDER",
+        ):
+            env.check({}, overlay | {"SANDBOXED_MANAGED_DEFAULT_PROVIDER": "leanci"})
 
     def test_managed_default_provider_lands_in_shared_base_via_migration(self):
         self.prod.write_bytes(self.prod.read_bytes() + b"SANDBOXED_MANAGED_DEFAULT_PROVIDER=leanci\n")
-        self.dev.write_bytes(self.dev.read_bytes() + b"SANDBOXED_MANAGED_DEFAULT_PROVIDER=leanci\n")
-        env.migrate(self.prod, self.dev, self.output, apply=True)
+        self.dev.write_bytes(self.dev.read_bytes() + b"SANDBOXED_MANAGED_DEFAULT_PROVIDER=boat\n")
+        result, _, stderr = self.cli("--apply")
+        self.assertEqual(result, 0, stderr)
         base = env.parse_env((self.output / "core.env").read_bytes())
         prod = env.parse_env((self.output / "prod.env").read_bytes())
         dev = env.parse_env((self.output / "dev.env").read_bytes())
         self.assertEqual(base["SANDBOXED_MANAGED_DEFAULT_PROVIDER"], "leanci")
         self.assertNotIn("SANDBOXED_MANAGED_DEFAULT_PROVIDER", prod)
         self.assertNotIn("SANDBOXED_MANAGED_DEFAULT_PROVIDER", dev)
+
+    def test_managed_default_provider_unset_and_invalid_in_migration(self):
+        # Unset in both inputs stays unset in core.env and overlays.
+        result, _, stderr = self.cli("--apply")
+        self.assertEqual(result, 0, stderr)
+        for name in ("core.env", "prod.env", "dev.env"):
+            self.assertNotIn("SANDBOXED_MANAGED_DEFAULT_PROVIDER",
+                             env.parse_env((self.output / name).read_bytes()))
+        # Invalid prod value fails closed before creating output and never discloses the value.
+        bad_output = self.root / "bad-environments"
+        self.prod.write_bytes(self.prod.read_bytes() + b"SANDBOXED_MANAGED_DEFAULT_PROVIDER=secret-bogus-provider\n")
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with patch("sys.argv", [str(SCRIPT), "migrate", "--prod", str(self.prod),
+                                "--dev", str(self.dev), "--output", str(bad_output), "--apply"]), \
+                contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            code = env.main()
+        self.assertEqual(code, 1)
+        self.assertIn("SANDBOXED_MANAGED_DEFAULT_PROVIDER must be a known managed provider", stderr.getvalue())
+        self.assertNotIn("secret-bogus-provider", stdout.getvalue() + stderr.getvalue())
+        self.assertFalse(bad_output.exists())
 
     def test_observed_named_groups_stay_instance_owned(self):
         dev_only = "AUTOMATION_MANAGER_MCP_BIN CODEX_APP_SERVER_MODE LIBRARY_PATH OPENAGENT_DATA_DIR RUST_MIN_STACK SANDBOXED_MANAGED_ENABLED SANDBOXED_PROXY_SECRET SANDBOXED_SH_RTK_ENABLED SCOPE_REAPER_ENABLED WORKING_DIR".split()

@@ -219,10 +219,25 @@ PROD_ONLY_KEYS = frozenset({
 })
 KNOWN_KEYS = SHARED_KEYS | INSTANCE_KEYS | PROD_ONLY_KEYS
 REQUIRED = frozenset({"ORB_INSTANCE", "PORT", "WORKING_DIR", "JWT_SECRET"})
+# Matches knownProviders / canonicalizeProvider in lean/OrbCore/OrbCore/Managed.lean.
+KNOWN_MANAGED_PROVIDERS = frozenset({
+    "boat",
+    "leanci",
+    "hetzner",
+    "vastai",
+    "scaleway",
+    "colab",
+})
 
 
 class InvalidConfig(Exception):
     pass
+
+
+def canonical_managed_provider(value):
+    """Match canonicalizeProvider in lean/OrbCore/OrbCore/Managed.lean."""
+    key = value.strip(" \t\r\n").lower()
+    return "leanci" if key == "lean.ci" else key
 
 
 def literal(value):
@@ -370,6 +385,9 @@ def check(base, overlay, policy=None):
         raise InvalidConfig("required instance keys must not be empty")
     if literal(overlay["ORB_INSTANCE"]) not in {"prod", "dev"}:
         raise InvalidConfig("ORB_INSTANCE must be prod or dev")
+    if "SANDBOXED_MANAGED_DEFAULT_PROVIDER" in base:
+        if canonical_managed_provider(literal(base["SANDBOXED_MANAGED_DEFAULT_PROVIDER"])) not in KNOWN_MANAGED_PROVIDERS:
+            raise InvalidConfig("SANDBOXED_MANAGED_DEFAULT_PROVIDER must be a known managed provider")
 
 
 def classify(prod, dev):
