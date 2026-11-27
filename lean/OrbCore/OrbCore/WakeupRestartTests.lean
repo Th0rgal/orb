@@ -45,7 +45,9 @@ private def verifyLegacyMigration (store : CoreStore) (now : UInt64) : IO Unit :
     ("fresh-sw", "inline", "{\"content\":\"legacy intent\"}", "interval", "{\"seconds\":300}", "{}", "after_first_fire", "always", "scheduler"),
     ("has-vars", "inline", "{\"content\":\"legacy intent\"}", "interval", "{\"seconds\":300}", "{\"env\":\"prod\"}", "after_first_fire", "keep", "scheduler"),
     ("stale-wgen", "inline", "{\"content\":\"stale wakeup\"}", "interval", "{\"seconds\":300}", "{\"__wakeup_request_id\":\"req-stale\",\"__wakeup_run_generation\":\"1\",\"__wakeup_source\":\"mcp\"}", "after_first_fire", "keep", "scheduler"),
+    ("stale-runs-gen", "inline", "{\"content\":\"stale turn1\"}", "interval", "{\"seconds\":300}", "{\"__wakeup_request_id\":\"req-stale-runs\",\"__wakeup_run_generation\":\"1\",\"__wakeup_source\":\"mcp\"}", "after_first_fire", "keep", "scheduler"),
     ("fenced-wgen", "inline", "{\"content\":\"fenced wakeup\"}", "interval", "{\"seconds\":300}", "{\"__wakeup_request_id\":\"req-fenced\",\"__wakeup_run_generation\":\"2\",\"__wakeup_source\":\"mcp\"}", "after_first_fire", "keep", "scheduler"),
+    ("local-client-var", "inline", "{\"content\":\"desktop local\"}", "interval", "{\"seconds\":300}", "{\"__wakeup_request_id\":\"req-local-var\",\"__wakeup_local\":\"true\",\"__wakeup_source\":\"orb-local\"}", "after_first_fire", "keep", "scheduler"),
     ("bad-json", "inline", "{\"content\":\"legacy intent\"}", "interval", "not-json", "{}", "after_first_fire", "keep", "scheduler"),
     ("bad-at", "inline", "{\"content\":\"legacy intent\"}", "time", "{\"at\":\"not-a-date\",\"seconds\":300}", "{}", "after_first_fire", "keep", "scheduler"),
     ("bad-insert", "inline", "{\"content\":\"legacy intent\"}", "interval", "{\"seconds\":300}", "{}", "after_first_fire", "keep", "scheduler"),
@@ -55,35 +57,52 @@ private def verifyLegacyMigration (store : CoreStore) (now : UInt64) : IO Unit :
     ("valid", "inline", "{\"content\":\"legacy intent\"}", "interval", "{\"seconds\":300}", "{}", "after_first_fire", "keep", "scheduler"),
     ("valid-recur", "inline", "{\"content\":\"recurring intent\"}", "interval", "{\"seconds\":300}", "{}", "never", "keep", "scheduler"),
     ("valid-job", "inline", "{\"content\":\"job intent\"}", "durable_job_terminal", "{\"job_id\":\"job-leg-1\"}", "{}", "after_first_fire", "keep", "scheduler"),
-    ("valid-wakeup-meta", "inline", "{\"content\":\"meta wakeup\"}", "interval", "{\"seconds\":300}", "{\"__wakeup_request_id\":\"req-meta-1\",\"__wakeup_reason\":\"poll\",\"__wakeup_source\":\"mcp\",\"__wakeup_run_generation\":\"2\"}", "after_first_fire", "keep", "scheduler")
+    ("valid-wakeup-meta", "inline", "{\"content\":\"meta wakeup\"}", "interval", "{\"seconds\":300}", "{\"__wakeup_request_id\":\"req-meta-1\",\"__wakeup_reason\":\"poll\",\"__wakeup_source\":\"mcp\",\"__wakeup_run_generation\":\"3\"}", "after_first_fire", "keep", "scheduler"),
+    ("valid-gen0", "inline", "{\"content\":\"pre-run wakeup\"}", "interval", "{\"seconds\":300}", "{\"__wakeup_request_id\":\"req-gen0\",\"__wakeup_run_generation\":\"0\",\"__wakeup_source\":\"mcp\"}", "after_first_fire", "keep", "scheduler")
   ]
   for (aid, cmdType, cmdData, kind, payload, vars, policy, fresh, drv) in unsupported ++ supported do
-    let mGen := if aid == "stale-wgen" || aid == "fenced-wgen" || aid == "valid-wakeup-meta" then "2" else "1"
+    let mGen := if aid == "stale-wgen" || aid == "fenced-wgen" then "2" else "1"
     sql db "INSERT INTO missions(id,title,status,backend,run_generation,created_at,updated_at) VALUES(?1,'legacy','completed','claudecode',CAST(?2 AS INTEGER),'t0','t0');" #[s!"m-legacy-{aid}", mGen]
     sql db "INSERT INTO automations VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,1);"
       #[aid, s!"m-legacy-{aid}", cmdType, cmdData, kind, payload, vars, policy, fresh, drv]
+  -- Simulate upgraded legacy DB where `missions.run_generation` defaulted to 1 while `mission_runs` reached generation 3.
+  sql db "INSERT INTO mission_runs(id,mission_id,generation,execution_state,updated_at) VALUES('r-leg-meta','m-legacy-valid-wakeup-meta',3,'terminal','t0');"
+  sql db "INSERT INTO mission_runs(id,mission_id,generation,execution_state,updated_at) VALUES('r-leg-stale','m-legacy-stale-runs-gen',3,'terminal','t0');"
   sql db "INSERT INTO mission_wakeup_fences(mission_id,stopped_generation) VALUES('m-legacy-fenced-wgen',2);"
-  -- SQL NULL command_source_data and archived (acknowledged) owning mission must both stay intact.
+  -- SQL NULL command_source_data, archived mission, client-placed mission, already-retired duplicate request_id, and revoked continuation.
   sql db "INSERT INTO missions(id,title,status,backend,run_generation,created_at,updated_at) VALUES('m-legacy-cmd-null','legacy','completed','claudecode',1,'t0','t0');"
   sql db "INSERT INTO automations(id,mission_id,command_source_type,command_source_data,trigger_type,trigger_data,variables,stop_policy,fresh_session,driver,active) VALUES('cmd-null','m-legacy-cmd-null','inline',NULL,'interval','{\"seconds\":300}','{}','after_first_fire','keep','scheduler',1);"
   sql db "INSERT INTO missions(id,title,status,backend,run_generation,created_at,updated_at) VALUES('m-legacy-archived','legacy','acknowledged','claudecode',1,'t0','t0');"
   sql db "INSERT INTO automations VALUES('archived','m-legacy-archived','inline','{\"content\":\"archived intent\"}','interval','{\"seconds\":300}','{}','after_first_fire','keep','scheduler',1);"
+  sql db "INSERT INTO missions(id,title,status,backend,placement_kind,run_generation,created_at,updated_at) VALUES('m-legacy-client','legacy','completed','claudecode','client',1,'t0','t0');"
+  sql db "INSERT INTO automations VALUES('client-place','m-legacy-client','inline','{\"content\":\"client intent\"}','interval','{\"seconds\":300}','{}','after_first_fire','keep','scheduler',1);"
+  sql db "INSERT INTO missions(id,title,status,backend,run_generation,created_at,updated_at) VALUES('m-legacy-dup-req','legacy','completed','claudecode',1,'t0','t0');"
+  sql db "INSERT INTO mission_continuations(id,mission_id,run_generation,phase,due_epoch,trigger_kind,reason,prompt,request_id,job_id,source,error,recurrence,stop_after_first,created_at,updated_at) VALUES('c-prior-dup','m-legacy-dup-req',1,4,100,'time','test','prior','req-dup-retired','','mcp','','',1,'t0','t0');"
+  sql db "INSERT INTO automations VALUES('dup-req','m-legacy-dup-req','inline','{\"content\":\"dup intent\"}','interval','{\"seconds\":300}','{\"__wakeup_request_id\":\"req-dup-retired\"}','after_first_fire','keep','scheduler',1);"
+  sql db "INSERT INTO missions(id,title,status,backend,run_generation,created_at,updated_at) VALUES('m-legacy-revoked','legacy','completed','claudecode',1,'t0','t0');"
+  sql db "INSERT INTO mission_continuations(id,mission_id,run_generation,phase,due_epoch,trigger_kind,reason,prompt,request_id,job_id,source,error,recurrence,stop_after_first,created_at,updated_at) VALUES('c-prior-rev','m-legacy-revoked',1,4,100,'time','test','revoked','req-rev','','mcp','revoked','',1,'t0','t0');"
+  sql db "INSERT INTO automations VALUES('revoked-src','m-legacy-revoked','inline','{\"content\":\"do not resurrect\"}','interval','{\"seconds\":300}','{}','after_first_fire','keep','scheduler',1);"
   sql db ("CREATE TRIGGER reject_legacy_insert BEFORE INSERT ON mission_continuations " ++
     "WHEN NEW.id='leg-auto-bad-insert' BEGIN SELECT RAISE(ABORT,'fixture insert failure'); END;")
   sql db ("CREATE TRIGGER reject_legacy_retirement BEFORE UPDATE ON automations " ++
     "WHEN OLD.id='bad-retire' BEGIN SELECT RAISE(IGNORE); END;")
-  let totalSkipped := unsupported.size + 2
+  let totalSkippedActive := unsupported.size + 4
   check ((← migrateLegacyAutomations store now) == supported.size && (← migrateLegacyAutomations store now) == 0)
     "only supported, fully written sources migrate, once"
-  check ((← cellOf db "SELECT COUNT(*) FROM automations WHERE active=1 AND id NOT IN ('valid','valid-recur','valid-job','valid-wakeup-meta');" #[]) == s!"{totalSkipped}")
-    "unsupported triggers, unsupported intent, archived missions, fenced metadata, and failed writes retain their active source"
-  check ((← cellOf db "SELECT COUNT(*) FROM missions WHERE id LIKE 'm-legacy-%' AND status='completed';" #[]) == s!"{unsupported.size + 1}")
-    "skipped rows and failed writes do not park completed owning missions"
+  check ((← cellOf db "SELECT COUNT(*) FROM automations WHERE active=1 AND id NOT IN ('valid','valid-recur','valid-job','valid-wakeup-meta','valid-gen0','dup-req');" #[]) == s!"{totalSkippedActive}")
+    "unsupported triggers, unsupported intent, archived/client missions, fenced/stale metadata, revoked rows, and failed writes retain their active source"
+  check ((← cellOf db "SELECT active FROM automations WHERE id='dup-req';" #[]) == "0" &&
+    (← cellOf db "SELECT status FROM missions WHERE id='m-legacy-dup-req';" #[]) == "completed")
+    "duplicate already-retired request_id retires legacy row without un-completing mission"
+  check ((← cellOf db "SELECT run_generation FROM missions WHERE id='m-legacy-valid-wakeup-meta';" #[]) == "3")
+    "migrating a multi-turn legacy wakeup syncs missions.run_generation to MAX(mission_runs.generation)"
+  check ((← cellOf db "SELECT COUNT(*) FROM missions WHERE id LIKE 'm-legacy-%' AND status='completed';" #[]) == s!"{unsupported.size + 4}")
+    "skipped rows, duplicate retirements, and failed writes do not park completed owning missions"
   check ((← cellOf db "SELECT status FROM missions WHERE id='m-legacy-archived';" #[]) == "acknowledged")
     "archived missions stay acknowledged during legacy migration"
-  check ((← cellOf db "SELECT group_concat(id || ':' || trigger_kind || ':' || prompt || ':' || stop_after_first || ':' || recurrence || ':' || request_id, '|') FROM (SELECT * FROM mission_continuations WHERE source='legacy-automations-migration' ORDER BY id);" #[]) ==
-    "leg-auto-valid:time:legacy intent:1::legacy-automation:valid|leg-auto-valid-job:durable_job_terminal:job intent:1::legacy-automation:valid-job|leg-auto-valid-recur:time:recurring intent:0:interval:300:legacy-automation:valid-recur|leg-auto-valid-wakeup-meta:time:meta wakeup:1::req-meta-1")
-    "supported legacy one-shot, recurring, durable-job, and __wakeup_* automations preserve exact intent"
+  check ((← cellOf db "SELECT group_concat(id || ':' || trigger_kind || ':' || prompt || ':' || stop_after_first || ':' || recurrence || ':' || request_id || ':' || run_generation, '|') FROM (SELECT * FROM mission_continuations WHERE source='legacy-automations-migration' ORDER BY id);" #[]) ==
+    "leg-auto-valid:time:legacy intent:1::legacy-automation:valid:1|leg-auto-valid-gen0:time:pre-run wakeup:1::req-gen0:1|leg-auto-valid-job:durable_job_terminal:job intent:1::legacy-automation:valid-job:1|leg-auto-valid-recur:time:recurring intent:0:interval:300:legacy-automation:valid-recur:1|leg-auto-valid-wakeup-meta:time:meta wakeup:1::req-meta-1:3")
+    "supported legacy one-shot, recurring, durable-job, and __wakeup_* automations preserve exact intent and run generation"
   -- Single-column `command_source` legacy schema: non-inline `"type"` stays intact, inline migrates.
   let singleRoot := s!"/tmp/orb-wakeup-singlecmd-{← newUuidV4}"
   try
@@ -215,6 +234,24 @@ private def verifyProductionLocalFailure (store : CoreStore) (sup : RemoteJobSup
   check ((← cellOf db "SELECT status FROM missions WHERE id='m-arch-wake';" #[]) == "acknowledged" &&
     (← cellOf db "SELECT phase || ':' || error FROM mission_continuations WHERE id='c-arch-wake';" #[]) == "4:owner_terminal")
     "archived mission wake-ups are retired without waking or retry-spinning"
+  let archArm ← registerContinuation store
+    { id := "c-arch-arm", missionId := "m-arch-wake", requestId := "arch-arm", prompt := "no",
+      reason := "test", source := "mcp", triggerKind := "time", dueEpoch := t + 100 } t "t0"
+  check (match archArm with | .error "continuation_arm_rejected" => true | _ => false)
+    "registerContinuation refuses to arm a wake-up on an archived mission"
+  -- Client-placed missions must never be claimed or executed on the Core API host.
+  sql db ("INSERT INTO missions(id,title,status,backend,placement_kind,run_generation,created_at,updated_at) " ++
+    "VALUES('m-client-wake','wakeup','awaiting_user','claudecode','client',1,'t0','t0');")
+  let .ok _ ← registerContinuation store
+    { id := "c-client-wake", missionId := "m-client-wake", requestId := "client-wake", prompt := "run on client",
+      reason := "test", source := "mcp", triggerKind := "time", dueEpoch := t + 20 } t "t0"
+    | throw (IO.userError "client wake-up registration")
+  discard <| tick (t + 20)
+  check ((← cellOf db "SELECT phase FROM mission_continuations WHERE id='c-client-wake';" #[]) == "1" &&
+    (← cellOf db "SELECT status FROM missions WHERE id='m-client-wake';" #[]) == "awaiting_user")
+    "client-placed mission wake-ups are never claimed or executed on the Core host"
+  check (renderContinuationNextAtJson "durable_job_terminal" (t + 86400) == "null")
+    "durable_job_terminal continuations render next_at as null"
 
 def run : IO Unit := do
   let root := s!"/tmp/orb-wakeup-restart-{← newUuidV4}"

@@ -2461,6 +2461,7 @@ private def launchLocalCoreMissionTurn
     | .ok d => pure d
     | .error e => return .error s!"invalid_working_directory:{e}"
   let some mission ← getMission? st.store missionId | return .error "mission_not_found"
+  if mission.placementKind == "client" then return .error "client_mission_uses_local_runner"
   let prelude ← remoteInstallPrelude st.cfg.workingDir
     (if mission.project.isEmpty then none else some mission.project) harness st.store.rootDir
     mission.ownerUserId st.bootstrapAdminId
@@ -2536,11 +2537,12 @@ private def launchLocalCoreMissionTurn
     if let some tok ← mintedProxyTokRef.get then
       revokeSingleMissionProxyToken st.store tok
       mintedProxyTokRef.set none
-    mgr.registration.atomically do
+    let stopFenced ← mgr.registration.atomically do
       let gs ← mgr.launchGenerations.get
       if gs.get? missionId == some nextGen then
         mgr.launchGenerations.set (gs.erase missionId)
-    let isFencedErr := err == "launch_fenced" || err == "acp_launch_failed_or_fenced" || err.endsWith ": launch_fenced"
+      return (← mgr.stopEpochs.get).getD missionId 0 != launchEpoch
+    let isFencedErr := stopFenced || err == "launch_fenced" || err.endsWith ": launch_fenced"
     if !isFencedErr then
       discard <| appendMissionEvent st.store missionId "error" (renderCompact (.obj #[("content", .str err)])) ts
     discard <| withImmediateTx st.store.missionsDb do

@@ -2260,10 +2260,10 @@ def normalizeContinuationIso8601 (raw : String) (fallbackEpoch : UInt64 := 0) : 
   else
     formatEpochIso8601Utc fallbackEpoch
 
-/-- Format continuation `next_at` JSON field value (`null` when `trigger_kind == "job"` or `due == 0`,
+/-- Format continuation `next_at` JSON field value (`null` when job-triggered or `due == 0`,
     otherwise JSON-escaped ISO-8601 UTC `YYYY-MM-DDTHH:MM:SSZ`). -/
 def renderContinuationNextAtJson (triggerKind : String) (dueEpoch : UInt64) : String :=
-  if triggerKind == "job" || dueEpoch == 0 then "null"
+  if triggerKind == "job" || triggerKind == "durable_job_terminal" || dueEpoch == 0 then "null"
   else jsonEscape (formatEpochIso8601Utc dueEpoch)
 
 /-- Direct children executing, queued, waiting for background work, or holding an armed
@@ -4523,12 +4523,22 @@ def resolveNativeAntigravityToken? (st : CoreStore) (token : String) (now : UInt
     let row ← rows[1]?
     return ⟨← row[0]?, ← row[1]?, ← row[2]?, ← row[3]?⟩
 
+def missionProxyTokenSha256 (rawTok : String) : String :=
+  let clean := rawTok.trimAscii.toString
+  if clean.isEmpty then "" else bytesToHexLower (sha256Bytes clean.toUTF8)
+
+def revokeMissionProxyTokenSha256 (st : CoreStore) (tokSha : String) : IO Unit := do
+  let clean := tokSha.trimAscii.toString
+  if !clean.isEmpty then
+    discard <| execParamQuery st.missionsDb
+      "UPDATE mission_proxy_tokens SET revoked=1 WHERE token_sha256=?1;" #[clean]
+
 def revokeSingleMissionProxyToken (st : CoreStore) (rawTok : String) : IO Unit := do
   let clean := rawTok.trimAscii.toString
-  if clean.startsWith "orb-mpt-v1_" || clean.startsWith "orb-agy-v1_" then
-    let tokSha := bytesToHexLower (sha256Bytes clean.toUTF8)
-    discard <| execParamQuery st.missionsDb
-      "UPDATE mission_proxy_tokens SET revoked=1 WHERE token_sha256=?1;" #[tokSha]
+  if clean.startsWith "sha256:" then
+    revokeMissionProxyTokenSha256 st (clean.drop 7).toString
+  else if clean.startsWith "orb-mpt-v1_" || clean.startsWith "orb-agy-v1_" then
+    revokeMissionProxyTokenSha256 st (missionProxyTokenSha256 clean)
 
 def revokeMissionProxyTokensForMission (st : CoreStore) (missionId : String) : IO Unit := do
   discard <| execParamQuery st.missionsDb

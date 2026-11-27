@@ -480,9 +480,10 @@ private def verifyRemoteWakeupHttp503AndStopFence (store : CoreStore) (sup : Rem
     mockNodeReply conn "200 OK" "{}"
   check ((← IO.ofExcept probe.get) == 0 &&
     (← cellOf db "SELECT state FROM remote_node_jobs WHERE job_id=?1;" #[jid]) == "cancelled" &&
+    (← cellOf db "SELECT COUNT(*) FROM mission_proxy_tokens WHERE mission_id=?1 AND revoked=0;" #[mid]) == "0" &&
     (← cellOf db "SELECT phase || ':' || error FROM mission_continuations WHERE id=?1;" #[cid]) == "4:wakeup_claim_fenced" &&
     (← cellOf db "SELECT status || ':' || terminal_reason FROM missions WHERE id=?1;" #[mid]) == "interrupted:hosted_stop")
-    "Stop-fenced uncertain remote wake-up cancels the original job and retires as wakeup_claim_fenced"
+    "Stop-fenced uncertain remote wake-up cancels the original job, revokes proxy token, and retires as wakeup_claim_fenced"
 
 private def verifyRemoteWakeupDirectStopAndStartupFence (store : CoreStore) (sup : RemoteJobSupervisor)
     (fd : LeanSys.Posix.Fd) (root mid : String) : IO Unit := do
@@ -512,9 +513,10 @@ private def verifyRemoteWakeupDirectStopAndStartupFence (store : CoreStore) (sup
     (← cellOf db "SELECT state FROM remote_node_jobs WHERE job_id=?1;" #[jid]) == "cancelled" &&
     (← cellOf store.projectsDb "SELECT COUNT(*) FROM remote_jobs WHERE job_id=?1 AND state='running';" #[jid]) == "0" &&
     (← cellOf db "SELECT COUNT(*) FROM mission_proxy_tokens WHERE mission_id=?1 AND revoked=0;" #[mid]) == "0" &&
+    (← cellOf db "SELECT COUNT(*) FROM mission_events WHERE mission_id=?1 AND event_type='error';" #[mid]) == "0" &&
     (← cellOf db "SELECT phase || ':' || error FROM mission_continuations WHERE id=?1;" #[cid]) == "4:wakeup_claim_fenced" &&
     (← cellOf db "SELECT status || ':' || terminal_reason FROM missions WHERE id=?1;" #[mid]) == "interrupted:hosted_stop")
-    "direct Stop-fenced remote wake-up cancels job, leaves no running projectsDb row, revokes proxy token, and retires fenced"
+    "direct Stop-fenced remote wake-up cancels job, leaves no running projectsDb row, revokes proxy token, emits no spurious error, and retires fenced"
   -- Simulate Core crashing mid-POST (`state='submitting'`): startup fence moves it to `uncertain`
   -- and startup reconciliation probes the original job before allowing retry.
   let midCrash := s!"{mid}-crash"
@@ -529,9 +531,13 @@ private def verifyRemoteWakeupDirectStopAndStartupFence (store : CoreStore) (sup
      "VALUES(?1,?2,1,2,CAST(?3 AS INTEGER),'time','test','crash recovery',?1,'',?4,'mcp','','',1,'t0','t0');")
     #[cidCrash, midCrash, s!"{due}", jidCrash]
     | throw (IO.userError "crash wake-up continuation insert")
+  let .ok crashTok ← mintMissionProxyToken store midCrash "" (due + 86400)
+    | throw (IO.userError "crash wake-up proxy token mint")
+  let crashTokSha := missionProxyTokenSha256 crashTok
   let payloadMeta := renderCompact (.obj #[
     ("backend", .str "opencode"), ("wakeup_claim", .str cidCrash), ("wakeup_request", .str cidCrash),
-    ("wakeup_generation", .num "1"), ("wakeup_lease_expires", JVal.uint64 (due + 900))])
+    ("wakeup_generation", .num "1"), ("wakeup_lease_expires", JVal.uint64 (due + 900)),
+    ("proxy_token_sha256", .str crashTokSha)])
   let .ok _ ← execParamQuery db
     "INSERT INTO remote_node_jobs(job_id,mission_id,node_id,state,payload_json,created_at,updated_at) VALUES(?1,?2,'mockwakeup','submitting',?3,'t0','t0');"
     #[jidCrash, midCrash, payloadMeta]
@@ -545,8 +551,9 @@ private def verifyRemoteWakeupDirectStopAndStartupFence (store : CoreStore) (sup
     mockNodeReply conn "404 Not Found" "job not found"
   check ((← IO.ofExcept startupProbe.get) == 0 &&
     (← cellOf db "SELECT state FROM remote_node_jobs WHERE job_id=?1;" #[jidCrash]) == "failed" &&
+    (← cellOf db "SELECT COUNT(*) FROM mission_proxy_tokens WHERE mission_id=?1 AND revoked=0;" #[midCrash]) == "0" &&
     (← cellOf db "SELECT phase || ':' || error || ':' || dispatch_job_id FROM mission_continuations WHERE id=?1;" #[cidCrash]) == "1:launch_retry:1:")
-    "startup reconciliation re-arms a crashed remote wake-up once after authoritative absence past lease expiry"
+    "startup reconciliation re-arms a crashed remote wake-up once and revokes its proxy token after authoritative absence past lease expiry"
 
 def r24_lost_reply_is_uncertain_not_rejected : IO Unit := do
   let receipt := JVal.obj #[
