@@ -1687,14 +1687,19 @@ class WaylandU6SessionTest(unittest.TestCase):
             launches = tmp / "launches"
 
             # Deterministic `codex` harness:
-            # - Launch #1 (Create turn): logs PID, emits one completed agent message, exits 0 cleanly
-            #   so Turn 1 settles to `awaiting_user`/`completed` and unlocks follow-up Send.
-            # - Launch #2+ (Follow-up turn): logs PID and streams agent messages until SIGTERM/SIGKILL
-            #   so Stop must genuinely tear down the child process (verified via os.pidfd_open).
+            # - Version/discovery probes (e.g. `codex --version` from `scanInstalledHarnesses`):
+            #   reply cleanly without touching `launches` so probes never shift turn numbering.
+            # - Launch #1 (`codex exec ...`, Create turn): logs PID, emits 3 completed agent messages,
+            #   and exits 0 cleanly so Turn 1 settles to `awaiting_user`/`completed` and unlocks Send.
+            # - Launch #2+ (`codex exec ...`, Follow-up turn): logs PID and streams agent messages
+            #   until SIGTERM/SIGKILL so Stop must genuinely tear down the child process (`os.pidfd_open`).
             harness = tmp / "codex"
             harness.write_text(
                 f"#!{sys.executable}\n"
-                "import fcntl, json, os, time\n"
+                "import fcntl, json, os, sys, time\n"
+                "if len(sys.argv) < 2 or sys.argv[1] != 'exec':\n"
+                "    print('codex 0.0.0-test', flush=True)\n"
+                "    sys.exit(0)\n"
                 f"launches_path = {str(launches)!r}\n"
                 "with open(launches_path, 'a+') as f:\n"
                 "    fcntl.flock(f.fileno(), fcntl.LOCK_EX)\n"
@@ -1734,7 +1739,7 @@ class WaylandU6SessionTest(unittest.TestCase):
             base = f"http://127.0.0.1:{port}"
 
             core_env = {
-                "PATH": f"{tmp}{os.pathsep}{os.environ['PATH']}",
+                "PATH": f"{tmp}{os.pathsep}{client_path}",
                 "HOME": str(home),
                 "HOST": "127.0.0.1",
                 "PORT": str(port),
@@ -1842,27 +1847,52 @@ class WaylandU6SessionTest(unittest.TestCase):
 
                     # Verify mid-batch focus switch (`Ctrl+K` + trailing IME commit in one socket write)
                     # does not leak text into Search (701) or the composer (1).
-                    with comp._lock:
-                        commits_pre_k = comp.text_input_commit_count
-                    search_region_pre = comp.region_hash(380, 60, 1090, 560)
-                    comp.send_key_and_ime_batch("k", MOD_CTRL, "MID_BATCH_LEAK")
-                    comp.wait_region_change(380, 60, 1090, 560, search_region_pre, timeout=5.0)
-                    comp.wait_text_input_commits(commits_pre_k + 2, timeout=5.0)
-                    with comp._lock:
-                        commits_pre_esc = comp.text_input_commit_count
-                    search_region_open = comp.region_hash(380, 60, 1090, 560)
-                    comp.key_tap("esc")
-                    comp.wait_region_change(380, 60, 1090, 560, search_region_open, timeout=5.0)
-                    comp.wait_text_input_commits(commits_pre_esc + 2, timeout=5.0)
-
-                    # Wait for Turn 1 harness launch and clean completion on real orb-core.
+                    # Compare the opaque Search input box (`dlgCard` starts at x=295, y=74; `searchBar`
+                    # text input widget 701 spans x=338..1086, y=78..118) against a clean empty-query
+                    # Search render for a non-vacuous pixel check.
                     _wait_until("Turn 1 harness launch", lambda: len(read_launch_pids()) >= 1, timeout=15.0)
                     _wait_until(
                         "Turn 1 settled on real orb-core",
                         lambda: api1(mpath)["status"] in ("awaiting_user", "completed", "paused"),
                         timeout=20.0,
                     )
-                    # Wait for widget 2 (Send/Stop button) to paint idle Send state before typing follow-up.
+                    # Wait for the window thread's 1s `poll_bubble` to observe Turn 1 idle and paint
+                    # widget 2 as dimmed empty Send (`alpha 0x47`, luma < 115) rather than opaque Stop (`luma > 140`).
+                    _wait_until(
+                        "widget 2 painted dimmed idle Send after Turn 1",
+                        lambda: comp.region_mean_luma(1188, 841, 1206, 859) < 115.0,
+                        timeout=10.0,
+                    )
+
+                    with comp._lock:
+                        commits_pre_clean_k = comp.text_input_commit_count
+                    search_input_pre0 = comp.region_hash(338, 78, 1086, 118)
+                    comp.key_tap("k", MOD_CTRL)
+                    clean_search_input_hash = comp.wait_region_change(338, 78, 1086, 118, search_input_pre0, timeout=5.0)
+                    comp.wait_text_input_commits(commits_pre_clean_k + 2, timeout=5.0)
+                    with comp._lock:
+                        commits_pre_clean_esc = comp.text_input_commit_count
+                    comp.key_tap("esc")
+                    comp.wait_region_change(338, 78, 1086, 118, clean_search_input_hash, timeout=5.0)
+                    comp.wait_text_input_commits(commits_pre_clean_esc + 2, timeout=5.0)
+
+                    with comp._lock:
+                        commits_pre_k = comp.text_input_commit_count
+                    search_input_pre = comp.region_hash(338, 78, 1086, 118)
+                    comp.send_key_and_ime_batch("k", MOD_CTRL, "MID_BATCH_LEAK")
+                    batch_search_input_hash = comp.wait_region_change(338, 78, 1086, 118, search_input_pre, timeout=5.0)
+                    comp.wait_text_input_commits(commits_pre_k + 2, timeout=5.0)
+                    self.assertEqual(
+                        batch_search_input_hash,
+                        clean_search_input_hash,
+                        "mid-batch trailing IME commit leaked into Search (701) input box",
+                    )
+                    with comp._lock:
+                        commits_pre_esc = comp.text_input_commit_count
+                    comp.key_tap("esc")
+                    comp.wait_region_change(338, 78, 1086, 118, batch_search_input_hash, timeout=5.0)
+                    comp.wait_text_input_commits(commits_pre_esc + 2, timeout=5.0)
+
                     comp.pointer_click(700, 850)
                     comp.wait_text_input(True, timeout=5.0)
                     btn_idle_empty = comp.region_hash(1184, 837, 1210, 863)
@@ -1923,10 +1953,14 @@ class WaylandU6SessionTest(unittest.TestCase):
                     menu_out_pre = comp.region_hash(225, 310, 325, 430)
                     comp.pointer_click(100, 303, button=0x111)
                     comp.wait_region_change(225, 310, 325, 430, menu_out_pre, timeout=5.0)
-                    toast_pre = comp.region_hash(1020, 770, 1465, 815)
+                    # Sample the warning toast at x=1250..1450, y=782..816: inside the right-aligned
+                    # toast (1022..1462, 779..819), outside the centered transcript column (<=1220)
+                    # and scrollbar (>=1458), so Turn 2 streaming deltas never satisfy this wait before
+                    # `live_transport.py archive` completes and clears `st.writeRequest`.
+                    toast_pre = comp.region_hash(1250, 782, 1450, 816)
                     # With 1 project (`Source`), context menu rows are: Rename (0), Move to (1), Archive (2, y=359..385).
                     comp.pointer_click(160, 372)
-                    comp.wait_region_change(1020, 770, 1465, 815, toast_pre, timeout=6.0)
+                    comp.wait_region_change(1250, 782, 1450, 816, toast_pre, timeout=6.0)
                     self.assertEqual(api1(mpath)["status"], "active")
                     self.assertFalse(exited.poll(0), "busy Archive refusal must not terminate active harness")
 

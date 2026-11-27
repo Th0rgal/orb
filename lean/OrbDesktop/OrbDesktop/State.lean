@@ -711,6 +711,25 @@ def DesktopState.voiceDraft (st : DesktopState) : Bool :=
   st.hasLiveConnection && st.openMission.isNone && st.writeRequest.isNone &&
     (st.screen == .controlEmpty || st.screen == .controlPopulated)
 
+/-- Cancel any active IME preedit across all editable buffers while preserving committed draft text. -/
+def DesktopState.clearAllPreedit (st : DesktopState) : DesktopState :=
+  { st with
+    composer := st.composer.setPreedit ""
+    cloudDraft := st.cloudDraft.setPreedit ""
+    settingsApiUrl := st.settingsApiUrl.setPreedit ""
+    searchBuffer := st.searchBuffer.setPreedit ""
+    missionMenu := st.missionMenu.map fun m => { m with draft := m.draft.setPreedit "" } }
+
+/-- Like `clearAllPreedit`, also reporting whether any buffer held non-empty preedit text. -/
+def DesktopState.clearAllPreeditChecked (st : DesktopState) : DesktopState × Bool :=
+  let hadPreedit :=
+    !st.composer.imePreeditText.isEmpty ||
+    !st.cloudDraft.imePreeditText.isEmpty ||
+    !st.settingsApiUrl.imePreeditText.isEmpty ||
+    !st.searchBuffer.imePreeditText.isEmpty ||
+    st.missionMenu.any (fun m => !m.draft.imePreeditText.isEmpty)
+  if hadPreedit then (st.clearAllPreedit, true) else (st, false)
+
 /-- Logical text-input session identity for Wayland `zwp_text_input_v3` cycling.
     Changes whenever the active text buffer switches logically even when its `EntityId`
     (such as `1` for composer, inline Rename, or draft directory) stays the same. -/
@@ -1100,26 +1119,25 @@ def openSearchModal (st : DesktopState) : DesktopState :=
       query := query
       selectedIdx := 0
       items := items }
-  { st with
+  { st.clearAllPreedit with
     modal := .searchPalette spec
-    composer := st.composer.setPreedit ""
     searchBuffer := { text := query, cursorOffset := query.length } }
 
 private def closeSearchModal (st : DesktopState) : DesktopState :=
   let nextScreen := if st.screen == .searchDialog then .controlPopulated else st.screen
-  { st with
+  { st.clearAllPreedit with
     modal := .none
-    screen := nextScreen
-    searchBuffer := st.searchBuffer.setPreedit "" }
+    screen := nextScreen }
 
 /-- Record current `(screen, openMission)` in `navHistory` before navigating to `next`. -/
 def pushNavScreen (st : DesktopState) (next : ScreenId) (nextMission : Option String := none) : DesktopState :=
   let cur : NavEntry := { screen := st.screen, missionId := st.openMission }
   if st.screen == next && st.openMission == nextMission then st
-  else { st with screen := next, navHistory := cur :: st.navHistory.take 15, navForward := [] }
+  else { st.clearAllPreedit with screen := next, navHistory := cur :: st.navHistory.take 15, navForward := [] }
 
 /-- Restore a `NavEntry` cleanly while preserving `openMission`, `sidebarRows.selected`, and live invariants. -/
 def restoreNavEntry (st : DesktopState) (entry : NavEntry) (hist fwd : List NavEntry) : DesktopState :=
+  let st := st.clearAllPreedit
   if st.liveData then
     let base := { st with modal := .none, multiRows := [], selectionAnchor := none, navHistory := hist, navForward := fwd }
     if entry.screen == .missionTranscript then
@@ -1263,7 +1281,7 @@ def stepSearchModal (viewport : Rect) (st : DesktopState) (spec : SearchDialogSp
       return (closeSearchModal st, some viewport)
     if id == searchClearId then
       let buf : ComposerBuffer := {}
-      return ({ st with searchBuffer := buf, modal := .searchPalette { spec with query := "", selectedIdx := 0 } }, some viewport)
+      return ({ st with searchBuffer := buf, imeResetGen := st.imeResetGen + 1, modal := .searchPalette { spec with query := "", selectedIdx := 0 } }, some viewport)
     if id == searchOpenId then
       return (openItem spec.selectedIdx, some viewport)
     if id == searchTabAllId then return ({ st with searchFilterTab := "All" }, some viewport)
@@ -1333,6 +1351,7 @@ private def stepDesktopInput (scale120 : Nat) (viewport : Rect) (st : DesktopSta
         { st with
           messageSent := true
           scroll := st.scroll.pinBottom
+          imeResetGen := st.imeResetGen + 1
           composer := { st.composer with text := "", cursorOffset := 0, imePreeditText := "" } }
       else if st.composer.isRunning then
         { st with missionStopped := true, composer := { st.composer with isRunning := false } }
@@ -1965,7 +1984,7 @@ def stepDesktopEvent (scale120 : Nat) (viewport : Rect) (st : DesktopState) (ev 
     if navId == 102 && !st.inboxEnabled then return (st, none)
     if [101, 102, 111, 112, 113, 114].contains navId then
       let screen := if navId == 111 then ScreenId.cloud else if navId == 114 then .resources else if navId == 102 then .inbox else if navId == 113 then .inference else if navId == 112 then .machinesFleet else .controlEmpty
-      let next := resetSelection (pushNavScreen { st with fleetTopSub := 0, writeError := "", accountRoutePage := none } screen) none
+      let next := resetSelection (pushNavScreen { st.clearAllPreedit with fleetTopSub := 0, writeError := "", accountRoutePage := none } screen) none
       -- These pages share the New Agent draft. A mission follow-up belongs only to its transcript.
       let next := if st.openMission.isNone then
           { next with composer := { st.composer with imePreeditText := "" } }

@@ -727,6 +727,70 @@ private def verifyWaylandImeSerialGuard : IO Unit := do
   unless dirAfterValid.missionMenu.isNone && dirAfterValid.draftDirectory == "/tmp/u6a" do
     throw <| IO.userError s!"draftDirectory Return did not commit valid absolute path: {repr dirAfterValid.draftDirectory}"
 
+  -- Preedit cancellation & IME session-cycling regressions (Finding 3):
+  -- 1. Ctrl+K from cloudDraft / settingsApiUrl clears active preedit while preserving committed text.
+  let cloudPreedit : DesktopState := {
+    baseDraft with
+    screen := .cloud, cloudMission := "cm1", cloudActions := ["send"],
+    cloudDraft := { text := "cloud committed", cursorOffset := 15, imePreeditText := "未確定" }
+  }
+  let (cloudAfterK, _) := stepDesktopEvent 120 vpDev cloudPreedit (.key 0x6b 2 .pressed)
+  unless cloudAfterK.cloudDraft.text == "cloud committed" && cloudAfterK.cloudDraft.imePreeditText.isEmpty do
+    throw <| IO.userError "Ctrl+K from cloudDraft did not cancel preedit while preserving committed text"
+
+  -- 2. Live nav shortcut (Ctrl+3) + Back (Ctrl+[) from cloudDraft cancels cloudDraft preedit.
+  let (cloudNav3, _) := stepDesktopEvent 120 vpDev cloudPreedit (.key 0x33 2 .pressed)
+  let (cloudBack, _) := stepDesktopEvent 120 vpDev cloudNav3 (.key 0x5b 2 .pressed)
+  unless cloudNav3.cloudDraft.imePreeditText.isEmpty && cloudBack.cloudDraft.imePreeditText.isEmpty do
+    throw <| IO.userError "nav shortcut from cloudDraft left zombie imePreeditText"
+
+  -- 3. Fixture Ctrl+K from settingsApiUrl, Ctrl+N / Ctrl+3 from composer, and Search Clear / fixture Send.
+  let settingsPreedit : DesktopState := {
+    DesktopState.forScreen .settingsGeneral true 120 with
+    settingsApiUrl := { text := "http://127.0.0.1:14470", cursorOffset := 22, imePreeditText := "組" }
+  }
+  let (settingsAfterK, _) := stepDesktopEvent 120 vpDev settingsPreedit (.key 0x6b 2 .pressed)
+  unless settingsAfterK.settingsApiUrl.text == "http://127.0.0.1:14470" && settingsAfterK.settingsApiUrl.imePreeditText.isEmpty do
+    throw <| IO.userError "Ctrl+K from settingsApiUrl left zombie preedit"
+
+  let fixComposerPreedit : DesktopState := {
+    DesktopState.forScreen .controlPopulated true 120 with
+    composer := { text := "draft", cursorOffset := 5, imePreeditText := "かな" }
+  }
+  let (fixCtrlN, _) := stepDesktopEvent 120 vpDev fixComposerPreedit (.key 0x6e 2 .pressed)
+  let (fixCtrl3, _) := stepDesktopEvent 120 vpDev fixComposerPreedit (.key 0x33 2 .pressed)
+  unless fixCtrlN.composer.text == "draft" && fixCtrlN.composer.imePreeditText.isEmpty &&
+      fixCtrl3.composer.text == "draft" && fixCtrl3.composer.imePreeditText.isEmpty do
+    throw <| IO.userError "fixture Ctrl+N / Ctrl+3 did not clear composer preedit"
+
+  let kFixPreSend := desktopImeSessionKey { fixComposerPreedit with composer := { text := "send me", cursorOffset := 7 } }
+  let (fixSent, _) := stepDesktopEvent 120 vpDev { fixComposerPreedit with composer := { text := "send me", cursorOffset := 7 } } (.activate 2)
+  unless fixSent.messageSent && desktopImeSessionKey fixSent != kFixPreSend do
+    throw <| IO.userError "fixture Send did not advance desktopImeSessionKey"
+
+  let searchOpenSt := (stepDesktopEvent 120 vpDev fixComposerPreedit (.key 0x6b 2 .pressed)).1
+  let kSearchPreClear := desktopImeSessionKey searchOpenSt
+  let (searchCleared, _) := stepDesktopEvent 120 vpDev searchOpenSt (.activate searchClearId)
+  unless desktopImeSessionKey searchCleared != kSearchPreClear do
+    throw <| IO.userError "Search Clear (706) did not advance desktopImeSessionKey"
+
+  -- 4. applyEventBatch with clearAllPreeditChecked cancels preedit on focus/context switch even when
+  --    a non-text menu opens and drops .preedit events (e.g. right-click sidebar mission row).
+  let menuOpenPreedit : DesktopState := {
+    afterCreate with
+    composer := { text := "keep me", cursorOffset := 7, imePreeditText := "未確定" }
+  }
+  let openActionsMenu := fun (_ : Runtime.RuntimeState DesktopState) (st : DesktopState) (_ : Event) =>
+    ({ st with missionMenu := some { mission := "m-u6a", x := 100, y := 300, trigger := 2001, page := .actions } }, some vpDev)
+  let rtMenu : Runtime.RuntimeState DesktopState := {
+    app := menuOpenPreedit, focus := { owner := some 1 },
+    lastImeOwner := some 1, lastImeContext := desktopImeSessionKey menuOpenPreedit
+  }
+  let rtAfterMenu := Runtime.applyEventBatch rtMenu #[.pointerButton 100 300 0x111 true]
+    openActionsMenu desktopFocusChange desktopFocusTraps desktopImeSessionKey DesktopState.clearAllPreeditChecked
+  unless rtAfterMenu.app.composer.text == "keep me" && rtAfterMenu.app.composer.imePreeditText.isEmpty do
+    throw <| IO.userError "opening context menu left zombie composer preedit in applyEventBatch"
+
 def main : IO UInt32 := do
   verifyOrbScrollEquivalence
   verifyNineScreenControls
