@@ -4873,10 +4873,6 @@ structure MissionEventsPage where
 def transcriptSpineEventTypes : Array String :=
   #["user_message", "assistant_message", "assistant_message_canonical", "todo", "error"]
 
-/-- Query a cursor-paginated slice of `mission_events` matching `X-Orb-Events-Protocol: 1` semantics
-    across both native `seq`/`payload` rows and legacy `sequence`/`content` rows.
-    Pushes `typesFilter` / `view=transcript` into SQL `WHERE` *before* `LIMIT` and projects oversized
-    `tool_call`/`tool_result` payloads via SQLite `SUBSTR` when `maxPayload?` is set. -/
 /-- Fast O(log N) sequence metadata for a mission using the existing `(mission_id, seq)`
     and `(mission_id, sequence)` indexes. Returns `(maxSeq, useIndexedSequence)` where
     `useIndexedSequence` is true iff every row of this mission has `sequence > 0` and
@@ -4901,6 +4897,10 @@ private def queryMissionSeqMeta (db : SqliteDb) (missionId : String) : IO (Excep
   let useIndexedSequence := hasNullSeq == 0 && hasZeroSeq == 0 && (maxSeqCol == 0 || maxSeqCol == maxSequenceCol)
   return .ok (maxSeq, useIndexedSequence)
 
+/-- Query a cursor-paginated slice of `mission_events` matching `X-Orb-Events-Protocol: 1` semantics
+    across both native `seq`/`payload` rows and legacy `sequence`/`content` rows.
+    Pushes `typesFilter` / `view=transcript` into SQL `WHERE` *before* `LIMIT` and projects oversized
+    `tool_call`/`tool_result` payloads via SQLite `SUBSTR` when `maxPayload?` is set. -/
 def queryMissionEventsPage
     (st : CoreStore) (missionId : String)
     (sinceSeq? beforeSeq? : Option UInt64)
