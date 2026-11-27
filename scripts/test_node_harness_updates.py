@@ -59,6 +59,15 @@ class UpdateSafety(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'contract'):
                 updater.probe('/usr/local/bin/vibe-acp', 'vibe', '2.19.1', 'sandboxed-node')
 
+    def test_pi_resolves_pinned_release_and_checks_rpc_contract(self):
+        self.assertEqual(updater.resolve('pi', {}), '0.73.1')
+        self.assertEqual(updater.resolve('pi', {'pi': '0.74.0'}), '0.74.0')
+        with patch.object(updater, 'run_probe', side_effect=['0.73.1', '--mode <mode> --session <path> --extension <path> --model <pattern>']):
+            self.assertEqual(updater.probe('/usr/local/bin/pi', 'pi', '0.73.1', 'sandboxed-node'), '0.73.1')
+        with patch.object(updater, 'run_probe', side_effect=['0.73.1', '--model only']):
+            with self.assertRaisesRegex(ValueError, 'contract'):
+                updater.probe('/usr/local/bin/pi', 'pi', '0.73.1', 'sandboxed-node')
+
     def test_uv_digest_mismatch_is_rejected(self):
         fake_release = {
             'tag_name': '0.13.6',
