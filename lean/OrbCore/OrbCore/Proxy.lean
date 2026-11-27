@@ -208,11 +208,28 @@ def rewriteTargetModelBody (tgt : ProviderTarget) (body : ByteArray) : ByteArray
         | none => body
       | _ => body
 
+/-- When a routing chain has `stripThinking = true` (e.g. `builtin/assistant`),
+    inject `"reasoning_effort": "none"` into `/v1/chat/completions` payloads
+    unless the caller already specified `reasoning_effort`. -/
+def applyStripThinkingToChatBody (stripThinking : Bool) (relPath : String) (body : ByteArray) : ByteArray :=
+  if !stripThinking || !(relPath == "/v1/chat/completions" || relPath.endsWith "/chat/completions") then body
+  else
+    match String.fromUTF8? body with
+    | none => body
+    | some raw =>
+      match OrbBin.Json.parse raw with
+      | .ok obj@(.obj _) =>
+        match obj.field? "reasoning_effort" with
+        | none | some .null => (renderCompact (obj.setField "reasoning_effort" (.str "none"))).toUTF8
+        | some _ => body
+      | _ => body
+
 /-- Model-routing chain configuration (`/api/model-routing/chains`). -/
 structure RoutingChain where
-  id      : String
-  name    : String
-  targets : Array ProviderTarget
+  id            : String
+  name          : String
+  targets       : Array ProviderTarget
+  stripThinking : Bool := false
   deriving Repr, DecidableEq
 
 /-- Hands decoded body bytes to the client; `false` means the client went away.
@@ -2442,6 +2459,7 @@ def forwardProxyChain
     (bodyTimedOutRef? : Option (IO.Ref Bool) := none)
     (resolveTransport : ResolveAccountTransport := fun _ => pure (.ok none)) :
     IO ProxyOutcome := do
+  let body := applyStripThinkingToChatBody chain.stripThinking relPath body
   let wantsStream := requestWantsStream relPath body
   let effStreamLimits := streamLimits?.getD {}
   let callStartMs ← IO.monoMsNow

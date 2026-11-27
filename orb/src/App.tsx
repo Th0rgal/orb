@@ -30,7 +30,7 @@ import { connectClientLink, reportClientHarnesses, type RemoteStart } from "./cl
 import {requireSpeedSupport} from './CodexSpeedPicker';
 import { Menu } from "./Menu";
 import { missionParent } from "./missionTree";
-import { btwParentId, isBtwMission, isPartialList, mergeMission, normalizeMissionFolder, reconcileMissionList, type Misses, type PlacementCommitItem, resetMissionHierarchy, resolvedParent } from "./missionHierarchy";
+import { btwParentId, isBtwMission, isPartialList, mergeMission, normalizeMissionFolder, partitionArchivedMissions, reconcileMissionList, type Misses, type PlacementCommitItem, resetMissionHierarchy, resolvedParent } from "./missionHierarchy";
 import { hintSideQuestionOpen, sideQuestionKey } from "./sideQuestionStorage";
 import { draftCyber, setDraftCyber, requireCyberSupport } from "./cyberAccess";
 import {
@@ -636,13 +636,36 @@ export default function App() {
       missionAppliedRevision = revision;
       const partial = isPartialList(rawFresh);
       const fresh = rawFresh.filter(m => !isMissionDeleting(m.id));
+      const { open: openFresh, archived: archivedFresh } = partitionArchivedMissions(fresh);
+      const archivedFreshIds = new Set(archivedFresh.map(m => m.id));
       // No answer keeps the completed list on screen; it never empties it.
       if (rawCompleted) { const completed = rawCompleted.filter(m => !isMissionDeleting(m.id)); setCompletedMissions(current => mergeById(current, completed)); }
-      const freshIds = new Set(fresh.map(m => m.id));
-      const vanished = partial ? [] : prev.filter(m => !freshIds.has(m.id));
+      const freshIds = new Set(openFresh.map(m => m.id));
+      const vanished = partial ? [] : prev.filter(m => !freshIds.has(m.id) && !archivedFreshIds.has(m.id));
       // Reconcile, never replace: a short answer during a restart keeps what is on screen.
-      const nextMissions = applyPendingMoves(mergeById(missions(), reconcileMissionList(missions().filter(m => !isMissionDeleting(m.id)), fresh, listMisses, partial)));
+      // Delta polls include newly archived rows (`all=true` + `partialList`); evict them immediately.
+      const prevActive = missions().filter(m => !isMissionDeleting(m.id) && !archivedFreshIds.has(m.id));
+      const nextMissions = applyPendingMoves(mergeById(missions(), reconcileMissionList(prevActive, openFresh, listMisses, partial)));
       setMissions(nextMissions);
+      if (archivedFresh.length) {
+        const curId = currentMissionId();
+        for (const m of archivedFresh) {
+          if (m.id !== curId) keepAlivePool.evictMission(m.id);
+        }
+        setNativeArchived(rows => [...archivedFresh, ...rows.filter(r => !archivedFreshIds.has(r.id))]);
+        setProjectMissions(cur => {
+          const archivedById = new Map(archivedFresh.map(m => [m.id, m]));
+          let changed = false;
+          const next: Record<string, Mission[]> = { ...cur };
+          for (const [slug, rows] of Object.entries(cur)) {
+            if (!rows.some(r => archivedById.has(r.id))) continue;
+            next[slug] = rows.map(r => archivedById.has(r.id) ? mergeMission(r, archivedById.get(r.id)!) : r);
+            changed = true;
+          }
+          return changed ? next : cur;
+        });
+        window.dispatchEvent(new CustomEvent("orb:missions-archived-remotely", { detail: { missions: archivedFresh } }));
+      }
       if (!useDelta && !partial && rawCompleted !== null) setFullMissionVersion(connection);
       const liveIds = selectLivePrefetchIds(nextMissions, isLive);
       noteLiveMissionIds(liveIds);
@@ -1651,9 +1674,32 @@ export default function App() {
       const m = archivedBefore.get(id); archivedBefore.delete(id);
       if (m) setMissions(prev => prev.some(x => x.id === id) ? prev : [...prev, m]);
     };
+    const onArchivedRemotely = (e: Event) => {
+      const archived = (e as CustomEvent<{ missions?: Mission[] }>).detail?.missions ?? [];
+      if (!archived.length) return;
+      const ids = new Set(archived.map(m => m.id));
+      const byId = new Map(archived.map(m => [m.id, m]));
+      const curId = currentMissionId();
+      batch(() => {
+        for (const id of ids) if (id !== curId) keepAlivePool.evictMission(id);
+        setMissions(prev => prev.some(m => ids.has(m.id)) ? prev.filter(m => !ids.has(m.id)) : prev);
+        setNativeArchived(rows => [...archived, ...rows.filter(r => !ids.has(r.id))]);
+        setProjectMissions(cur => {
+          let changed = false;
+          const next: Record<string, Mission[]> = { ...cur };
+          for (const [slug, rows] of Object.entries(cur)) {
+            if (!rows.some(r => byId.has(r.id))) continue;
+            next[slug] = rows.map(r => byId.has(r.id) ? mergeMission(r, byId.get(r.id)!) : r);
+            changed = true;
+          }
+          return changed ? next : cur;
+        });
+      });
+    };
     window.addEventListener("orb:mission-archived", onArchived);
     window.addEventListener("orb:mission-archive-failed", onArchiveFailed);
-    onCleanup(() => { window.removeEventListener("orb:mission-archived", onArchived); window.removeEventListener("orb:mission-archive-failed", onArchiveFailed); });
+    window.addEventListener("orb:missions-archived-remotely", onArchivedRemotely);
+    onCleanup(() => { window.removeEventListener("orb:mission-archived", onArchived); window.removeEventListener("orb:mission-archive-failed", onArchiveFailed); window.removeEventListener("orb:missions-archived-remotely", onArchivedRemotely); });
     onCleanup(() => {
       window.removeEventListener("orb:open-page", onOpenPage);
     });

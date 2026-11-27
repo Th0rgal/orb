@@ -1152,7 +1152,7 @@ def loadRoutingChainsFromStore (st : CoreStore) (workingDir : String := "") : IO
   let cliKey := ((← lookupEnvWithFiles? "CLI_PROXY_API_KEY").getD "").trimAscii.toString
   let cliUrl ← resolveCliProxyBaseUrl
   let googleMax ← resolveGoogleMaxConcurrency st.rootDir
-  let .ok rows ← execParamQuery st.missionsDb "SELECT id,name,models_json FROM model_routing_chains ORDER BY id ASC;" #[]
+  let .ok rows ← execParamQuery st.missionsDb "SELECT id,name,models_json,COALESCE(strip_thinking,-1) FROM model_routing_chains ORDER BY id ASC;" #[]
     | throw (IO.userError "routing_chain_store_unavailable")
   let mut out : Array RoutingChain := #[]
   for i in [1:rows.size] do
@@ -1160,12 +1160,13 @@ def loadRoutingChainsFromStore (st : CoreStore) (workingDir : String := "") : IO
     let cid := (r[0]?).getD ""
     let nm := (r[1]?).getD cid
     let mj := (r[2]?).getD "[]"
-    out := out.push { id := cid, name := nm, targets := parseChainTargetsJson mj providers hydratedProvs cliUrl cliKey (some googleMax) }
+    let strip := if r[3]? == some "-1" then cid == "builtin/assistant" else r[3]? == some "1"
+    out := out.push { id := cid, name := nm, targets := parseChainTargetsJson mj providers hydratedProvs cliUrl cliKey (some googleMax), stripThinking := strip }
   -- Immutable defaults are a derived view, not a second mutable config store.
   -- Persisted ids (even empty/unavailable chains) always win over stock entries.
   for (id, name, entries) in OrbCore.ProxyModelRouting.stockChains do
     if !out.any (fun c => c.id == id) then
-      out := out.push { id := id, name := name, targets := parseChainTargetsJson (OrbCore.ProxyModelRouting.entriesJson entries) providers hydratedProvs cliUrl cliKey (some googleMax) }
+      out := out.push { id := id, name := name, targets := parseChainTargetsJson (OrbCore.ProxyModelRouting.entriesJson entries) providers hydratedProvs cliUrl cliKey (some googleMax), stripThinking := (id == "builtin/assistant") }
   return out
 
 private def optU32Json (v? : Option UInt32) : String :=
@@ -5370,27 +5371,28 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
       if encodeRollbackStatus nextStatus == 255 then
         return .ok (mkJson 400 "{\"error\":\"unsupported_status\"}")
       let nowIso := formatEpochIso8601Utc nowEpochSec
-      let fenceArchive : IO Bool := do
+      let fenceArchiveFor (targetId : String) : IO Bool := do
         let some mgr := st.warmMgr? | return true
         mgr.registration.atomically do
-          if (← mgr.stoppingGroupsRef.get).any (·.1 == mid) then return false
-          if (← mgr.activeGroupsRef.get).any (·.1 == mid) then return false
-          if let some (_, entry) := (← mgr.warmProcsRef.get).find? (·.1 == mid) then
+          if (← mgr.stoppingGroupsRef.get).any (·.1 == targetId) then return false
+          if (← mgr.activeGroupsRef.get).any (·.1 == targetId) then return false
+          if let some (_, entry) := (← mgr.warmProcsRef.get).find? (·.1 == targetId) then
             if !(← entry.aliveRef.get) then return false
-            if (← OrbBin.ClaudeControl.getRunState? mgr mid).any (!·.done) then return false
-          mgr.launchGenerations.modify (·.erase mid)
+            if (← OrbBin.ClaudeControl.getRunState? mgr targetId).any (!·.done) then return false
+          mgr.launchGenerations.modify (·.erase targetId)
           return true
-      match ← setMissionStatusFromClient st.store mid nextStatus nowIso fenceArchive with
-      | .ok changed =>
-        if changed then
-          -- An archived mission must not be woken again by its own reminders.
-          if nextStatus == "acknowledged" then
-            discard <| revokeContinuations st.store mid nowIso true
+      match ← setMissionStatusFromClientCascade st.store mid nextStatus nowIso fenceArchiveFor with
+      | .ok changedIds =>
+        if !changedIds.isEmpty then
+          for changedId in changedIds do
+            -- An archived mission must not be woken again by its own reminders.
+            if nextStatus == "acknowledged" then
+              discard <| revokeContinuations st.store changedId nowIso true
+            let payload := renderCompact (.obj #[("status", .str nextStatus), ("mission_id", .str changedId)])
+            discard <| appendMissionEvent st.store changedId "mission_status_changed" payload nowIso
+            if !(← isBroadcastHubBridged st.broadcastHub?) then
+              publishControlEvent st.broadcastHub? "mission_status_changed" payload (some changedId)
           discard <| OrbCore.SecretAndApproval.reapPrivilegeLeases st.store nowEpochSec
-          let payload := renderCompact (.obj #[("status", .str nextStatus), ("mission_id", .str mid)])
-          discard <| appendMissionEvent st.store mid "mission_status_changed" payload nowIso
-          if !(← isBroadcastHubBridged st.broadcastHub?) then
-            publishControlEvent st.broadcastHub? "mission_status_changed" payload (some mid)
         return .ok (mkJson 200 s!"\{\"ok\":true,\"mission_id\":{jsonEscape mid},\"status\":{jsonEscape nextStatus}}")
       | .error "mission_not_found" => return .ok (mkJson 404 "{\"error\":\"mission_not_found\"}")
       | .error "mission_running" =>

@@ -175,6 +175,25 @@ def recoveryAndOrphanReaping (root : String) : IO Unit := do
     check (archRun == 1) "acknowledged mission run is reaped with orphaned_scope"
     let liveRun ← count store.missionsDb "SELECT COUNT(*) FROM mission_runs WHERE id='r-live' AND execution_state='running';"
     check (liveRun == 1) "run of a live mission is untouched"
+    -- Archive cascade: archiving a parent cascades to stopped descendants and refuses if any descendant is live.
+    missionSql store.missionsDb "p-arch" "completed" "managed" 1
+    missionSql store.missionsDb "c-done" "failed" "managed" 1
+    missionSql store.missionsDb "gc-done" "completed" "managed" 1
+    missionSql store.missionsDb "c-live" "active" "managed" 1
+    discard <| require (← execParamQuery store.missionsDb "UPDATE missions SET parent_mission_id='p-arch' WHERE id IN ('c-done','c-live');" #[])
+    discard <| require (← execParamQuery store.missionsDb "UPDATE missions SET parent_mission_id='c-done' WHERE id='gc-done';" #[])
+    match ← setMissionStatusFromClientCascade store "p-arch" "acknowledged" "2026-01-01T00:02:00Z" with
+    | .error e => check (e == "mission_running") "archive cascade refuses parent while any descendant is live"
+    | .ok _ => throw (IO.userError "archive cascade overwrote a live descendant")
+    let pStillDone ← count store.missionsDb "SELECT COUNT(*) FROM missions WHERE id='p-arch' AND status='completed';"
+    check (pStillDone == 1) "parent status stays unchanged when archive cascade is refused"
+    discard <| require (← execParamQuery store.missionsDb "UPDATE missions SET status='completed' WHERE id='c-live';" #[])
+    match ← setMissionStatusFromClientCascade store "p-arch" "acknowledged" "2026-01-01T00:02:01Z" with
+    | .error e => throw (IO.userError s!"archive cascade failed after children stopped: {e}")
+    | .ok changed =>
+      check (changed.size == 4) s!"archive cascade returns parent + all stopped descendants (got {changed.size})"
+    let allArch ← count store.missionsDb "SELECT COUNT(*) FROM missions WHERE id IN ('p-arch','c-done','gc-done','c-live') AND status='acknowledged';"
+    check (allArch == 4) s!"archive cascade updates parent + all descendants to acknowledged (got {allArch})"
   finally closeCoreStore store
 
 /-- `FLT-08`: Cumulative multi-child ancestor dollar pools, carving validation,

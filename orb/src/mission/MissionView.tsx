@@ -67,7 +67,7 @@ import {
   transcriptVersion,
 } from "../missionCache";
 import { ConversationSkeleton, DelayedTranscriptSkeleton, ActivitySkeleton } from "../Skeleton";
-import { projectCompletedGoal, stripGoalCompletionMarkers, visibleTranscript, removeUsers, mapUsers, reuseUnchanged } from "../transcriptModel";
+import { hasOpenTranscriptItems, projectCompletedGoal, settleTranscriptForStoppedMission, stripGoalCompletionMarkers, visibleTranscript, removeUsers, mapUsers, reuseUnchanged } from "../transcriptModel";
 import { isFleetNodeOnline } from "../machineLoad";
 import { pollWhileVisible } from "../poll";
 import { contextPct, contextWindow, estimateTokens, formatTokens } from "../missionContext";
@@ -1048,6 +1048,9 @@ export function NativeMissionView(p: { id: string; active?: boolean; launch?:Lau
     const hasSettledOutputOnMount = (() => {
       if (!readyOnMount) return false;
       const list = readyOnMount.items;
+      // A cached transcript with an unfinished tool, thinking block, or live
+      // text is never settled on a stopped/archived mission: always resync.
+      if (hasOpenTranscriptItems(list)) return false;
       const lastUser = list.reduce((last, item, idx) => (item.kind === "user" && !item.queued ? idx : last), -1);
       if (lastUser < 0) return false;
       const status = mission()?.status ?? "";
@@ -1101,6 +1104,12 @@ export function NativeMissionView(p: { id: string; active?: boolean; launch?:Lau
               setMission(old => ({ ...(old ?? {id:p.id,title:null,history:[],created_at:"",updated_at:""}), status,
                 ...(isLive(status) && old?.remote_job && remoteJobEnded(old.remote_job) ? { remote_job: null, terminal_reason: null } : {}),
                 status_message: typeof ev.data.summary === "string" ? ev.data.summary : old?.status_message }));
+              if (isArchived(status)) {
+                const snap = mission();
+                if (snap) {
+                  window.dispatchEvent(new CustomEvent("orb:missions-archived-remotely", { detail: { missions: [{ ...snap, status }] } }));
+                }
+              }
               if (!missionPhase({ status } as Mission, false).moving) void resync(true);
             }
             void refresh(true);
@@ -1443,12 +1452,18 @@ export function NativeMissionView(p: { id: string; active?: boolean; launch?:Lau
 
   const nonQueuedViewItems = createMemo(() => {
     const list = viewItems();
+    let filtered = list;
     for (let i = 0; i < list.length; i++) {
       if (list[i].kind === "user" && (list[i] as Extract<StreamItem, { kind: "user" }>).queued) {
-        return list.filter((it) => it.kind !== "user" || !it.queued);
+        filtered = list.filter((it) => it.kind !== "user" || !it.queued);
+        break;
       }
     }
-    return list;
+    const status = mission()?.status?.toLowerCase() ?? "";
+    if (status && !working() && !missionPhase(mission(), false).moving && ["completed", "failed", "not_feasible", "interrupted", "cancelled", "canceled", "acknowledged", "archived"].includes(status)) {
+      return settleTranscriptForStoppedMission(filtered);
+    }
+    return filtered;
   });
   const confirmedRemote = createMemo<Array<{id:string;content:string;attached?:boolean}>>(
     () => clientPlaced() ? [] : items().flatMap((item) => item.kind === "user" && item.queued === true && !!item.messageId ? [{ id: item.messageId, content: item.text, attached: item.attached }] : []),

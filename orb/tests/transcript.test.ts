@@ -1,7 +1,7 @@
 import conversationHistoryFixtures from "../../shared/orb-spec/fixtures/conversation-history.json";
 import { describe,it,expect } from "vitest";
 import { buildTranscript,applyStreamEvent } from "../src/Transcript";
-import { stripGoalCompletionMarkers } from "../src/transcriptModel";
+import { hasOpenTranscriptItems, settleTranscriptForStoppedMission, stripGoalCompletionMarkers } from "../src/transcriptModel";
 import { storedToStream,heldAfterHistory,type StreamEvent } from "../src/stream";
 const ev=(type:string,data:Record<string,unknown>):StreamEvent=>({type,data});
 const snap=(content:string)=>ev("text_delta",{content});
@@ -228,4 +228,30 @@ it("strips standalone GOAL_COMPLETE markers from finalized goal answers after fo
  expect(assistantTexts[0].text).toBe("Preflight check passed.\n");
  expect(assistantTexts[1].text).toContain("```html\n<!-- GOAL_COMPLETE -->\n```");
  expect(assistantTexts[2].text).toContain("<!-- GOAL_COMPLETE -->");
+});
+
+it("closes orphaned running tool calls when mission_status_changed transitions to acknowledged or paused", () => {
+ const events: StreamEvent[] = [
+  ev("user_message", { content: "Watch PR checks" }),
+  ev("tool_call", { tool_call_id: "call-783", name: "run_command", args: { CommandLine: "gh pr checks 2256 --watch" } }),
+  ev("mission_status_changed", { status: "acknowledged", mission_id: "099f35d7-d369-4444-a96c-394fd64a5ed0" }),
+ ];
+ const items = buildTranscript(events);
+ const toolRow = items.find(i => i.kind === "tool");
+ expect(toolRow).toMatchObject({ kind: "tool", callId: "call-783", done: true, unresolved: true });
+ expect(hasOpenTranscriptItems(items)).toBe(false);
+});
+
+it("detects open transcript items and settles them for stopped missions without mutating settled lists", () => {
+ const open = buildTranscript([
+  ev("user_message", { content: "Build core" }),
+  final("Opened PR #2252", "a1"),
+  ev("tool_call", { tool_call_id: "call-738", name: "run_command", args: { CommandLine: "lake build orb-core" } }),
+ ]);
+ expect(hasOpenTranscriptItems(open)).toBe(true);
+ const settled = settleTranscriptForStoppedMission(open);
+ expect(hasOpenTranscriptItems(settled)).toBe(false);
+ expect(settled.find(i => i.kind === "tool")).toMatchObject({ done: true, unresolved: true });
+ // Calling settle on an already-settled list preserves array identity.
+ expect(settleTranscriptForStoppedMission(settled)).toBe(settled);
 });

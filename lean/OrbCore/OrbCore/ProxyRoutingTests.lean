@@ -2234,6 +2234,17 @@ def run : IO Unit := do
     check ((sent "custom:lab" "https://llm.example/v1" "m").1 == "https://llm.example/v1/chat/completions") "custom base ending in /v1"
     check ((sent "kimi" "http://127.0.0.1:8317" "kimi-k3").1 == "http://127.0.0.1/v1/chat/completions") "CLIProxy base without a version"
     check (((sent "zai" (defaultProviderBaseUrl "zai") "glm-5.3[1m]").2.2.fieldStr? "model") == some "glm-5.3") "z.ai has no [1m] suffix"
+    -- strip_thinking injects `"reasoning_effort":"none"` on /v1/chat/completions unless caller specified it.
+    let stripSample := "{\"model\":\"ethereumfoundation/deepseek-v4.1-flash\",\"messages\":[]}".toUTF8
+    let stripApplied := applyStripThinkingToChatBody true "/v1/chat/completions" stripSample
+    let stripJv := (String.fromUTF8? stripApplied).bind (fun s => (OrbBin.Json.parse s).toOption) |>.getD .null
+    check (stripJv.fieldStr? "reasoning_effort" == some "none") "strip_thinking injects reasoning_effort=none on chat/completions"
+    let explicitEff := "{\"model\":\"ethereumfoundation/deepseek-v4.1-flash\",\"reasoning_effort\":\"high\"}".toUTF8
+    let keepApplied := applyStripThinkingToChatBody true "/v1/chat/completions" explicitEff
+    let keepJv := (String.fromUTF8? keepApplied).bind (fun s => (OrbBin.Json.parse s).toOption) |>.getD .null
+    check (keepJv.fieldStr? "reasoning_effort" == some "high") "strip_thinking preserves explicit reasoning_effort"
+    check (applyStripThinkingToChatBody false "/v1/chat/completions" stripSample == stripSample) "strip_thinking=false leaves payload untouched"
+    check (applyStripThinkingToChatBody true "/v1/messages" stripSample == stripSample) "strip_thinking does not alter /v1/messages"
     for (provider, entry, upstream) in #[("kimi", "k3", "kimi-k3"), ("kimi", "kimi-for-coding", "kimi-k3"),
         ("kimi", "kimi-for-coding-highspeed", "kimi-k2.7-code-highspeed"), ("kimi", "kimi-k3.1-pro", "kimi-k3.1-pro"),
         ("xai", "grok-4.6-latest", "grok-4.6"), ("minimax", "MiniMax-M3", "MiniMax-M3")] do

@@ -602,7 +602,7 @@ export class TranscriptReducer {
       }
       case "mission_status_changed": {
         const status = str(d.status).toLowerCase();
-        if (["completed", "failed", "not_feasible", "interrupted", "cancelled", "canceled"].includes(status)) {
+        if (["completed", "failed", "not_feasible", "interrupted", "cancelled", "canceled", "acknowledged", "archived"].includes(status)) {
           this.close();
           this.hoistTrailingThoughts();
         }
@@ -954,4 +954,28 @@ export function reuseUnchanged(prev: StreamItem[], next: StreamItem[], session?:
   const reducer = reducerFor(next, session);
   if (reducer) { reducer.items = out; bindReducer(session, out, reducer); }
   return out;
+}
+
+/** True when the transcript still holds an unfinished tool call, open thinking
+ * block, or live streaming text bubble. */
+export function hasOpenTranscriptItems(items: readonly StreamItem[]): boolean {
+  for (let i = 0; i < items.length; i++) {
+    const item = items[i];
+    if ((item.kind === "tool" || item.kind === "think") && !item.done) return true;
+    if (item.kind === "text" && item.live) return true;
+  }
+  return false;
+}
+
+/** Close any lingering open tool/thinking/live-text rows when the mission's
+ * authoritative status is already stopped/archived. Keeps array identity when
+ * nothing is open so memos and keyed rows do not re-render. */
+export function settleTranscriptForStoppedMission(items: StreamItem[]): StreamItem[] {
+  if (!hasOpenTranscriptItems(items)) return items;
+  return items.map(item => {
+    if (item.kind === "tool" && !item.done) return { ...item, done: true, unresolved: true };
+    if (item.kind === "think" && !item.done) return { ...item, done: true };
+    if (item.kind === "text" && item.live) return { ...item, live: false };
+    return item;
+  });
 }

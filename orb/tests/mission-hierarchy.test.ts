@@ -1,5 +1,5 @@
 import { beforeEach, expect, test } from "vitest";
-import { configureParentResolver, excludeBtwMissions, isBtwMission, mergeMission, observeMission, openBeyondPage, partialList, reconcileMissionList, reparentMission, resetMissionHierarchy, resolvedParents, resolveParent, stickHierarchy, withHierarchy, type HierarchyFields, type Misses } from "../src/missionHierarchy";
+import { configureParentResolver, excludeBtwMissions, isBtwMission, mergeMission, observeMission, openBeyondPage, partialList, partitionArchivedMissions, reconcileMissionList, reparentMission, resetMissionHierarchy, resolvedParents, resolveParent, stickHierarchy, withHierarchy, type HierarchyFields, type Misses } from "../src/missionHierarchy";
 import { nestMissions, type NestedMission } from "../src/missionTree";
 
 type Row = HierarchyFields & { status: string; updated_at?: string; status_message?: string | null; [k: string]: unknown };
@@ -277,4 +277,23 @@ test("snapshot with explicit project: null and folder: '' at higher placement_re
   expect(stale.project).toBeNull();
   expect(stale.folder).toBe("");
   expect(stale.placement_revision).toBe(2);
+});
+
+test("partitionArchivedMissions evicts missions archived elsewhere from delta partialList updates", () => {
+  const prev = [
+    row("m-keep", { status: "completed" }),
+    row("m-ack", { status: "completed" }),
+    row("m-tag", { status: "completed" }),
+  ];
+  const delta = partialList([
+    row("m-ack", { status: "acknowledged" }),
+    row("m-tag", { status: "completed", tags: ["archived"] }),
+  ]);
+  const { open, archived } = partitionArchivedMissions(delta);
+  expect(archived.map(m => m.id)).toEqual(["m-ack", "m-tag"]);
+  expect(open).toEqual([]);
+  const archivedIds = new Set(archived.map(m => m.id));
+  const misses: Misses = new Map();
+  const next = reconcileMissionList(prev.filter(m => !archivedIds.has(m.id)), open, misses, true);
+  expect(next.map(m => m.id)).toEqual(["m-keep"]);
 });

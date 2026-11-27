@@ -1795,6 +1795,8 @@ def dispatchMcpToolCall
         "UPDATE missions SET status='cancelled', terminal_reason='cancelled', updated_at=?2, state_revision=state_revision+1 WHERE id=?1;"
         #[mid, nowIso]
         | return ← settleReservedMcpAction store claims callerUserId toolName idemKeyTop "uncertain" "mission cancellation write failed" nowIso
+      discard <| appendMissionEvent store mid "mission_status_changed"
+        (renderCompact (.obj #[("status", .str "cancelled"), ("mission_id", .str mid)])) nowIso
       let .ok settled ← recordSettledMcpAction store claims callerUserId toolName args
         (.obj #[("ok", .bool true), ("mission_id", .str mid), ("status", .str "cancelled")]) nowIso mid
         | return mcpErr "receipt_record_failed" "The mutation completed but its receipt could not be recorded. Reconcile the action." false
@@ -1847,6 +1849,8 @@ def dispatchMcpToolCall
       discard <| execParamQuery store.missionsDb
         "UPDATE missions SET status=?2, updated_at=?3, state_revision=state_revision+1 WHERE id=?1;"
         #[mid, nextSt, nowIso]
+      discard <| appendMissionEvent store mid "mission_status_changed"
+        (renderCompact (.obj #[("status", .str nextSt), ("mission_id", .str mid)])) nowIso
       let .ok settled ← recordSettledMcpAction store claims callerUserId toolName args
         (.obj #[("ok", .bool true), ("mission_id", .str mid), ("status", .str nextSt)]) nowIso mid
         | return mcpErr "receipt_record_failed" "The mutation completed but its receipt could not be recorded. Reconcile the action." false
