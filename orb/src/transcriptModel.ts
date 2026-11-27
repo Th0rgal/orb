@@ -1,6 +1,6 @@
 import { confirmedGoalAnswer } from "./remoteGoal";
 import { shallowEqual } from "./poll";
-import { isFailedStatus, isSettingsIdle } from "./missionStatus";
+import { isFailedStatus } from "./missionStatus";
 import type { DraftImage } from "./imageAttachments";
 import { deferredMessages } from "./deferredMessages";
 import {
@@ -602,7 +602,7 @@ export class TranscriptReducer {
       }
       case "mission_status_changed": {
         const status = str(d.status).toLowerCase();
-        if (isSettingsIdle(status) || status === "canceled") {
+        if (["completed", "failed", "not_feasible", "interrupted", "cancelled", "canceled", "acknowledged", "archived"].includes(status)) {
           this.close();
           this.hoistTrailingThoughts();
         }
