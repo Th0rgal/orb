@@ -1459,8 +1459,8 @@ export function NativeMissionView(p: { id: string; active?: boolean; launch?:Lau
         break;
       }
     }
-    const status = mission()?.status;
-    if (status && !working() && !missionPhase(mission(), false).moving) {
+    const status = mission()?.status?.toLowerCase() ?? "";
+    if (status && !working() && !missionPhase(mission(), false).moving && ["completed", "failed", "not_feasible", "interrupted", "cancelled", "canceled", "acknowledged", "archived"].includes(status)) {
       return settleTranscriptForStoppedMission(filtered);
     }
     return filtered;
