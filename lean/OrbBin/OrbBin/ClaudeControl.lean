@@ -2235,7 +2235,7 @@ def PersistedOneShotRun.toJVal (m : PersistedOneShotRun) : JVal :=
     ("id", .str m.id),
     ("harness", .str m.harness),
     ("cwd", .str m.cwd),
-    ("pid", JVal.int (Int.ofNat m.pid.toNat)),
+    ("pid", JVal.int (Int.ofNat m.pid.toNatClampNeg)),
     ("generation", JVal.uint64 m.generation),
     ("resumed", .bool m.resumed),
     ("turn_count", JVal.nat m.turnCount),
@@ -2738,7 +2738,7 @@ def ensurePersistedRunsReattached
         | .ok h => pure h
         | .error _ => continue
       let initState : LocalRunState := {
-        id := m.id
+        runId := m.id
         harness := m.harness
         cwd := m.cwd
         generation := m.generation
