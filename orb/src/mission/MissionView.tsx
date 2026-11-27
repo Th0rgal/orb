@@ -1475,6 +1475,25 @@ export function NativeMissionView(p: { id: string; active?: boolean; launch?:Lau
     [],
     { equals: (a, b) => a.length === b.length && a.every((v, i) => v === b[i]) },
   );
+  // User bubbles already visible in the active/trailing turn of the transcript
+  // (after the last assistant text). Passed to `<QueuedMessages>` so an already-
+  // dispatched local message is never shown simultaneously in the transcript and
+  // in the `Sending…` queue drawer.
+  const activeTranscriptUserIds = createMemo<string[]>(
+    () => nonQueuedViewItems().flatMap((item) => item.kind === "user" && item.messageId ? [item.messageId] : []),
+    [],
+    { equals: (a, b) => a.length === b.length && a.every((v, i) => v === b[i]) },
+  );
+  const activeTranscriptUserTexts = createMemo<string[]>(() => {
+    const list = nonQueuedViewItems();
+    const out: string[] = [];
+    for (let i = list.length - 1; i >= 0; i--) {
+      const item = list[i];
+      if (item.kind === "text" && !item.live && item.text.trim()) break;
+      if (item.kind === "user") out.push(item.text);
+    }
+    return out;
+  }, [], { equals: (a, b) => a.length === b.length && a.every((v, i) => v === b[i]) });
   const visibleViewItems = createMemo(() => visibleTranscript(viewItems(), isFleetNodeOnline));
   const planProgress = createPlanProgress({get mission(){return p.id;},get items(){return viewItems();},get active(){return clientPlaced()?localRunActive(p.id):busy();}});
   createEffect(() => { if (p.active !== false) p.onPlan?.(p.id, planProgress()); });
@@ -1969,7 +1988,7 @@ export function NativeMissionView(p: { id: string; active?: boolean; launch?:Lau
             setItems(previous=>removeUsers(previous,item=>!!item.queued&&item.messageId===id));
             liveEvents=liveEvents.filter(event=>event.type!=="user_message"||!event.data?.queued||event.data?.id!==id);
           }}/>
-          <QueuedMessages mission={p.id} editing={editingQueued()} pending={clientPlaced() && !sendError() && !editingQueued() ? optimisticList().filter(item => item.waiting && !item.failed).map(item => ({id:item.id,text:item.text})) : undefined} onCancelPending={id => drafts.remove(id)} onEdit={row=>void queuedEdit.start(row)}/>
+          <QueuedMessages mission={p.id} editing={editingQueued()} delivered={activeTranscriptUserIds()} deliveredTexts={activeTranscriptUserTexts()} pending={clientPlaced() && !sendError() && !editingQueued() ? optimisticList().filter(item => item.waiting && !item.failed).map(item => ({id:item.id,text:item.text})) : undefined} onCancelPending={id => drafts.remove(id)} onEdit={row=>void queuedEdit.start(row)}/>
           <Composer
             active={p.active !== false}
             allowConcurrentSend
