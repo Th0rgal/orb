@@ -28,6 +28,7 @@ import OrbCore.ManagedTtl
 import OrbCore.ManagedSnapshotCatalog
 import OrbCore.R7Core
 import OrbCore.LegacyHydrate
+import OrbCore.NodeRelease
 
 namespace OrbCore.RemoteFleetAndRelay
 
@@ -572,7 +573,16 @@ def probeStaticNodeHeartbeat
   | none =>
     return mkOfflineOrDegraded "degraded" s!"missing token env {sn.tokenEnv}"
   | some tok =>
-    match ← sendJsonRequest "GET" (sn.baseUrl ++ "/heartbeat") (some tok) none #[] timeoutMs with
+    let mut hbHdrs : Array (String × String) := #[
+      ("x-orb-node-cordoned", if persistedCordoned then "true" else "false")
+    ]
+    let corePubUrl :=
+      ((← IO.getEnv "SANDBOXED_PUBLIC_URL").getD ((← IO.getEnv "SANDBOXED_MANAGED_CORE_URL").getD "")).trimAscii.toString
+    if !corePubUrl.isEmpty then
+      hbHdrs := hbHdrs.push ("x-orb-core-url", corePubUrl)
+    if let some (targetSha, _) ← OrbCore.NodeRelease.resolveReleaseBinaryMeta? "sandboxed-node" "x86_64" then
+      hbHdrs := hbHdrs.push ("x-orb-target-node-sha256", targetSha)
+    match ← sendJsonRequest "GET" (sn.baseUrl ++ "/heartbeat") (some tok) none hbHdrs timeoutMs with
     | .ok (200, _, some hb) =>
       let cap := (hb.fieldNat? "capacity_total").orElse (fun _ => hb.fieldNat? "capacity") |>.getD 4
       let act := (hb.fieldNat? "active_jobs").orElse (fun _ => hb.fieldNat? "running_jobs") |>.getD 0
@@ -645,6 +655,8 @@ def probeStaticNodeHeartbeat
         ("quarantined_harnesses", .arr #[]),
         ("admin_only", .bool effAdminOnly),
         ("core_colocated", .bool effColocated),
+        ("cli_versions", (hb.field? "cli_versions").getD (.obj #[])),
+        ("auto_update", (hb.field? "auto_update").getD .null),
         ("heartbeat", sanitizedHb)
       ]
       if let some fj := hb.fieldNat? "forced_jobs" then

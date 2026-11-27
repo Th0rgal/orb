@@ -33,6 +33,7 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -826,21 +827,45 @@ fun OrbHomeScreen(
                     }
                 }
 
-                Box(
-                    modifier = Modifier
-                        .size(44.dp)
-                        .clip(CircleShape)
-                        .background(OrbStyle.surface)
-                        .border(1.dp, OrbStyle.border, CircleShape)
-                        .semantics { contentDescription = "New project" }
-                        .orbPressClickable {
-                            newProjectName = ""
-                            newProjectRepo = ""
-                            showNewProjectDialog = true
-                        },
-                    contentAlignment = Alignment.Center
-                ) {
-                    OrbSfIcons.FolderBadgePlus(color = Color.White, size = 22.dp)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Box(
+                        modifier = Modifier
+                            .size(44.dp)
+                            .clip(CircleShape)
+                            .background(OrbStyle.surface)
+                            .border(1.dp, OrbStyle.border, CircleShape)
+                            .semantics { contentDescription = "New mission" }
+                            .orbPressClickable {
+                                val targetProject = visibleProjects.firstOrNull()
+                                    ?: OrbRow("local", mapOf("slug" to "local", "name" to "Local"))
+                                onSelectMission(OrbRow("", mapOf("project" to targetProject.str("slug", "id").orEmpty())), targetProject)
+                            },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Filled.Add,
+                            contentDescription = "New mission",
+                            tint = Color.White,
+                            modifier = Modifier.size(22.dp)
+                        )
+                    }
+
+                    Box(
+                        modifier = Modifier
+                            .size(44.dp)
+                            .clip(CircleShape)
+                            .background(OrbStyle.surface)
+                            .border(1.dp, OrbStyle.border, CircleShape)
+                            .semantics { contentDescription = "New project" }
+                            .orbPressClickable {
+                                newProjectName = ""
+                                newProjectRepo = ""
+                                showNewProjectDialog = true
+                            },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        OrbSfIcons.FolderBadgePlus(color = Color.White, size = 22.dp)
+                    }
                 }
             }
 

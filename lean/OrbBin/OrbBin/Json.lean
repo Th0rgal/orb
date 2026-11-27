@@ -139,6 +139,21 @@ partial def renderCompact : JVal → String
     "{" ++ String.intercalate "," (kvs.toList.map fun (k, v) =>
       escapeJsonString k ++ ":" ++ renderCompact v) ++ "}"
 
+/-- Render JSON canonically with object keys sorted lexicographically at every level.
+    Used for deterministic idempotency request fingerprints (`MCP-03`). -/
+partial def renderCanonical : JVal → String
+  | .null => "null"
+  | .bool true => "true"
+  | .bool false => "false"
+  | .num raw => raw
+  | .str s => escapeJsonString s
+  | .arr xs =>
+    "[" ++ String.intercalate "," (xs.toList.map renderCanonical) ++ "]"
+  | .obj kvs =>
+    let sorted := (kvs.qsort fun a b => a.1 < b.1).toList
+    "{" ++ String.intercalate "," (sorted.map fun (k, v) =>
+      escapeJsonString k ++ ":" ++ renderCanonical v) ++ "}"
+
 private def indentSpaces (n : Nat) : String :=
   String.ofList (List.replicate n ' ')
 

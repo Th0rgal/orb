@@ -49,6 +49,9 @@ import OrbCore.ApprovalSignatureTests
 import OrbCore.SettingsTransferTests
 import OrbCore.MacTetherTests
 import OrbCore.PrivdNodeAuthTests
+import OrbCore.NodeReleaseTests
+import OrbCore.StreamableMcpTests
+import OrbCore.MachineTransferTests
 
 namespace OrbCore.SelfTest
 
@@ -270,7 +273,8 @@ private def runManagedMcpProviderContractTests (root : String) : IO Unit := do
       let extOn ← extCall "extend_managed_machine"
         (.obj #[("machine_id", .str defaultId), ("ttl_minutes", .nat 5), ("idempotency_key", .str "leanci-ext-on")])
       check (leanciSupportsExtendOf catOff == some false &&
-        ((OrbBin.Json.renderCompact extOff).splitOn "managed_provider_extend_unsupported").length == 2 &&
+        extOff.fieldBool? "ok" == some false &&
+        ((OrbBin.Json.renderCompact extOff).splitOn "managed_provider_extend_unsupported").length >= 2 &&
         leanciSupportsExtendOf catOn == some true &&
         extOn.fieldBool? "ok" == some true && (← extCalls.get) == 1)
         s!"lean.ci supports_extend and extend_managed_machine follow provider.supportsExtend: off={OrbBin.Json.renderCompact extOff} on={OrbBin.Json.renderCompact extOn}"
@@ -7318,7 +7322,7 @@ private def runRemoteDispatchWakeupAndBtwTests (_baseCfg : CoreConfig) : IO UInt
               if ltok.isEmpty then
                 pure ("400 Bad Request", "{\"error\":\"missing_lease_token\"}")
               else if mid == "m-btw-fail" then
-                pure ("503 Service Unavailable", "{\"error\":\"node_overloaded\"}")
+                pure ("422 Unprocessable Entity", "{\"error\":\"node_rejected\"}")
               else do
                 let n ← jobSeqRef.modifyGet (fun c => (c + 1, c + 1))
                 let reqJid := (jv.fieldStr? "job_id").getD ""
@@ -8205,8 +8209,7 @@ def runSuite (emitLogPath? : Option String) : IO UInt32 := do
     OrbCore.ManagedResumeTests.run tmpRoot
     OrbCore.DevSpendingTests.run tmpRoot
     OrbCore.ManagedBudgetTests.run tmpRoot
-    OrbCore.R18LivenessTests.recoveryAndOrphanReaping s!"{tmpRoot}/r18-recovery"
-    OrbCore.R18LivenessTests.lineageMissionBudget s!"{tmpRoot}/r18-lineage"
+    OrbCore.R18LivenessTests.runAll tmpRoot
     OrbCore.DevOperatorTests.run tmpRoot
     OrbCore.ApprovalSignatureTests.run tmpRoot
     OrbCore.ManagedAccessTests.run tmpRoot
@@ -8564,16 +8567,17 @@ def runSuite (emitLogPath? : Option String) : IO UInt32 := do
     IO.eprintln s!"[orb-core-test] FAIL: parallel_missions_cap contract mismatch ({capHitResp.status}): {capHitStr}"
     return 1
 
-  -- `/btw` side questions bypass `parallel_missions_cap` AND never consume project cap slots!
+  -- `/btw` side questions bypass `parallel_missions_cap` (never return 429) AND fail closed
+  -- with 503 (`side_agent_runner_unavailable`) when no live local/remote runner is wired (`MCP-07`).
   let btwAgentBody := "{\"id\":\"m-btw-cap-1\",\"backend\":\"opencode\",\"model_override\":\"builtin/smart\",\"idempotency_key\":\"idem-btw-cap-1\",\"side_question\":\"How far are we?\",\"side_context_mode\":\"incremental\"}"
   let btwAgentRaw := s!"POST /api/control/missions/m-exp-lease/btw/agent HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {validJwt}\r\nContent-Length: {btwAgentBody.utf8ByteSize}\r\n\r\n{btwAgentBody}".toUTF8
   let .ok btwAgentReq := parseRequest btwAgentRaw none | do closeCoreStore store; return 1
   let .ok btwAgentResp ← dispatchCoreRequest appSt btwAgentReq nowSec | do closeCoreStore store; return 1
   let btwAgentStr := String.fromUTF8! btwAgentResp.body
-  if btwAgentResp.status != 201 ||
-     (btwAgentStr.splitOn "\"btw-parent:m-exp-lease\"").length != 2 then
+  if btwAgentResp.status != 503 ||
+     (btwAgentStr.splitOn "\"side_agent_runner_unavailable\"").length != 2 then
     closeCoreStore store
-    IO.eprintln s!"[orb-core-test] FAIL: /btw/agent blocked by parallel_missions_cap ({btwAgentResp.status}): {btwAgentStr}"
+    IO.eprintln s!"[orb-core-test] FAIL: /btw/agent expected 503 fail-closed (not 429 cap) ({btwAgentResp.status}): {btwAgentStr}"
     return 1
 
   let btwDirectBody := "{\"id\":\"m-btw-cap-2\",\"title\":\"Side 2\",\"backend\":\"opencode\",\"project_slug\":\"proj-cap\",\"tags\":[\"btw-parent:m-exp-lease\"]}"
@@ -8634,14 +8638,29 @@ def runSuite (emitLogPath? : Option String) : IO UInt32 := do
   let wsAuthRaw := s!"GET /api/console/ws HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Protocol: jwt.{wsToken}\r\n\r\n".toUTF8
   let .ok wsAuthReq := parseRequest wsAuthRaw none | do closeCoreStore store; return 1
   match ← dispatchCoreRequest appSt wsAuthReq nowSec with
-  | .ok r =>
-    if r.status != 501 then
+  | .error raw101 =>
+    let resp101 := String.fromUTF8! raw101
+    if (resp101.splitOn "101 Switching Protocols").length != 2 then
       closeCoreStore store
-      IO.eprintln s!"[orb-core-test] FAIL: unsupported /api/console/ws returned HTTP {r.status}, expected 501"
+      IO.eprintln s!"[orb-core-test] FAIL: /api/console/ws missing 101 Switching Protocols: {resp101}"
+      return 1
+  | .ok r =>
+    closeCoreStore store
+    IO.eprintln s!"[orb-core-test] FAIL: authenticated /api/console/ws returned HTTP {r.status}, expected 101"
+    return 1
+
+  let wsDesktopRaw := s!"GET /api/desktop/stream HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Protocol: jwt.{wsToken}\r\n\r\n".toUTF8
+  let .ok wsDesktopReq := parseRequest wsDesktopRaw none | do closeCoreStore store; return 1
+  match ← dispatchCoreRequest appSt wsDesktopReq nowSec with
+  | .ok r =>
+    let headStr := String.fromUTF8! (encodeCoreHttpResponseHead r false)
+    if r.status != 501 || (headStr.splitOn "501 Not Implemented").length != 2 then
+      closeCoreStore store
+      IO.eprintln s!"[orb-core-test] FAIL: /api/desktop/stream returned HTTP {r.status} ({headStr}), expected 501 Not Implemented"
       return 1
   | .error raw =>
     closeCoreStore store
-    IO.eprintln s!"[orb-core-test] FAIL: unsupported /api/console/ws upgraded instead of 501: {String.fromUTF8! raw}"
+    IO.eprintln s!"[orb-core-test] FAIL: unsupported /api/desktop/stream upgraded instead of 501: {String.fromUTF8! raw}"
     return 1
 
   let wsSyncRaw := s!"GET /api/control/sync HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Protocol: jwt.{wsToken}\r\n\r\n".toUTF8
@@ -8804,15 +8823,19 @@ def runSuite (emitLogPath? : Option String) : IO UInt32 := do
      "VALUES('job-remote-sn','m-remote-sendnow','uruk','running','{}','2026-11-26T00:00:00Z','2026-11-26T00:00:00Z');") #[]
   discard <| enqueueStructuredFollowup store "core" "q-rem-1" "m-remote-sendnow" "first remote" "control" "2026-11-26T00:00:01Z"
   discard <| enqueueStructuredFollowup store "core" "q-rem-2" "m-remote-sendnow" "second remote" "control" "2026-11-26T00:00:02Z"
+  let remSupSn ← newRemoteJobSupervisor appSt.cfg.jwtSecret
+  let appStRem := { appSt with remoteSup? := some remSupSn }
   let remIntRaw := s!"POST /api/control/queue/q-rem-2/send-now?interrupt=true HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {validJwt}\r\nContent-Length: 0\r\n\r\n".toUTF8
   let .ok remIntReq := parseRequest remIntRaw none | do closeCoreStore store; return 1
-  let .ok remIntResp ← dispatchCoreRequest appSt remIntReq nowSec | do closeCoreStore store; return 1
+  let .ok remIntResp ← dispatchCoreRequest appStRem remIntReq nowSec | do closeCoreStore store; return 1
   let remIntText := String.fromUTF8! remIntResp.body
   if remIntResp.status != 200 || (remIntText.splitOn "\"promoted\":true").length != 2 then
     closeCoreStore store
     IO.eprintln s!"[orb-core-test] FAIL: remote interrupt send-now failed: {remIntResp.status} {remIntText}"
     return 1
-  let .ok (_, remQHead) ← sendTestHttp appSt validJwt "GET" "/api/control/queue?mission_id=m-remote-sendnow" "" nowSec
+  -- Give the async cancel task a brief window to persist durable `cancel_requested`
+  IO.sleep 150
+  let .ok (_, remQHead) ← sendTestHttp appStRem validJwt "GET" "/api/control/queue?mission_id=m-remote-sendnow" "" nowSec
     | do closeCoreStore store; return 1
   if !remQHead.startsWith "[{\"id\":\"q-rem-2\"" then
     closeCoreStore store
@@ -8821,17 +8844,27 @@ def runSuite (emitLogPath? : Option String) : IO UInt32 := do
   let remMetaRows ← execParamQuery store.missionsDb
     "SELECT status, COALESCE(run_generation,0), (SELECT state FROM remote_node_jobs WHERE job_id='job-remote-sn') FROM missions WHERE id='m-remote-sendnow';" #[]
   let .ok rmrs := remMetaRows | do closeCoreStore store; return 1
-  if rmrs.size ≤ 1 || (rmrs[1]![0]?).getD "" != "active" || (rmrs[1]![1]?).getD "" != "2" || (rmrs[1]![2]?).getD "" != "cancelled" then
+  if rmrs.size ≤ 1 || (rmrs[1]![0]?).getD "" != "active" || (rmrs[1]![1]?).getD "" != "2" ||
+      !#["cancelled", "cancel_requested"].contains ((rmrs[1]![2]?).getD "") then
     closeCoreStore store
     IO.eprintln s!"[orb-core-test] FAIL: remote interrupt send-now state mismatch: {repr rmrs}"
     return 1
-  -- R18 FUP-01: collection DELETE clears the mission's whole waiting prefix.
+  -- R18 FUP-01: collection DELETE clears the mission's whole waiting prefix while preserving job-bound rows.
   let clearQueueRaw := s!"DELETE /api/control/queue?mission_id=m-alpha HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {validJwt}\r\n\r\n".toUTF8
   let .ok clearQueueReq := parseRequest clearQueueRaw none | do closeCoreStore store; return 1
   let .ok clearQueueResp ← dispatchCoreRequest appSt clearQueueReq nowSec | do closeCoreStore store; return 1
-  if clearQueueResp.status != 200 then
+  let clearQueueText := String.fromUTF8! clearQueueResp.body
+  if clearQueueResp.status != 200 || (clearQueueText.splitOn "\"cancelled\":2").length != 2 then
     closeCoreStore store
-    IO.eprintln s!"[orb-core-test] FAIL: collection queue DELETE returned {clearQueueResp.status}: {String.fromUTF8! clearQueueResp.body}"
+    IO.eprintln s!"[orb-core-test] FAIL: collection queue DELETE returned {clearQueueResp.status}: {clearQueueText}"
+    return 1
+  -- Job-bound row q-2 must remain untouched and refuse item DELETE with 409 (`FUP-01`).
+  let delBoundRaw := s!"DELETE /api/control/queue/q-2 HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {validJwt}\r\n\r\n".toUTF8
+  let .ok delBoundReq := parseRequest delBoundRaw none | do closeCoreStore store; return 1
+  let .ok delBoundResp ← dispatchCoreRequest appSt delBoundReq nowSec | do closeCoreStore store; return 1
+  if delBoundResp.status != 409 then
+    closeCoreStore store
+    IO.eprintln s!"[orb-core-test] FAIL: job-bound DELETE returned {delBoundResp.status}, expected 409"
     return 1
 
   -- 6b. Phase R2-B & R2-C regressions (`SM-01`, `SM-02`, `SM-08`, `SM-12`)
@@ -9579,5 +9612,8 @@ def main (args : List String) : IO UInt32 := do
   OrbCore.SettingsDocumentTests.run
   OrbCore.LegacyMigrationTests.run
   OrbCore.SettingsTransferTests.run
+  OrbCore.NodeReleaseTests.run
+  OrbCore.StreamableMcpTests.run
+  OrbCore.MachineTransferTests.run
   if (← OrbCore.SelfTest.runSoftwareVersionProbeTest) != 0 then return 1
   OrbCore.SelfTest.runSuite (OrbCore.SelfTest.findFlag? args "--emit-evidence-log")

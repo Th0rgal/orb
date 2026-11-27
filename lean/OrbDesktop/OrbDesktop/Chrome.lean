@@ -128,39 +128,47 @@ def buildMissionMenu (st : DesktopState) (menu : MissionMenu) (width : SubPx) (v
   | "failed"            => pal.danger
   | _                   => pal.textMuted
 
-/-- Live rows use the same status vocabulary and badge tones as MissionGlyph. -/
+/-- Live rows use the same status vocabulary and badge tones as `MissionGlyph` and `gtk_icons.c`. -/
 def liveBadgeKind (status : String) : String :=
-  match status with
+  match status.toLower with
   | "active" | "running" | "starting" | "resuming" | "working" | "in_progress" | "processing" | "streaming" => "loader"
   | "pending" | "queued" | "awaiting_wakeup" | "waiting_background" => "clock"
-  | "paused" | "interrupted" | "cancelled" => "pause"
+  | "paused" | "interrupted" | "cancelled" | "canceled" => "pause"
   | "completed" | "succeeded" => "check"
-  | "blocked" | "failed" | "error" | "errored" | "not_feasible" | "timed_out" => "alert"
+  | "blocked" | "failed" | "error" | "errored" | "not_feasible" | "timed_out" | "waiting_for_approval" => "alert"
   | _ => ""
 
-private def liveMissionLead (theme : Theme) (status : String) (phase : Nat) : WidgetNode :=
+/-- Pure 60-step spinner phase (`0..59`, 1 revolution per second) matching `gtk_leanui.c`. -/
+@[inline] def liveSpinnerPhase (nowMs : Nat) : Nat :=
+  (nowMs * 60 / 1000) % 60
+
+def liveMissionLead (theme : Theme) (status : String) (phase : Nat) : WidgetNode :=
   let pal := theme.palette
-  let kind := liveBadgeKind status
-  let ring : List (Int × Int) := [(80,15),(112,24),(136,48),(145,80),(136,112),(112,136),
-    (80,145),(48,136),(24,112),(15,80),(24,48),(48,24)]
-  let circle := ring ++ ring.take 1
-  let spinnerArc : List (Int × Int) :=
-    let base := Float.ofNat (phase % 60) * 0.10471975511965977 - 1.5707963267948966
-    let step := 4.71238898038469 / 17.0
-    (List.range 18).map fun i =>
-      let a := base + Float.ofNat i * step
-      ((80.0 + 65.0 * Float.cos a).toInt64.toInt, (80.0 + 65.0 * Float.sin a).toInt64.toInt)
-  let paths := match kind with
-    | "loader" => [spinnerArc]
-    | "clock" => [circle, [(80,40),(80,80),(105,93)]]
-    | "pause" => [[(55,36),(55,125)],[(105,36),(105,125)]]
-    | "alert" => [circle,[(80,43),(80,86)],[(80,107),(80,111)]]
-    | "check" => [circle,[(43,81),(69,105),(116,56)]]
-    | _ => [circle]
-  let tone := if kind == "loader" || status == "waiting_background" then pal.accent
-    else if kind == "alert" then pal.warning else if kind == "check" then pal.success else pal.textMuted
-  .mk none false false (BoxStyle.row 0 |>.withAlign .center |>.withJustify .center |>.withFixedSize (pxToSub 16) (pxToSub 16))
-    (.vectorIcon paths tone none) []
+  let s := status.toLower
+  let kind := liveBadgeKind s
+  if kind.isEmpty then
+    chromeIcon "mission" pal.textMuted
+  else
+    let ring : List (Int × Int) := [(80,15),(112,24),(136,48),(145,80),(136,112),(112,136),
+      (80,145),(48,136),(24,112),(15,80),(24,48),(48,24)]
+    let circle := ring ++ ring.take 1
+    let spinnerArc : List (Int × Int) :=
+      let base := Float.ofNat (phase % 60) * 0.10471975511965977 - 1.5707963267948966
+      let step := 4.71238898038469 / 17.0
+      (List.range 18).map fun i =>
+        let a := base + Float.ofNat i * step
+        ((80.0 + 65.0 * Float.cos a).toInt64.toInt, (80.0 + 65.0 * Float.sin a).toInt64.toInt)
+    let paths := match kind with
+      | "loader" => [spinnerArc]
+      | "clock" => [circle, [(80,40),(80,80),(105,93)]]
+      | "pause" => [[(55,36),(55,125)],[(105,36),(105,125)]]
+      | "alert" => [circle,[(80,43),(80,86)],[(80,107),(80,111)]]
+      | "check" => [circle,[(43,81),(69,105),(116,56)]]
+      | _ => [circle]
+    let tone := if kind == "loader" || s == "waiting_background" then pal.accent
+      else if kind == "alert" then pal.warning else if kind == "check" then pal.success else pal.textMuted
+    .mk none false false (BoxStyle.row 0 |>.withAlign .center |>.withJustify .center |>.withFixedSize (pxToSub 16) (pxToSub 16))
+      (.vectorIcon paths tone none) []
 
 /-- Body text of the SolidJS chrome (`13px/1.4`), laid out on an `18 px` line. -/
 def chromeText (theme : Theme) (color : Color) : TextStyle :=

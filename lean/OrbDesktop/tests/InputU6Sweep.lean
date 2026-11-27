@@ -613,10 +613,33 @@ private def verifyScrollbarQuietFocusAndCaret : IO Unit := do
   unless reprStr coalesced == reprStr expected do
     throw <| IO.userError s!"coalesceScrollEvents mismatch: {reprStr coalesced}"
 
+private def verifyWaylandImeSerialGuard : IO Unit := do
+  -- After switching text inputs (commit serial 1 -> disable 2 -> enable 3), a stale
+  -- in-flight `done(1)` must be dropped so commits from the prior input cannot leak.
+  let wl0 : Wayland.WaylandClient :=
+    { imeEntered := true, imeEnabled := true, imeCommitSerial := 3, imeEnableSerial := 3 }
+  let (wl1, evs1) ← Wayland.stepWireEvent wl0
+    { tag := Wayland.tagTextInput, proxy := 1, opcode := 3, args := #[.str (some "stale")] }
+  unless evs1.isEmpty && wl1.ime.commit == "stale" do
+    throw <| IO.userError "commit_string did not stage pending IME text"
+  let (wl2, evs2) ← Wayland.stepWireEvent wl1
+    { tag := Wayland.tagTextInput, proxy := 1, opcode := 5, args := #[.uint 1] }
+  unless evs2.isEmpty && wl2.ime.commit.isEmpty do
+    throw <| IO.userError s!"stale zwp_text_input_v3.done(1) leaked into new text input: {reprStr evs2}"
+  -- Matching serial `done(3)` delivers the atomic `.imeBatch` normally.
+  let (wl3, _) ← Wayland.stepWireEvent wl2
+    { tag := Wayland.tagTextInput, proxy := 1, opcode := 3, args := #[.str (some "日本語")] }
+  let (wl4, evs4) ← Wayland.stepWireEvent wl3
+    { tag := Wayland.tagTextInput, proxy := 1, opcode := 5, args := #[.uint 3] }
+  let expectedIme : Array Event := #[.imeBatch 0 0 "日本語" "" 0 0]
+  unless reprStr evs4 == reprStr expectedIme && wl4.ime.commit.isEmpty do
+    throw <| IO.userError s!"current zwp_text_input_v3.done(3) did not emit expected imeBatch: {reprStr evs4}"
+
 def main : IO UInt32 := do
   verifyOrbScrollEquivalence
   verifyNineScreenControls
   verifyInteractionRegressions
   verifyScrollbarQuietFocusAndCaret
-  IO.println "InputU6Sweep: all 9 screens, live panels, Inference VPN/routing, Orb.Scroll, caret, scrollbar drag, quiet focus, and regression checks passed"
+  verifyWaylandImeSerialGuard
+  IO.println "InputU6Sweep: all 9 screens, live panels, Inference VPN/routing, Orb.Scroll, caret, scrollbar drag, quiet focus, IME serial guard, and regression checks passed"
   return 0

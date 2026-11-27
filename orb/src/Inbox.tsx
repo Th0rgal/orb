@@ -195,7 +195,7 @@ function MissionFileScope(p: {
                 for (const r of reply.results ?? []) {
                   all.set(r.reference, [
                     ...(all.get(r.reference) ?? []),
-                    ...r.matches.map((m) => ({ ...m, source: root.id })),
+                    ...r.matches.map((m) => ({ ...m, source: m.source ?? root.id })),
                   ]);
                 }
               } catch {

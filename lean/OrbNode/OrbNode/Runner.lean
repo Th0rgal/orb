@@ -12,6 +12,7 @@ import OrbBin.PosixExt
 import OrbBin.Json
 import OrbNode.Spec
 import OrbNode.Posix
+import OrbNode.AutoUpdate
 import OrbNode.Lease
 import OrbNode.Store
 import OrbNode.LeanBuild
@@ -55,6 +56,10 @@ structure NodeConfig where
     "LEAN_NUM_THREADS", "LAKE_JOBS", "TURBO_LEAN_MAX_MEMORY_MB", "TURBO_LEAN_NO_AUDIT_CACHE"
   ]
   managedAuth         : ManagedAuthConfig := {}
+  autoUpdateEnabled   : Bool := true
+  autoUpdateStateDir  : String := ""
+  autoUpdatePollSecs  : Nat := 60
+  coreUrl?            : Option String := none
   deriving Repr, Inhabited
 
 def parseBindAddr (raw : String) : String × UInt16 :=
@@ -307,6 +312,17 @@ def loadConfigFromEnv : IO NodeConfig := do
   let capacitySettings := match resolvedSettings with
     | .ok settings => settings
     | .error _ => baseSettings
+  let autoUpdateDisabled :=
+    match (← IO.getEnv "SANDBOXED_NODE_AUTO_UPDATE") with
+    | some v =>
+      let lv := v.trimAscii.toString.toLower
+      lv == "0" || lv == "false" || lv == "no"
+    | none => false
+  let autoUpdateStateDir ← OrbNode.AutoUpdate.defaultStateDir workDir
+  let autoUpdatePollSecs := max 5 (((← IO.getEnv "SANDBOXED_NODE_UPDATE_POLL_SECS") >>= String.toNat?).getD 60)
+  let coreUrl? :=
+    ((← IO.getEnv "SANDBOXED_NODE_CORE_URL").orElse (fun _ => none)).map (·.trimAscii.toString)
+      |>.filter (!·.isEmpty)
   let cfg : NodeConfig := {
     bindHost := host
     bindPort := port
@@ -330,6 +346,10 @@ def loadConfigFromEnv : IO NodeConfig := do
     minFreeDiskBytes := capacitySettings.minFreeDiskBytes
     envAllowlist := allowKeys
     managedAuth := managedAuth
+    autoUpdateEnabled := !autoUpdateDisabled
+    autoUpdateStateDir := autoUpdateStateDir
+    autoUpdatePollSecs := autoUpdatePollSecs
+    coreUrl? := coreUrl?
   }
   return cfg
 
@@ -492,10 +512,12 @@ def readJobLogTailBounded (logPath? : Option String) (tailMax : Nat := 65536) : 
 /-- Format a non-zero job exit error, surfacing any `execvp`/`chdir` diagnostic (`E2BIG`, `ENOENT`,
     `EACCES`, `ENOEXEC`) from `logPath?` (or synthesizing an `E2BIG` reason if `pipe_stdin`
     `/bin/sh` exited before opening `logPath?` due to `MAX_ARG_STRLEN`) when exit code is `126`/`127`. -/
-def formatJobExitError (codeInt : Int) (logPath? : Option String) : IO (Option String) := do
+def formatJobExitError (codeInt : Int) (logPath? : Option String) (oomKilled : Bool := false) : IO (Option String) := do
   if codeInt == 0 then
     return none
   let base := s!"command exited with Some({codeInt})"
+  if oomKilled then
+    return some s!"{base}: killed by cgroup OOM limit"
   if codeInt == 126 || codeInt == 127 then
     if let some raw ← readJobLogTailBounded logPath? 4096 then
       let lines := (raw.splitOn "\n").map (·.trimAscii.toString) |>.filter (!·.isEmpty)
@@ -1062,6 +1084,10 @@ def buildSystemdScopeArgs
     "--quiet",
     s!"--unit={unit}",
     "--property=KillMode=control-group",
+    -- Keep the scope alive when a child process (e.g. a build tool) hits MemoryMax so the
+    -- harness receives exit 137 and can recover instead of DefaultOOMPolicy=stop killing the
+    -- entire scope and failing the mission.
+    "--property=OOMPolicy=continue",
     s!"--property=MemoryMax={memMax}",
     s!"--property=MemoryHigh={memHigh}",
     "--property=MemorySwapMax=0"
@@ -1113,6 +1139,26 @@ private def wrapWithSystemdScope
   let sArgs := buildSystemdScopeArgs mode unit memMax memHigh cpuWeight? cpuQuota?
     timeoutSecs? trampExe (envPairs.map Prod.fst) prog args supportsExpandEnv
   return ("systemd-run", sArgs, sEnv, some scope)
+
+/-- Query whether `systemd` recorded `Result=oom-kill` on `scope?` before teardown resets it. -/
+def isSystemdScopeOomKilled (scope? : Option SystemdScope) : IO Bool := do
+  let some sc := scope? | return false
+  let mut baseArgs : Array String := #[]
+  let mut envMods : Array (String × Option String) := #[]
+  if sc.mode == .user then
+    baseArgs := baseArgs.push "--user"
+    if let some rtDir := sc.userRuntimeDir then
+      envMods := #[
+        ("XDG_RUNTIME_DIR", some rtDir),
+        ("DBUS_SESSION_BUS_ADDRESS", some s!"unix:path={rtDir}/bus")
+      ]
+  match ← (IO.Process.output {
+    cmd := "systemctl"
+    args := baseArgs ++ #["show", "--property=Result", "--value", sc.unit]
+    env := envMods
+  }).toBaseIO with
+  | .ok out => return out.exitCode == 0 && out.stdout.trimAscii.toString == "oom-kill"
+  | .error _ => return false
 
 /-- Immediately send `SIGKILL` to every process in `SystemdScope` (`systemctl kill --kill-who=all --signal=SIGKILL`),
     then `systemctl stop` and `systemctl reset-failed` so even `SIGTERM`-ignoring or `setsid()`-detached
@@ -1577,6 +1623,9 @@ def buildHeartbeatJson (rt : NodeRuntime) : IO JVal := do
   let advAuth ← advertisedManagedAuth rt.cfg.managedAuth
   let buildSha ← resolveNodeBuildSha
   let binShas ← collectNodeBinaryShas
+  let cliVers ← if rt.cfg.autoUpdateStateDir.isEmpty then pure #[] else OrbNode.AutoUpdate.collectLocalCliVersions rt.cfg.autoUpdateStateDir
+  let autoUpdateSt ← if rt.cfg.autoUpdateStateDir.isEmpty then pure ({} : OrbNode.AutoUpdate.AutoUpdateState)
+    else OrbNode.AutoUpdate.loadAutoUpdateState rt.cfg.autoUpdateStateDir
   let buildVal : JVal := if buildSha.isEmpty then .null else .str buildSha
   return .obj #[
     ("resource_history", .arr #[]),
@@ -1589,6 +1638,8 @@ def buildHeartbeatJson (rt : NodeRuntime) : IO JVal := do
     ("build", buildVal),
     ("build_sha", buildVal),
     ("binary_sha256", binShas),
+    ("cli_versions", OrbNode.AutoUpdate.cliVersionsToJson cliVers),
+    ("auto_update", autoUpdateSt.toJson),
     ("protocol_version", JVal.nat 5),
     ("labels", .arr (labels.map .str)),
     ("cpu_total", JVal.nat st.cpuTotal.toNat),
@@ -1731,6 +1782,12 @@ private def prepareJobOutsideLockInner
         artifacts := arts.filterMap JVal.asStr?
     else
       envPairs ← prepareSharedMissionEnv cfg.workDir missionDir
+      if !cfg.autoUpdateStateDir.isEmpty then
+        let toolsBin := OrbNode.AutoUpdate.managedToolsBinDir cfg.autoUpdateStateDir
+        if ← (System.FilePath.mk toolsBin).pathExists then
+          let curPath := (envPairs.find? (fun (k, _) => k == "PATH")).map Prod.snd |>.getD "/usr/local/bin:/usr/bin:/bin"
+          if !(curPath.startsWith (toolsBin ++ ":")) then
+            envPairs := mergeEnvPair envPairs "PATH" s!"{toolsBin}:{curPath}"
       envPairs := mergeEnvPair envPairs "SANDBOXED_MISSION_ID" missionId
       envPairs := mergeEnvPair envPairs "SANDBOXED_JOB_ID" jid
       if let some envObj := (payload.field? "env") >>= JVal.asObj? then
@@ -2239,10 +2296,11 @@ def tickRuntimeReserve
           if lp.startTicks != 0 then
             discard <| terminateVerifiedPgrp lp.procPhase lp.pid lp.startTicks none lp.bootId
           collectArtifactsConfined lp.cwd lp.artifacts
+      let oomKilled ← if codeInt != 0 then isSystemdScopeOomKilled lp.systemdScope? else pure false
       teardownJobResourcesAsync lp.systemdScope? lp.isolatedCheckout scratchFin
       let nowTs ← nowRfc3339
       let nextState : JobState := if codeInt == 0 then .succeeded else .failed
-      let failErr? ← formatJobExitError codeInt (recJob?.bind (·.logPath?))
+      let failErr? ← formatJobExitError codeInt (recJob?.bind (·.logPath?)) oomKilled
       if let .ok (l', _) ← rt.ledger.updateJob jid (fun r => .ok {
         r with
         state := if r.state == .cancelled then .cancelled else nextState

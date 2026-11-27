@@ -61,6 +61,8 @@ def parseDesktopArgs (args : List String) : DesktopCliConfig :=
     | [] => cfg
     | "--self-test" :: rest =>
       loop rest { cfg with selfTest := true }
+    | "--leanui" :: rest =>
+      loop rest cfg
     | "--headless-golden-all" :: dir :: rest =>
       loop rest { cfg with headlessGoldenAllDir := some dir }
     | "--headless-golden-all-prims" :: path :: rest =>
@@ -261,6 +263,13 @@ private partial def scrollRegionsOf (b : ComputedBox) : List Runtime.ScrollRegio
     [{ id, bounds := b.contentRectSub, limitY, offsetY := (b.scrollOffset.getD (0, 0)).2, textLines := lines }]
   | _, _ => b.children.flatMap scrollRegionsOf
 
+/-- Regions of the visible running (`loader`) mission rows. An overlay that takes over input keeps
+    them beneath its full-window backdrop region: `hitTest` never returns them, and the spinner tick
+    still finds the rows it has to repaint. -/
+private def runningRowRegions (st : DesktopState) (regions : List (EntityId × Rect)) : List (EntityId × Rect) :=
+  regions.filter fun (id, _) => st.sidebarRows.any fun row =>
+    row.widgetId == id && row.kind == "mission" && liveBadgeKind row.status == "loader"
+
 /-- Render one frame of `DesktopState` via `OrbDesktop.buildDesktopScreen`, `Layout.layoutNode`,
 `Scene.buildSceneFromLayout`, and HarfBuzz/FreeType glyph shaping (`shapeDesktopRuns` + `Text.layoutTextRun`). -/
 def renderDesktopView (rt : Runtime.RuntimeState DesktopState) :
@@ -311,6 +320,11 @@ def renderDesktopView (rt : Runtime.RuntimeState DesktopState) :
   -- This backend diffs paint commands; it does not consume per-node fingerprints.
   let sceneOut := buildSceneFromLayout sc rt.focus theme widgetRoot rootBox (recordNodes := false) (focusVisible := rt.focusVisible)
   if profile then IO.eprintln s!"u7-view-ns {t1-t0} {t2-t1} {(← IO.monoNanosNow)-t2}"
+  let winClipRect := rt.viewportDeviceRect
+  let winRad := scaleSubPx sc (pxToSub 12)
+  let winRadii : Nat × Nat × Nat × Nat := (winRad, winRad, winRad, winRad)
+  let clipOverlay (prims : Scene) : Scene :=
+    if liveWindow then #[.clipPushRounded winClipRect winRadii] ++ prims ++ #[.clipPop] else prims
   if let some menu := st.missionMenu then
     let w := min availW (pxToSub (if menu.page == .picker .model then 440 else 228))
     let count := min (max 1 ((availH - pxToSub 10) / pxToSub 26)) (missionMenuRows st menu).length
@@ -322,8 +336,8 @@ def renderDesktopView (rt : Runtime.RuntimeState DesktopState) :
     let box := layoutNode sc rt.focus.owner pal.focusRing left top w h widget.toLayoutNode
     let overlay := buildSceneFromLayout sc rt.focus theme widget box (recordNodes := false) (focusVisible := rt.focusVisible)
     let outside : Rect := { x := 0, y := 0, w := availW, h := availH }
-    return ((ac7.finishUploads, if liveWindow then 0 else pal.canvas, sceneOut.prims ++ overlay.prims,
-      (719, outside) :: overlay.hitRegionsSub, overlay.focusableOrder), [])
+    return ((ac7.finishUploads, if liveWindow then 0 else pal.canvas, sceneOut.prims ++ clipOverlay overlay.prims,
+      runningRowRegions st sceneOut.hitRegionsSub ++ (719, outside) :: overlay.hitRegionsSub, overlay.focusableOrder), [])
   if let .searchPalette spec := st.modal then
     let overRaw := buildSearchModalOverlay theme availW availH spec st.searchFilterTab
       st.searchProjectFilter st.searchTimeFilter st.searchSortOrder (!st.liveData) st.searchBuffer
@@ -332,8 +346,14 @@ def renderDesktopView (rt : Runtime.RuntimeState DesktopState) :
     let overScene := buildSceneFromLayout sc rt.focus theme overWidget overBox (recordNodes := false) (focusVisible := rt.focusVisible)
     let clearColor := if liveWindow then 0x00000000 else pal.canvas
     let outside : Rect := { x := 0, y := 0, w := availW, h := availH }
-    return ((ac7.finishUploads, clearColor, sceneOut.prims ++ #[.backdropBlur (scaleSubPx sc (pxToSub 6))] ++ overScene.prims,
-      (searchBackdropId, outside) :: overScene.hitRegionsSub, overScene.focusableOrder), [])
+    let modalPrims :=
+      let inner := sceneOut.prims ++ #[.backdropBlur (scaleSubPx sc (pxToSub 6))] ++ overScene.prims
+      if liveWindow then
+        #[.clipPushRounded winClipRect winRadii, .layerPush 255] ++ inner ++ #[.layerPop, .clipPop]
+      else inner
+    return ((ac7.finishUploads, clearColor, modalPrims,
+      runningRowRegions st sceneOut.hitRegionsSub ++ (searchBackdropId, outside) :: overScene.hitRegionsSub,
+      overScene.focusableOrder), [])
   if !st.writeError.isEmpty then
     let w := min availW (pxToSub 440)
     let h := pxToSub 40
@@ -342,7 +362,7 @@ def renderDesktopView (rt : Runtime.RuntimeState DesktopState) :
     let box := layoutNode sc rt.focus.owner pal.focusRing (availW - w - pxToSub 8 : Nat)
       (availH - chromeComposerHeightSub - h - pxToSub 8 : Nat) w h widget.toLayoutNode
     let overlay := buildSceneFromLayout sc rt.focus theme widget box (recordNodes := false) (focusVisible := rt.focusVisible)
-    return ((ac7.finishUploads, if liveWindow then 0 else pal.canvas, sceneOut.prims ++ overlay.prims,
+    return ((ac7.finishUploads, if liveWindow then 0 else pal.canvas, sceneOut.prims ++ clipOverlay overlay.prims,
       sceneOut.hitRegionsSub ++ overlay.hitRegionsSub, sceneOut.focusableOrder ++ overlay.focusableOrder), scrollRegionsOf rootBox)
   else
     let clearColor := if liveWindow then 0x00000000 else pal.canvas
@@ -896,7 +916,182 @@ def liveViewportRegression : Bool := Id.run do
   return !before.any visible && after.any visible && bottom.rosterTopSub == down.rosterTopSub &&
     atBottom.hitRegions.any (·.1 == 2)
 
-/-- `--self-test`: check live viewports, embedded palette, and quiescent rendering. -/
+/-- Native U8 window-effects & badge parity self-test: checks live surface alphas (frosted sidebar
+    78% dark / 72% light, 100% solid main pane), 12px rounded window corners (including the
+    backdrop-blur search modal, clipped once where its layer is composited), 60-step 4-quadrant active spinner + paused/Bot
+    badges, 0-pixel-diff pure `--leanui` vs hybrid `EmbeddedSidebar` parity, and Vulkan 1.3 GPU
+    readback parity when an ICD is available (`ORB_REQUIRE_WINDOW_EFFECTS_GPU=1` makes a missing
+    device a failure, so CI cannot skip it). -/
+def windowEffectsSelfTest : IO Unit := do
+  let check (cond : Bool) (msg : String) : IO Unit := do
+    unless cond do throw (IO.userError msg)
+  let pxAt (fb : ByteArray) (w x y : Nat) : UInt8 × UInt8 × UInt8 × UInt8 :=
+    let i := (y * w + x) * 4
+    (fb.get! i, fb.get! (i + 1), fb.get! (i + 2), fb.get! (i + 3))
+  let shapeStub (ac : Text.GlyphAtlasCache) (sc : Nat) (n : WidgetNode) : IO (Text.GlyphAtlasCache × WidgetNode) :=
+    let f : Text.FontHandle := { fontId := 1, facePtr := 0, pattern := "stub" }
+    shapeWidgetTree ac f f f f f sc n
+  let rows : List ChromeSidebarRow :=
+    [ { widgetId := 101, rowId := "nav:new", kind := "nav", title := "New Agent", shortcut := "⌘N" }
+    , { widgetId := 102, rowId := "nav:inbox", kind := "nav", title := "Inbox", shortcut := "⌘I", badge := 3 }
+    , { widgetId := 108, rowId := "section:projects", kind := "section", title := "Projects" }
+    , { widgetId := 130, rowId := "project:orb", kind := "project", depth := 0, title := "Orb" }
+    , { widgetId := 1001, rowId := "mission:m-active", kind := "mission", depth := 1, title := "Active", status := "active" }
+    , { widgetId := 1002, rowId := "mission:m-paused", kind := "mission", depth := 1, title := "Paused", status := "paused" }
+    , { widgetId := 1003, rowId := "mission:m-done", kind := "mission", depth := 1, title := "Done", status := "completed" }
+    , { widgetId := 1004, rowId := "mission:m-fail", kind := "mission", depth := 1, title := "Failed", status := "failed" }
+    , { widgetId := 1005, rowId := "mission:m-wait", kind := "mission", depth := 1, title := "Waiting", status := "awaiting_user" }
+    , { widgetId := 103, rowId := "nav:settings", kind := "footer", title := "Settings" }
+    ]
+  let mkState (isDark : Bool) (sc phase : Nat) : DesktopState :=
+    { DesktopState.liveUnavailable isDark sc with
+      sidebarRows := rows, expandedProjects := ["orb"]
+      badgePhase := phase, screen := .controlEmpty }
+  let buildScene (st : DesktopState) (logW logH : Nat) (withModal : Bool) : IO (Nat × Nat × Text.GlyphAtlasCache × Scene) := do
+    let sc := st.scale120
+    let bw := bufferSize sc logW
+    let bh := bufferSize sc logH
+    let availW := pxToSub logW
+    let availH := pxToSub logH
+    let theme := Theme.withWindowEffects st.theme
+    let spec : SearchDialogSpec := { inputWidgetId := 700, query := "u8", items := [] }
+    let st := if withModal then { st with modal := .searchPalette spec } else st
+    let (ac1, tree) ← shapeStub ({ pageWidth := 1024, pageHeight := 1024, pad := 1 }) sc (buildDesktopScreen st availW availH {} true)
+    let box := layoutNode sc none theme.palette.focusRing 0 0 availW availH tree.toLayoutNode
+    let out := buildSceneFromLayout sc {} theme tree box (recordNodes := false)
+    if !withModal then return (bw, bh, ac1.finishUploads, out.prims)
+    let overRaw := buildSearchModalOverlay theme availW availH spec "All" "All projects" "Any time" "relevance" false {}
+    let (ac2, overTree) ← shapeStub ac1 sc overRaw
+    let overBox := layoutNode sc none theme.palette.focusRing 0 0 availW availH overTree.toLayoutNode
+    let overOut := buildSceneFromLayout sc {} theme overTree overBox (recordNodes := false)
+    let winRect : Rect := ⟨0, 0, Int.ofNat bw, Int.ofNat bh⟩
+    let winRad := scaleSubPx sc (pxToSub 12)
+    let inner := out.prims ++ #[.backdropBlur (scaleSubPx sc (pxToSub 6))] ++ overOut.prims
+    return (bw, bh, ac2.finishUploads, #[.clipPushRounded winRect (winRad, winRad, winRad, winRad), .layerPush 255] ++ inner ++ #[.layerPop, .clipPop])
+  -- 1. Surface alphas, premultiplication, 12px corners (normal & backdrop-blur modal), dark/light × 1x/2x
+  for isDark in [true, false] do
+    let expSb : UInt8 := if isDark then 199 else 184
+    for sc in [120, 240] do
+      let f := sc / 120
+      let (bw, bh, ac, prims) ← buildScene (mkState isDark sc 0) 640 420 false
+      let (fb, _) := Vulkan.rasterizeScene bw bh 0 ac prims
+      for (cx, cy) in [(0, 0), (bw - 1, 0), (0, bh - 1), (bw - 1, bh - 1)] do
+        check (pxAt fb bw cx cy == (0, 0, 0, 0)) s!"corner ({cx},{cy}) not transparent (dark={isDark} sc={sc})"
+      let mut hasAA := false
+      for k in [1 : 12 * f] do
+        let (_, _, _, a) := pxAt fb bw k k
+        if a > 0 && a < expSb then hasAA := true
+      check hasAA s!"missing AA corner transition (dark={isDark} sc={sc})"
+      let (sr, sg, sb, sa) := pxAt fb bw (10 * f) (350 * f)
+      check (sa == expSb && sr <= sa && sg <= sa && sb <= sa) s!"sidebar alpha/premul mismatch (dark={isDark} sc={sc}): ({sr},{sg},{sb},{sa})"
+      let (_, _, _, hdrA) := pxAt fb bw (420 * f) (10 * f)
+      let (_, _, _, mainA) := pxAt fb bw (420 * f) (220 * f)
+      check (hdrA == 255 && mainA == 255) s!"main pane must be 100% solid (dark={isDark} sc={sc}): hdr={hdrA} main={mainA}"
+    let (bw, bh, acM, primsM) ← buildScene (mkState isDark 120 0) 640 420 true
+    let (fbM, _) := Vulkan.rasterizeScene bw bh 0 acM primsM
+    for (cx, cy) in [(0, 0), (bw - 1, 0), (0, bh - 1), (bw - 1, bh - 1)] do
+      check (pxAt fbM bw cx cy == (0, 0, 0, 0)) s!"modal blur corner ({cx},{cy}) leaked (dark={isDark})"
+    -- The blur must not drag the transparent window corners into the solid main pane.
+    for (cx, cy) in [(bw - 14, 14), (bw - 20, 6), (bw - 6, 20), (bw - 14, bh - 15), (bw - 6, bh - 21)] do
+      let (_, _, _, a) := pxAt fbM bw cx cy
+      check (a == 255) s!"modal blur thinned the main pane at ({cx},{cy}): alpha={a} (dark={isDark})"
+  -- A rounded clip around an opacity layer attenuates its edge once, not once per nesting level.
+  let raster (scene : Scene) : Array UInt8 :=
+    (Vulkan.rasterizeScene 64 64 0 { pageWidth := 1024, pageHeight := 1024, pad := 1 } scene).1.data
+  let clip : Prim := .clipPushRounded ⟨8, 8, 48, 48⟩ (12, 12, 12, 12)
+  let fill : Prim := .rrect ⟨0, 0, 64, 64⟩ 0xFFFFFFFF (0, 0, 0, 0) (0, 0, 0, 0) 0
+  let flat := raster #[clip, fill, .clipPop]
+  check (flat.any fun a => a > 0 && a < 255) "rounded clip fixture has no anti-aliased edge"
+  check (raster #[clip, .layerPush 255, fill, .layerPop, .clipPop] == flat)
+    "a rounded clip around a layer must clip it once, exactly like the same fill without the layer"
+  -- Clip commands inside a layer neither outlive it nor widen its render area, on both renderers.
+  let area : Rect := ⟨8, 8, 48, 48⟩
+  let leaked : Scene := #[clip, .layerPush 255, .clipPush ⟨8, 8, 4, 4⟩, .layerPop, fill, .clipPop]
+  let escaped : Scene := #[.clipPush area, .layerPush 255, .clipPop, fill, .layerPop, .clipPop]
+  let scissors (scene : Scene) : List Rect :=
+    (Vk.lowerScene 64 64 scene).ops.toList.filterMap fun op =>
+      match op with
+      | .drawBatch _ _ scissor => some scissor
+      | _ => none
+  check (raster leaked == flat) "a clip left open inside a layer outlived its layerPop on CPU"
+  check (scissors leaked == [area]) s!"a clip left open inside a layer outlived its layerPop on GPU: {repr (scissors leaked)}"
+  check (scissors escaped == [area]) s!"an unmatched clipPop widened the layer scissor on GPU: {repr (scissors escaped)}"
+  -- 2. Active 4-quadrant rotation, stationary paused bars, and awaiting_user Bot fallback
+  let rasterLead (status : String) (phase : Nat) : IO ByteArray := do
+    let (ac, n) ← shapeStub ({ pageWidth := 1024, pageHeight := 1024, pad := 1 }) 120 (liveMissionLead orbDarkTheme status phase)
+    let box := layoutNode 120 none orbDarkTheme.palette.focusRing 0 0 (pxToSub 16) (pxToSub 16) n.toLayoutNode
+    let out := buildSceneFromLayout 120 {} orbDarkTheme n box (recordNodes := false)
+    return (Vulkan.rasterizeScene 16 16 0 ac.finishUploads out.prims).1
+  let q0 ← rasterLead "active" 0
+  let q15 ← rasterLead "active" 15
+  let q30 ← rasterLead "active" 30
+  let q45 ← rasterLead "active" 45
+  check (q0 != q15 && q15 != q30 && q30 != q45 && q45 != q0 && q0 != q30) "active spinner must rotate through all 4 quadrants"
+  let pb0 ← rasterLead "paused" 0
+  let pb30 ← rasterLead "paused" 30
+  check (pb0 == pb30) "paused badge must be stationary"
+  let (_, _, _, lbA) := pxAt pb0 16 5 8
+  let (_, _, _, midA) := pxAt pb0 16 8 8
+  let (_, _, _, rbA) := pxAt pb0 16 10 8
+  check (lbA > 128 && midA == 0 && rbA > 128) s!"paused badge bars mismatch: l={lbA} m={midA} r={rbA}"
+  let waitFb ← rasterLead "awaiting_user" 0
+  let (acBot, nBot) ← shapeStub ({ pageWidth := 1024, pageHeight := 1024, pad := 1 }) 120 (chromeIcon "mission" orbDarkTheme.palette.textMuted)
+  let bBot := layoutNode 120 none orbDarkTheme.palette.focusRing 0 0 (pxToSub 16) (pxToSub 16) nBot.toLayoutNode
+  let (botFb, _) := Vulkan.rasterizeScene 16 16 0 acBot.finishUploads (buildSceneFromLayout 120 {} orbDarkTheme nBot bBot (recordNodes := false)).prims
+  check (waitFb == botFb) "awaiting_user badge must render Bot icon"
+  -- 3. Pure --leanui vs hybrid EmbeddedSidebar pixel-exact parity (0 diff pixels across sidebar & badges)
+  for isDark in [true, false] do
+    let (bw, bh, acP, primsP) ← buildScene (mkState isDark 120 18) 640 420 false
+    let (fbP, _) := Vulkan.rasterizeScene bw bh 0 acP primsP
+    let lStr := if isDark then "0" else "1"
+    let req := String.intercalate "\n"
+      [ s!"219\t420\t1\t{lStr}\t0\t18"
+      , "101\tnav:new-agent\tnav\tNew Agent\t0\t\t⌘N\t0\t0\t0\t"
+      , "102\tnav:inbox\tnav\tInbox\t0\t\t⌘I\t3\t0\t0\t"
+      , "108\tsection:projects\tsection\tProjects\t0\t\t\t0\t0\t0\t"
+      , "130\tproject:orb\tproject\tOrb\t0\t\t\t0\t0\t1\t"
+      , "1001\tmission:m-active\tmission\tActive\t1\tactive\t\t0\t0\t0\t"
+      , "1002\tmission:m-paused\tmission\tPaused\t1\tpaused\t\t0\t0\t0\t"
+      , "1003\tmission:m-done\tmission\tDone\t1\tcompleted\t\t0\t0\t0\t"
+      , "1004\tmission:m-fail\tmission\tFailed\t1\tfailed\t\t0\t0\t0\t"
+      , "1005\tmission:m-wait\tmission\tWaiting\t1\tawaiting_user\t\t0\t0\t0\t"
+      , "103\tnav:settings\tfooter\tSettings\t0\t\t\t0\t0\t0\t"
+      ]
+    let aRef ← IO.mkRef ({ pageWidth := 1024, pageHeight := 1024, pad := 1 } : Text.GlyphAtlasCache)
+    let cRef ← IO.mkRef ({ enabled := false } : EmbeddedSidebarCache)
+    let fr ← prepareSidebarFrame req aRef cRef shapeStub 0
+    let (fbH, _) := Vulkan.rasterizeScene 219 420 0 (← aRef.get) fr.scene.prims
+    let mut diffs := 0
+    for y in [120 : 360] do
+      for x in [14 : 210] do
+        if pxAt fbP bw x y != pxAt fbH 219 x y then diffs := diffs + 1
+    check (diffs == 0) s!"pure vs hybrid sidebar mismatch (dark={isDark}): {diffs} pixels"
+  -- 4. Vulkan 1.3 GPU readback parity on base shell & backdrop-blur modal (when ICD available)
+  if let .ok rb0 ← Vk.createOffscreenReadback false true then
+    let rbRef ← IO.mkRef rb0
+    try
+      for withModal in [false, true] do
+        let (bw, bh, ac, prims) ← buildScene (mkState true 120 24) 640 420 withModal
+        let (cpuFb, _) := Vulkan.rasterizeScene bw bh 0 ac prims
+        match ← Vk.renderOffscreenInstanced (← rbRef.get) bw bh 0 ac prims true with
+        | .error e => throw (IO.userError s!"GPU readback failed (modal={withModal}): {e}")
+        | .ok (rb', gpuFb) =>
+          rbRef.set rb'
+          let mut maxD := 0
+          for i in [:min cpuFb.size gpuFb.size] do
+            let x := (cpuFb.get! i).toNat
+            let y := (gpuFb.get! i).toNat
+            let d := if x >= y then x - y else y - x
+            if d > maxD then maxD := d
+          check (maxD <= 2) s!"CPU vs GPU window-effects delta={maxD} > 2 (modal={withModal})"
+          for (cx, cy) in [(0, 0), (bw - 1, 0), (0, bh - 1), (bw - 1, bh - 1)] do
+            check (pxAt gpuFb bw cx cy == (0, 0, 0, 0)) s!"GPU corner ({cx},{cy}) not transparent (modal={withModal})"
+    finally
+      Vk.destroyOffscreenReadback (← rbRef.get)
+  else if (← IO.getEnv "ORB_REQUIRE_WINDOW_EFFECTS_GPU") == some "1" then
+    throw (IO.userError "no Vulkan device for the GPU window-effects readback")
+
+/-- `--self-test`: check live viewports, embedded palette, window effects, and quiescent rendering. -/
 def runSelfTest (cfg : Runtime.RuntimeConfig) (initSt : DesktopState) : IO UInt32 := do
   unless liveViewportRegression do
     IO.eprintln "orb-desktop self-test: live viewport regression"
@@ -911,25 +1106,48 @@ def runSelfTest (cfg : Runtime.RuntimeConfig) (initSt : DesktopState) : IO UInt3
   catch e =>
     IO.eprintln s!"orb-desktop self-test: embedded sidebar cache regression: {e}"
     return 1
+  try
+    windowEffectsSelfTest
+  catch e =>
+    IO.eprintln s!"orb-desktop self-test: window effects regression: {e}"
+    return 1
   let rt0Raw ← Runtime.initRuntime { cfg with headless := true } initSt
   let rt0 := { rt0Raw with focus := initSt.initialFocusState }
   let mut rt ← Runtime.stepFrame rt0 (desktopReducer rt0) renderDesktopFrame
   rt ← Runtime.stepFrame rt (desktopReducer rt) renderDesktopFrame
+  -- An overlay owns the pointer, yet a running row beneath it keeps its spinner region.
+  let running : DesktopState := { DesktopState.liveUnavailable cfg.darkTheme cfg.scale120 with
+    expandedProjects := ["orb"], screen := .controlEmpty
+    sidebarRows :=
+      [ { widgetId := 130, rowId := "project:orb", kind := "project", depth := 0, title := "Orb" }
+      , { widgetId := 1001, rowId := "mission:m-active", kind := "mission", depth := 1, title := "Active", status := "active" } ] }
+  let mut overlayFault : Option String := none
+  for (name, over, backdrop) in
+      [ ("mission menu", { running with missionMenu := some { mission := "", x := 0, y := 0 } }, 719)
+      , ("search modal", { running with modal := .searchPalette defaultSearchDialogSpec }, searchBackdropId) ] do
+    let ((_, _, _, regions, _), _) ← renderDesktopView { rt with app := over }
+    match (runningRowRegions over regions).head? with
+    | none => overlayFault := some s!"{name} hides the running row from the spinner tick"
+    | some (_, row) =>
+      if hitTest regions row.x row.y != some backdrop then
+        overlayFault := some s!"{name} lets the pointer reach the row beneath it"
   Runtime.shutdownRuntime rt
+  if let some fault := overlayFault then
+    IO.eprintln s!"orb-desktop self-test: {fault}"
+    return 1
   if rt.framesRendered != 1 || rt.quiescentSkips < 1 then
     IO.eprintln s!"orb-desktop self-test: frames={rt.framesRendered}, skips={rt.quiescentSkips}"
     return 1
   IO.println "orb-desktop self-test: ok"
   return 0
 
-/-- Main entry point for `OrbDesktop`. -/
+/-- Device-pixel damage covering every visible running (`loader`) mission row, or `none` when no
+    spinner is on screen, so a spinner tick repaints only those rows. -/
 private def runningBadgeDamage (rt : Runtime.RuntimeState DesktopState) : Damage :=
-  rt.app.sidebarRows.foldl (fun damage row =>
-    if row.kind != "mission" || liveBadgeKind row.status != "loader" then damage else
-      match rt.hitRegions.find? (·.1 == row.widgetId) with
-      | none => damage
-      | some (_, rect) => Damage.add damage (roundRect rt.wayland.scale120 rect)) none
+  (runningRowRegions rt.app rt.hitRegions).foldl
+    (fun damage (_, rect) => Damage.add damage (roundRect rt.wayland.scale120 rect)) none
 
+/-- Main entry point for `OrbDesktop`. -/
 def main (args : List String) : IO UInt32 := do
   if let ["--gtk-sidebar-host", path] := args then
     return ← runEmbeddedSidebar path shapeWidgetTree
@@ -987,7 +1205,7 @@ def main (args : List String) : IO UInt32 := do
                   (!rt.app.inboxAvailable || st.inboxItems != rt.app.inboxItems || st.inboxEnabled != rt.app.inboxEnabled) then
                 let ids := if st.inboxEnabled then st.inboxItems.map (·.mission) else []
                 IO.eprintln ("Inbox badge IDs: " ++ String.intercalate "," ids)
-              let phase := ((← IO.monoMsNow) / 100) % 12
+              let phase := liveSpinnerPhase (← IO.monoMsNow)
               let spin := animations && phase != st.badgePhase
               let damage := if spin then (runningBadgeDamage rt).elim damage (Damage.add damage) else damage
               let st := if spin then { st with badgePhase := phase } else st

@@ -16,6 +16,9 @@ private opaque rawOpenPty (rows cols : UInt16) : IO UInt64
 @[extern "orb_net_leaf_pty_resize"]
 private opaque rawPtyResize (mfd : UInt32) (rows cols : UInt16) : IO UInt64
 
+@[extern "orb_net_leaf_pty_spawn"]
+private opaque rawPtySpawn (slaveFd : UInt32) (cwd shell : @& String) : IO UInt64
+
 structure PtyPair where
   masterFd : Fd
   slaveFd  : Fd
@@ -41,6 +44,14 @@ def resizePty (masterFd : Fd) (rows cols : UInt16) : IO (SysResult Unit) := do
   match decodePackedWord packed with
   | .error e => return .error e
   | .ok _ => return .ok ()
+
+/-- Spawn an interactive shell attached to `pair.slaveFd` in `cwd` and return its PID (process group leader).
+    Caller should close `pair.slaveFd` in the parent after spawn. -/
+def spawnPtyShell (slaveFd : Fd) (cwd : String) (shell : String := "/bin/sh") : IO (SysResult UInt32) := do
+  let packed ← rawPtySpawn slaveFd.raw cwd shell
+  match decodePackedWord packed with
+  | .error e => return .error e
+  | .ok v => return .ok v.toUInt32
 
 /-- Close both master and slave descriptors of a `PtyPair`. -/
 def closePtyPair (pair : PtyPair) : IO Unit := do

@@ -1917,11 +1917,11 @@ export function NativeMissionView(p: { id: string; active?: boolean; launch?:Lau
           </Show>
 
           <NextReminder mission={p.id} active={isSlotActive()} busy={busy()} archived={isArchived(mission()?.status)} />
-          <Show when={remoteGoal()}>{goal => <><div role="status">{remoteGoalStatusLabel(goal())}</div>
+          <Show when={remoteGoal()}>{goal => <div class="remote-goal-status"><span role="status">{remoteGoalStatusLabel(goal())}</span>
             <Show when={goalRecovery() && !participant() && mission()?.run_generation}>
               <button type="button" class="error-notice-link primary" disabled={resumingGoal()} onClick={() => void resumeGoal()}>Resume Goal</button>
             </Show>
-          </>}</Show>
+          </div>}</Show>
           <Show when={refreshing()}><div class="agent-wait-status" role="status">Refreshing conversation…</div></Show>
         </div>
       </div>

@@ -75,6 +75,22 @@ def readChild (store : CoreStore) (p : Placement) (args : JVal) : IO JVal := do
 def digest (args : JVal) : String :=
   LeanSys.Auth.bytesToHexLower (LeanSys.Auth.sha256Bytes (renderCompact args).toUTF8)
 
+/-- List live pending native goal approval ticket IDs for `mid` (owned by `owner` when non-empty). -/
+def pendingForMission (store : CoreStore) (owner mid : String) (now : UInt64) : IO (Array String) := do
+  if mid.trimAscii.toString.isEmpty then return #[]
+  let .ok rows ← execParamQuery store.missionsDb
+    ("SELECT a.id FROM native_goal_approvals a JOIN missions m ON m.id=a.mission " ++
+     "WHERE a.mission=?1 AND (?2='' OR a.owner=?2) AND a.decision='pending' AND a.expires>CAST(?3 AS INTEGER) " ++
+     "AND m.placement_job_id=a.job AND m.status='active' AND m.goal_mode=1 " ++
+     "AND EXISTS(SELECT 1 FROM remote_node_jobs j WHERE j.job_id=m.placement_job_id AND j.state='running') " ++
+     "ORDER BY a.expires ASC;")
+    #[mid, owner, toString now] | return #[]
+  let mut out : Array String := #[]
+  for i in [1:rows.size] do
+    let tid := ((rows[i]?.bind (·[0]?)).getD "").trimAscii.toString
+    if !tid.isEmpty then out := out.push tid
+  return out
+
 /-- Only the actual owner can resolve this one-shot request via the dashboard. -/
 def answer (store : CoreStore) (id owner explicitMid action : String) (now : UInt64) : IO (Option String) := do
   if !id.startsWith ticketPrefix || owner.isEmpty || (action != "accept" && action != "revise") then return none
