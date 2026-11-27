@@ -1152,7 +1152,7 @@ def loadRoutingChainsFromStore (st : CoreStore) (workingDir : String := "") : IO
   let cliKey := ((← lookupEnvWithFiles? "CLI_PROXY_API_KEY").getD "").trimAscii.toString
   let cliUrl ← resolveCliProxyBaseUrl
   let googleMax ← resolveGoogleMaxConcurrency st.rootDir
-  let .ok rows ← execParamQuery st.missionsDb "SELECT id,name,models_json FROM model_routing_chains ORDER BY id ASC;" #[]
+  let .ok rows ← execParamQuery st.missionsDb "SELECT id,name,models_json,COALESCE(strip_thinking,-1) FROM model_routing_chains ORDER BY id ASC;" #[]
     | throw (IO.userError "routing_chain_store_unavailable")
   let mut out : Array RoutingChain := #[]
   for i in [1:rows.size] do
@@ -1160,12 +1160,13 @@ def loadRoutingChainsFromStore (st : CoreStore) (workingDir : String := "") : IO
     let cid := (r[0]?).getD ""
     let nm := (r[1]?).getD cid
     let mj := (r[2]?).getD "[]"
-    out := out.push { id := cid, name := nm, targets := parseChainTargetsJson mj providers hydratedProvs cliUrl cliKey (some googleMax) }
+    let strip := if r[3]? == some "-1" then cid == "builtin/assistant" else r[3]? == some "1"
+    out := out.push { id := cid, name := nm, targets := parseChainTargetsJson mj providers hydratedProvs cliUrl cliKey (some googleMax), stripThinking := strip }
   -- Immutable defaults are a derived view, not a second mutable config store.
   -- Persisted ids (even empty/unavailable chains) always win over stock entries.
   for (id, name, entries) in OrbCore.ProxyModelRouting.stockChains do
     if !out.any (fun c => c.id == id) then
-      out := out.push { id := id, name := name, targets := parseChainTargetsJson (OrbCore.ProxyModelRouting.entriesJson entries) providers hydratedProvs cliUrl cliKey (some googleMax) }
+      out := out.push { id := id, name := name, targets := parseChainTargetsJson (OrbCore.ProxyModelRouting.entriesJson entries) providers hydratedProvs cliUrl cliKey (some googleMax), stripThinking := (id == "builtin/assistant") }
   return out
 
 private def optU32Json (v? : Option UInt32) : String :=
