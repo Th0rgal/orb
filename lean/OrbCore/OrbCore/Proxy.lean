@@ -843,6 +843,8 @@ private def jsonEventIsStructuredModelPayload (jv : JVal) : Bool :=
   (jv.field? "candidates").isSome ||
   (jv.field? "delta").isSome ||
   (jv.field? "response").isSome ||
+  (jv.field? "prompt_filter_results").isSome ||
+  jsonFieldIndicatesError jv ||
   match jv.fieldStr? "object" with
   | some o => containsSubstring o "chat.completion" || containsSubstring o "response"
   | none =>
@@ -1542,9 +1544,9 @@ private def isCompleteToolArgsJson (raw : String) : Bool :=
 private def completeToolCallBoundary? (body : ByteArray) : Option Nat := Id.run do
   let mut lastBoundary : Option Nat := none
   let mut openAiCalls : Array (Nat × Bool × String) := #[]
-  let mut anthropicToolBlocks : Array (Nat × String × Bool × Bool) := #[]
+  let mut anthropicToolBlocks : Array (Nat × Bool × String × Bool × Bool) := #[]
   let mut responsesTools : Array (String × Bool) := #[]
-  let mut geminiCalls : Nat := 0
+  let mut geminiValid : Array Bool := #[]
   for (s, e) in sseCompleteFrameRanges body do
     let some frame := String.fromUTF8? (body.extract s e)
       | continue
@@ -1576,18 +1578,27 @@ private def completeToolCallBoundary? (body : ByteArray) : Option Nat := Id.run 
       for candidate in candidates do
         let parts := ((candidate.fieldOrNull "content").fieldArr? "parts").getD #[]
         for part in parts do
-          if let some functionCall := part.field? "functionCall" then
-            if functionCall.asObj?.isSome && !((functionCall.fieldStr? "name").getD "").trimAscii.toString.isEmpty then
-              geminiCalls := geminiCalls + 1
-              updatedCall := true
+          match part.field? "functionCall" with
+          | none | some .null => pure ()
+          | some functionCall =>
+            let nameOk := functionCall.asObj?.isSome &&
+              !((functionCall.fieldStr? "name").getD "").trimAscii.toString.isEmpty
+            let argsOk := match functionCall.field? "args" with
+              | none | some .null => true
+              | some (.obj _) => true
+              | some _ => false
+            geminiValid := geminiValid.push (nameOk && argsOk)
+            updatedCall := true
       if jv.fieldStr? "type" == some "content_block_start" then
         if (jv.fieldOrNull "content_block").fieldStr? "type" == some "tool_use" then
           let index := (jv.fieldNat? "index").getD 0
-          let input := match (jv.fieldOrNull "content_block").field? "input" with
+          let cb := jv.fieldOrNull "content_block"
+          let hasName := !((cb.fieldStr? "name").getD "").trimAscii.toString.isEmpty
+          let input := match cb.field? "input" with
             | some value => renderCompact value
             | none => ""
           anthropicToolBlocks := anthropicToolBlocks.filter (fun x => x.1 != index)
-          anthropicToolBlocks := anthropicToolBlocks.push (index, input, false, false)
+          anthropicToolBlocks := anthropicToolBlocks.push (index, hasName, input, false, false)
           updatedCall := true
       else if jv.fieldStr? "type" == some "content_block_delta" then
         let delta := jv.fieldOrNull "delta"
@@ -1598,18 +1609,18 @@ private def completeToolCallBoundary? (body : ByteArray) : Option Nat := Id.run 
             -- (e.g. `server_tool_use` / `mcp_tool_use`), and do not let an empty `""` delta
             -- wipe the placeholder `"{}"` of a zero-argument `tool_use`.
             if !fragment.isEmpty then
-              if let some (_, prevBuf, hasDelta, stopped) := anthropicToolBlocks.find? (fun x => x.1 == index) then
+              if let some (_, hasName, prevBuf, hasDelta, stopped) := anthropicToolBlocks.find? (fun x => x.1 == index) then
                 let nextBuf :=
                   if !hasDelta && (prevBuf.isEmpty || prevBuf == "{}") then fragment
                   else prevBuf ++ fragment
                 anthropicToolBlocks := anthropicToolBlocks.filter (fun x => x.1 != index)
-                anthropicToolBlocks := anthropicToolBlocks.push (index, nextBuf, true, stopped)
+                anthropicToolBlocks := anthropicToolBlocks.push (index, hasName, nextBuf, true, stopped)
                 updatedCall := true
       else if jv.fieldStr? "type" == some "content_block_stop" then
         let index := (jv.fieldNat? "index").getD 0
-        if let some (_, buf, hasDelta, _) := anthropicToolBlocks.find? (fun x => x.1 == index) then
+        if let some (_, hasName, buf, hasDelta, _) := anthropicToolBlocks.find? (fun x => x.1 == index) then
           anthropicToolBlocks := anthropicToolBlocks.filter (fun x => x.1 != index)
-          anthropicToolBlocks := anthropicToolBlocks.push (index, buf, hasDelta, true)
+          anthropicToolBlocks := anthropicToolBlocks.push (index, hasName, buf, hasDelta, true)
           updatedCall := true
       else if jv.fieldStr? "type" == some "response.output_item.added" then
         let item := jv.fieldOrNull "item"
@@ -1632,17 +1643,21 @@ private def completeToolCallBoundary? (body : ByteArray) : Option Nat := Id.run 
             | none =>
               ((item.fieldStr? "call_id").filter (!·.isEmpty)).orElse
                 (fun _ => (item.fieldStr? "id").filter (!·.isEmpty)) |>.getD "idx:0"
+          let hasName := !((item.fieldStr? "name").getD "").trimAscii.toString.isEmpty
+          let status := item.fieldStr? "status"
+          let statusOk := status != some "incomplete" && status != some "failed"
           let args := (item.fieldStr? "arguments").getD ""
-          if isCompleteToolArgsJson args then
-            responsesTools := responsesTools.filter (fun (k, _) => k != key)
-            responsesTools := responsesTools.push (key, true)
-            updatedCall := true
+          let isDone := hasName && statusOk && isCompleteToolArgsJson args
+          responsesTools := responsesTools.filter (fun (k, _) => k != key)
+          responsesTools := responsesTools.push (key, isDone)
+          updatedCall := true
     if updatedCall then
-      let hasAny := !openAiCalls.isEmpty || !anthropicToolBlocks.isEmpty || !responsesTools.isEmpty || geminiCalls > 0
+      let hasAny := !openAiCalls.isEmpty || !anthropicToolBlocks.isEmpty || !responsesTools.isEmpty || !geminiValid.isEmpty
       let allComplete :=
         openAiCalls.all (fun (_, hasName, a) => hasName && isCompleteToolArgsJson a) &&
-        anthropicToolBlocks.all (fun (_, b, _, stopped) => stopped && isCompleteToolArgsJson b) &&
-        responsesTools.all (fun (_, done) => done)
+        anthropicToolBlocks.all (fun (_, hasName, b, _, stopped) => hasName && stopped && isCompleteToolArgsJson b) &&
+        responsesTools.all (fun (_, done) => done) &&
+        geminiValid.all id
       if hasAny && allComplete then
         lastBoundary := some e
   return lastBoundary
@@ -1657,7 +1672,8 @@ private def isProviderReasoningBlock (jv : JVal) : Bool :=
 
 private def isProviderReasoningField (k : String) : Bool :=
   k == "reasoning_content" || k == "reasoning_details" || k == "encrypted_content" ||
-  k == "reasoning_opaque" || k == "thought_signature" || k == "thoughtSignature"
+  k == "reasoning_opaque" || k == "thought_signature" || k == "thoughtSignature" ||
+  k == "thinking_blocks"
 
 private partial def stripProviderReasoningPart : JVal → JVal
   | .arr xs => .arr (xs.filterMap fun x =>
@@ -1665,6 +1681,11 @@ private partial def stripProviderReasoningPart : JVal → JVal
       else some (stripProviderReasoningPart x))
   | .obj fields => .obj (fields.filterMap fun (k, v) =>
       if isProviderReasoningField k then none
+      else if k == "provider_specific_fields" then
+        let cleaned := stripProviderReasoningPart v
+        match cleaned with
+        | .obj #[] => none
+        | _ => some (k, cleaned)
       else if k == "content" || k == "parts" || k == "tool_calls" || k == "extra_content" || k == "google" then
         some (k, stripProviderReasoningPart v)
       else
@@ -1675,12 +1696,39 @@ private def stripProviderReasoningMessage (msg : JVal) : Option JVal :=
   if isProviderReasoningBlock msg then none
   else match msg with
     | .obj fields =>
-      some (.obj (fields.filterMap fun (k, v) =>
+      let hasToolCalls :=
+        match (JVal.obj fields).fieldArr? "tool_calls" with
+        | some arr => !arr.isEmpty
+        | none => false
+      let hadNonEmptyContentArr :=
+        match (JVal.obj fields).fieldArr? "content" with
+        | some arr => !arr.isEmpty
+        | none => false
+      let hadNonEmptyPartsArr :=
+        match (JVal.obj fields).fieldArr? "parts" with
+        | some arr => !arr.isEmpty
+        | none => false
+      let cleanedFields := fields.filterMap fun (k, v) =>
         if isProviderReasoningField k || k == "reasoning" then none
+        else if k == "provider_specific_fields" then
+          let cleaned := stripProviderReasoningPart v
+          match cleaned with
+          | .obj #[] => none
+          | _ => some (k, cleaned)
         else if k == "content" || k == "parts" || k == "tool_calls" || k == "extra_content" || k == "google" then
           some (k, stripProviderReasoningPart v)
         else
-          some (k, v)))
+          some (k, v)
+      let outObj := JVal.obj cleanedFields
+      let contentBecameEmpty := hadNonEmptyContentArr && ((outObj.fieldArr? "content").map Array.isEmpty).getD false
+      let partsBecameEmpty := hadNonEmptyPartsArr && ((outObj.fieldArr? "parts").map Array.isEmpty).getD false
+      if contentBecameEmpty || partsBecameEmpty then
+        if hasToolCalls && contentBecameEmpty then
+          some (.obj (cleanedFields.map fun (k, v) => if k == "content" then (k, .null) else (k, v)))
+        else
+          none
+      else
+        some outObj
     | other => some other
 
 private def stripProviderReasoningJVal : JVal → JVal
@@ -1747,7 +1795,7 @@ private def synthesizeToolCallClose (contentType : String) (emitted head : ByteA
               (part.field? "functionCall").isSome)) then
           isGemini := true
   if isAnthropic then
-    head ++ ("data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"}}\n\ndata: {\"type\":\"message_stop\"}\n\n".toUTF8)
+    head ++ ("event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\",\"stop_sequence\":null},\"usage\":{\"output_tokens\":0}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n".toUTF8)
   else if isResponses then
     let respId := ((extractResponsesId? emitted).orElse (fun _ => extractResponsesId? head)).getD "resp_recovered"
     head ++ (s!"event: response.completed\ndata: \{\"type\":\"response.completed\",\"response\":\{\"id\":{jsonEscape respId},\"status\":\"completed\"}}\n\n").toUTF8
@@ -2041,9 +2089,17 @@ private def committingPrefixBoundary (body : ByteArray) (alreadyCommitted : Bool
     let frameIsPing := sseFrameIsPingOnly frame
     for rawLine in frame.splitOn "\n" do
       let trimmed := rawLine.trimAscii.toString
+      if trimmed.startsWith "event:" then
+        let evName := (trimmed.drop 6).toString.trimAscii.toString
+        if evName == "error" then
+          frameIsModel := true
+        continue
       if !trimmed.startsWith "data:" then continue
       let payload := (trimmed.drop 5).toString.trimAscii.toString
-      if payload == "[DONE]" || payload.isEmpty then continue
+      if payload.isEmpty then continue
+      if payload == "[DONE]" || payload.startsWith "[DONE]" then
+        frameIsModel := true
+        continue
       if let .ok jv := OrbBin.Json.parse payload then
         if jsonEventIsStructuredModelPayload jv then
           frameIsModel := true
@@ -2243,7 +2299,11 @@ def recoverBufferedStream
               containsSubstring text "\"message_start\"" ||
               containsSubstring text "\"content_block_start\"" ||
               containsSubstring text "\"content_block_delta\"" ||
-              containsSubstring text "\"functionCall\""
+              containsSubstring text "\"functionCall\"" ||
+              containsSubstring text "\"prompt_filter_results\"" ||
+              containsSubstring text "\"error\"" ||
+              containsSubstring text "event: error" ||
+              containsSubstring text "[DONE]"
             if model then
               modeRef.set (some true)
             else if text.contains "\n\n" || text.contains "\r\n\r\n" then
@@ -2735,50 +2795,46 @@ def forwardProxyChain
                   estimatedTokens ≤ candidate.contextLimit.toNat
                 let openRecoveryTarget (retryTarget : ProviderTarget) (retryBody : ByteArray)
                     (checkContext : Bool) : IO (Option BodyPump) := do
+                  let (retryTls, retryHost, retryPort, retryPath, retryHdrs, retryWireBody) :=
+                    upstreamRequest retryTarget relPath extraHeaders retryBody
+                  let estimatedTokens := (retryWireBody.size + 3) / 4
+                  if checkContext && estimatedTokens > retryTarget.contextLimit.toNat then
+                    return none
                   let admitted ← match effPacing? with
                     | none => pure true
                     | some tracker => do
                       let nowMs ← IO.monoMsNow
                       tryAcquireTargetSlot tracker retryTarget nowMs.toUInt64
                   if !admitted then
+                    return none
+                  let retryStartMs ← IO.monoMsNow
+                  let retryHeadDeadlineMs? : Option Nat :=
+                    some (retryStartMs + effStreamLimits.preHeadBudgetMs)
+                  match ← openAccountRequest resolveTransport retryTarget true retryTls method retryHost
+                    retryPort retryPath retryHdrs retryWireBody effStreamLimits retryHeadDeadlineMs? bodyTimedOutRef? with
+                  | .ok (retryResp, some p) =>
+                    if let some ref := bodyTimedOutRef? then
+                      ref.set false
+                    if let some tracker := effPacing? then
+                      recordObservedHeaders tracker retryTarget.accountId retryResp.headers
+                    streamSelectedAccountRef.set retryTarget.accountId
+                    streamAttemptsRef.modify (· + 1)
+                    pure (some fun emit => do
+                      try
+                        p emit
+                      finally
+                        if let some tracker := effPacing? then
+                          releaseTargetSlot tracker retryTarget)
+                  | .error "upstream_idle_timeout" =>
+                    if let some ref := bodyTimedOutRef? then
+                      ref.set true
+                    if let some tracker := effPacing? then
+                      releaseTargetSlot tracker retryTarget
                     pure none
-                  else
-                    let (retryTls, retryHost, retryPort, retryPath, retryHdrs, retryWireBody) :=
-                      upstreamRequest retryTarget relPath extraHeaders retryBody
-                    let estimatedTokens := (retryWireBody.size + 3) / 4
-                    if checkContext && estimatedTokens > retryTarget.contextLimit.toNat then
-                      if let some tracker := effPacing? then
-                        releaseTargetSlot tracker retryTarget
-                      pure none
-                    else
-                      let retryStartMs ← IO.monoMsNow
-                      let retryHeadDeadlineMs? : Option Nat :=
-                        some (retryStartMs + effStreamLimits.preHeadBudgetMs)
-                      match ← openAccountRequest resolveTransport retryTarget true retryTls method retryHost
-                        retryPort retryPath retryHdrs retryWireBody effStreamLimits retryHeadDeadlineMs? bodyTimedOutRef? with
-                      | .ok (retryResp, some p) =>
-                        if let some ref := bodyTimedOutRef? then
-                          ref.set false
-                        if let some tracker := effPacing? then
-                          recordObservedHeaders tracker retryTarget.accountId retryResp.headers
-                        streamSelectedAccountRef.set retryTarget.accountId
-                        streamAttemptsRef.modify (· + 1)
-                        pure (some fun emit => do
-                          try
-                            p emit
-                          finally
-                            if let some tracker := effPacing? then
-                              releaseTargetSlot tracker retryTarget)
-                      | .error "upstream_idle_timeout" =>
-                        if let some ref := bodyTimedOutRef? then
-                          ref.set true
-                        if let some tracker := effPacing? then
-                          releaseTargetSlot tracker retryTarget
-                        pure none
-                      | _ =>
-                        if let some tracker := effPacing? then
-                          releaseTargetSlot tracker retryTarget
-                        pure none
+                  | _ =>
+                    if let some tracker := effPacing? then
+                      releaseTargetSlot tracker retryTarget
+                    pure none
                 let probeRecovery : IO (Bool × Bool × Bool) := do
                   if isCommitted then
                     return (false, false, false)
