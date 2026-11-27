@@ -99,10 +99,10 @@ The env ownership check is also useful after edits:
 ```
 
 `SANDBOXED_MANAGED_DEFAULT_PROVIDER` is a shared key in `core.env`. Leaving it
-unset keeps Core's built-in `leanci` default; when set, `orb-env check` requires
-a known managed provider (`leanci` / `lean.ci`, `boat`, `hetzner`, `vastai`,
-`scaleway`, or `colab`) and rejects unknown or empty values without disclosing
-them.
+unset or blank keeps Core's built-in `leanci` default; when set to a non-empty
+value, `orb-env check` requires a known managed provider (`leanci` / `lean.ci`,
+`boat`, `hetzner`, `vastai`, `scaleway`, or `colab`) and rejects unknown values
+without disclosing them.
 
 Settings document transfer, provider sealing, dev grants and automatic dev
 deployment are separate steps of

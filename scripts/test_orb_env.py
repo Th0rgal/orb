@@ -59,24 +59,23 @@ class OrbEnvTest(unittest.TestCase):
         self.assertEqual(env.KNOWN_MANAGED_PROVIDERS, lean_providers)
         overlay = {"ORB_INSTANCE": "dev", "PORT": "3002", "WORKING_DIR": "/var/lib/dev",
                    "JWT_SECRET": "dev-secret"}
-        # Unset (omitted) leaves Core's built-in leanci default active.
+        # Unset (omitted) or empty/ASCII-blank leaves Core's built-in leanci default active.
         env.check({}, overlay)
-        for value in ("leanci", "lean.ci", '" LeanCI "', "'lean.ci'", "boat",
-                      "hetzner", "vastai", "scaleway", "colab"):
+        for value in ("", '""', "''", '"   "', '"\t"', "leanci", "lean.ci",
+                      '" LeanCI "', "'lean.ci'", "boat", "hetzner", "vastai", "scaleway", "colab"):
             with self.subTest(value=value):
                 env.check({"SANDBOXED_MANAGED_DEFAULT_PROVIDER": value}, overlay)
 
     def test_managed_default_provider_rejects_invalid_and_wrong_layer_without_leaking_values(self):
         overlay = {"ORB_INSTANCE": "dev", "PORT": "3002", "WORKING_DIR": "/var/lib/dev",
                    "JWT_SECRET": "dev-secret"}
-        for raw_value in ("", '"   "', "nope", "secret-bogus-provider", '"\u00a0leanci\u00a0"'):
+        expected = "SANDBOXED_MANAGED_DEFAULT_PROVIDER must be a known managed provider"
+        for raw_value in ("nope", "lean-ci", "secret-bogus-provider", '"\u00a0"', '"\u00a0leanci\u00a0"'):
             with self.subTest(raw_value=raw_value):
-                with self.assertRaisesRegex(
-                    env.InvalidConfig,
-                    "SANDBOXED_MANAGED_DEFAULT_PROVIDER must be a known managed provider",
-                ) as caught:
+                with self.assertRaises(env.InvalidConfig) as caught:
                     env.check({"SANDBOXED_MANAGED_DEFAULT_PROVIDER": raw_value}, overlay)
-                self.assertNotIn("secret-bogus-provider", str(caught.exception))
+                self.assertEqual(str(caught.exception), expected)
+                self.assertNotIn(env.literal(raw_value), str(caught.exception))
         with self.assertRaisesRegex(
             env.InvalidConfig,
             "keys in the wrong layer: SANDBOXED_MANAGED_DEFAULT_PROVIDER",
@@ -95,13 +94,26 @@ class OrbEnvTest(unittest.TestCase):
         self.assertNotIn("SANDBOXED_MANAGED_DEFAULT_PROVIDER", prod)
         self.assertNotIn("SANDBOXED_MANAGED_DEFAULT_PROVIDER", dev)
 
-    def test_managed_default_provider_unset_and_invalid_in_migration(self):
+    def test_managed_default_provider_unset_blank_and_invalid_in_migration(self):
         # Unset in both inputs stays unset in core.env and overlays.
         result, _, stderr = self.cli("--apply")
         self.assertEqual(result, 0, stderr)
         for name in ("core.env", "prod.env", "dev.env"):
             self.assertNotIn("SANDBOXED_MANAGED_DEFAULT_PROVIDER",
                              env.parse_env((self.output / name).read_bytes()))
+        # Blank prod value (clearing an earlier setting) migrates cleanly to shared core.env.
+        blank_output = self.root / "blank-environments"
+        blank_prod = self.root / "blank-prod.env"
+        blank_prod.write_bytes(self.prod.read_bytes() + b"SANDBOXED_MANAGED_DEFAULT_PROVIDER=\n")
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with patch("sys.argv", [str(SCRIPT), "migrate", "--prod", str(blank_prod),
+                                "--dev", str(self.dev), "--output", str(blank_output), "--apply"]), \
+                contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            code = env.main()
+        self.assertEqual(code, 0, stderr.getvalue())
+        self.assertEqual(env.parse_env((blank_output / "core.env").read_bytes())["SANDBOXED_MANAGED_DEFAULT_PROVIDER"], "")
+        self.assertNotIn("SANDBOXED_MANAGED_DEFAULT_PROVIDER", env.parse_env((blank_output / "prod.env").read_bytes()))
+        self.assertNotIn("SANDBOXED_MANAGED_DEFAULT_PROVIDER", env.parse_env((blank_output / "dev.env").read_bytes()))
         # Invalid prod value fails closed before creating output and never discloses the value.
         bad_output = self.root / "bad-environments"
         self.prod.write_bytes(self.prod.read_bytes() + b"SANDBOXED_MANAGED_DEFAULT_PROVIDER=secret-bogus-provider\n")
@@ -111,7 +123,7 @@ class OrbEnvTest(unittest.TestCase):
                 contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
             code = env.main()
         self.assertEqual(code, 1)
-        self.assertIn("SANDBOXED_MANAGED_DEFAULT_PROVIDER must be a known managed provider", stderr.getvalue())
+        self.assertEqual(stderr.getvalue().strip(), "orb-env: SANDBOXED_MANAGED_DEFAULT_PROVIDER must be a known managed provider")
         self.assertNotIn("secret-bogus-provider", stdout.getvalue() + stderr.getvalue())
         self.assertFalse(bad_output.exists())
 

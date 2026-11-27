@@ -386,7 +386,8 @@ def check(base, overlay, policy=None):
     if literal(overlay["ORB_INSTANCE"]) not in {"prod", "dev"}:
         raise InvalidConfig("ORB_INSTANCE must be prod or dev")
     if "SANDBOXED_MANAGED_DEFAULT_PROVIDER" in base:
-        if canonical_managed_provider(literal(base["SANDBOXED_MANAGED_DEFAULT_PROVIDER"])) not in KNOWN_MANAGED_PROVIDERS:
+        provider = canonical_managed_provider(literal(base["SANDBOXED_MANAGED_DEFAULT_PROVIDER"]))
+        if provider and provider not in KNOWN_MANAGED_PROVIDERS:
             raise InvalidConfig("SANDBOXED_MANAGED_DEFAULT_PROVIDER must be a known managed provider")
 
 
