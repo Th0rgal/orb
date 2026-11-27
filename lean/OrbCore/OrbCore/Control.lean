@@ -2830,7 +2830,9 @@ private def resolveConfinedCoreMissionGitDir (st : CoreAppState) (m : MissionRec
 def resolveLocalCoreHarnessSetup
     (st : CoreAppState) (missionId ownerUserId rawHarness rawModel : String)
     (boundPort : UInt16) (nowSec : UInt64)
-    (mintedProxyTokRef : IO.Ref (Option String)) : IO (Except String OrbCore.RemoteDispatch.HarnessProxySetup) := do
+    (mintedProxyTokRef : IO.Ref (Option String))
+    (allocateVpn? : Option (String → AccountVpnRoutes.Preference → IO (Except String UInt16)) := none) :
+    IO (Except String OrbCore.RemoteDispatch.HarnessProxySetup) := do
   let hLow := rawHarness.trimAscii.toString.toLower
   let normHarness := if hLow == "claude" then "claudecode" else hLow
   let cleanModel := rawModel.trimAscii.toString
@@ -2869,12 +2871,18 @@ def resolveLocalCoreHarnessSetup
     let .ok bound? ← nativeMissionAccount? st.store missionId
       | return .error "antigravity_binding_unavailable"
     let allocateSocks := fun (acctId : String) (pref : AccountVpnRoutes.Preference) => do
-      let some pool := st.vpnPool?
-        | return .error "antigravity_vpn_coordinator_unavailable"
-      match ← AccountVpnPool.allocate pool st.store.rootDir st.vpnCoordinatorDir st.store.missionsDb acctId "antigravity" pref with
+      let allocRes ← match allocateVpn? with
+        | some fn => fn acctId pref
+        | none =>
+          let some pool := st.vpnPool?
+            | return .error "antigravity_vpn_coordinator_unavailable"
+          AccountVpnPool.allocate pool st.store.rootDir st.vpnCoordinatorDir st.store.missionsDb acctId "antigravity" pref
+      match allocRes with
       | .error e => return .error s!"antigravity_vpn_unavailable:{e}"
-      | .ok port =>
-        let proxyUrl := s!"socks5://127.0.0.1:{port}"
+      | .ok _ =>
+        let some proxyUrl := st.vpnRelayPort?.bind (fun port =>
+          AccountVpnRelay.proxyUrl (effectiveJwtSecret st.cfg) port "antigravity" acctId "127.0.0.1" "socks5h")
+          | return .error "antigravity_vpn_relay_unconfigured"
         let noProxy := "127.0.0.1,localhost,::1"
         return .ok {
           env := #[
@@ -2898,18 +2906,25 @@ def resolveLocalCoreHarnessSetup
     | none =>
       let hydrated ← loadHydratedProviders st.store st.cfg.workingDir
       let agAccounts := hydrated.filter (·.providerType == "antigravity")
-      let mut vpnAccounts : Array (String × AccountVpnRoutes.Preference) := #[]
+      let mut anyVpn := false
+      let mut enabledVpn : Array (String × AccountVpnRoutes.Preference) := #[]
+      let mut enabledCount : Nat := 0
       for hp in agAccounts do
         match ← AccountVpnRoutes.snapshot st.store.missionsDb hp.id with
         | .error _ => return .error "antigravity_vpn_route_store_unavailable"
-        | .ok (.direct _) => pure ()
-        | .ok (.vpn pref) => vpnAccounts := vpnAccounts.push (hp.id, pref)
-      if vpnAccounts.isEmpty then
+        | .ok (.direct _) =>
+          if hp.enabled then enabledCount := enabledCount + 1
+        | .ok (.vpn pref) =>
+          anyVpn := true
+          if hp.enabled then
+            enabledCount := enabledCount + 1
+            enabledVpn := enabledVpn.push (hp.id, pref)
+      if !anyVpn then
         return .ok { model := model? }
-      if agAccounts.size == 1 then
-        match vpnAccounts[0]? with
+      if enabledCount == 1 && enabledVpn.size == 1 then
+        match enabledVpn[0]? with
         | some (acctId, pref) => allocateSocks acctId pref
-        | none => return .ok { model := model? }
+        | none => return .error "antigravity_vpn_requires_account_binding"
       else
         return .error "antigravity_vpn_requires_account_binding"
   else
@@ -10217,6 +10232,11 @@ def runCoreServer (cfg : CoreConfig) (maxRequests? : Option Nat := none) : IO UI
     if let some listener := vpnRelay? then listener.stop
     AccountVpnPool.shutdown vpnPool
     closeCoreStore store
+    -- All stores, listeners, tunnels, and telemetry batches are drained and closed.
+    -- Exit immediately in daemon mode so Lean's task manager does not block waiting
+    -- on sleeping background upkeep loops (30s+ intervals) after SIGTERM.
+    if maxRequests?.isNone then
+      IO.Process.exit 0
     return 0
 
 end OrbCore.Control

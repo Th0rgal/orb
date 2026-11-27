@@ -509,7 +509,52 @@ function AccountRoutesCard(p: { onOpenPage?: (id: string) => void; refreshKey?: 
   const [filterVpnOnly, setFilterVpnOnly] = createSignal(false);
   const [routes, setRoutes] = createSignal<Record<string, AccountVpnRoute>>({});
   const [routeErrors, setRouteErrors] = createSignal<Record<string, unknown>>({});
-  const [localRefresh, setLocalRefresh] = createSignal(0);
+  const accountVersions = new Map<string, number>();
+  const savingAccounts = new Set<string>();
+  let mounted = true;
+  onCleanup(() => {
+    mounted = false;
+  });
+  const bumpAccountVersion = (id: string) => {
+    const next = (accountVersions.get(id) ?? 0) + 1;
+    accountVersions.set(id, next);
+    return next;
+  };
+  const applyRoute = (id: string, next: AccountVpnRoute) => {
+    setRouteErrors((prev) => {
+      if (!(id in prev)) return prev;
+      const copy = { ...prev };
+      delete copy[id];
+      return copy;
+    });
+    setRoutes((prev) => ({ ...prev, [id]: next }));
+  };
+  const clearRouteWithError = (id: string, err: unknown) => {
+    setRoutes((prev) => {
+      if (!(id in prev)) return prev;
+      const copy = { ...prev };
+      delete copy[id];
+      return copy;
+    });
+    setRouteErrors((prev) => ({ ...prev, [id]: err }));
+  };
+  const refreshAccount = async (id: string, versionAtStart: number, isAlive: () => boolean) => {
+    if (savingAccounts.has(id)) return;
+    const gen = accountVersions.get(id) ?? 0;
+    try {
+      const parsed = accountVpnRoute(
+        await apiMod.api<unknown>(`/api/ai/providers/${encodeURIComponent(id)}/vpn`),
+      );
+      if (!isAlive() || versionAtStart !== apiMod.connectionVersion()) return;
+      if (savingAccounts.has(id) || (accountVersions.get(id) ?? 0) !== gen) return;
+      if (parsed) applyRoute(id, parsed);
+      else clearRouteWithError(id, new Error("Account connection settings are unavailable."));
+    } catch (e) {
+      if (!isAlive() || versionAtStart !== apiMod.connectionVersion()) return;
+      if (savingAccounts.has(id) || (accountVersions.get(id) ?? 0) !== gen) return;
+      clearRouteWithError(id, e);
+    }
+  };
   const [providers] = createResource(async () => {
     const list = await apiMod.listProviders();
     return (list as ProviderAccountRow[]).filter((item) => item.has_credentials !== false);
@@ -518,35 +563,20 @@ function AccountRoutesCard(p: { onOpenPage?: (id: string) => void; refreshKey?: 
   createEffect(() => {
     const list = providers() ?? [];
     void p.refreshKey;
-    void localRefresh();
     if (!list.length) return;
     let alive = true;
     const version = apiMod.connectionVersion();
     void (async () => {
       // Bounded concurrency so cold opens stay calm and responsive.
       const queue = [...list];
-      const next: Record<string, AccountVpnRoute> = {};
-      const nextErrors: Record<string, unknown> = {};
       const workers = Array.from({ length: Math.min(4, queue.length) }, async () => {
         while (queue.length && alive && version === apiMod.connectionVersion()) {
           const item = queue.shift();
           if (!item) break;
-          try {
-            const parsed = accountVpnRoute(
-              await apiMod.api<unknown>(`/api/ai/providers/${encodeURIComponent(item.id)}/vpn`),
-            );
-            if (parsed) next[item.id] = parsed;
-            else nextErrors[item.id] = new Error("Account connection settings are unavailable.");
-          } catch (e) {
-            nextErrors[item.id] = e;
-          }
+          await refreshAccount(item.id, version, () => alive && mounted);
         }
       });
       await Promise.all(workers);
-      if (alive && version === apiMod.connectionVersion()) {
-        setRoutes(next);
-        setRouteErrors(nextErrors);
-      }
     })();
     onCleanup(() => {
       alive = false;
@@ -556,11 +586,12 @@ function AccountRoutesCard(p: { onOpenPage?: (id: string) => void; refreshKey?: 
   const sortedAccounts = createMemo(() => {
     const list = providers() ?? [];
     const map = routes();
+    const errs = routeErrors();
     const filtered = filterVpnOnly()
-      ? list.filter((a) => map[a.id]?.mode === "vpn")
+      ? list.filter((a) => map[a.id]?.mode === "vpn" || a.id in errs)
       : list.filter((a) => {
           const r = map[a.id];
-          return !r || r.mode === "vpn" || r.can_configure;
+          return !r || r.mode === "vpn" || r.can_configure || a.id in errs;
         });
     return [...filtered].sort((a, b) => {
       const aVpn = map[a.id]?.mode === "vpn" ? 0 : 1;
@@ -574,17 +605,29 @@ function AccountRoutesCard(p: { onOpenPage?: (id: string) => void; refreshKey?: 
     return (providers() ?? []).filter((a) => map[a.id]?.mode === "vpn").length;
   });
 
+  const errorCount = createMemo(() => {
+    const errs = routeErrors();
+    return (providers() ?? []).filter((a) => a.id in errs).length;
+  });
+
+  const summaryTitle = () => {
+    if (providers.loading) return "Loading provider accounts…";
+    const vpns = vpnCount();
+    const errs = errorCount();
+    if (errs > 0 && vpns === 0) {
+      return `Could not confirm ${errs} account route${errs === 1 ? "" : "s"}`;
+    }
+    const base = `${vpns} account${vpns === 1 ? "" : "s"} routed via AirVPN`;
+    return errs > 0 ? `${base} · ${errs} unconfirmed` : base;
+  };
+
   return (
     <SettingsCard
       title="Account routes"
       hint="Choose whether each connected provider account exits directly or through a verified AirVPN country."
     >
       <SettingsRow
-        title={
-          providers.loading
-            ? "Loading provider accounts…"
-            : `${vpnCount()} account${vpnCount() === 1 ? "" : "s"} routed via AirVPN`
-        }
+        title={summaryTitle()}
         desc="Accounts in the same provider category automatically receive disjoint public exit IPs."
       >
         <Show when={(providers()?.length ?? 0) > 0}>
@@ -615,25 +658,25 @@ function AccountRoutesCard(p: { onOpenPage?: (id: string) => void; refreshKey?: 
             account={account}
             route={routes()[account.id]}
             readError={routeErrors()[account.id]}
+            onSaveStart={() => {
+              savingAccounts.add(account.id);
+              bumpAccountVersion(account.id);
+            }}
+            onSaveEnd={() => {
+              savingAccounts.delete(account.id);
+            }}
             onUpdated={(next) => {
-              setRouteErrors((prev) => {
-                if (!(account.id in prev)) return prev;
-                const copy = { ...prev };
-                delete copy[account.id];
-                return copy;
-              });
-              setRoutes((prev) => ({ ...prev, [account.id]: next }));
+              bumpAccountVersion(account.id);
+              applyRoute(account.id, next);
             }}
             onUnconfirmed={(err) => {
-              setRoutes((prev) => {
-                if (!(account.id in prev)) return prev;
-                const copy = { ...prev };
-                delete copy[account.id];
-                return copy;
-              });
-              setRouteErrors((prev) => ({ ...prev, [account.id]: err }));
+              if (savingAccounts.has(account.id)) return;
+              clearRouteWithError(account.id, err);
             }}
-            onRetryRead={() => setLocalRefresh((v) => v + 1)}
+            onRetryRead={() => {
+              const version = apiMod.connectionVersion();
+              void refreshAccount(account.id, version, () => mounted);
+            }}
           />
         )}
       </For>
@@ -645,6 +688,8 @@ function AccountRouteSummaryRow(p: {
   account: ProviderAccountRow;
   route: AccountVpnRoute | undefined;
   readError?: unknown;
+  onSaveStart: () => void;
+  onSaveEnd: () => void;
   onUpdated: (route: AccountVpnRoute) => void;
   onUnconfirmed: (err: unknown) => void;
   onRetryRead: () => void;
@@ -664,11 +709,11 @@ function AccountRouteSummaryRow(p: {
       async () => {
         try {
           const next = accountVpnRoute(await apiMod.api<unknown>(uri()));
-          if (!active || version !== apiMod.connectionVersion()) return;
+          if (!active || busy() || version !== apiMod.connectionVersion()) return;
           if (next) p.onUpdated(next);
           else p.onUnconfirmed(new Error("Account connection settings are unavailable."));
         } catch (e) {
-          if (active && version === apiMod.connectionVersion()) p.onUnconfirmed(e);
+          if (active && !busy() && version === apiMod.connectionVersion()) p.onUnconfirmed(e);
         }
       },
       pollMs,
@@ -684,6 +729,7 @@ function AccountRouteSummaryRow(p: {
     const version = apiMod.connectionVersion();
     setBusy(true);
     setError("");
+    p.onSaveStart();
     try {
       const next = accountVpnRoute(
         await apiMod.api<unknown>(uri(), {
@@ -700,6 +746,7 @@ function AccountRouteSummaryRow(p: {
         setError(e instanceof Error ? e.message : String(e));
       }
     } finally {
+      p.onSaveEnd();
       setBusy(false);
     }
   }

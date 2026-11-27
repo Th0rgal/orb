@@ -1966,6 +1966,12 @@ private def memberNativeCatalog (store : CoreStore) (root : String) : IO Unit :=
       let adminModels ← nativeCatalogForRequest .unrestricted adminRouted store root "admin-user" "/" true true false
       unless adminModels.contains ("first-model", "First model") && (← adminSeen.get).contains a.id do
         throw (IO.userError "admin unrestricted catalog bypassed per-account VPN transport")
+      -- `force := true` must bypass the 300s `memberAgyCatalogs` cache on the same hub and fail closed immediately.
+      let adminForcedUnavail ← (nativeCatalogForRequest .unrestricted
+        { adminRouted with resolveTransport? := some fun _ _ => pure (.error "offline") }
+        store root "admin-user" "/" true true true).toBaseIO
+      if adminForcedUnavail.isOk then
+        throw (IO.userError "admin unrestricted catalog with force=true returned stale cached models instead of failing closed")
       let adminDeniedHub ← newProviderRuntimeHub
       let adminDenied := { adminDeniedHub with resolveTransport? := some fun _ _ => pure (.error "offline") }
       let adminUnavail ← (nativeCatalogForRequest .unrestricted adminDenied store root "admin-user" "/" true true false).toBaseIO
@@ -2259,26 +2265,61 @@ private def v1LocalHarnessAndChainRefreshContract
   let agId := "v1-refresh-ag"
   let agFile := "antigravity-v1-refresh.json"
   let agPath := s!"{root}/auth-empty/{agFile}"
+  let staleLegId := "v1-stale-legacy-openai"
+  let liveCodexFile := "codex-live-v1.json"
+  let liveCodexPath := s!"{root}/auth-empty/{liveCodexFile}"
+  let liveCodexId := fileAccountId "openai" liveCodexFile
   let xaiId := "v1-local-xai"
   let chainId := "v1-refresh-chain"
+  let boundMid := "v1-bound-ag-mission"
   let origProvidersRaw ← IO.FS.readFile s!"{root}/.sandboxed-sh/ai_providers.json"
   try
     let .ok origArr := (OrbBin.Json.parse origProvidersRaw).map (fun j => j.asArr?.getD #[])
       | throw (IO.userError "v1 orig providers parse failed")
     IO.FS.writeFile agPath "{\"type\":\"antigravity\",\"email\":\"v1-refresh@fixture.invalid\",\"access_token\":\"fixture-tok\"}"
+    IO.FS.writeFile liveCodexPath "{\"type\":\"codex\",\"email\":\"shared-v1@fixture.invalid\",\"access_token\":\"fixture-codex\"}"
     let agLegacy := JVal.obj #[
       ("id", .str agId), ("provider_type", .str "antigravity"), ("name", .str "V1 Refresh AG"),
       ("enabled", .bool true), ("cli_proxy_auth_file", .str agFile)
     ]
-    IO.FS.writeFile s!"{root}/.sandboxed-sh/ai_providers.json" (renderCompact (.arr (origArr.push agLegacy)))
+    let staleLegacy := JVal.obj #[
+      ("id", .str staleLegId), ("provider_type", .str "openai"), ("name", .str "V1 Stale Legacy"),
+      ("enabled", .bool true), ("cli_proxy_auth_file", .str "missing-old-v1.json"),
+      ("account_email", .str "shared-v1@fixture.invalid")
+    ]
+    -- Disable any pre-existing fixture antigravity row so `agId` is the sole enabled Antigravity login
+    -- alongside a disabled Antigravity row (verifying unbound local turns resolve enabled logins).
+    let updatedOrig := origArr.map fun row =>
+      if row.fieldStr? "provider_type" == some "antigravity" then row.setField "enabled" (.bool false) else row
+    IO.FS.writeFile s!"{root}/.sandboxed-sh/ai_providers.json"
+      (renderCompact (.arr ((updatedOrig.push agLegacy).push staleLegacy)))
     IO.ofExcept (← upsertAIProvider store {
       id := agId, providerType := "antigravity", name := "V1 Refresh AG", enabled := true,
+      apiKey := "cli-proxy-managed", updatedAt := "1700001000"
+    })
+    IO.ofExcept (← upsertAIProvider store {
+      id := liveCodexId, providerType := "openai", name := "V1 Bound Codex", enabled := true,
       apiKey := "cli-proxy-managed", updatedAt := "1700001000"
     })
     IO.ofExcept (← upsertAIProvider store {
       id := xaiId, providerType := "xai", name := "V1 Local xAI", enabled := true,
       apiKey := "sk-v1-xai", updatedAt := "1700001000"
     })
+
+    -- 0. Regression: a stale-filename legacy row sharing an email with a strictly bound row
+    --    must NOT steal the live file or break `accountRoutingFile` on the bound row.
+    let hydratedV1 ← loadHydratedProviders store root
+    let some boundCodex := hydratedV1.find? (·.id == liveCodexId)
+      | throw (IO.userError "v1: bound codex row missing")
+    let some staleRow := hydratedV1.find? (·.id == staleLegId)
+      | throw (IO.userError "v1: stale legacy row missing")
+    if boundCodex.boundOauthFile != liveCodexFile ||
+       accountRoutingFile hydratedV1 boundCodex != liveCodexFile ||
+       !staleRow.boundOauthFile.isEmpty ||
+       staleRow.oauthFile == liveCodexFile ||
+       !(accountRoutingFile hydratedV1 staleRow).isEmpty then
+      failures := failures.push s!"v1: stale legacy row collided with bound row: bound={boundCodex.boundOauthFile}/{accountRoutingFile hydratedV1 boundCodex} stale={staleRow.boundOauthFile}/{staleRow.oauthFile}"
+
     -- 1. `resolveLocalCoreHarnessSetup`: mixed-case `Grok` with boundPort routes through Core router.
     let tokRef ← IO.mkRef (none : Option String)
     match ← resolveLocalCoreHarnessSetup app "v1-mid" "" "Grok" "xai/grok-4" 3123 now tokRef with
@@ -2298,12 +2339,34 @@ private def v1LocalHarnessAndChainRefreshContract
       | .error "local_harness_vpn_requires_router" => pure ()
       | other => failures := failures.push s!"v1 local {h} boundPort=0 with VPN must fail closed, got {other.isOk}"
     IO.ofExcept (← AccountVpnRoutes.set store.missionsDb xaiId none)
-    -- With an Antigravity account VPN-routed and no pool, local `antigravity` fails closed.
+    -- Bound local `antigravity` mission + unbound with 1 enabled VPN login alongside a disabled login.
+    let boundJob ← startNativeFixtureJob store boundMid
+    let boundTok ← IO.ofExcept (← mintNativeAntigravityToken store boundMid "admin" boundJob agId "gemini-4-carbon" (now + 300))
     IO.ofExcept (← AccountVpnRoutes.set store.missionsDb agId (some "CH"))
-    match ← resolveLocalCoreHarnessSetup { app with vpnPool? := none } "v1-mid" "" "Antigravity" "gemini-4-carbon" 3123 now tokRef with
+    -- (a) Bound mission with no pool -> exact `antigravity_vpn_coordinator_unavailable`.
+    match ← resolveLocalCoreHarnessSetup { app with vpnPool? := none } boundMid "" "Antigravity" "gemini-4-carbon" 3123 now tokRef with
     | .error "antigravity_vpn_coordinator_unavailable" => pure ()
-    | .error "antigravity_vpn_requires_account_binding" => pure ()
-    | other => failures := failures.push s!"v1 local antigravity with VPN and no pool must fail closed, got {other.isOk}"
+    | other => failures := failures.push s!"v1 bound local antigravity with no pool must fail with coordinator_unavailable, got {other.isOk}"
+    -- (b) Unbound mission with 1 enabled VPN Antigravity login + 1 disabled login -> reaches coordinator (not `requires_account_binding`).
+    match ← resolveLocalCoreHarnessSetup { app with vpnPool? := none } "v1-unbound-mid" "" "antigravity" "gemini-4-carbon" 3123 now tokRef with
+    | .error "antigravity_vpn_coordinator_unavailable" => pure ()
+    | other => failures := failures.push s!"v1 unbound local antigravity with 1 enabled + 1 disabled login must resolve enabled login, got {other.isOk}"
+    -- (c) Bound mission with verified allocation but no relay port -> fails closed with `antigravity_vpn_relay_unconfigured`.
+    let mockAlloc : String → AccountVpnRoutes.Preference → IO (Except String UInt16) := fun _ _ => pure (.ok 39999)
+    match ← resolveLocalCoreHarnessSetup { app with vpnRelayPort? := none } boundMid "" "antigravity" "gemini-4-carbon" 3123 now tokRef (some mockAlloc) with
+    | .error "antigravity_vpn_relay_unconfigured" => pure ()
+    | other => failures := failures.push s!"v1 bound local antigravity without relay must fail closed, got {other.isOk}"
+    -- (d) Bound mission with verified allocation and relay port -> routes via authenticated `AccountVpnRelay` `socks5h://` URL (never raw wireproxy port).
+    let expectedRelay? := AccountVpnRelay.proxyUrl app.cfg.jwtSecret 43210 "antigravity" agId "127.0.0.1" "socks5h"
+    match ← resolveLocalCoreHarnessSetup { app with vpnRelayPort? := some 43210 } boundMid "" "antigravity" "gemini-4-carbon" 3123 now tokRef (some mockAlloc) with
+    | .error e => failures := failures.push s!"v1 bound local antigravity with relay failed: {e}"
+    | .ok setup =>
+      let okRelay := expectedRelay?.any fun expectedUrl =>
+        #["HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy"].all fun k =>
+          setup.env.any (fun kv => kv.1 == k && kv.2 == expectedUrl)
+      if !okRelay || setup.env.any (fun kv => (kv.2.splitOn ":39999").length > 1) then
+        failures := failures.push s!"v1 bound local antigravity must use authenticated socks5h AccountVpnRelay URL, got {setup.env}"
+    revokeSingleMissionProxyToken store boundTok
     IO.ofExcept (← AccountVpnRoutes.set store.missionsDb agId none)
     -- When all routes are Direct, local `grok` (boundPort=0) and `antigravity` succeed.
     discard <| execParamQuery store.missionsDb "DELETE FROM account_vpn_routes;" #[]
@@ -2312,7 +2375,8 @@ private def v1LocalHarnessAndChainRefreshContract
     if !(← resolveLocalCoreHarnessSetup { app with vpnPool? := none } "v1-mid" "" "antigravity" "gemini-4-carbon" 0 now tokRef).isOk then
       failures := failures.push "v1 local direct antigravity should succeed"
 
-    -- 2. Live `chainsRef` refresh on `PUT /alternative-routers` and `PUT /vpn` via real sidecar management endpoints.
+    -- 2. Live `chainsRef` refresh on `PUT /alternative-routers` and `PUT /vpn` (including sidecar `orb-vpn-*` prefix)
+    --    via real sidecar management endpoints.
     let (createSt, _) ← postJson app jwt "/api/model-routing/chains"
       (renderCompact (.obj #[
         ("id", .str chainId),
@@ -2321,18 +2385,24 @@ private def v1LocalHarnessAndChainRefreshContract
       ])) now
     if createSt != 201 then
       failures := failures.push s!"v1: create chain expected 201, got {createSt}"
-    let hasTarget := fun () => do
+    let chainTarget? := fun () => do
       let chs ← app.chainsRef.get
-      return chs.any (fun c => c.id == chainId && c.targets.any (·.accountId == agId))
+      return (chs.find? (·.id == chainId)).bind (fun c => c.targets.find? (·.accountId == agId))
+    let hasTarget := fun () => do return (← chainTarget? ()).isSome
     let (scFd, scPort) ← IO.ofExcept (← LeanSys.Posix.tcpListen "127.0.0.1" 0 8)
     let scStop ← IO.mkRef false
     let exclRef ← IO.mkRef (#[] : Array String)
-    let writeAgFile := fun (excl : Array String) =>
-      IO.FS.writeFile agPath (renderCompact (.obj #[
+    let proxyUrlRef ← IO.mkRef ""
+    let prefixRef ← IO.mkRef ""
+    let writeAgFile := fun (excl : Array String) (proxyUrl pfx : String) => do
+      let mut fields : Array (String × JVal) := #[
         ("type", .str "antigravity"), ("email", .str "v1-refresh@fixture.invalid"),
         ("access_token", .str "fixture-tok"), ("excluded_models", .arr (excl.map JVal.str))
-      ]))
-    writeAgFile #[]
+      ]
+      if !proxyUrl.isEmpty then fields := fields.push ("proxy_url", .str proxyUrl)
+      if !pfx.isEmpty then fields := fields.push ("prefix", .str pfx)
+      IO.FS.writeFile agPath (renderCompact (.obj fields))
+    writeAgFile #[] "" ""
     let scSrv ← IO.asTask (prio := .dedicated) do
       while !(← scStop.get) do
         match ← LeanSys.Posix.tcpAcceptPoll scFd 50 with
@@ -2347,9 +2417,19 @@ private def v1LocalHarnessAndChainRefreshContract
                 pure (200, content)
               else if req.method == "PATCH" && req.path == "/v8/management/credentials/fields" then
                 let jv := (OrbBin.Json.parseBytes req.bodySlice.toByteArray).toOption.getD .null
-                let nextExcl := ((jv.fieldArr? "excluded_models").getD #[]).filterMap JVal.asStr?
+                let nextExcl ← match jv.fieldArr? "excluded_models" with
+                  | some arr => pure (arr.filterMap JVal.asStr?)
+                  | none => exclRef.get
+                let nextProxy ← match jv.fieldStr? "proxy_url" with
+                  | some s => pure s
+                  | none => proxyUrlRef.get
+                let nextPfx ← match jv.fieldStr? "prefix" with
+                  | some s => pure s
+                  | none => prefixRef.get
                 exclRef.set nextExcl
-                writeAgFile nextExcl
+                proxyUrlRef.set nextProxy
+                prefixRef.set nextPfx
+                writeAgFile nextExcl nextProxy nextPfx
                 pure (200, "{\"status\":\"ok\"}")
               else if req.method == "GET" && req.path.startsWith "/v8/management/credentials/models" then
                 let ex ← exclRef.get
@@ -2362,8 +2442,10 @@ private def v1LocalHarnessAndChainRefreshContract
           discard <| LeanSys.Posix.closeFd client
     let prevCliBase ← IO.getEnv "CLI_PROXY_API_BASE_URL"
     let prevCliKey ← IO.getEnv "CLI_PROXY_MANAGEMENT_KEY"
+    let prevCliApiKey ← IO.getEnv "CLI_PROXY_API_KEY"
     setenvVar "CLI_PROXY_API_BASE_URL" s!"http://127.0.0.1:{scPort}"
     setenvVar "CLI_PROXY_MANAGEMENT_KEY" "v1-fixture-mgmt-key"
+    setenvVar "CLI_PROXY_API_KEY" "v1-fixture-api-key"
     try
       app.chainsRef.set (← loadRoutingChainsFromStore store root)
       unless ← hasTarget () do
@@ -2374,15 +2456,29 @@ private def v1LocalHarnessAndChainRefreshContract
       let (enSt, _) ← putJson app jwt s!"/api/ai/providers/{agId}/alternative-routers" "{\"allowed\":true}" now
       if enSt != 200 || !(← hasTarget ()) then
         failures := failures.push s!"v1: PUT /alternative-routers true must immediately restore target in chainsRef (status={enSt})"
-      -- Clear `chainsRef` and verify `PUT /vpn` refreshes it immediately without restart.
-      app.chainsRef.set #[]
+      -- Enabling VPN on the sidecar OAuth account via `PUT /vpn` must immediately update `orb-vpn-*` prefix in `chainsRef`,
+      -- and switching back to Direct must clear it immediately without restarting Core.
       let testPool ← Std.Mutex.new ({} : AccountVpnPool.PoolState)
-      let (vpnSt, _) ← putJson { app with vpnPool? := some testPool } jwt s!"/api/ai/providers/{xaiId}/vpn" "{\"mode\":\"direct\"}" now
-      if vpnSt != 200 || !(← hasTarget ()) then
-        failures := failures.push s!"v1: PUT /vpn must immediately refresh chainsRef (status={vpnSt})"
+      let vpnApp := { app with vpnPool? := some testPool, vpnRelayPort? := some 43210 }
+      let expectedPrefix := vpnModelPrefix agFile
+      let (vpnOnSt, _) ← putJson vpnApp jwt s!"/api/ai/providers/{agId}/vpn" "{\"mode\":\"vpn\",\"country\":\"NL\"}" now
+      let afterOn? ← chainTarget? ()
+      let hasVpnPrefix := afterOn?.any fun t =>
+        t.modelId == s!"{expectedPrefix}/gemini-4-neon-high" &&
+        t.sidecarCredential?.any (fun c => c.modelPrefix == expectedPrefix)
+      if vpnOnSt != 200 || !hasVpnPrefix then
+        failures := failures.push s!"v1: PUT /vpn enable must immediately refresh sidecar orb-vpn-* prefix in chainsRef (status={vpnOnSt}, target={afterOn?.map (·.modelId)})"
+      let (vpnOffSt, _) ← putJson vpnApp jwt s!"/api/ai/providers/{agId}/vpn" "{\"mode\":\"direct\"}" now
+      let afterOff? ← chainTarget? ()
+      let clearedPrefix := afterOff?.any fun t =>
+        t.modelId == "gemini-4-neon-high" &&
+        t.sidecarCredential?.any (fun c => c.modelPrefix.isEmpty)
+      if vpnOffSt != 200 || !clearedPrefix then
+        failures := failures.push s!"v1: PUT /vpn direct must immediately clear sidecar orb-vpn-* prefix in chainsRef (status={vpnOffSt}, target={afterOff?.map (·.modelId)})"
     finally
       match prevCliBase with | some v => setenvVar "CLI_PROXY_API_BASE_URL" v | none => unsetenvVar "CLI_PROXY_API_BASE_URL"
       match prevCliKey with | some v => setenvVar "CLI_PROXY_MANAGEMENT_KEY" v | none => unsetenvVar "CLI_PROXY_MANAGEMENT_KEY"
+      match prevCliApiKey with | some v => setenvVar "CLI_PROXY_API_KEY" v | none => unsetenvVar "CLI_PROXY_API_KEY"
       scStop.set true
       discard <| IO.wait scSrv
       discard <| LeanSys.Posix.closeFd scFd
@@ -2391,9 +2487,11 @@ private def v1LocalHarnessAndChainRefreshContract
     discard <| AccountVpnRoutes.set store.missionsDb xaiId none
     discard <| execParamQuery store.missionsDb "DELETE FROM model_routing_chains WHERE id=?1;" #[chainId]
     discard <| deleteAIProvider store agId
+    discard <| deleteAIProvider store liveCodexId
     discard <| deleteAIProvider store xaiId
     IO.FS.writeFile s!"{root}/.sandboxed-sh/ai_providers.json" origProvidersRaw
     discard <| (IO.FS.removeFile agPath).toBaseIO
+    discard <| (IO.FS.removeFile liveCodexPath).toBaseIO
   return failures
 
 def run : IO Unit := do
