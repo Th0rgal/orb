@@ -289,21 +289,33 @@ structure LiveSubscription where
   olderFetch : IO.Ref (Option (Int × IO Unit))
   stop : IO Unit
 
-private def parseHistoryEntries (packed : String) : List (String × String) :=
+private def parseHistoryTurnKind : String → HistoryTurnKind
+  | "p" => .plainAssistant
+  | "c" => .unmatchedCanonical
+  | _ => .other
+
+private def parseHistoryEntries (packed : String) : List (String × String × HistoryTurnKind) :=
   if packed.isEmpty then []
   else (packed.splitOn "\x1d").filterMap fun raw =>
     match raw.splitOn "\x1c" with
+    | [tid, kindStr, body] =>
+      let turn := (body.replace "\x1e" "\n").replace "\x1f" "\t"
+      if turn.isEmpty then none else some (tid, turn, parseHistoryTurnKind kindStr)
     | [tid, body] =>
       let turn := (body.replace "\x1e" "\n").replace "\x1f" "\t"
-      if turn.isEmpty then none else some (tid, turn)
+      if turn.isEmpty then none else some (tid, turn, .other)
     | _ =>
       let turn := (raw.replace "\x1e" "\n").replace "\x1f" "\t"
-      if turn.isEmpty then none else some ("", turn)
+      if turn.isEmpty then none else some ("", turn, .other)
 
 private def parseHistoryBatch (hasMoreStr cursorStr packed : String) : HistoryBatch :=
   let nextCursor := cursorStr.toInt?
   let hasMore := hasMoreStr == "1" && nextCursor.isSome
-  { turns := parseHistoryEntries packed, hasMore, nextCursor := if hasMore then nextCursor else none }
+  let parsed := parseHistoryEntries packed
+  { turns := parsed.map (fun (tid, turn, _) => (tid, turn))
+    turnKinds := parsed.map (fun (_, _, kind) => kind)
+    hasMore
+    nextCursor := if hasMore then nextCursor else none }
 
 private def readSample (line : String) : Option LiveUpdate := do
   match splitTab line with
@@ -317,7 +329,10 @@ private def readSample (line : String) : Option LiveUpdate := do
   | ["HS", hasMoreStr, cursorStr, packed] =>
     return .sample none none (some (parseHistoryBatch hasMoreStr cursorStr packed)) none
   | ["HS", packed] =>
-    return .sample none none (some { turns := parseHistoryEntries packed }) none
+    let parsed := parseHistoryEntries packed
+    return .sample none none (some {
+      turns := parsed.map (fun (tid, turn, _) => (tid, turn))
+      turnKinds := parsed.map (fun (_, _, kind) => kind) }) none
   -- One on-demand older history page, oldest first (originating cursor stamped by `startOlderFetch`).
   | ["HO", hasMoreStr, cursorStr, packed] =>
     return .sample none none none (some (.page 0 (parseHistoryBatch hasMoreStr cursorStr packed)))
@@ -486,7 +501,8 @@ private def mergeRoster (st : DesktopState) (records : List String) : DesktopSta
 /-- The window thread owns selection and damage. Each reader owns a fresh,
 single-value mailbox, so a retired subscription cannot update a new mission. -/
 def readLiveFrame (slot : IO.Ref (Option LiveSubscription)) (scale : Nat) (viewport : LeanUI.Rect)
-    (st : DesktopState) (notify : IO Unit := pure ()) : IO (DesktopState × LeanUI.Damage) := do
+    (st : DesktopState) (notify : IO Unit := pure ())
+    (logicalSubSize? : Option (LeanUI.SubPx × LeanUI.SubPx) := none) : IO (DesktopState × LeanUI.Damage) := do
   if st.openAccountForm then
     let st := { st with openAccountForm := false, writeError := "" }
     try
@@ -657,9 +673,9 @@ def readLiveFrame (slot : IO.Ref (Option LiveSubscription)) (scale : Nat) (viewp
   | .invalid => closeLiveSubscription slot; return invalidate
   | .sample roster bubble history older =>
     let isUnavailable := match bubble with | some .unavailable => true | _ => false
-    -- Retire any in-flight older-page fetch when its result arrives, or when a
-    -- fresh `/open` (`HS`) or access-loss (`X`) invalidates the active fetch window.
-    if older.isSome || history.isSome || isUnavailable then
+    -- Retire any in-flight older-page fetch when its result arrives or access is lost.
+    -- A tail-only recovery-merge `HS` keeps an in-flight older fetch alive if its cursor still matches.
+    if older.isSome || isUnavailable then
       if let some (_, stopOlder) ← sub.olderFetch.swap none then stopOlder
     -- The roster can finish after a newer transcript read. Keep the selected
     -- conversation's title, status and text together across that arrival.
@@ -702,19 +718,17 @@ def readLiveFrame (slot : IO.Ref (Option LiveSubscription)) (scale : Nat) (viewp
       return (next, startDamage.orElse (fun _ => if changed then some viewport else damage))
     -- Cold open / recovery: the persisted timeline populates or merges completed
     -- turns before the bubble frame is applied to the same state.
-    let (st, histDamage) := match history with
-      | some batch =>
-        let (st', dmg) := applyHistoryBatch scale viewport st sub.mission batch
-        if st'.historyLoading then
-          ({ st' with historyLoading := false }, dmg.orElse fun _ => some (transcriptDamageRect scale viewport st'.sidebarWidth))
-        else (st', dmg)
-      | none => (st, none)
+    let (st, histDamage, historyReplaced) := match history with
+      | some batch => applyHistoryBatchEx scale viewport st sub.mission batch
+      | none => (st, none, false)
+    if historyReplaced then
+      if let some (_, stopOlder) ← sub.olderFetch.swap none then stopOlder
     let (st, olderDamage) := match older with
       | some (.page reqCursor batch) =>
-        if history.isSome then (st, none)
-        else applyOlderHistoryBatch scale viewport st sub.mission batch (some reqCursor)
+        if historyReplaced then (st, none)
+        else applyOlderHistoryBatch scale viewport st sub.mission batch (some reqCursor) logicalSubSize?
       | some (.failed reqCursor) =>
-        if history.isSome then (st, none)
+        if historyReplaced then (st, none)
         else if st.openMission == some sub.mission && st.historyHasMore && st.historyNextCursor == some reqCursor then
           ({ st with historyLoading := false, historyLoadError := true },
            some (transcriptDamageRect scale viewport st.sidebarWidth))
