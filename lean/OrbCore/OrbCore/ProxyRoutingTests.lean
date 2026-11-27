@@ -819,11 +819,37 @@ where
       rbUsage.input == 100 && rbUsage.output == 340 && rbUsage.cacheRead == 20 && rbUsage.reasoning == 15)
     s!"oversized (> tailCap) response.completed must finish ok with exact usage: ok={rbOk} size={rbCopy.size} class={rbClass} usage={repr rbUsage}"
 
-  -- (c) Single terminal `response.completed` frame exceeding `maxCopyBytes` (split across small chunks,
-  --     flipping `modeRef` to `some false`) must still classify as `ok` and preserve usage.
+  -- Gemini `:streamGenerateContent` top-level `usageMetadata` must be extracted in BOTH
+  -- verbatim (`≤ tailCap` / non-truncated) and condensed (`> tailCap`) paths.
+  let gemDelta := "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"0123456789abcdef0123456789abcdef\"}]}}]}\n\n"
+  let gemSmallFinal :=
+    "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"done\"}]},\"finishReason\": \"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":40,\"cachedContentTokenCount\":10,\"candidatesTokenCount\":25,\"thoughtsTokenCount\":5}}\n\n"
+  let gemBigFinal :=
+    s!"data: \{\"candidates\":[\{\"content\":\{\"parts\":[\{\"functionCall\":\{\"name\":\"write\",\"args\":\{\"body\":\"{padStr}\"}}}]},\"finishReason\": \"STOP\"}],\"usageMetadata\":\{\"promptTokenCount\":90,\"cachedContentTokenCount\":20,\"candidatesTokenCount\":35,\"thoughtsTokenCount\":7}}\n\n"
+  let gemSmallUsage := extractProxyUsage (gemDelta ++ gemSmallFinal).toUTF8
+  check (gemSmallUsage.input == 30 && gemSmallUsage.cacheRead == 10 && gemSmallUsage.output == 30 && gemSmallUsage.reasoning == 5)
+    s!"verbatim top-level Gemini usageMetadata must extract exact usage: {repr gemSmallUsage}"
+  let gemBigPump : BodyPump := fun emit => do
+    for _ in [0:8] do
+      if !(← emit gemDelta.toUTF8) then return (ByteArray.empty, false)
+    if !(← emit gemBigFinal.toUTF8) then return (ByteArray.empty, false)
+    return (ByteArray.empty, true)
+  let (gbCopy, gbOk) ← recoverBufferedStream "text/event-stream" gemBigPump (pure ()) (fun _ => pure none) none
+    (fun _ => pure true) (maxCopyBytes := 768)
+  let gbClass := classifyProxyStreamOutcome "text/event-stream" true gbCopy gbOk false
+  let gbUsage := extractProxyUsage gbCopy
+  check (gbOk && gbCopy.size ≤ 768 && gbClass == "ok" &&
+      gbUsage.input == 70 && gbUsage.cacheRead == 20 && gbUsage.output == 42 && gbUsage.reasoning == 7)
+    s!"oversized (> tailCap) Gemini functionCall + top-level usageMetadata must finish ok with exact usage: ok={gbOk} size={gbCopy.size} class={gbClass} usage={repr gbUsage}"
+
+  -- (c) Single terminal frame exceeding `maxCopyBytes` (split across small chunks, flipping `modeRef`
+  --     to `some false`) must:
+  --     1. Preserve usage even when `"metadata": {"category": "usage"}` appears AFTER `"usage": {...}`
+  --     2. Recognize spaced JSON finish reasons (`"finishReason": "SAFETY"`, `"finish_reason": "content_filter"`)
+  --     3. Detect top-level `"error": {"type": "server_error", ...}` as `stream_incomplete`.
   let hugePad := String.ofList (List.replicate 1100 'y')
   let hugeCompleted :=
-    s!"event: response.completed\ndata: \{\"type\":\"response.completed\",\"response\":\{\"id\":\"resp_huge\",\"status\":\"completed\",\"output\":[\{\"text\":\"{hugePad}\"}],\"usage\":\{\"input_tokens\":50,\"output_tokens\":77}}}\n\n"
+    s!"event: response.completed\ndata: \{\"type\": \"response.completed\", \"response\": \{\"id\": \"resp_huge\", \"status\": \"completed\", \"output\": [\{\"text\": \"{hugePad}\"}], \"usage\": \{\"input_tokens\": 50, \"output_tokens\": 77}, \"metadata\": \{\"category\": \"usage\"}}}\n\n"
   let hugeBytes := hugeCompleted.toUTF8
   let hugePump : BodyPump := fun emit => do
     for _ in [0:6] do
@@ -839,7 +865,40 @@ where
   let hClass := classifyProxyStreamOutcome "text/event-stream" true hCopy hOk false
   let hUsage := extractProxyUsage hCopy
   check (hOk && hCopy.size ≤ 768 && hClass == "ok" && hUsage.input == 50 && hUsage.output == 77)
-    s!"single terminal frame > maxCopyBytes split across chunks must finish ok with intact usage: ok={hOk} size={hCopy.size} class={hClass} usage={repr hUsage}"
+    s!"single terminal frame > maxCopyBytes with trailing metadata=usage must finish ok with intact usage: ok={hOk} size={hCopy.size} class={hClass} usage={repr hUsage}"
+
+  let hugeSpacedGem :=
+    s!"data: \{\"candidates\": [\{\"content\": \{\"parts\": [\{\"text\": \"{hugePad}\"}]}, \"finishReason\": \"SAFETY\"}], \"usageMetadata\": \{\"promptTokenCount\": 30, \"candidatesTokenCount\": 11}}\n\n"
+  let hugeSpacedBytes := hugeSpacedGem.toUTF8
+  let hugeSpacedPump : BodyPump := fun emit => do
+    for _ in [0:6] do
+      if !(← emit gemDelta.toUTF8) then return (ByteArray.empty, false)
+    let mut off := 0
+    while off < hugeSpacedBytes.size do
+      let next := Nat.min hugeSpacedBytes.size (off + 89)
+      if !(← emit (hugeSpacedBytes.extract off next)) then return (ByteArray.empty, false)
+      off := next
+    return (ByteArray.empty, true)
+  let (hsCopy, hsOk) ← recoverBufferedStream "text/event-stream" hugeSpacedPump (pure ()) (fun _ => pure none) none
+    (fun _ => pure true) (maxCopyBytes := 768)
+  let hsClass := classifyProxyStreamOutcome "text/event-stream" true hsCopy hsOk false
+  let hsUsage := extractProxyUsage hsCopy
+  check (hsOk && hsCopy.size ≤ 768 && hsClass == "ok" && hsUsage.input == 30 && hsUsage.output == 11)
+    s!"oversized spaced Gemini finishReason=SAFETY must finish ok with intact usage: ok={hsOk} size={hsCopy.size} class={hsClass} usage={repr hsUsage}"
+
+  let hugeErrBytes := (s!"data: \{\"error\": \{\"message\": \"{hugePad}\", \"type\": \"server_error\"}}\n\n").toUTF8
+  let hugeErrPump : BodyPump := fun emit => do
+    let mut off := 0
+    while off < hugeErrBytes.size do
+      let next := Nat.min hugeErrBytes.size (off + 83)
+      if !(← emit (hugeErrBytes.extract off next)) then return (ByteArray.empty, false)
+      off := next
+    return (ByteArray.empty, true)
+  let (heCopy, heOk) ← recoverBufferedStream "text/event-stream" hugeErrPump (pure ()) (fun _ => pure none) none
+    (fun _ => pure true) (maxCopyBytes := 768)
+  let heClass := classifyProxyStreamOutcome "text/event-stream" true heCopy heOk false
+  check (heClass == "stream_incomplete")
+    s!"oversized top-level error object frame must classify as stream_incomplete: ok={heOk} class={heClass} copy={String.fromUTF8? heCopy}"
 
   -- (d) Large uncommitted prefix exceeding `headCap` on the very first flush must still populate
   --     `emittedHeadRef` with the opening `message_start` frame so Anthropic input tokens survive.

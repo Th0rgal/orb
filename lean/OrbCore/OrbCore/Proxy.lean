@@ -1815,38 +1815,113 @@ private def summarizeOversizedCompleteSseFrame (frame : ByteArray) : ByteArray :
           hasError := true
   return renderCompactSseSummary hasFinish hasError acc.1 acc.2.1 acc.2.2.1 acc.2.2.2.1 acc.2.2.2.2
 
-/-- Extract a balanced `{...}` JSON object immediately following `"<key>":` in a bounded tail
-    slice of a streaming frame that exceeded `maxCopyBytes` (`> 16 MiB`). -/
+/-- Extract a balanced `{...}` JSON object immediately following `"<key>" <ws>* : <ws>*`
+    scanning right-to-left across occurrences so a later string value equal to `key`
+    (e.g. `"metadata":{"category":"usage"}`) does not hide the real `"usage":{...}` object. -/
 private def extractBalancedFieldObject? (text key : String) : Option JVal := Id.run do
   let needle := s!"\"{key}\""
-  let parts := text.splitOn needle
-  if parts.length ≤ 1 then return none
-  let tail := parts.getLast!
-  let bytes := tail.toUTF8
-  let mut i := 0
-  while i < bytes.size && (bytes[i]! == 32 || bytes[i]! == 9 || bytes[i]! == 10 || bytes[i]! == 13 || bytes[i]! == 58) do
-    i := i + 1
-  if i ≥ bytes.size || bytes[i]! != 123 then return none
-  let start := i
-  let mut depth : Nat := 0
-  let mut inStr := false
-  let mut escaped := false
-  while i < bytes.size do
-    let b := bytes[i]!
-    if inStr then
-      if escaped then escaped := false
-      else if b == 92 then escaped := true
-      else if b == 34 then inStr := false
-    else
-      if b == 34 then inStr := true
-      else if b == 123 then depth := depth + 1
-      else if b == 125 then
-        depth := depth - 1
-        if depth == 0 then
-          let slice := (String.fromUTF8? (bytes.extract start (i + 1))).getD ""
-          return (OrbBin.Json.parse slice).toOption
-    i := i + 1
+  let parts := (text.splitOn needle).toArray
+  if parts.size ≤ 1 then return none
+  let mut idx := parts.size - 1
+  while idx ≥ 1 do
+    let bytes := parts[idx]!.toUTF8
+    let mut i := 0
+    while i < bytes.size && (bytes[i]! == 32 || bytes[i]! == 9 || bytes[i]! == 10 || bytes[i]! == 13) do
+      i := i + 1
+    if i < bytes.size && bytes[i]! == 58 then
+      i := i + 1
+      while i < bytes.size && (bytes[i]! == 32 || bytes[i]! == 9 || bytes[i]! == 10 || bytes[i]! == 13) do
+        i := i + 1
+      if i < bytes.size && bytes[i]! == 123 then
+        let start := i
+        let mut depth : Nat := 0
+        let mut inStr := false
+        let mut escaped := false
+        while i < bytes.size do
+          let b := bytes[i]!
+          if inStr then
+            if escaped then escaped := false
+            else if b == 92 then escaped := true
+            else if b == 34 then inStr := false
+          else
+            if b == 34 then inStr := true
+            else if b == 123 then depth := depth + 1
+            else if b == 125 then
+              depth := depth - 1
+              if depth == 0 then
+                let slice := (String.fromUTF8? (bytes.extract start (i + 1))).getD ""
+                if let .ok jv := OrbBin.Json.parse slice then
+                  return some jv
+                break
+          i := i + 1
+    idx := idx - 1
   return none
+
+/-- Extract JSON string values following `"<key>" <ws>* : <ws>* "..."` in a bounded chunk. -/
+private def extractFieldStringValues (text key : String) : Array String := Id.run do
+  let needle := s!"\"{key}\""
+  let parts := (text.splitOn needle).toArray
+  if parts.size ≤ 1 then return #[]
+  let mut vals : Array String := #[]
+  for idx in [1:parts.size] do
+    let bytes := parts[idx]!.toUTF8
+    let mut i := 0
+    while i < bytes.size && (bytes[i]! == 32 || bytes[i]! == 9 || bytes[i]! == 10 || bytes[i]! == 13) do
+      i := i + 1
+    if i < bytes.size && bytes[i]! == 58 then
+      i := i + 1
+      while i < bytes.size && (bytes[i]! == 32 || bytes[i]! == 9 || bytes[i]! == 10 || bytes[i]! == 13) do
+        i := i + 1
+      if i < bytes.size && bytes[i]! == 34 then
+        let start := i
+        i := i + 1
+        let mut escaped := false
+        while i < bytes.size do
+          let b := bytes[i]!
+          if escaped then escaped := false
+          else if b == 92 then escaped := true
+          else if b == 34 then
+            let rawLit := (String.fromUTF8? (bytes.extract start (i + 1))).getD ""
+            if let .ok (.str s) := OrbBin.Json.parse rawLit then
+              vals := vals.push s.trimAscii.toString
+            break
+          i := i + 1
+  return vals
+
+/-- Detect a JSON `"error" <ws>* : <ws>* <truthy>` field (object, array, `true`, or non-empty string),
+    matching `jsonFieldIndicatesError` without requiring the full oversized frame in memory. -/
+private def hasTruthyErrorField (text : String) : Bool := Id.run do
+  let parts := (text.splitOn "\"error\"").toArray
+  if parts.size ≤ 1 then return false
+  for idx in [1:parts.size] do
+    let bytes := parts[idx]!.toUTF8
+    let mut i := 0
+    while i < bytes.size && (bytes[i]! == 32 || bytes[i]! == 9 || bytes[i]! == 10 || bytes[i]! == 13) do
+      i := i + 1
+    if i < bytes.size && bytes[i]! == 58 then
+      i := i + 1
+      while i < bytes.size && (bytes[i]! == 32 || bytes[i]! == 9 || bytes[i]! == 10 || bytes[i]! == 13) do
+        i := i + 1
+      if i < bytes.size then
+        let b := bytes[i]!
+        if b == 123 || b == 91 || b == 116 then -- '{', '[', 't' (true)
+          return true
+        if b == 34 then -- string: non-empty after trim
+          let start := i
+          i := i + 1
+          let mut escaped := false
+          while i < bytes.size do
+            let cb := bytes[i]!
+            if escaped then escaped := false
+            else if cb == 92 then escaped := true
+            else if cb == 34 then
+              let rawLit := (String.fromUTF8? (bytes.extract start (i + 1))).getD ""
+              if let .ok (.str s) := OrbBin.Json.parse rawLit then
+                if !s.trimAscii.toString.isEmpty then
+                  return true
+              break
+            i := i + 1
+  return false
 
 /-- Decode a bounded byte slice that may start or end mid-UTF-8 codepoint across arbitrary
     TCP chunk or rolling-window boundaries. -/
@@ -1868,25 +1943,24 @@ private def utf8SafeSlice (bytes : ByteArray) : String := Id.run do
 /-- Heuristic metadata scan on a bounded chunk of an active `> maxCopyBytes` single SSE frame. -/
 private def scanOversizedFrameChunk (chunk : ByteArray) : Bool × Bool × (Nat × Nat × Nat × Nat × Nat) := Id.run do
   let text := utf8SafeSlice chunk
-  let hasError :=
-    containsSubstring text "\"type\":\"error\"" ||
-    containsSubstring text "\"type\": \"error\"" ||
-    containsSubstring text "\"type\":\"response.failed\"" ||
-    containsSubstring text "\"type\": \"response.failed\"" ||
-    containsSubstring text "\"type\":\"response.incomplete\"" ||
-    containsSubstring text "\"type\": \"response.incomplete\""
-  let hasFinish :=
-    containsSubstring text "\"type\":\"response.completed\"" ||
-    containsSubstring text "\"type\": \"response.completed\"" ||
-    containsSubstring text "\"type\":\"message_stop\"" ||
-    containsSubstring text "\"type\": \"message_stop\"" ||
-    containsSubstring text "\"finish_reason\":\"stop\"" ||
-    containsSubstring text "\"finish_reason\":\"tool_calls\"" ||
-    containsSubstring text "\"finish_reason\":\"length\"" ||
-    containsSubstring text "\"finishReason\":\"STOP\"" ||
-    containsSubstring text "\"finishReason\":\"MAX_TOKENS\"" ||
-    containsSubstring text "\"stop_reason\":\"end_turn\"" ||
-    containsSubstring text "\"stop_reason\":\"tool_use\""
+  let mut hasError := hasTruthyErrorField text
+  let mut hasFinish := false
+  for t in extractFieldStringValues text "type" do
+    if t == "error" || t == "response.failed" || t == "response.incomplete" then
+      hasError := true
+    else if t == "message_stop" || t == "response.completed" then
+      hasFinish := true
+  for fr in extractFieldStringValues text "finish_reason" do
+    if fr == "error" || fr == "network_error" then
+      hasError := true
+    else if !fr.isEmpty && fr != "null" then
+      hasFinish := true
+  for sr in extractFieldStringValues text "stop_reason" do
+    if !sr.isEmpty && sr != "null" then
+      hasFinish := true
+  for gr in extractFieldStringValues text "finishReason" do
+    if !gr.isEmpty && gr != "null" && gr != "FINISH_REASON_UNSPECIFIED" then
+      hasFinish := true
   let mut usage : Nat × Nat × Nat × Nat × Nat := (0, 0, 0, 0, 0)
   if let some uObj := extractBalancedFieldObject? text "usage" then
     usage := mergeUsageTuples usage (extractUsageTupleOfObject uObj)
@@ -2959,11 +3033,16 @@ def proxyUsageOfObject (u : JVal) : ProxyUsage :=
     reasoning := Nat.max (detail "completion_tokens_details" "reasoning_tokens") (detail "output_tokens_details" "reasoning_tokens") }
 
 private def proxyUsageOfEvent (jv : JVal) : ProxyUsage := Id.run do
-  if let some usageMeta := (jv.fieldOrNull "response").field? "usageMetadata" then
+  let ofUsageMeta (usageMeta : JVal) : ProxyUsage :=
     let cached := (usageMeta.fieldNat? "cachedContentTokenCount").getD 0
     let thought := (usageMeta.fieldNat? "thoughtsTokenCount").getD 0
-    return { input := (usageMeta.fieldNat? "promptTokenCount").getD 0 - cached, cacheRead := cached
-             reasoning := thought, output := (usageMeta.fieldNat? "candidatesTokenCount").getD 0 + thought }
+    let prompt := (usageMeta.fieldNat? "promptTokenCount").getD 0
+    { input := prompt - Nat.min prompt cached, cacheRead := cached
+      reasoning := thought, output := (usageMeta.fieldNat? "candidatesTokenCount").getD 0 + thought }
+  if let some usageMeta := (jv.fieldOrNull "response").field? "usageMetadata" then
+    return ofUsageMeta usageMeta
+  if let some usageMeta := jv.field? "usageMetadata" then
+    return ofUsageMeta usageMeta
   let fromField (holder : JVal) : ProxyUsage := ((holder.field? "usage").map proxyUsageOfObject).getD {}
   let merge (a b : ProxyUsage) : ProxyUsage :=
     { input := Nat.max a.input b.input, output := Nat.max a.output b.output
