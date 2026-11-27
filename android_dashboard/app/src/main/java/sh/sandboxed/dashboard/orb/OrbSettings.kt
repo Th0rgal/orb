@@ -263,20 +263,6 @@ fun OrbSettingsSheet(
                         }
 
                         OrbSettingsGroup {
-                            val onLocal = baseURL.trim().trimEnd('/') == localSideSystemUrl
-                            OrbSettingsRow(
-                                icon = sectionIcon(OrbSettingsSection.Account),
-                                title = if (localSideSystemReachable) "Local SideSystem (Ready)" else "Local SideSystem",
-                                subtitle = if (onLocal) "Connected to 127.0.0.1:3000 · Tap to switch" else "127.0.0.1:3000 · Tap to open Server settings",
-                                attention = false,
-                                onClick = {
-                                    section = OrbSettingsSection.Account
-                                    route = OrbSettingsRoute.Backend
-                                }
-                            )
-                        }
-
-                        OrbSettingsGroup {
                             visibleSections.forEachIndexed { i, sec ->
                                 val secPages = visiblePages(sec)
                                 if (i > 0) HorizontalDivider(color = OrbStyle.border, modifier = Modifier.padding(start = 52.dp))

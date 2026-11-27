@@ -6396,11 +6396,41 @@ fun OrbAgentPickerSheet(
                     fontWeight = FontWeight.Bold,
                     letterSpacing = 0.7.sp
                 )
-                if (modelChoices.isNotEmpty()) {
+                val supportsLocalLlm = selectedBackend in setOf("opencode", "pi")
+                if (supportsLocalLlm || modelChoices.isNotEmpty()) {
                     Row(
                         modifier = Modifier.horizontalScroll(rememberScrollState()),
                         horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
+                        if (supportsLocalLlm) {
+                            val bonsaiId = "bonsai-local/ternary-bonsai-2.5-27b"
+                            val bonsaiActive = selectedModel == bonsaiId
+                            Row(
+                                modifier = Modifier
+                                    .clip(CircleShape)
+                                    .background(if (bonsaiActive) OrbStyle.success else OrbStyle.success.copy(alpha = 0.14f))
+                                    .border(1.dp, OrbStyle.success, CircleShape)
+                                    .orbPressClickable { if (!locked) onSelectModel(bonsaiId) }
+                                    .padding(horizontal = 12.dp, vertical = 7.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(6.dp)
+                                        .clip(CircleShape)
+                                        .background(if (bonsaiActive) Color.Black else OrbStyle.success)
+                                )
+                                Text(
+                                    text = "Bonsai 27B · Local NPU",
+                                    color = if (bonsaiActive) Color.Black else Color.White,
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    maxLines = 1,
+                                    softWrap = false
+                                )
+                            }
+                        }
                         val defaultActive = selectedModel.isEmpty()
                         Box(
                             modifier = Modifier
