@@ -51,6 +51,7 @@ import OrbCore.MacTetherTests
 import OrbCore.PrivdNodeAuthTests
 import OrbCore.NodeReleaseTests
 import OrbCore.StreamableMcpTests
+import OrbCore.MachineTransferTests
 
 namespace OrbCore.SelfTest
 
@@ -9583,5 +9584,6 @@ def main (args : List String) : IO UInt32 := do
   OrbCore.SettingsTransferTests.run
   OrbCore.NodeReleaseTests.run
   OrbCore.StreamableMcpTests.run
+  OrbCore.MachineTransferTests.run
   if (← OrbCore.SelfTest.runSoftwareVersionProbeTest) != 0 then return 1
   OrbCore.SelfTest.runSuite (OrbCore.SelfTest.findFlag? args "--emit-evidence-log")

@@ -40,6 +40,7 @@ import OrbCore.AccountVpnRelay
 import OrbCore.NativeGoalApproval
 import OrbCore.AutoPlacement
 import OrbCore.RemoteDispatch
+import OrbCore.MachineTransfer
 import OrbCore.ProjectFilesAndController
 import OrbCore.CloudHttpAndWorker
 import OrbCore.ProviderUsageAndLogin
@@ -5217,11 +5218,22 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
     let mid := (params.find? (fun p => p.1 == "id")).map Prod.snd |>.getD ""
     if let some (cCode, cBody) := (← authorizeMissionOp st caller mid (req.method != "GET")) then
       return .ok (mkJson cCode cBody)
+    let isAdminCaller := !caller.disabled && (caller.role == "admin" || caller.isLegacyUnscoped)
+    let callerUid? := if caller.isLegacyUnscoped then none else some caller.userId
     if req.method == "GET" then
-      let rows ← execParamQuery st.store.missionsDb
-        "SELECT id,mission_id,phase,revision,created_at FROM machine_transfers WHERE mission_id=?1 ORDER BY created_at ASC;" #[mid]
-      return .ok (mkJson 200 (match rows with | .ok rs => rowsToJsonArray rs | .error _ => "[]"))
+      let (code, body) ← OrbCore.MachineTransfer.handleMachineTransferGet
+        st.store st.managedStore? st.relayHub? mid callerUid? isAdminCaller nowEpochSec
+      return .ok (mkJson code body)
     else if req.method == "POST" then
+      let bodyBytes := req.bodySlice.toByteArray
+      let hasOp := match OrbBin.Json.parseBytes bodyBytes with
+        | .ok jv => ((jv.fieldStr? "op").getD "").trimAscii.toString != ""
+        | .error _ => false
+      if hasOp then
+        let (code, body) ← OrbCore.MachineTransfer.handleMachineTransferPost
+          st.store st.managedStore? st.relayHub? st.cfg.workingDir mid caller.userId isAdminCaller bodyBytes (formatEpochIso8601Utc nowEpochSec)
+        return .ok (mkJson code body)
+      -- Legacy compatibility path when `op` is omitted
       let tape := JsonTape.indexJsonObject req.bodySlice
       let dest := (JsonTape.lookupString? tape "destination").getD "local"
       let (_, staticNodes) ← loadStaticRemoteNodes
