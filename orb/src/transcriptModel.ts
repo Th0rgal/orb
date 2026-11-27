@@ -568,8 +568,9 @@ export class TranscriptReducer {
       }
       case "tool_call":
       case "tool_result": {
-        const callId=str(d.tool_call_id), index=this.tools.get(callId);
-        const name = str(d.name ?? d.tool_name);
+        const callId = str(d.tool_call_id ?? d.id) || (ev.eventId ?? (ev.sequence != null ? `seq:${ev.sequence}` : ""));
+        const index = this.tools.get(callId);
+        const name = str(d.name ?? d.tool_name ?? d.label);
         // A finished call whose id comes back is a new call: OpenCode history
         // from before Core made its ids unique reused `call_0` per response.
         // A re-emitted call (Antigravity repeats some) carries the same arguments;
@@ -579,12 +580,12 @@ export class TranscriptReducer {
         const trunc = d.truncated === true ? { truncated: true } : undefined;
         if(index!=null&&!reused){
           const old=this.items[index];
-          if(old.kind==="tool"&&ev.type==="tool_result")this.put(index,{...old,result:d.result,done:true,unresolved:false,...trunc});
+          if(old.kind==="tool"&&ev.type==="tool_result")this.put(index,{...old,name:name||old.name,result:d.result,done:true,unresolved:false,...trunc});
           else if(old.kind==="tool"&&ev.type==="tool_call")this.put(index,{...old,name:name||old.name,args:d.args??old.args,...trunc});
           return;
         }
         this.tools.set(callId,this.items.length);
-        this.items.push({kind:"tool",key:reused?`tool:${callId}:${this.items.length}`:`tool:${callId}`,callId,name:name||"tool",args:d.args??null,...(ev.type==="tool_result"?{result:d.result}:{}),...trunc,...(ev.sequence!=null?{sequence:ev.sequence}:{}),done:ev.type==="tool_result"});return;
+        this.items.push({kind:"tool",key:reused?`tool:${callId}:${this.items.length}`:`tool:${callId}`,callId,name:name||"tool",args:d.args??null,...(ev.type==="tool_result"?{result:d.result}:{}),...trunc,...(ev.sequence!=null?{sequence:ev.sequence}:{}),done:ev.type==="tool_result"||d.done===true});return;
       }
       case "error": {
         const message = str(d.message);
