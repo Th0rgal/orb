@@ -35,10 +35,13 @@ def run : IO Unit := do
   IO.FS.createDirAll s!"{relDir}/x86_64"
   let nodeBytes := mkDummyElf64 "x86_64" "orb-core-test-sandboxed-node-bin"
   let privdBytes := mkDummyElf64 "x86_64" "orb-core-test-orb-privd-bin"
+  let agyBytes := mkDummyElf64 "x86_64" "orb-core-test-agy-cli-bin"
   let nodeSha := bytesToHexLower (sha256Bytes nodeBytes)
   let privdSha := bytesToHexLower (sha256Bytes privdBytes)
+  let agySha := bytesToHexLower (sha256Bytes agyBytes)
   IO.FS.writeBinFile s!"{relDir}/x86_64/sandboxed-node" nodeBytes
   IO.FS.writeBinFile s!"{relDir}/x86_64/orb-privd" privdBytes
+  IO.FS.writeBinFile s!"{relDir}/x86_64/agy" agyBytes
 
   let .ok store ← openCoreStore root 0 "prod"
     | throw (IO.userError "openCoreStore failed")
@@ -99,11 +102,13 @@ def run : IO Unit := do
     let nodeBinSha := ((man.field? "binaries").bind (·.field? "sandboxed-node")).bind (·.fieldStr? "sha256")
     let privdBinSha := ((man.field? "binaries").bind (·.field? "orb-privd")).bind (·.fieldStr? "sha256")
     let cliHarnesses := ((man.field? "cli_bundle").bind (·.field? "harnesses"))
-    assertTrue "heartbeat response exposes sandboxed-node & orb-privd sha256 + 4-harness cli_bundle"
+    let agyEntry := cliHarnesses.bind (·.field? "agy")
+    assertTrue "heartbeat response exposes sandboxed-node & orb-privd sha256 + 4-harness cli_bundle with hydrated agy URL"
       (hbJv.fieldStr? "node_id" == some "uruk-test" &&
        nodeBinSha == some nodeSha &&
        privdBinSha == some privdSha &&
-       (cliHarnesses.bind (·.field? "agy")).isSome &&
+       agyEntry.bind (·.fieldStr? "url") == some "/api/node-releases/binaries/agy?arch=x86_64" &&
+       agyEntry.bind (·.fieldStr? "sha256") == some agySha &&
        (cliHarnesses.bind (·.field? "claude")).isSome &&
        (cliHarnesses.bind (·.field? "codex")).isSome &&
        (cliHarnesses.bind (·.field? "opencode")).isSome)
@@ -113,11 +118,15 @@ def run : IO Unit := do
     let savedReason := (reports.field? "uruk-test").bind (·.field? "auto_update") |>.bind (·.fieldStr? "rollback_reason")
     assertTrue "node rollback report persisted by node_id" (savedReason == some "startup_heartbeat_timeout")
 
-    -- 4. Binary download serves exact bytes + X-Orb-Sha256 and rejects arch mismatch
+    -- 4. Binary download serves exact bytes + X-Orb-Sha256 (sandboxed-node & agy) and rejects arch mismatch
     let rBin ← dispatch "GET" "/api/node-releases/binaries/sandboxed-node?arch=x86_64" nodeHdrs ""
     let hdrSha := (rBin.extraHdrs.find? (fun (k, _) => k.toLower == "x-orb-sha256")).map Prod.snd
     assertTrue "binary download serves exact bytes with matching X-Orb-Sha256"
       (rBin.status == 200 && rBin.body == nodeBytes && hdrSha == some nodeSha)
+    let rAgyBin ← dispatch "GET" "/api/node-releases/binaries/agy?arch=x86_64" nodeHdrs ""
+    let agyHdrSha := (rAgyBin.extraHdrs.find? (fun (k, _) => k.toLower == "x-orb-sha256")).map Prod.snd
+    assertTrue "agy CLI binary download serves exact bytes with matching X-Orb-Sha256"
+      (rAgyBin.status == 200 && rAgyBin.body == agyBytes && agyHdrSha == some agySha)
     let rArchMiss ← dispatch "GET" "/api/node-releases/binaries/sandboxed-node?arch=aarch64" nodeHdrs ""
     assertTrue "binary download refuses mismatched architecture with 404" (rArchMiss.status == 404)
 
