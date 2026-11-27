@@ -135,7 +135,7 @@ def liveBadgeKind (status : String) : String :=
   | "pending" | "queued" | "awaiting_wakeup" | "waiting_background" => "clock"
   | "paused" | "interrupted" | "cancelled" | "canceled" => "pause"
   | "completed" | "succeeded" => "check"
-  | "blocked" | "failed" | "error" | "errored" | "not_feasible" | "timed_out" | "awaiting_approval" | "waiting_for_approval" => "alert"
+  | "blocked" | "failed" | "error" | "errored" | "not_feasible" | "timed_out" | "waiting_for_approval" => "alert"
   | _ => ""
 
 /-- Pure 60-step spinner phase (`0..59`, 1 revolution per second) matching `gtk_leanui.c`. -/

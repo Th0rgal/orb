@@ -1082,7 +1082,8 @@ def runSelfTest (cfg : Runtime.RuntimeConfig) (initSt : DesktopState) : IO UInt3
   IO.println "orb-desktop self-test: ok"
   return 0
 
-/-- Main entry point for `OrbDesktop`. -/
+/-- Device-pixel damage covering every visible running (`loader`) mission row, or `none` when no
+    spinner is on screen, so a spinner tick repaints only those rows. -/
 private def runningBadgeDamage (rt : Runtime.RuntimeState DesktopState) : Damage :=
   rt.app.sidebarRows.foldl (fun damage row =>
     if row.kind != "mission" || liveBadgeKind row.status != "loader" then damage else
@@ -1090,6 +1091,7 @@ private def runningBadgeDamage (rt : Runtime.RuntimeState DesktopState) : Damage
       | none => damage
       | some (_, rect) => Damage.add damage (roundRect rt.wayland.scale120 rect)) none
 
+/-- Main entry point for `OrbDesktop`. -/
 def main (args : List String) : IO UInt32 := do
   if let ["--gtk-sidebar-host", path] := args then
     return ← runEmbeddedSidebar path shapeWidgetTree

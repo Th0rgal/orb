@@ -36,13 +36,13 @@ def main : IO Unit := do
     check (liveBadgeKind s == "loader") s!"expected loader for {s}"
   for s in ["paused", "PAUSED", "interrupted", "cancelled", "canceled", "CANCELED"] do
     check (liveBadgeKind s == "pause") s!"expected pause for {s}"
-  for s in ["failed", "FAILED", "blocked", "error", "errored", "not_feasible", "timed_out", "awaiting_approval", "waiting_for_approval"] do
+  for s in ["failed", "FAILED", "blocked", "error", "errored", "not_feasible", "timed_out", "waiting_for_approval"] do
     check (liveBadgeKind s == "alert") s!"expected alert for {s}"
   for s in ["pending", "queued", "awaiting_wakeup", "waiting_background"] do
     check (liveBadgeKind s == "clock") s!"expected clock for {s}"
   for s in ["completed", "COMPLETED", "succeeded"] do
     check (liveBadgeKind s == "check") s!"expected check for {s}"
-  for s in ["awaiting_user", "idle", ""] do
+  for s in ["awaiting_user", "awaiting_approval", "AWAITING_APPROVAL", "idle", ""] do
     check (liveBadgeKind s == "") s!"expected empty (Bot fallback) for {s}"
 
   -- 3. Full 60-step spinner sweep (0..59)

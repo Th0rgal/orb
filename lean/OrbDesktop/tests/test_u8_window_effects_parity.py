@@ -52,6 +52,11 @@ ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import test_wayland_u6_session as u6  # noqa: E402
 
+# Main-pane rectangle (x0, y0, x1, y1) covered by the Ctrl+K search modal at 960x640.
+MODAL_REGION = (240, 80, 760, 520)
+# Status badge of the first (active) mission row in the sidebar at 960x640.
+ACTIVE_BADGE_REGION = (14, 320, 36, 346)
+
 
 def find_bin() -> Path:
     env_bin = os.environ.get("ORB_LEANUI_TEST_BINARY")
@@ -276,33 +281,43 @@ class U8WindowEffectsParityTests(unittest.TestCase):
                 h_boot = comp.last_frame_hash
                 u6._wait_until("initial roster /api/auth/me", lambda: count_req("GET", "/api/auth/me") >= 1)
                 comp.wait_frame_change(h_boot, timeout=5.0)
-                # Collect live 60fps active-spinner frames over ~450ms
+                # Two changes of the active row's badge prove the roster is painted and its spinner
+                # is ticking, so the frames collected below differ only by that spinner.
+                h_badge = comp.region_hash(*ACTIVE_BADGE_REGION)
+                h_badge = comp.wait_region_change(*ACTIVE_BADGE_REGION, h_badge, timeout=10.0)
+                comp.wait_region_change(*ACTIVE_BADGE_REGION, h_badge, timeout=10.0)
+                # Collect live 60fps active-spinner frames.
                 comp.frame_history.clear()
-                time.sleep(0.45)
+                u6._wait_until("active spinner frames", lambda: len(comp.frame_history) >= 8)
                 normal_frames = list(comp.frame_history)
                 normal_frame = comp.last_frame_bytes
                 w, h = comp.last_frame_w, comp.last_frame_h
 
-                # Open Search modal (Ctrl+K) with backdrop blur + scrim and verify corners remain transparent
-                h_before_modal = comp.last_frame_hash
+                # Open Search modal (Ctrl+K) with backdrop blur + scrim and verify corners remain transparent.
+                # The running badge commits a frame every 16 ms, so a whole-frame hash changes before the
+                # modal paints. Watch the modal region, which the sidebar spinner never touches.
+                h_before_modal = comp.region_hash(*MODAL_REGION)
                 t_modal = time.monotonic()
                 comp.key_tap("k", u6.MOD_CTRL)
                 comp.wait_text_input(True, timeout=5.0)
-                comp.wait_frame_change(h_before_modal, timeout=5.0)
                 # The first commit after Ctrl+K can be a spinner tick or the text-input focus; the
                 # backdrop-blurred modal follows once rendered. Wait for that frame, not a fixed delay.
-                ref_center = bgra_premul_to_rgba_array(normal_frame, w, h)[80:520, 240:760].astype(int)
+                mx0, my0, mx1, my1 = MODAL_REGION
+                ref_center = bgra_premul_to_rgba_array(normal_frame, w, h)[my0:my1, mx0:mx1].astype(int)
 
                 def modal_painted():
-                    cur = bgra_premul_to_rgba_array(comp.last_frame_bytes, w, h)[80:520, 240:760].astype(int)
+                    cur = bgra_premul_to_rgba_array(comp.last_frame_bytes, w, h)[my0:my1, mx0:mx1].astype(int)
                     return float(np.abs(cur - ref_center).mean()) > 5.0
 
                 with contextlib.suppress(TimeoutError):
-                    u6._wait_until("backdrop-blur search modal frame", modal_painted, timeout=5.0)
+                    u6._wait_until("backdrop-blur search modal frame", modal_painted, timeout=10.0)
                 print(f"U8 modal latency: {(time.monotonic() - t_modal) * 1000:.0f} ms", file=sys.stderr)
                 modal_frame = comp.last_frame_bytes
                 comp.key_tap("esc", 0)
-                time.sleep(0.1)
+                # Search results can repaint the modal after its first frame, so wait for the
+                # pre-modal pixels themselves instead of for any change.
+                u6._wait_until("Esc restores the pre-modal main pane",
+                               lambda: comp.region_hash(*MODAL_REGION) == h_before_modal)
 
                 comp.send_close()
                 rc = proc.wait(timeout=10)
@@ -363,13 +378,15 @@ class U8WindowEffectsParityTests(unittest.TestCase):
             for cx, cy in ((0, 0), (w - 1, 0), (0, h - 1), (w - 1, h - 1)):
                 self.assertEqual(tuple(int(v) for v in modal_rgba[cy, cx]), (0, 0, 0, 0),
                                  f"{tag} modal corner ({cx},{cy}) leaked blur/scrim")
-            modal_diff = float(np.abs(modal_rgba[80:520, 240:760].astype(int) - rgba[80:520, 240:760].astype(int)).mean())
+            mx0, my0, mx1, my1 = MODAL_REGION
+            modal_diff = float(np.abs(modal_rgba[my0:my1, mx0:mx1].astype(int) - rgba[my0:my1, mx0:mx1].astype(int)).mean())
             self.assertGreater(modal_diff, 5.0, f"{tag} Ctrl+K search modal did not render visibly (mean diff={modal_diff})")
 
             # 5. Active mission spinner animates across captured Wayland frames while paused row stays stationary!
             self.assertGreaterEqual(len(res["frames"]), 4, f"{tag} expected >=4 animated spinner frames, got {len(res['frames'])}")
+            ax0, ay0, ax1, ay1 = ACTIVE_BADGE_REGION
             active_band_hashes = {
-                hashlib.sha256(bgra_premul_to_rgba_array(f, w, h)[320:346, 14:36].tobytes()).hexdigest()
+                hashlib.sha256(bgra_premul_to_rgba_array(f, w, h)[ay0:ay1, ax0:ax1].tobytes()).hexdigest()
                 for f in res["frames"]
             }
             paused_band_hashes = {
