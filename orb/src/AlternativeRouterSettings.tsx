@@ -20,10 +20,40 @@ export function AlternativeRouterSettings(p: { account: string }) {
   const [setting, { mutate, refetch }] = createResource(source, ([, id]) => access(id));
   const [saving, setSaving] = createSignal(false);
   const [error, setError] = createSignal("");
+  const [readError, setReadError] = createSignal<unknown>(null);
   createEffect(() => {
-    if (saving() || setting.state !== "ready") return;
-    onCleanup(pollWhileVisible(async () => { await refetch(); }, null, "alternative-routers"));
+    source();
+    setReadError(null);
+    setError("");
   });
+  createEffect(() => {
+    if (saving() || readError() || setting.state !== "ready" || !setting()) return;
+    const [, id] = source();
+    let active = true;
+    const stop = pollWhileVisible(async () => {
+      try {
+        const next = await access(id);
+        if (active) {
+          setReadError(null);
+          mutate(next);
+        }
+      } catch (e) {
+        if (active) {
+          mutate(undefined);
+          setReadError(e);
+        }
+      }
+    }, null, "alternative-routers");
+    onCleanup(() => {
+      active = false;
+      stop();
+    });
+  });
+  const retryRead = () => {
+    setReadError(null);
+    setError("");
+    void refetch();
+  };
   async function save(allowed: boolean) {
     const [version, id] = source();
     const current = () => version === connectionVersion() && p.account === id;
@@ -31,20 +61,36 @@ export function AlternativeRouterSettings(p: { account: string }) {
     setError("");
     try {
       const updated = await access(id, allowed);
-      if (current()) mutate(updated);
+      if (current()) {
+        setReadError(null);
+        mutate(updated);
+      }
     } catch {
       if (current()) {
-        setError("Could not confirm the change. Check the current setting before retrying.");
-        void refetch();
+        try {
+          const recovered = await access(id);
+          if (current()) {
+            setReadError(null);
+            mutate(recovered);
+            setError("Could not confirm the change. Check the current setting before retrying.");
+          }
+        } catch (re) {
+          if (current()) {
+            mutate(undefined);
+            setError("");
+            setReadError(re);
+          }
+        }
       }
     } finally {
       setSaving(false);
     }
   }
+  const activeReadError = () => readError() ?? setting.error;
   return <SettingsRow title="Alternative routers" desc="Allow OpenCode and other routed clients to use this account.">
     <Suspense fallback={<span class="p-ctrl-skel p-ctrl-skel-toggle" aria-hidden="true" />}>
-      <Show when={!setting.error} fallback={<AccountSettingReadError error={setting.error} path={uri(p.account)}
-        updateMessage="Update Core to configure alternative router access." retryLabel="Retry router settings" retry={() => void refetch()} />}>
+      <Show when={!activeReadError()} fallback={<AccountSettingReadError error={activeReadError()} path={uri(p.account)}
+        updateMessage="Update Core to configure alternative router access." retryLabel="Retry router settings" retry={retryRead} />}>
         <Show when={setting()}>{s =>
           <Toggle label="Allow alternative routers" on={s().allowed} disabled={saving() || setting.loading}
             onClick={() => void save(!s().allowed)} />

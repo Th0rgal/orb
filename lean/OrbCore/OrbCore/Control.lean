@@ -2821,6 +2821,100 @@ private def resolveConfinedCoreMissionGitDir (st : CoreAppState) (m : MissionRec
   | .ok safeDir => return .ok safeDir
   | .error err => return .error (400, s!"\{\"error\":{jsonEscape err}}")
 
+/-- Resolve proxy environment variables, CLI args, and model name for a local Core
+    harness turn (`launchLocalCoreMissionTurn`). Routes router-backed harnesses
+    (`opencode`, `claudecode`, `codex`, `grok`) through Core's local router when bound
+    and fails closed if `boundPort == 0` while any account VPN route is configured.
+    For native `antigravity`, binds the account's verified AirVPN SOCKS5 tunnel when
+    VPN-routed and fails closed whenever the coordinator, tunnel, or binding is unavailable. -/
+def resolveLocalCoreHarnessSetup
+    (st : CoreAppState) (missionId ownerUserId rawHarness rawModel : String)
+    (boundPort : UInt16) (nowSec : UInt64)
+    (mintedProxyTokRef : IO.Ref (Option String)) : IO (Except String OrbCore.RemoteDispatch.HarnessProxySetup) := do
+  let hLow := rawHarness.trimAscii.toString.toLower
+  let normHarness := if hLow == "claude" then "claudecode" else hLow
+  let cleanModel := rawModel.trimAscii.toString
+  let model? := if cleanModel.isEmpty then none else some cleanModel
+  if normHarness == "opencode" || normHarness == "claudecode" || normHarness == "codex" || normHarness == "grok" then
+    if boundPort > 0 then
+      match ← mintMissionProxyToken st.store missionId ownerUserId (nowSec + 86400) with
+      | .error e => return .error s!"failed to mint mission proxy token: {e}"
+      | .ok tok =>
+        mintedProxyTokRef.set (some tok)
+        -- Reach Core where it listens: loopback for wildcard binds, else the bound address.
+        let h := st.cfg.host.trimAscii.toString
+        let host :=
+          if h.isEmpty || h == "0.0.0.0" || h == "::" || h == "[::]" || h == "localhost" then "127.0.0.1"
+          else if h.contains ':' && !h.startsWith "[" then s!"[{h}]"
+          else h
+        let s := OrbCore.RemoteDispatch.harnessProxySetup normHarness rawModel s!"http://{host}:{boundPort}" tok
+        -- Core runs as root and its home holds the operator's own harness setup.
+        -- Claude refuses to skip permissions as root unless told it is sandboxed;
+        -- Codex gets its own home per mission (sessions for `resume` stay there)
+        -- instead of root's config, whose MCP servers it hangs starting.
+        let hostEnv ←
+          if normHarness == "claudecode" then pure #[("IS_SANDBOX", "1")]
+          else if normHarness == "codex" then do
+            let codexHome := s!"{st.store.rootDir}/core-turns/codex-home/{missionId}"
+            IO.FS.createDirAll codexHome
+            pure #[("CODEX_HOME", codexHome)]
+          else pure #[]
+        return .ok { s with env := s.env ++ hostEnv }
+    else
+      match ← AccountVpnRoutes.anyVpnConfigured st.store.missionsDb with
+      | .error _ => return .error "local_harness_vpn_route_store_unavailable"
+      | .ok true => return .error "local_harness_vpn_requires_router"
+      | .ok false => return .ok { model := model? }
+  else if normHarness == "antigravity" then
+    let .ok bound? ← nativeMissionAccount? st.store missionId
+      | return .error "antigravity_binding_unavailable"
+    let allocateSocks := fun (acctId : String) (pref : AccountVpnRoutes.Preference) => do
+      let some pool := st.vpnPool?
+        | return .error "antigravity_vpn_coordinator_unavailable"
+      match ← AccountVpnPool.allocate pool st.store.rootDir st.vpnCoordinatorDir st.store.missionsDb acctId "antigravity" pref with
+      | .error e => return .error s!"antigravity_vpn_unavailable:{e}"
+      | .ok port =>
+        let proxyUrl := s!"socks5://127.0.0.1:{port}"
+        let noProxy := "127.0.0.1,localhost,::1"
+        return .ok {
+          env := #[
+            ("HTTPS_PROXY", proxyUrl),
+            ("https_proxy", proxyUrl),
+            ("HTTP_PROXY", proxyUrl),
+            ("http_proxy", proxyUrl),
+            ("ALL_PROXY", proxyUrl),
+            ("all_proxy", proxyUrl),
+            ("NO_PROXY", noProxy),
+            ("no_proxy", noProxy)
+          ]
+          model := model?
+        }
+    match bound? with
+    | some acctId =>
+      match ← AccountVpnRoutes.read st.store.missionsDb acctId with
+      | .error _ => return .error "antigravity_vpn_route_store_unavailable"
+      | .ok none => return .ok { model := model? }
+      | .ok (some pref) => allocateSocks acctId pref
+    | none =>
+      let hydrated ← loadHydratedProviders st.store st.cfg.workingDir
+      let agAccounts := hydrated.filter (·.providerType == "antigravity")
+      let mut vpnAccounts : Array (String × AccountVpnRoutes.Preference) := #[]
+      for hp in agAccounts do
+        match ← AccountVpnRoutes.snapshot st.store.missionsDb hp.id with
+        | .error _ => return .error "antigravity_vpn_route_store_unavailable"
+        | .ok (.direct _) => pure ()
+        | .ok (.vpn pref) => vpnAccounts := vpnAccounts.push (hp.id, pref)
+      if vpnAccounts.isEmpty then
+        return .ok { model := model? }
+      if agAccounts.size == 1 then
+        match vpnAccounts[0]? with
+        | some (acctId, pref) => allocateSocks acctId pref
+        | none => return .ok { model := model? }
+      else
+        return .error "antigravity_vpn_requires_account_binding"
+  else
+    return .ok { model := model? }
+
 /-- Launch a local harness turn under `st.warmMgr?` (for `/btw/agent`, wakeup continuations, and `spawn_harness` turns). -/
 private def launchLocalCoreMissionTurn
     (st : CoreAppState)
@@ -2893,12 +2987,12 @@ private def launchLocalCoreMissionTurn
       if !claimed then return .error "local_run_busy_or_fenced"
     return changed
   if let .error e := started then return .error e
-  let model? := if model.trimAscii.toString.isEmpty then none else some model.trimAscii.toString
   let effort? := if effort.trimAscii.toString.isEmpty then none else some effort.trimAscii.toString
   let parsedPerm := OrbBin.ClaudeControl.parsePermissionMode permMode
   let wtArg := if worktreeMode.trimAscii.toString.isEmpty then "local" else worktreeMode.trimAscii.toString
   let cbs := buildCoreHarnessCallbacks st missionId (some nextGen)
-  let normHarness := if harness.trimAscii.toString.toLower == "claude" then "claudecode" else harness.trimAscii.toString
+  let hLow := harness.trimAscii.toString.toLower
+  let normHarness := if hLow == "claude" then "claudecode" else hLow
   if let some tSink := st.telemetrySink? then
     let ownerUid? := if mission.ownerUserId.trimAscii.toString.isEmpty then none else some mission.ownerUserId.trimAscii.toString
     let ownerUser? ← match ownerUid? with
@@ -2911,7 +3005,6 @@ private def launchLocalCoreMissionTurn
   let boundPort ← match st.remoteSup? with
     | some sup => sup.boundPortRef.get
     | none => pure (0 : UInt16)
-  let proxied := boundPort != 0 && (normHarness == "opencode" || normHarness == "claudecode" || normHarness == "codex")
   let mintedProxyTokRef ← IO.mkRef (none : Option String)
   let failLaunch : String → IO (Except String String) := fun err => do
     -- Nothing was started: release the launch-generation slot, revoke any minted
@@ -2939,32 +3032,7 @@ private def launchLocalCoreMissionTurn
       discard <| appendMissionEvent st.store missionId "error" (renderCompact (.obj #[("content", .str err)])) ts
     return .error err
   let setupRes : Except String OrbCore.RemoteDispatch.HarnessProxySetup ← try
-    if proxied then
-      match ← mintMissionProxyToken st.store missionId mission.ownerUserId (nowSec + 86400) with
-      | .ok tok =>
-        mintedProxyTokRef.set (some tok)
-        -- Reach Core where it listens: loopback for wildcard binds, else the bound address.
-        let h := st.cfg.host.trimAscii.toString
-        let host :=
-          if h.isEmpty || h == "0.0.0.0" || h == "::" || h == "[::]" || h == "localhost" then "127.0.0.1"
-          else if h.contains ':' && !h.startsWith "[" then s!"[{h}]"
-          else h
-        let s := OrbCore.RemoteDispatch.harnessProxySetup normHarness model s!"http://{host}:{boundPort}" tok
-        -- Core runs as root and its home holds the operator's own harness setup.
-        -- Claude refuses to skip permissions as root unless told it is sandboxed;
-        -- Codex gets its own home per mission (sessions for `resume` stay there)
-        -- instead of root's config, whose MCP servers it hangs starting.
-        let hostEnv ←
-          if normHarness == "claudecode" then pure #[("IS_SANDBOX", "1")]
-          else if normHarness == "codex" then do
-            let codexHome := s!"{st.store.rootDir}/core-turns/codex-home/{missionId}"
-            IO.FS.createDirAll codexHome
-            pure #[("CODEX_HOME", codexHome)]
-          else pure #[]
-        pure (.ok { s with env := s.env ++ hostEnv })
-      | .error e => pure (.error s!"failed to mint mission proxy token: {e}")
-    else
-      pure (.ok ({ model := model? } : OrbCore.RemoteDispatch.HarnessProxySetup))
+    resolveLocalCoreHarnessSetup st missionId mission.ownerUserId normHarness model boundPort nowSec mintedProxyTokRef
   catch e =>
     pure (.error s!"local harness setup failed: {e}")
   let setup ← match setupRes with
@@ -4784,7 +4852,11 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
         else if req.method != "GET" then return .ok (mkJson 405 "{\"error\":\"method_not_allowed\"}")
         let some key ← resolveCliProxyMgmtKey? | return .ok (mkJson 503 "{\"error\":\"router_access_unavailable\"}")
         match ← AccountVpnSidecar.alternativeRouterAccess (← resolveCliProxyBaseUrl) key file allowed? with
-        | .ok allowed => return .ok (mkJson 200 (renderCompact (.obj #[("allowed", .bool allowed)])))
+        | .ok allowed =>
+          if req.method == "PUT" then
+            let refreshed ← loadRoutingChainsFromStore st.store st.cfg.workingDir
+            discard <| publishRoutingChainsUpdate st refreshed
+          return .ok (mkJson 200 (renderCompact (.obj #[("allowed", .bool allowed)])))
         | .error reason => return .ok (mkJson 503 (renderCompact (.obj #[("error", .str reason)])))
       let stored ← getAIProvider? st.store account
       let coreOwned := !hp.hasOAuth && stored.any (fun p => !p.apiKey.isEmpty && p.apiKey != "cli-proxy-managed")
@@ -4799,6 +4871,9 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
               configure? := some (AccountVpnSidecar.configure base key file url)
       let (status, result) ← AccountVpnApi.route st.store st.vpnPool? st.vpnCoordinatorDir account hp.providerType
         (coreOwned || configure?.isSome) req.method req.bodySlice.toByteArray configure?
+      if req.method == "PUT" && status == 200 then
+        let refreshed ← loadRoutingChainsFromStore st.store st.cfg.workingDir
+        discard <| publishRoutingChainsUpdate st refreshed
       return .ok (mkJson status (renderCompact result))
 
   if cleanPath == "/api/settings/airvpn" then

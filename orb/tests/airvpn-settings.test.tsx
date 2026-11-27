@@ -3,7 +3,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { fireEvent, render, screen, waitFor } from "@solidjs/testing-library";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { api, bumpConnectionVersion } from "../src/api";
+import { api, bumpConnectionVersion, listProviders } from "../src/api";
 import { airVpnSessionSummary, parseAirVpnFilenameHint, parseAirVpnStatus } from "../src/airVpnModel";
 import { AirVpnSettings } from "../src/AirVpnSettings";
 
@@ -17,8 +17,12 @@ const fixture = JSON.parse(
 vi.mock("../src/api", async () => {
   const { createSignal } = await import("solid-js");
   const [connectionVersion, bumpConnectionVersion] = createSignal(0);
+  class ApiError extends Error {
+    constructor(public status: number, public detail: string) { super(`${status}: ${detail}`); }
+  }
   return {
     api: vi.fn(),
+    ApiError,
     connectionVersion,
     bumpConnectionVersion,
     isAdminUser: () => true,
@@ -135,5 +139,61 @@ describe("AirVpnSettings page", () => {
       method: "DELETE",
       body: JSON.stringify({ device_id: "orb-nl" }),
     });
+  });
+
+  it("refreshes Account routes after profile removal and clears stale routes on reread failure", async () => {
+    vi.mocked(listProviders).mockResolvedValue([
+      { id: "acct-1", name: "Claude Work", provider_type: "anthropic", has_credentials: true },
+    ]);
+    let removed = false;
+    let failRouteRead = false;
+    vi.mocked(api).mockImplementation(async (path: string, init?: RequestInit) => {
+      if (path === "/api/settings/airvpn") {
+        if (init?.method === "DELETE") {
+          removed = true;
+          return { ok: true };
+        }
+        return {
+          api_key_configured: true,
+          session_limit: 5,
+          devices: removed ? [] : ["orb-nl"],
+          profiles: removed ? [] : [{ device: "orb-nl", country: "NL", server: "Alcyone" }],
+          active_tunnels: removed ? [] : [{ device: "orb-nl", country: "NL", server: "Alcyone", exits: ["213.152.161.155"], accounts: 1 }],
+        };
+      }
+      if (path === "/api/ai/providers/acct-1/vpn") {
+        if (failRouteRead) throw new Error("Core unavailable");
+        if (removed) {
+          return {
+            mode: "vpn", country: "NL", countries: [], can_configure: true,
+            status: "blocked", reason: "vpn_profile_unavailable", message: "No AirVPN profile is imported for NL.",
+          };
+        }
+        return {
+          mode: "vpn", country: "NL", countries: ["NL"], can_configure: true,
+          status: "verified", server: "Alcyone", exits: ["213.152.161.155"],
+        };
+      }
+      return {};
+    });
+
+    render(() => <AirVpnSettings />);
+    await screen.findByText("Verified exit · Alcyone · 213.152.161.155");
+
+    // Removing the profile must refresh Account routes immediately.
+    fireEvent.click(screen.getByRole("button", { name: "Remove" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Remove profile" }));
+    await screen.findByText("No AirVPN profile is imported for NL.");
+    expect(screen.queryByText(/Verified exit/)).toBeNull();
+
+    // A failed focus reread must clear the confirmed route and show Retry.
+    failRouteRead = true;
+    window.dispatchEvent(new Event("focus"));
+    const retry = await screen.findByRole("button", { name: "Retry connection settings" });
+    expect(screen.queryByLabelText("Route for Claude Work")).toBeNull();
+
+    failRouteRead = false;
+    fireEvent.click(retry);
+    await screen.findByText("No AirVPN profile is imported for NL.");
   });
 });

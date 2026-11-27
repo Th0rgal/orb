@@ -805,7 +805,11 @@ private def routeSettingsBody (st : DesktopState) (page : AccountRoutePage) (hov
         if row.detail == "Confirm Direct route" then "Confirm"
         else if row.detail == "Retry verification" then "Retry"
         else "Select"
-      | "refresh" => if row.title == "Account connection" && row.detail != "Could not load. Retry" then "Refresh" else "Retry"
+      | "refresh" =>
+        if row.title == "Account connection" &&
+            row.detail != "Could not load. Retry" &&
+            row.detail != "Update Core to configure account VPNs." then "Refresh"
+        else "Retry"
       | _ => ""
     let body := buildSettingsRow theme rowW rowH row.title row.detail button
       (isButton := true) (hasBottomBorder := i + 1 < settings.length)

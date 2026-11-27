@@ -574,11 +574,26 @@ def resolveAntigravityVpnProxyEnvs
   return .ok #[
     ("HTTPS_PROXY", proxyUrl),
     ("https_proxy", proxyUrl),
+    ("HTTP_PROXY", proxyUrl),
+    ("http_proxy", proxyUrl),
     ("ALL_PROXY", proxyUrl),
     ("all_proxy", proxyUrl),
     ("NO_PROXY", noProxy),
     ("no_proxy", noProxy)
   ]
+
+/-- Check whether any xAI/Grok provider account has a VPN route configured so direct
+    `managed_auth` fallback can never bypass a configured AirVPN exit when `proxyBase` is empty. -/
+def anyXaiVpnConfigured? (store : CoreStore) (coreWorkDir : String) : IO (Except String Bool) := do
+  let hydrated ← loadHydratedProviders store coreWorkDir
+  for hp in hydrated do
+    let pt := hp.providerType.toLower
+    if pt == "xai" || pt == "grok" then
+      match ← OrbCore.AccountVpnRoutes.snapshot store.missionsDb hp.id with
+      | .ok (.vpn _) => return .ok true
+      | .ok (.direct _) => pure ()
+      | .error _ => return .error "grok_vpn_route_store_unavailable"
+  return .ok false
 
 private def wrapWithRemoteMcp (harness innerCmd : String) : String :=
   s!"if [ -x /usr/local/bin/sandboxed-mcp ]; then /usr/local/bin/sandboxed-mcp launch --harness {harness} -- {innerCmd}; else {innerCmd}; fi"
@@ -1141,8 +1156,12 @@ def prepareRemoteHarnessCommand
         ("NO_COLOR", "1")
       ]
       return .ok { command := cmd, envPairs := envs, managedAuth := #[], proxyToken := pTok }
-    let envs := skillEnvs ++ promptEnvs ++ mcpEnvs ++ #[("NO_COLOR", "1")]
-    return .ok { command := cmd, envPairs := envs, managedAuth := #["grok"], proxyToken := "" }
+    match ← anyXaiVpnConfigured? store coreWorkDir with
+    | .error e => return .error e
+    | .ok true => return .error "grok_vpn_requires_proxy_base_url"
+    | .ok false =>
+      let envs := skillEnvs ++ promptEnvs ++ mcpEnvs ++ #[("NO_COLOR", "1")]
+      return .ok { command := cmd, envPairs := envs, managedAuth := #["grok"], proxyToken := "" }
 
   else if harness == "antigravity" then
     let invocation := fun (chosenModel : String) => Id.run do

@@ -2335,7 +2335,7 @@ private fun AlternativeRouterSettings(core: OrbCore, account: String) {
 }
 
 @Composable
-internal fun AccountVpnSettings(core: OrbCore, account: String, nativeAccount: Boolean) {
+internal fun AccountVpnSettings(core: OrbCore, account: String, nativeAccount: Boolean, refreshKey: Int = 0) {
     val scope = rememberCoroutineScope()
     var route by remember(core, account) { mutableStateOf<OrbDict?>(null) }
     var requests by remember(core, account) { mutableStateOf(OrbAccountVpn.Requests()) }
@@ -2373,7 +2373,7 @@ internal fun AccountVpnSettings(core: OrbCore, account: String, nativeAccount: B
     val busy = requests.saving
     val view = route?.let { OrbAccountVpn.view(it, nativeAccount) }
     val lifecycleOwner = LocalLifecycleOwner.current
-    LaunchedEffect(core, account, lifecycleOwner) {
+    LaunchedEffect(core, account, lifecycleOwner, refreshKey) {
         lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) { update() }
     }
     LaunchedEffect(core, account, lifecycleOwner, view?.poll == true) {

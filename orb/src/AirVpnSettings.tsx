@@ -1,5 +1,6 @@
 import { For, Show, createEffect, createMemo, createResource, createSignal, onCleanup } from "solid-js";
 import * as apiMod from "./api";
+import { AccountSettingReadError } from "./AccountSettingReadError";
 import { accountVpnRoute, accountVpnView, accountVpnWrite, type AccountVpnRoute } from "./accountVpn";
 import {
   airVpnSessionSummary,
@@ -25,6 +26,7 @@ export function AirVpnSettings(p: { onOpenPage?: (id: string) => void } = {}) {
 function AirVpnPageInner(p: { onOpenPage?: (id: string) => void }) {
   const isAdmin = () => (typeof apiMod.isAdminUser === "function" ? apiMod.isAdminUser() : true);
   const connected = () => (typeof apiMod.isConnected === "function" ? apiMod.isConnected() : true);
+  const [routesRevision, setRoutesRevision] = createSignal(0);
 
   return (
     <div class="s-body settings-body">
@@ -34,10 +36,10 @@ function AirVpnPageInner(p: { onOpenPage?: (id: string) => void }) {
           fallback={<p class="s-lead">Connect to Core on the Account page to manage AirVPN routing.</p>}
         >
           <Show when={isAdmin()}>
-            <AdminAirVpnPanels />
+            <AdminAirVpnPanels onMutated={() => setRoutesRevision((v) => v + 1)} />
           </Show>
           <Show when={typeof apiMod.listProviders === "function"}>
-            <AccountRoutesCard onOpenPage={p.onOpenPage} />
+            <AccountRoutesCard onOpenPage={p.onOpenPage} refreshKey={routesRevision()} />
           </Show>
         </Show>
       </div>
@@ -45,7 +47,7 @@ function AirVpnPageInner(p: { onOpenPage?: (id: string) => void }) {
   );
 }
 
-function AdminAirVpnPanels() {
+function AdminAirVpnPanels(p: { onMutated?: () => void }) {
   const [status, { refetch }] = createResource(async () => {
     const parsed = parseAirVpnStatus(await apiMod.api<unknown>(SETTINGS_PATH));
     if (!parsed) throw new Error("AirVPN settings are unavailable.");
@@ -132,6 +134,7 @@ function AdminAirVpnPanels() {
       setKeyDraft("");
       setKeyDialogOpen(false);
       await refetch();
+      p.onMutated?.();
       setSaving(false);
       setMessage("API key saved.");
     } catch (e) {
@@ -184,6 +187,7 @@ function AdminAirVpnPanels() {
       if (fileInput) fileInput.value = "";
       setProfileDialogOpen(false);
       await refetch();
+      p.onMutated?.();
       setSaving(false);
       setMessage("Device profile saved.");
     } catch (e) {
@@ -210,6 +214,7 @@ function AdminAirVpnPanels() {
       if (apiMod.connectionVersion() !== version) return;
       setDeletingDevice(null);
       await refetch();
+      p.onMutated?.();
       setSaving(false);
       setMessage(`Removed profile ${dev}.`);
     } catch (e) {
@@ -500,9 +505,11 @@ interface ProviderAccountRow {
   has_credentials?: boolean;
 }
 
-function AccountRoutesCard(p: { onOpenPage?: (id: string) => void }) {
+function AccountRoutesCard(p: { onOpenPage?: (id: string) => void; refreshKey?: number }) {
   const [filterVpnOnly, setFilterVpnOnly] = createSignal(false);
   const [routes, setRoutes] = createSignal<Record<string, AccountVpnRoute>>({});
+  const [routeErrors, setRouteErrors] = createSignal<Record<string, unknown>>({});
+  const [localRefresh, setLocalRefresh] = createSignal(0);
   const [providers] = createResource(async () => {
     const list = await apiMod.listProviders();
     return (list as ProviderAccountRow[]).filter((item) => item.has_credentials !== false);
@@ -510,6 +517,8 @@ function AccountRoutesCard(p: { onOpenPage?: (id: string) => void }) {
 
   createEffect(() => {
     const list = providers() ?? [];
+    void p.refreshKey;
+    void localRefresh();
     if (!list.length) return;
     let alive = true;
     const version = apiMod.connectionVersion();
@@ -517,6 +526,7 @@ function AccountRoutesCard(p: { onOpenPage?: (id: string) => void }) {
       // Bounded concurrency so cold opens stay calm and responsive.
       const queue = [...list];
       const next: Record<string, AccountVpnRoute> = {};
+      const nextErrors: Record<string, unknown> = {};
       const workers = Array.from({ length: Math.min(4, queue.length) }, async () => {
         while (queue.length && alive && version === apiMod.connectionVersion()) {
           const item = queue.shift();
@@ -526,14 +536,16 @@ function AccountRoutesCard(p: { onOpenPage?: (id: string) => void }) {
               await apiMod.api<unknown>(`/api/ai/providers/${encodeURIComponent(item.id)}/vpn`),
             );
             if (parsed) next[item.id] = parsed;
-          } catch {
-            // Individual unroutable accounts stay omitted from the summary map.
+            else nextErrors[item.id] = new Error("Account connection settings are unavailable.");
+          } catch (e) {
+            nextErrors[item.id] = e;
           }
         }
       });
       await Promise.all(workers);
       if (alive && version === apiMod.connectionVersion()) {
-        setRoutes((prev) => ({ ...prev, ...next }));
+        setRoutes(next);
+        setRouteErrors(nextErrors);
       }
     })();
     onCleanup(() => {
@@ -602,7 +614,26 @@ function AccountRoutesCard(p: { onOpenPage?: (id: string) => void }) {
           <AccountRouteSummaryRow
             account={account}
             route={routes()[account.id]}
-            onUpdated={(next) => setRoutes((prev) => ({ ...prev, [account.id]: next }))}
+            readError={routeErrors()[account.id]}
+            onUpdated={(next) => {
+              setRouteErrors((prev) => {
+                if (!(account.id in prev)) return prev;
+                const copy = { ...prev };
+                delete copy[account.id];
+                return copy;
+              });
+              setRoutes((prev) => ({ ...prev, [account.id]: next }));
+            }}
+            onUnconfirmed={(err) => {
+              setRoutes((prev) => {
+                if (!(account.id in prev)) return prev;
+                const copy = { ...prev };
+                delete copy[account.id];
+                return copy;
+              });
+              setRouteErrors((prev) => ({ ...prev, [account.id]: err }));
+            }}
+            onRetryRead={() => setLocalRefresh((v) => v + 1)}
           />
         )}
       </For>
@@ -613,7 +644,10 @@ function AccountRoutesCard(p: { onOpenPage?: (id: string) => void }) {
 function AccountRouteSummaryRow(p: {
   account: ProviderAccountRow;
   route: AccountVpnRoute | undefined;
+  readError?: unknown;
   onUpdated: (route: AccountVpnRoute) => void;
+  onUnconfirmed: (err: unknown) => void;
+  onRetryRead: () => void;
 }) {
   const [busy, setBusy] = createSignal(false);
   const [error, setError] = createSignal("");
@@ -628,8 +662,14 @@ function AccountRouteSummaryRow(p: {
     let active = true;
     const stop = pollWhileVisible(
       async () => {
-        const next = accountVpnRoute(await apiMod.api<unknown>(uri()));
-        if (active && next && version === apiMod.connectionVersion()) p.onUpdated(next);
+        try {
+          const next = accountVpnRoute(await apiMod.api<unknown>(uri()));
+          if (!active || version !== apiMod.connectionVersion()) return;
+          if (next) p.onUpdated(next);
+          else p.onUnconfirmed(new Error("Account connection settings are unavailable."));
+        } catch (e) {
+          if (active && version === apiMod.connectionVersion()) p.onUnconfirmed(e);
+        }
       },
       pollMs,
       `airvpn-page-${p.account.id}`,
@@ -651,8 +691,9 @@ function AccountRouteSummaryRow(p: {
           body: JSON.stringify(accountVpnWrite(country)),
         }),
       );
-      if (next && version === apiMod.connectionVersion()) {
-        p.onUpdated({ ...next, saved: true });
+      if (version === apiMod.connectionVersion()) {
+        if (next) p.onUpdated({ ...next, saved: true });
+        else setError("Account connection settings are unavailable.");
       }
     } catch (e) {
       if (version === apiMod.connectionVersion()) {
@@ -667,26 +708,44 @@ function AccountRouteSummaryRow(p: {
     <SettingsRow
       title={p.account.name}
       desc={
-        <Show when={p.route} fallback={<span>Checking route…</span>}>
-          {(r) => {
-            const v = () => accountVpnView(r(), nativeAccount());
-            return (
-              <>
-                <code>{p.account.provider_type}</code>
-                <Show when={v().status}> · <span role="status">{v().status}</span></Show>
-                <Show when={!v().status && v().notice}> · {v().notice}</Show>
-                <Show when={error()}> · <span role="alert">{error()}</span></Show>
-              </>
-            );
-          }}
+        <Show
+          when={!p.readError}
+          fallback={
+            <AccountSettingReadError
+              error={p.readError}
+              path={uri()}
+              updateMessage="Update Core to configure account VPNs."
+              retryLabel="Retry connection settings"
+              retry={() => { setError(""); p.onRetryRead(); }}
+            />
+          }
+        >
+          <Show when={p.route} fallback={<span>Checking route…</span>}>
+            {(r) => {
+              const v = () => accountVpnView(r(), nativeAccount());
+              return (
+                <>
+                  <code>{p.account.provider_type}</code>
+                  <Show when={v().status}> · <span role="status">{v().status}</span></Show>
+                  <Show when={!v().status && v().notice}> · {v().notice}</Show>
+                  <Show when={error()}> · <span role="alert">{error()}</span></Show>
+                </>
+              );
+            }}
+          </Show>
         </Show>
       }
     >
-      <Show when={p.route}>
+      <Show when={!p.readError && p.route}>
         {(r) => {
           const v = () => accountVpnView(r(), nativeAccount());
           return (
             <>
+              <Show when={v().confirmDirect}>
+                <button class="s-btn" disabled={busy()} onClick={() => void save("")}>
+                  Confirm Direct route
+                </button>
+              </Show>
               <Show when={v().retry}>
                 <button class="s-btn" disabled={busy() || !v().editable} onClick={() => void save(v().selected)}>
                   Retry

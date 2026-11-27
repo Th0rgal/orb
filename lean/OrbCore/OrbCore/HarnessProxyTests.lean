@@ -40,5 +40,39 @@ def run : IO Unit := do
   check (relayUrl.isSome && ((relayUrl.getD "").startsWith "socks5h://") &&
     ((relayUrl.getD "").splitOn "@10.88.0.1:10855").length == 2)
     "mesh AirVPN relay URL uses socks5h and configured mesh host"
+  -- Fail-closed checks for native Antigravity VPN proxy env resolution and Grok direct fallback guard.
+  IO.FS.withTempDir fun tmpDir => do
+    let root := tmpDir.toString
+    let store ← IO.ofExcept (← OrbCore.Store.openCoreStore root)
+    try
+      let baseSup ← newRemoteJobSupervisor "fixture-jwt-secret" false none
+      -- Direct account returns empty proxy env array.
+      let directEnvs ← IO.ofExcept (← resolveAntigravityVpnProxyEnvs store baseSup (some "agy-direct") "https://core.invalid")
+      check directEnvs.isEmpty "Direct Antigravity account produces no VPN proxy env vars"
+      -- VPN-routed Antigravity account must fail closed when coordinator/pool is missing.
+      IO.ofExcept (← OrbCore.AccountVpnRoutes.set store.missionsDb "agy-vpn" (some "NL"))
+      let noPool ← resolveAntigravityVpnProxyEnvs store baseSup (some "agy-vpn") "https://core.invalid"
+      check (match noPool with | .error "antigravity_vpn_coordinator_unavailable" => true | _ => false)
+        "VPN Antigravity account fails closed without coordinator pool"
+      -- VPN-routed Antigravity account must fail closed when pool cannot verify a tunnel.
+      let pool ← Std.Mutex.new ({} : OrbCore.AccountVpnPool.PoolState)
+      let supWithPool := { baseSup with vpnPool? := some pool, vpnCoordinatorDir := root }
+      let noProfile ← resolveAntigravityVpnProxyEnvs store supWithPool (some "agy-vpn") "https://core.invalid"
+      check (match noProfile with | .error e => e.startsWith "antigravity_vpn_unavailable:" | _ => false)
+        "VPN Antigravity account fails closed when tunnel cannot be verified"
+      -- Grok direct fallback must refuse to run when any xAI account has AirVPN configured.
+      IO.ofExcept (← OrbCore.Store.upsertAIProvider store {
+        id := "xai-vpn-1", name := "xAI VPN", providerType := "xai", apiKey := "fixture-only"
+      })
+      check ((← anyXaiVpnConfigured? store root).toOption == some false)
+        "Direct xAI account allows fallback check"
+      IO.ofExcept (← OrbCore.AccountVpnRoutes.set store.missionsDb "xai-vpn-1" (some "NL"))
+      check ((← anyXaiVpnConfigured? store root).toOption == some true)
+        "VPN-routed xAI account blocks direct Grok managedAuth fallback"
+      IO.ofExcept (← OrbCore.AccountVpnRoutes.set store.missionsDb "xai-vpn-1" none)
+      check ((← anyXaiVpnConfigured? store root).toOption == some false)
+        "Switching xAI account back to Direct clears VPN block"
+    finally
+      OrbCore.Store.closeCoreStore store
 
 end OrbCore.HarnessProxyTests

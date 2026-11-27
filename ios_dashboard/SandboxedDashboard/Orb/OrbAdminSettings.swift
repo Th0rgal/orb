@@ -1502,6 +1502,7 @@ struct OrbAirVpnSettings: View {
     @State private var pickingFile = false
 
     @State private var deletingDevice: String?
+    @State private var routesRevision = 0
 
     private var isAdmin: Bool { OrbCore.shared.isAdminUser }
 
@@ -1519,7 +1520,10 @@ struct OrbAirVpnSettings: View {
         }
         .scrollContentBackground(.hidden).background(OrbStyle.background)
         .navigationTitle("AirVPN").navigationBarTitleDisplayMode(.inline)
-        .refreshable { await load() }
+        .refreshable {
+            await load()
+            routesRevision += 1
+        }
         .task { await load() }
         .alert("AirVPN API key", isPresented: $editingKey) {
             SecureField("AirVPN API key", text: $keyDraft)
@@ -1621,6 +1625,7 @@ struct OrbAirVpnSettings: View {
                             account: account.selfID,
                             nativeAccount: account["provider_type"].text == "antigravity"
                         )
+                        .id("\(account.selfID)-\(routesRevision)")
                     }
                     .padding(.vertical, 2)
                 }
@@ -1728,6 +1733,7 @@ struct OrbAirVpnSettings: View {
             editingKey = false
             notice = "API key saved."
             await load()
+            routesRevision += 1
         } catch is CancellationError {} catch { self.error = error.localizedDescription }
     }
 
@@ -1763,6 +1769,7 @@ struct OrbAirVpnSettings: View {
             importingProfile = false
             notice = "Device profile saved."
             await load()
+            routesRevision += 1
         } catch is CancellationError {} catch { self.error = error.localizedDescription }
     }
 
@@ -1773,6 +1780,7 @@ struct OrbAirVpnSettings: View {
             deletingDevice = nil
             notice = "Removed profile \(dev)."
             await load()
+            routesRevision += 1
         } catch is CancellationError {} catch { self.error = error.localizedDescription }
     }
 }

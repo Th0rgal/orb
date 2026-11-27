@@ -1601,3 +1601,13 @@ private def routeButtonsText (opts : List AccountRouteOption) : String :=
   let rendered := routeButtonsText [
     ⟨"refresh", "", "Account connection", "Could not load. Retry"⟩]
   rendered.contains "Retry"
+
+#guard
+  let rendered := routeButtonsText [
+    ⟨"refresh", "", "Account connection", "Update Core to configure account VPNs."⟩]
+  rendered.contains "Retry" && !rendered.contains "Refresh"
+
+#guard
+  let rendered := routeButtonsText [
+    ⟨"refresh", "", "Alternative routers", "Update Core to configure alternative router access."⟩]
+  rendered.contains "Retry" && !rendered.contains "Refresh"
