@@ -2038,7 +2038,6 @@ fun OrbProjectPage(
                     )
                 ) {
                     item(key = "project_board") {
-                        OrbProjectBoardSection(core, liveProject, projectMissions, boardRefreshID, onOpenMission)
                         OrbMissionBoardsSection(core, liveProject, projectMissions, boardRefreshID) { board, revision -> selectedMissionBoard = board to revision }
                     }
                     if (filter != OrbProjectFilter.All) {
