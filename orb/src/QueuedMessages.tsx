@@ -1,24 +1,36 @@
 import {For,Show,createMemo,createSignal} from 'solid-js';
 import { ErrorToast } from "./toast";
 import {canDiscardQueuedMessage,queuedLocalMessages,acceptedLocalMessages,removeQueuedMessage,retryQueuedMessage,sendQueuedNow} from './localMessageQueue';
+import { normalizeFollowupPrompt } from './followupQueueState';
 import * as Ic from './icons';
 import { skillPreview } from './skillSlash';
 /** Follow-ups waiting for the current turn, shown like Cursor's queue: one line per
  * message, hover actions, and the row being edited marked in place. */
-export function QueuedMessages(p:{mission:string;editing?:string;pending?:{id:string;text:string}[];onEdit?:(row:{id:string;text:string})=>void;onCancel?:(id:string)=>void;onCancelPending?:(id:string)=>void}){
+export function QueuedMessages(p:{mission:string;editing?:string;pending?:{id:string;text:string}[];delivered?:readonly string[];deliveredTexts?:readonly string[];onEdit?:(row:{id:string;text:string})=>void;onCancel?:(id:string)=>void;onCancelPending?:(id:string)=>void}){
+ const deliveredIds=()=>new Set(p.delivered??[]);
  const allLocal=()=>queuedLocalMessages(p.mission);
- const storedRows=()=>allLocal().filter(row=>row.waiting&&row.state!=='accepted'&&row.state!=='dispatching'||!!row.error);
+ const storedRows=()=>{
+  const sent=deliveredIds();
+  return allLocal().filter(row=>!!row.error||(row.waiting&&row.state!=='accepted'&&row.state!=='dispatching'&&!sent.has(row.id)));
+ };
  const pendingRows=()=> {
+  const local=allLocal();
+  const accepted=acceptedLocalMessages(p.mission);
   const knownIds=new Set<string>([
-   ...allLocal().map(r=>r.id),
-   ...acceptedLocalMessages(p.mission).map(r=>r.id),
+   ...local.map(r=>r.id),
+   ...accepted.map(r=>r.id),
+   ...(p.delivered??[]),
   ]);
-  const storedTexts=new Set<string>(storedRows().map(r=>r.text.trim()).filter(Boolean));
+  const knownTexts=new Set<string>([
+   ...local.map(r=>normalizeFollowupPrompt(r.text)),
+   ...accepted.map(r=>normalizeFollowupPrompt(r.text)),
+   ...(p.deliveredTexts??[]).map(normalizeFollowupPrompt),
+  ].filter(Boolean));
   const seenPendingTexts=new Set<string>();
   return (p.pending??[]).filter(item=>{
    if(knownIds.has(item.id))return false;
-   const norm=item.text.trim();
-   if(norm&&(storedTexts.has(norm)||seenPendingTexts.has(norm)))return false;
+   const norm=normalizeFollowupPrompt(item.text);
+   if(norm&&(knownTexts.has(norm)||seenPendingTexts.has(norm)))return false;
    if(norm)seenPendingTexts.add(norm);
    return true;
   });
