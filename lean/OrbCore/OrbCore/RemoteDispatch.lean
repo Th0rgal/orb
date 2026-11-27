@@ -1855,10 +1855,11 @@ private def verifiedManagedWorkerLoss (mc? : Option ManagedComputeStore) (node :
   let some mc := mc? | return false
   if !node.startsWith "managed-" then return false
   let .ok rows ← execParamQuery mc.db
-      ("SELECT 1 FROM managed_machines m JOIN managed_expirations e ON e.machine_id=m.id " ++
+      ("SELECT 1 FROM managed_machines m LEFT JOIN managed_expirations e ON e.machine_id=m.id " ++
        "AND e.boot_epoch=m.node_boot_epoch AND e.provider_id=m.provider_id " ++
-       "WHERE m.id=?1 AND m.phase_code IN (2,3) AND e.state='completed' " ++
-       "AND e.observed_state IN ('reaped','deleted','destroyed','absent') " ++
+       "WHERE m.id=?1 AND ((m.phase_code=3 AND m.status='destroyed') OR " ++
+       "(m.phase_code IN (2,3) AND e.state='completed' " ++
+       "AND e.observed_state IN ('reaped','deleted','destroyed','absent'))) " ++
        "AND NOT EXISTS (SELECT 1 FROM managed_resume_intents r WHERE r.machine_id=m.id AND r.state IN ('pending','aborting'));")
       #[(node.drop 8).toString] | return false
   if rows.size < 2 then return false
