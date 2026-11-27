@@ -21,30 +21,52 @@ private def sql (db : SqliteDb) (stmt : String) (params : Array String := #[]) :
 
 private def verifyLegacyMigration (store : CoreStore) (now : UInt64) : IO Unit := do
   let db := store.missionsDb
-  sql db ("CREATE TABLE automations(id TEXT PRIMARY KEY,mission_id TEXT,command_source_data TEXT, " ++
-    "trigger_type TEXT,trigger_data TEXT,stop_policy TEXT,active INTEGER);")
-  for (aid, kind, payload, policy) in #[
-      ("unknown", "future_trigger", "{\"job_id\":\"unrelated\"}", "never"),
-      ("cron", "cron", "{\"expression\":\"0 0 * * *\"}", "after_first_fire"),
-      ("policy", "interval", "{\"seconds\":300}", "consecutive_failures:2"),
-      ("bad-insert", "interval", "{\"seconds\":300}", "after_first_fire"),
-      ("bad-retire", "interval", "{\"seconds\":300}", "after_first_fire"),
-      ("valid", "interval", "{\"seconds\":300}", "after_first_fire")] do
+  sql db ("CREATE TABLE automations(id TEXT PRIMARY KEY,mission_id TEXT,command_source_type TEXT DEFAULT 'inline', " ++
+    "command_source_data TEXT,trigger_type TEXT,trigger_data TEXT,variables TEXT DEFAULT '{}',stop_policy TEXT, " ++
+    "fresh_session TEXT DEFAULT 'keep',driver TEXT DEFAULT 'scheduler',active INTEGER);")
+  let unsupported : Array (String × String × String × String × String × String × String × String × String) := #[
+    ("unknown", "inline", "{\"content\":\"legacy intent\"}", "future_trigger", "{\"job_id\":\"unrelated\"}", "{}", "never", "keep", "scheduler"),
+    ("cron", "inline", "{\"content\":\"legacy intent\"}", "cron", "{\"expression\":\"0 0 * * *\"}", "{}", "after_first_fire", "keep", "scheduler"),
+    ("webhook", "inline", "{\"content\":\"legacy intent\"}", "webhook", "{\"path\":\"/hook\"}", "{}", "after_first_fire", "keep", "scheduler"),
+    ("agent-fin", "inline", "{\"content\":\"legacy intent\"}", "agent_finished", "{}", "{}", "after_first_fire", "keep", "scheduler"),
+    ("telegram", "inline", "{\"content\":\"legacy intent\"}", "telegram", "{\"chat_id\":1}", "{}", "after_first_fire", "keep", "scheduler"),
+    ("empty-trig", "inline", "{\"content\":\"legacy intent\"}", "", "{\"seconds\":300}", "{}", "after_first_fire", "keep", "scheduler"),
+    ("policy", "inline", "{\"content\":\"legacy intent\"}", "interval", "{\"seconds\":300}", "{}", "consecutive_failures:2", "keep", "scheduler"),
+    ("term-done", "inline", "{\"content\":\"legacy intent\"}", "interval", "{\"seconds\":300}", "{}", "when_mission_terminal", "keep", "scheduler"),
+    ("cmd-lib", "library", "{\"name\":\"nightly\"}", "interval", "{\"seconds\":300}", "{}", "after_first_fire", "keep", "scheduler"),
+    ("cmd-file", "local_file", "{\"path\":\"/tmp/run.md\"}", "interval", "{\"seconds\":300}", "{}", "after_first_fire", "keep", "scheduler"),
+    ("cmd-loop", "native_loop", "{\"harness\":\"codex\"}", "interval", "{\"seconds\":300}", "{}", "after_first_fire", "keep", "scheduler"),
+    ("cmd-obj", "inline", "{\"name\":\"not-inline-content\"}", "interval", "{\"seconds\":300}", "{}", "after_first_fire", "keep", "scheduler"),
+    ("drv-loop", "inline", "{\"content\":\"legacy intent\"}", "interval", "{\"seconds\":300}", "{}", "after_first_fire", "keep", "harness_loop"),
+    ("fresh-sw", "inline", "{\"content\":\"legacy intent\"}", "interval", "{\"seconds\":300}", "{}", "after_first_fire", "always", "scheduler"),
+    ("has-vars", "inline", "{\"content\":\"legacy intent\"}", "interval", "{\"seconds\":300}", "{\"env\":\"prod\"}", "after_first_fire", "keep", "scheduler"),
+    ("bad-json", "inline", "{\"content\":\"legacy intent\"}", "interval", "not-json", "{}", "after_first_fire", "keep", "scheduler"),
+    ("bad-at", "inline", "{\"content\":\"legacy intent\"}", "time", "{\"at\":\"not-a-date\",\"seconds\":300}", "{}", "after_first_fire", "keep", "scheduler"),
+    ("bad-insert", "inline", "{\"content\":\"legacy intent\"}", "interval", "{\"seconds\":300}", "{}", "after_first_fire", "keep", "scheduler"),
+    ("bad-retire", "inline", "{\"content\":\"legacy intent\"}", "interval", "{\"seconds\":300}", "{}", "after_first_fire", "keep", "scheduler")
+  ]
+  let supported : Array (String × String × String × String × String × String × String × String × String) := #[
+    ("valid", "inline", "{\"content\":\"legacy intent\"}", "interval", "{\"seconds\":300}", "{}", "after_first_fire", "keep", "scheduler"),
+    ("valid-recur", "inline", "{\"content\":\"recurring intent\"}", "interval", "{\"seconds\":300}", "{}", "never", "keep", "scheduler"),
+    ("valid-job", "inline", "{\"content\":\"job intent\"}", "durable_job_terminal", "{\"job_id\":\"job-leg-1\"}", "{}", "after_first_fire", "keep", "scheduler")
+  ]
+  for (aid, cmdType, cmdData, kind, payload, vars, policy, fresh, drv) in unsupported ++ supported do
     sql db "INSERT INTO missions(id,title,status,backend,created_at,updated_at) VALUES(?1,'legacy','completed','claudecode','t0','t0');" #[s!"m-legacy-{aid}"]
-    sql db "INSERT INTO automations VALUES(?1,?2,'{\"content\":\"legacy intent\"}',?3,?4,?5,1);"
-      #[aid, s!"m-legacy-{aid}", kind, payload, policy]
+    sql db "INSERT INTO automations VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,1);"
+      #[aid, s!"m-legacy-{aid}", cmdType, cmdData, kind, payload, vars, policy, fresh, drv]
   sql db ("CREATE TRIGGER reject_legacy_insert BEFORE INSERT ON mission_continuations " ++
     "WHEN NEW.id='leg-auto-bad-insert' BEGIN SELECT RAISE(ABORT,'fixture insert failure'); END;")
   sql db ("CREATE TRIGGER reject_legacy_retirement BEFORE UPDATE ON automations " ++
     "WHEN OLD.id='bad-retire' BEGIN SELECT RAISE(IGNORE); END;")
-  check ((← migrateLegacyAutomations store now) == 1 && (← migrateLegacyAutomations store now) == 0)
-    "only the supported, fully written source migrates, once"
-  check ((← cellOf db "SELECT COUNT(*) FROM automations WHERE active=1 AND id<>'valid';" #[]) == "5")
-    "unsupported intent and both failed writes retain their active source"
-  check ((← cellOf db "SELECT COUNT(*) FROM missions WHERE id LIKE 'm-legacy-%' AND status='completed';" #[]) == "5")
-    "failed writes do not park the owning missions"
-  check ((← cellOf db "SELECT group_concat(id || ':' || prompt || ':' || stop_after_first) FROM mission_continuations WHERE source='legacy-automations-migration';" #[]) ==
-    "leg-auto-valid:legacy intent:1") "valid legacy after_first_fire stays one-shot"
+  check ((← migrateLegacyAutomations store now) == supported.size && (← migrateLegacyAutomations store now) == 0)
+    "only supported, fully written sources migrate, once"
+  check ((← cellOf db "SELECT COUNT(*) FROM automations WHERE active=1 AND id NOT IN ('valid','valid-recur','valid-job');" #[]) == s!"{unsupported.size}")
+    "unsupported triggers, unsupported intent, and failed writes retain their active source"
+  check ((← cellOf db "SELECT COUNT(*) FROM missions WHERE id LIKE 'm-legacy-%' AND status='completed';" #[]) == s!"{unsupported.size}")
+    "skipped rows and failed writes do not park the owning missions"
+  check ((← cellOf db "SELECT group_concat(id || ':' || trigger_kind || ':' || prompt || ':' || stop_after_first || ':' || recurrence, '|') FROM (SELECT * FROM mission_continuations WHERE source='legacy-automations-migration' ORDER BY id);" #[]) ==
+    "leg-auto-valid:time:legacy intent:1:|leg-auto-valid-job:durable_job_terminal:job intent:1:|leg-auto-valid-recur:time:recurring intent:0:interval:300")
+    "supported legacy one-shot, recurring, and durable-job automations preserve exact intent"
 
 private def verifyProductionLocalFailure (store : CoreStore) (sup : RemoteJobSupervisor)
     (root : String) (due : UInt64) : IO Unit := do
@@ -57,15 +79,18 @@ private def verifyProductionLocalFailure (store : CoreStore) (sup : RemoteJobSup
     { id := "c-real-local", missionId := "m-real-local", requestId := "real-local", prompt := "retry me",
       reason := "test", source := "mcp", triggerKind := "time", dueEpoch := due } (due - 1) "t0"
     | throw (IO.userError "production local continuation registration")
+  let warmMgr ← OrbBin.ClaudeControl.newWarmHarnessManager
   let app : CoreAppState := {
     cfg := { workingDir := root }, store, searchIdx? := none, managedRef := ← IO.mkRef {},
     chainsRef := ← IO.mkRef #[], proxyCooldownsRef := ← IO.mkRef #[], seqRef := ← IO.mkRef 0,
-    warmMgr? := some (← OrbBin.ClaudeControl.newWarmHarnessManager) }
+    warmMgr? := some warmMgr }
   let tick := fun now => tickContinuationScheduler store none none none sup none root (some (launchLocalWakeup app)) (some now)
   let state := cellOf db ("SELECT c.phase||':'||c.run_generation||':'||c.error||':'||m.status||':'||m.run_generation " ++
     "FROM mission_continuations c JOIN missions m ON m.id=c.mission_id WHERE c.id='c-real-local';") #[]
   discard <| tick due
   check ((← state) == "1:2:launch_retry:1:interrupted:2") "real failed launch advances the generation and re-arms once"
+  check ((← warmMgr.launchGenerations.get).get? "m-real-local" == none)
+    "real failed launch clears its launch-generation slot"
   discard <| tick (due + 59)
   check ((← state) == "1:2:launch_retry:1:interrupted:2") "real retry respects its deadline"
   discard <| tick (due + 60)
@@ -73,6 +98,44 @@ private def verifyProductionLocalFailure (store : CoreStore) (sup : RemoteJobSup
   check ((← state) == "1:3:launch_retry:2:interrupted:3") "the real launcher retries once at the deadline"
   check ((← cellOf db "SELECT COUNT(*) FROM mission_events WHERE mission_id='m-real-local' AND event_type='user_message';" #[]) == "1")
     "real retries do not duplicate the wake-up prompt"
+  -- Replacing a re-armed wake-up clears its prior launch_retry count so the replacement
+  -- gets its own transcript entry and full bounded retry budget.
+  let repDue := due + 500
+  let .ok repId ← registerContinuation store
+    { id := "c-real-local-rep", missionId := "m-real-local", requestId := "real-local-rep", prompt := "fresh replacement",
+      reason := "test", source := "mcp", triggerKind := "time", dueEpoch := repDue } (due + 61) "t1"
+    | throw (IO.userError "production local continuation replacement")
+  check (repId == "c-real-local") "time replacement reuses the armed row"
+  check ((← cellOf db "SELECT error || ':' || dispatch_job_id FROM mission_continuations WHERE id='c-real-local';" #[]) == ":")
+    "replacing a failed wake-up clears prior retry state"
+  discard <| tick repDue
+  check ((← state) == "1:4:launch_retry:1:interrupted:4") "replaced wake-up starts from launch_retry:1 after generation advance"
+  check ((← cellOf db "SELECT COUNT(*) FROM mission_events WHERE mission_id='m-real-local' AND event_type='user_message';" #[]) == "2")
+    "replaced wake-up records its own user_message once"
+  -- Bounded retries through the real production launcher: never spin infinitely.
+  let mut t := repDue
+  for _ in [0:maxWakeupLaunchTries + 2] do
+    t := t + 1000
+    discard <| tick t
+  check ((← cellOf db "SELECT phase || ':' || error FROM mission_continuations WHERE id='c-real-local';" #[]) == "4:launch_failed")
+    "real production launcher bounds retries and retires as launch_failed"
+  check ((← cellOf db "SELECT status FROM missions WHERE id='m-real-local';" #[]) == "interrupted")
+    "exhausted production local failures never strand a ghost-active mission"
+  -- Production launcher with Stop race: Stop bumps generation before launchLocalWakeup runs.
+  sql db ("INSERT INTO missions(id,title,status,backend,run_generation,created_at,updated_at) " ++
+    "VALUES('m-real-stop','wakeup','awaiting_user',?1,1,'t0','t0');") #[s!"missing-cli-{← newUuidV4}"]
+  let .ok _ ← registerContinuation store
+    { id := "c-real-stop", missionId := "m-real-stop", requestId := "real-stop", prompt := "stopped before launch",
+      reason := "test", source := "mcp", triggerKind := "time", dueEpoch := t + 10 } t "t0"
+    | throw (IO.userError "production stop-race registration")
+  let .ok (.ok _) ← actOnContinuation store "c-real-stop" "resume" "t1" (t + 10) (some ("real-stop", 1))
+    | throw (IO.userError "production stop-race resume claim")
+  let .ok _ ← hostedStop store "m-real-stop" "t2" | throw (IO.userError "production stop-race hostedStop")
+  let some mrStop ← getMission? store "m-real-stop" | throw (IO.userError "production stop-race mission")
+  let stopOk ← launchLocalWakeup app mrStop "stopped before launch" none ⟨"c-real-stop", "real-stop", 1⟩
+  check (!stopOk) "production launcher refuses a claim fenced by Stop"
+  check ((← cellOf db "SELECT status || ':' || terminal_reason FROM missions WHERE id='m-real-stop';" #[]) == "interrupted:hosted_stop")
+    "fenced production launch preserves hosted_stop"
 
 def run : IO Unit := do
   let root := s!"/tmp/orb-wakeup-restart-{← newUuidV4}"

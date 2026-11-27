@@ -39,7 +39,8 @@ def continuationsSchemaSql : String :=
   "phase INTEGER NOT NULL DEFAULT 1, due_epoch INTEGER NOT NULL DEFAULT 0, " ++
   "trigger_kind TEXT NOT NULL DEFAULT 'time', reason TEXT NOT NULL DEFAULT '', " ++
   "prompt TEXT NOT NULL DEFAULT '', request_id TEXT NOT NULL DEFAULT '', " ++
-  "job_id TEXT NOT NULL DEFAULT '', source TEXT NOT NULL DEFAULT '', " ++
+  "job_id TEXT NOT NULL DEFAULT '', dispatch_job_id TEXT NOT NULL DEFAULT '', " ++
+  "source TEXT NOT NULL DEFAULT '', " ++
   "error TEXT NOT NULL DEFAULT '', recurrence TEXT NOT NULL DEFAULT '', " ++
   "stop_after_first INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL DEFAULT '', " ++
   "updated_at TEXT NOT NULL DEFAULT '', UNIQUE(mission_id, request_id));"
@@ -561,8 +562,8 @@ def registerContinuation
           let .ok rcrs := rch | return .error "continuation_changes_failed"
           if changesOf rcrs == 0 then return .error "continuation_replace_rejected"
         let upd ← execParamQueryUnlocked st.missionsDb
-          "UPDATE mission_continuations SET phase=1,run_generation=?2,due_epoch=?3,prompt=?4,reason=?5,source=?6,request_id=?7,updated_at=?8 WHERE id=?1 AND phase=1;"
-          #[prevId, s!"{runGen}", s!"{d.dueEpoch}", d.prompt, d.reason, d.source, d.requestId, isoNow]
+          "UPDATE mission_continuations SET phase=1,run_generation=?2,due_epoch=?3,prompt=?4,reason=?5,source=?6,request_id=?7,error='',dispatch_job_id='',recurrence=?9,stop_after_first=CAST(?10 AS INTEGER),updated_at=?8 WHERE id=?1 AND phase=1;"
+          #[prevId, s!"{runGen}", s!"{d.dueEpoch}", d.prompt, d.reason, d.source, d.requestId, isoNow, d.recurrence, if d.stopAfterFirst then "1" else "0"]
         if let .error e := upd then return .error e
         let ch ← execParamQueryUnlocked st.missionsDb "SELECT changes();" #[]
         let .ok crs := ch | return .error "continuation_changes_failed"
@@ -594,8 +595,8 @@ def registerContinuation
           let .ok rcrs := rch | return .error "continuation_changes_failed"
           if changesOf rcrs == 0 then return .error "continuation_replace_rejected"
         let upd ← execParamQueryUnlocked st.missionsDb
-          "UPDATE mission_continuations SET run_generation=?2,due_epoch=?3,prompt=?4,reason=?5,source=?6,request_id=?7,updated_at=?8 WHERE id=?1 AND phase=1;"
-          #[prevId, s!"{runGen}", s!"{d.dueEpoch}", d.prompt, d.reason, d.source, d.requestId, isoNow]
+          "UPDATE mission_continuations SET run_generation=?2,due_epoch=?3,prompt=?4,reason=?5,source=?6,request_id=?7,error='',dispatch_job_id='',recurrence=?9,stop_after_first=CAST(?10 AS INTEGER),updated_at=?8 WHERE id=?1 AND phase=1;"
+          #[prevId, s!"{runGen}", s!"{d.dueEpoch}", d.prompt, d.reason, d.source, d.requestId, isoNow, d.recurrence, if d.stopAfterFirst then "1" else "0"]
         if let .error e := upd then return .error e
         let ch ← execParamQueryUnlocked st.missionsDb "SELECT changes();" #[]
         let .ok crs := ch | return .error "continuation_changes_failed"

@@ -1217,7 +1217,8 @@ private def wakeupRetryCount (err : String) : Nat :=
 -- The caller owns the write transaction. For a remote attempt, settlement and
 -- job acceptance/rejection must commit together. A newer schedule wins over retry.
 private def settleWakeupClaimUnlocked (store : CoreStore) (claim : WakeupClaim)
-    (jobId : String) (accepted : Bool) (nextGen nowSec : UInt64) : IO (Except String Unit) := do
+    (jobId : String) (accepted : Bool) (nextGen nowSec : UInt64)
+    (fenced : Bool := false) : IO (Except String Unit) := do
   let query := execParamQueryUnlocked store.missionsDb
   let iso := formatEpochIso8601Utc nowSec
   let fence := "id=?1 AND request_id=?2 AND phase=2 AND dispatch_job_id=?3"
@@ -1229,6 +1230,9 @@ private def settleWakeupClaimUnlocked (store : CoreStore) (claim : WakeupClaim)
     "c.id=?1 AND c.request_id=?2 AND c.phase=2 AND c.dispatch_job_id=?3;") args
     | return .error "wakeup_claim_read_failed"
   let some r := rows[1]? | return .ok ()
+  if fenced then
+    return (← query ("UPDATE mission_continuations SET phase=4, error='wakeup_claim_fenced', updated_at=?4 WHERE " ++ fence ++ ";")
+      (args ++ #[iso])).map (fun _ => ())
   let mid := cell r 0
   let recurrence := cell r 2
   let recurring := cellNat r 3 == 0 && recurrence.startsWith "interval:"
@@ -2479,7 +2483,9 @@ partial def submitRemoteMissionTurn
   | .ok (status, respTxt, _, _, _) =>
     if status < 200 || status ≥ 300 then
       if spec.wakeupClaim?.isSome && (status ≥ 500 || status == 408 || status == 409) then
-        discard <| execParamQuery store.missionsDb "UPDATE remote_node_jobs SET state='uncertain' WHERE job_id=?1 AND state='submitting';" #[jobId]
+        discard <| execParamQuery store.missionsDb
+          "UPDATE remote_node_jobs SET state='uncertain', updated_at=?2 WHERE job_id=?1 AND state='submitting';"
+          #[jobId, submitNowIso]
         return .error s!"remote_dispatch_uncertain:http_{status}"
       let settled ← withImmediateTx store.missionsDb do
         if let .error e ← execParamQueryUnlocked store.missionsDb
@@ -2489,7 +2495,9 @@ partial def submitRemoteMissionTurn
           settleWakeupClaimUnlocked store claim jobId false 0 nowSec
         else pure (.ok ())
       if let .error _ := settled then
-        discard <| execParamQuery store.missionsDb "UPDATE remote_node_jobs SET state='uncertain' WHERE job_id=?1 AND state='submitting';" #[jobId]
+        discard <| execParamQuery store.missionsDb
+          "UPDATE remote_node_jobs SET state='uncertain', updated_at=?2 WHERE job_id=?1 AND state='submitting';"
+          #[jobId, submitNowIso]
       if !prep.proxyToken.isEmpty then revokeSingleMissionProxyToken store prep.proxyToken
       return .error s!"remote_node_rejected_{status}:{respTxt}"
     let nowIso := formatEpochIso8601Utc nowSec
@@ -2542,7 +2550,7 @@ partial def submitRemoteMissionTurn
               "UPDATE remote_node_jobs SET state=?2 WHERE job_id=?1;" #[jobId, state] then return .error e
           if state == "cancelled" then
             if let some claim := spec.wakeupClaim? then
-              return ← settleWakeupClaimUnlocked store claim jobId true 0 nowSec
+              return ← settleWakeupClaimUnlocked store claim jobId false 0 nowSec (fenced := true)
           return .ok ()
         return .error dbErr
       -- The node accepted the work but Core could not activate its owner row.
@@ -2661,20 +2669,20 @@ def reconcileUncertainRemoteSubmissions
           #[mid, nowIso, jid]
       else if 200 ≤ status && status < 300 then
         if (wakeup?.isSome || completedGoal) && (view? >>= (·.fieldStr? "job_id")) != some jid then continue
-        let .ok gRows ← execParamQuery store.missionsDb
-            "SELECT COALESCE(run_generation,1), COALESCE((SELECT MAX(generation) FROM mission_runs WHERE mission_id=?1),0) FROM missions WHERE id=?1;"
-            #[mid] | continue
-        let mut nextGen : Nat := 1
-        if gRows.size > 1 then
-          let mg := cellNat gRows[1]! 0
-          let rg := cellNat gRows[1]! 1
-          nextGen := if rg == 0 then Nat.max 1 mg else Nat.max mg (rg + 1)
         let runId ← newUuidV4
         let txRes ← withImmediateTx store.missionsDb do
           let .ok pending ← execParamQueryUnlocked store.missionsDb
             "SELECT 1 FROM remote_node_jobs WHERE job_id=?1 AND state IN ('submitting','uncertain');" #[jid]
             | return .error "remote_dispatch_pending_read_failed"
           if pending.size ≤ 1 then return .error "remote_dispatch_already_settled"
+          let .ok gRows ← execParamQueryUnlocked store.missionsDb
+            "SELECT COALESCE(run_generation,1), COALESCE((SELECT MAX(generation) FROM mission_runs WHERE mission_id=?1),0) FROM missions WHERE id=?1;"
+            #[mid] | return .error "remote_dispatch_generation_read_failed"
+          let mut nextGen : Nat := 1
+          if gRows.size > 1 then
+            let mg := cellNat gRows[1]! 0
+            let rg := cellNat gRows[1]! 1
+            nextGen := if rg == 0 then Nat.max 1 mg else Nat.max mg (rg + 1)
           if let some claim := wakeup? then
             let .ok pending ← execParamQueryUnlocked store.missionsDb
               "SELECT 1 FROM remote_node_jobs WHERE job_id=?1 AND state='uncertain';" #[jid]
@@ -2707,8 +2715,8 @@ def reconcileUncertainRemoteSubmissions
             if 200 ≤ code && code < 300 then
               discard <| withImmediateTx store.missionsDb do
                 if let .error e ← execParamQueryUnlocked store.missionsDb
-                  "UPDATE remote_node_jobs SET state='cancelled' WHERE job_id=?1 AND state='uncertain';" #[jid] then return .error e
-                if let some claim := wakeup? then return ← settleWakeupClaimUnlocked store claim jid true 0 nowSec
+                  "UPDATE remote_node_jobs SET state='cancelled', updated_at=?2 WHERE job_id=?1 AND state='uncertain';" #[jid, nowIso] then return .error e
+                if let some claim := wakeup? then return ← settleWakeupClaimUnlocked store claim jid false 0 nowSec (fenced := true)
                 return .ok ()
         | .error "remote_goal_dispatch_fenced" =>
           if let .ok pending ← execParamQuery store.missionsDb
@@ -2725,6 +2733,11 @@ def reconcileUncertainRemoteSubmissions
               "UPDATE remote_node_jobs SET state='uncertain', updated_at=?2 WHERE job_id=?1 AND (?3='' OR state='submitting');"
               #[jid, nowIso, if goalGen?.isSome then "goal" else ""]
         | .ok _ =>
+          discard <| execParamQuery store.projectsDb
+            ("INSERT INTO remote_jobs(job_id,mission_id,node_id,kind,state,started_at,accepted_at,heartbeat_at,updated_at) " ++
+             "VALUES(?1,?2,?3,'mission','running',?4,?4,?4,?4) " ++
+             "ON CONFLICT(job_id) DO UPDATE SET state='running', node_id=excluded.node_id, heartbeat_at=excluded.updated_at, updated_at=excluded.updated_at;")
+            #[jid, mid, node, nowIso]
           spawnRemoteJobPoller store mc? relayHub? broadcastHub? sup coreWorkDir mid backend node jid "" 0
           attached := attached + 1
   return attached
@@ -2889,6 +2902,10 @@ def migrateLegacyAutomations (store : CoreStore) (nowSec : UInt64) : IO Nat := d
     if hasSplitCmd then "COALESCE(command_source_data,'')"
     else if hasJsonCmd then "COALESCE(command_source,'')"
     else "''"
+  let cmdTypeExpr := if colNames.contains "command_source_type" then "lower(trim(COALESCE(command_source_type,'')))" else "''"
+  let driverExpr := if colNames.contains "driver" then "lower(trim(COALESCE(driver,'')))" else "''"
+  let freshSessExpr := if colNames.contains "fresh_session" then "lower(trim(COALESCE(fresh_session,'')))" else "''"
+  let varsExpr := if colNames.contains "variables" then "trim(COALESCE(variables,''))" else "''"
   let hasTrigType := colNames.contains "trigger_type"
   let hasTrigData := colNames.contains "trigger_data"
   let trigTypeExpr := if hasTrigType then "lower(trim(COALESCE(trigger_type,'')))" else "''"
@@ -2898,7 +2915,8 @@ def migrateLegacyAutomations (store : CoreStore) (nowSec : UInt64) : IO Nat := d
   let stopPolExpr := if colNames.contains "stop_policy" then "COALESCE(stop_policy,'')" else "''"
 
   let selSql :=
-    s!"SELECT id, mission_id, {cmdExpr}, {trigTypeExpr}, {trigDataExpr}, {createdExpr}, {lastTrigExpr}, {stopPolExpr} " ++
+    s!"SELECT id, mission_id, {cmdExpr}, {trigTypeExpr}, {trigDataExpr}, {createdExpr}, {lastTrigExpr}, {stopPolExpr}, " ++
+    s!"{cmdTypeExpr}, {driverExpr}, {freshSessExpr}, {varsExpr} " ++
     s!"FROM automations WHERE COALESCE(active,0)=1 AND {trigTypeExpr} IN ('interval','time','job','durable_job_terminal');"
   let .ok aRows ← execParamQuery store.missionsDb selSql #[]
     | return 0
@@ -2914,9 +2932,40 @@ def migrateLegacyAutomations (store : CoreStore) (nowSec : UInt64) : IO Nat := d
     let rawTrig := (cell r 4).trimAscii.toString
     let createdAt := (cell r 5).trimAscii.toString
     let lastTrig := (cell r 6).trimAscii.toString
-    let stopPol := (cell r 7).trimAscii.toString
+    let stopPol := (cell r 7).trimAscii.toString.toLower
+    let cmdType := (cell r 8).trimAscii.toString.toLower
+    let driver := (cell r 9).trimAscii.toString.toLower
+    let freshSess := (cell r 10).trimAscii.toString.toLower
+    let rawVars := (cell r 11).trimAscii.toString
     let stopFirst := #["after_first_fire", "after_first", "\"after_first\"", "{\"type\":\"after_first\"}"].contains stopPol
     if !(stopFirst || #["", "never", "when_mission_terminal"].contains stopPol) then continue
+    -- Preserve non-inline command sources, non-scheduler drivers, session-switching policies,
+    -- and templated variable maps intact rather than flattening them into literal prompts.
+    if !cmdType.isEmpty && cmdType != "inline" then continue
+    if !driver.isEmpty && driver != "scheduler" then continue
+    if !freshSess.isEmpty && freshSess != "keep" then continue
+    let varsSupported :=
+      if rawVars.isEmpty then true
+      else match OrbBin.Json.parse rawVars with
+        | .ok (.obj fields) => fields.isEmpty
+        | _ => false
+    if !varsSupported then continue
+    let prompt? : Option String :=
+      match OrbBin.Json.parse rawCmd with
+      | .ok (.obj fields) =>
+        let obj := JVal.obj fields
+        ((obj.fieldStr? "content").orElse (fun _ => obj.fieldStr? "prompt"))
+          |>.filter (!·.trimAscii.toString.isEmpty)
+      | .ok (.str s) => if s.trimAscii.toString.isEmpty then none else some s
+      | .ok _ => none
+      | .error _ => if rawCmd.isEmpty then some "Continue." else some rawCmd
+    let some prompt := prompt? | continue
+    let trigFields? : Option (Array (String × JVal)) :=
+      match OrbBin.Json.parse rawTrig with
+      | .ok (.obj fields) => some fields
+      | _ => none
+    let some trigFields := trigFields? | continue
+    let trigJv : JVal := .obj trigFields
     if !aid.isEmpty && !mid.isEmpty then
       let result ← withImmediateTx store.missionsDb do
         let query := execParamQueryUnlocked store.missionsDb
@@ -2927,18 +2976,10 @@ def migrateLegacyAutomations (store : CoreStore) (nowSec : UInt64) : IO Nat := d
           if mrs.size ≤ 1 then return .ok false
           let mStatus := cell mrs[1]! 0
           let mRunGen := Nat.max 1 (cellNat mrs[1]! 1)
-          if mStatus == "cancelled" || mStatus == "failed" || mStatus == "not_feasible" then
+          if mStatus == "cancelled" || mStatus == "failed" || mStatus == "not_feasible" ||
+              (mStatus == "completed" && stopPol == "when_mission_terminal") then
             return .ok false
           else
-            let prompt :=
-              match OrbBin.Json.parse rawCmd with
-              | .ok jv =>
-                (jv.fieldStr? "content")
-                  |>.orElse (fun _ => jv.fieldStr? "prompt")
-                  |>.orElse (fun _ => jv.asStr?)
-                  |>.getD (if rawCmd.isEmpty then "Continue." else rawCmd)
-              | .error _ => if rawCmd.isEmpty then "Continue." else rawCmd
-            let trigJv := (OrbBin.Json.parse rawTrig).toOption.getD (.obj #[])
             let baseEpoch :=
               (if !lastTrig.isEmpty then parseIso8601EpochU64? lastTrig else none)
                 |>.orElse (fun _ => if !createdAt.isEmpty then parseIso8601EpochU64? createdAt else none)
@@ -2948,14 +2989,18 @@ def migrateLegacyAutomations (store : CoreStore) (nowSec : UInt64) : IO Nat := d
                 |>.orElse (fun _ => trigJv.fieldUInt64? "interval_seconds")
                 |>.orElse (fun _ => trigJv.fieldUInt64? "delay_seconds")
                 |>.getD 0
+            let hasAtKey := trigFields.any (fun (k, _) => k == "at" || k == "next_at")
+            let hasCronKey := trigFields.any (fun (k, _) => k == "expression" || k == "timezone")
             let explicitAt? :=
               (trigJv.fieldStr? "at")
                 |>.orElse (fun _ => trigJv.fieldStr? "next_at")
                 |>.bind parseIso8601EpochU64?
             let jobId := (trigJv.fieldStr? "job_id").getD ""
             let isJobTrig := trigType == "job" || trigType == "durable_job_terminal"
-            if (isJobTrig && jobId.isEmpty) || (!isJobTrig && !jobId.isEmpty) ||
-                (trigType == "interval" && secs < 60) || (trigType == "time" && explicitAt?.isNone && secs == 0) then
+            if hasCronKey || (hasAtKey && explicitAt?.isNone) ||
+                (isJobTrig && jobId.isEmpty) || (!isJobTrig && !jobId.isEmpty) ||
+                (trigType == "interval" && (secs < 60 || hasAtKey)) ||
+                (trigType == "time" && explicitAt?.isNone && secs == 0) then
               return .ok false
             let effTrigKind := if isJobTrig then "durable_job_terminal" else "time"
             let dueEpoch :=

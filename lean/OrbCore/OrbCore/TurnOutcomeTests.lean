@@ -421,7 +421,8 @@ private def verifyRemoteWakeupRecovery (store : CoreStore) (sup : RemoteJobSuper
   let attached ← IO.ofExcept probe.get
   if found then
     check (attached == 1 && (← state) == "4:" && (← jobs) == "1" &&
-      (← cellOf db "SELECT placement_job_id FROM missions WHERE id=?1;" #[mid]) == jid)
+      (← cellOf db "SELECT placement_job_id FROM missions WHERE id=?1;" #[mid]) == jid &&
+      (← cellOf store.projectsDb "SELECT state FROM remote_jobs WHERE job_id=?1;" #[jid]) == "running")
       "reconciliation adopts acceptance and retires the original occurrence"
     check ((← tick (due + 600)) == 0 && (← jobs) == "1") "accepted wake-up never creates a second job"
   else
@@ -441,6 +442,47 @@ private def verifyRemoteWakeupRecovery (store : CoreStore) (sup : RemoteJobSuper
     discard <| hostedStop store mid "t-stop"
   check ((← cellOf db "SELECT COUNT(*) FROM mission_events WHERE mission_id=?1 AND event_type='user_message';" #[mid]) == "1")
     "remote retries record the wake-up prompt once"
+
+private def verifyRemoteWakeupHttp503AndStopFence (store : CoreStore) (sup : RemoteJobSupervisor)
+    (fd : LeanSys.Posix.Fd) (root mid : String) : IO Unit := do
+  let db := store.missionsDb
+  let cid := s!"c-{mid}"
+  let due ← nowEpoch
+  let .ok _ ← registerContinuation store
+    { id := cid, missionId := mid, requestId := cid, prompt := "uncertain 503 then stop", reason := "test",
+      source := "mcp", triggerKind := "time", dueEpoch := due } (due - 1) "t0"
+    | throw (IO.userError "remote 503 wake-up registration")
+  let tick := fun t => tickContinuationScheduler store none none none sup none root none (some t)
+  let reconcile := fun now => reconcileUncertainRemoteSubmissions store none none none sup root false (some now)
+  let launch ← IO.asTask (tick due)
+  let posted ← IO.mkRef ""
+  withMockNodeRequest fd fun conn req => do
+    let .ok body := OrbBin.Json.parseBytes req.bodySlice.toByteArray | throw (IO.userError "remote 503 POST body")
+    let jid := (body.fieldStr? "job_id").getD ""
+    check (req.method == "POST" && req.path == "/jobs" && !jid.isEmpty) "503 fixture submits remote wake-up"
+    posted.set jid
+    mockNodeReply conn "503 Service Unavailable" "upstream proxy timeout"
+  let jid ← posted.get
+  check ((← IO.ofExcept launch.get) == 0 &&
+    (← cellOf db "SELECT phase || ':' || dispatch_job_id FROM mission_continuations WHERE id=?1;" #[cid]) == s!"2:{jid}" &&
+    (← cellOf db "SELECT state FROM remote_node_jobs WHERE job_id=?1;" #[jid]) == "uncertain")
+    "HTTP 503 leaves the original job bound and uncertain instead of blindly retrying"
+  check ((← tick (due + 600)) == 0 && (← cellOf db "SELECT COUNT(*) FROM remote_node_jobs WHERE mission_id=?1;" #[mid]) == "1")
+    "HTTP 503 uncertain claim blocks duplicate submissions before reconciliation"
+  -- Operator stops the mission before reconciliation learns the node had accepted the job.
+  let .ok _ ← hostedStop store mid "t-stop" | throw (IO.userError "stop during uncertain remote wake-up")
+  let probe ← IO.asTask (reconcile (due + 61))
+  withMockNodeRequest fd fun conn req => do
+    check (req.method == "GET" && req.path == s!"/jobs/{jid}") "fenced reconciliation probes the original job"
+    mockNodeReply conn "200 OK" s!"\{\"job_id\":\"{jid}\",\"state\":\"running\"}"
+  withMockNodeRequest fd fun conn req => do
+    check (req.method == "POST" && req.path == s!"/jobs/{jid}/cancel") "fenced accepted job is cancelled on the node"
+    mockNodeReply conn "200 OK" "{}"
+  check ((← IO.ofExcept probe.get) == 0 &&
+    (← cellOf db "SELECT state FROM remote_node_jobs WHERE job_id=?1;" #[jid]) == "cancelled" &&
+    (← cellOf db "SELECT phase || ':' || error FROM mission_continuations WHERE id=?1;" #[cid]) == "4:wakeup_claim_fenced" &&
+    (← cellOf db "SELECT status || ':' || terminal_reason FROM missions WHERE id=?1;" #[mid]) == "interrupted:hosted_stop")
+    "Stop-fenced uncertain remote wake-up cancels the original job and retires as wakeup_claim_fenced"
 
 def r24_lost_reply_is_uncertain_not_rejected : IO Unit := do
   let receipt := JVal.obj #[
@@ -1280,7 +1322,16 @@ def run : IO Unit := do
             | throw (IO.userError "remote wake-up mock node listen failed")
           try
             setenvVar "SANDBOXED_REMOTE_NODES" s!"mockwakeup=http://127.0.0.1:{wakePort}|TURN_OUTCOME_MOCK_TOK"
-            -- The found case starts a poller, so run it last on this listener.
+            -- Run non-poller cases before the found case, which starts a background poller on this listener.
+            let .ok stopStore ← openCoreStore s!"{root}/m-remote-wakeup-503-stop" | throw (IO.userError "remote 503 fixture store")
+            try
+              let .ok _ ← execParamQuery stopStore.missionsDb
+                ("INSERT INTO missions(id,title,status,backend,placement_kind,tags,created_at,updated_at) " ++
+                 "VALUES('m-remote-wakeup-503-stop','turn','awaiting_user','opencode','managed','[\"remote-node:mockwakeup\"]','t0','t0');") #[]
+                | throw (IO.userError "remote 503 fixture mission")
+              verifyRemoteWakeupHttp503AndStopFence stopStore sup wakeFd root "m-remote-wakeup-503-stop"
+            finally
+              closeCoreStore stopStore
             for (mid, found) in #[("m-remote-wakeup-missing", false), ("m-remote-wakeup-found", true)] do
               let .ok wakeStore ← openCoreStore s!"{root}/{mid}" | throw (IO.userError "remote wake-up fixture store")
               try
