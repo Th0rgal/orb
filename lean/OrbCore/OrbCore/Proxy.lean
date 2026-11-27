@@ -396,13 +396,16 @@ def lookupHeader? (headers : Array (String × String)) (name : String) : Option 
         if kv.1.trimAscii.toString.toLower == target then some kv.2.trimAscii.toString else none)
     none
 
+private def natToSaturatedUInt64 (n : Nat) : UInt64 :=
+  if n ≥ 0xFFFFFFFFFFFFFFFF then 0xFFFFFFFFFFFFFFFF else n.toUInt64
+
 /-- Parse a positive integer or decimal `Retry-After` seconds value (rounding fractional seconds up). -/
 def parseRetryAfterValue? (raw : String) : Option UInt64 :=
   let s := raw.trimAscii.toString
   if s.isEmpty then none
   else
     match s.toNat? with
-    | some n => some n.toUInt64
+    | some n => some (natToSaturatedUInt64 n)
     | none =>
       match s.splitOn "." with
       | [wholeStr, fracStr] =>
@@ -412,7 +415,7 @@ def parseRetryAfterValue? (raw : String) : Option UInt64 :=
           | none => none
           | some w =>
             let hasNonZeroFrac := fracStr.toList.any (· != '0')
-            some (w + if hasNonZeroFrac then 1 else 0).toUInt64
+            some (natToSaturatedUInt64 (w + if hasNonZeroFrac then 1 else 0))
       | _ => none
 
 def retryAfterSecs? (headers : Array (String × String)) : Option UInt64 :=
@@ -441,9 +444,10 @@ def retryAfterBodySecs? (body : String) : Option UInt64 :=
     (fromObj errObj).orElse (fun _ => fromObj jv)
   | .error _ => none
 
-/-- Announced upstream retry delay (seconds), preferring `Retry-After` header over JSON body fields. -/
+/-- Announced upstream retry delay (seconds), preferring a positive `Retry-After` header
+    over JSON body fields (so `Retry-After: 0` falls back to JSON `resets_in_seconds`). -/
 def announcedRetryAfterSecs? (headers : Array (String × String)) (body : String) : Option UInt64 :=
-  (retryAfterSecs? headers).orElse (fun _ => retryAfterBodySecs? body)
+  ((retryAfterSecs? headers).filter (· > 0)).orElse (fun _ => retryAfterBodySecs? body)
 
 def defaultCooldownBaseSecs (reason : CooldownReason) : UInt64 :=
   match reason with
@@ -669,10 +673,11 @@ def clearAccountHealthWhere (tracker : ProviderHealthTracker) (pick : String →
 def planChainFromHealth (tracker : ProviderHealthTracker) (chain : RoutingChain) (nowEpoch : UInt64) : IO ChainPlan := do
   let active ← snapshotActiveHealthCooldowns tracker nowEpoch
   let disabled ← snapshotDisabledHealthAccountIds tracker
-  let plan := planChain chain active nowEpoch
-  return { plan with
-    eligible := plan.eligible.filter (fun t => !disabled.contains t.accountId)
-    cooling := plan.cooling.filter (fun c => !disabled.contains c.accountId) }
+  let enabledChain : RoutingChain := {
+    chain with targets := chain.targets.filter (fun t => !disabled.contains t.accountId)
+  }
+  let enabledActive := active.filter (fun c => !disabled.contains c.accountId)
+  return planChain enabledChain enabledActive nowEpoch
 
 /-- Pure single-step reconciliation of an attempt outcome against `(ProviderHealthState, ProviderAttemptSliceState)`
     using `Orb.HarnessCloud.stepProviderAttemptSlice`, `Orb.Kernel.breakerStep`, and `Orb.Kernel.accountCooldownSecs`.
@@ -1025,7 +1030,7 @@ def sanitizeUpstreamHeaders (hdrs : Array (String × String)) : String × Array 
         let outVal :=
           if kClean.toLower == "retry-after" then
             match parseRetryAfterValue? vClean with
-            | some secs => toString (clampCooldownRetryAfter secs)
+            | some secs => if secs == 0 then "0" else toString (clampCooldownRetryAfter secs)
             | none => vClean
           else vClean
         safe := safe.push (kClean, outVal)

@@ -1867,12 +1867,9 @@ private def planChainState (st : CoreAppState) (chain : RoutingChain) (nowEpochS
     if extra.isEmpty then
       return hPlan
     else
-      let extraCooling := coolingFor chain.targets extra
-      let mergedCooling := hPlan.cooling ++ extraCooling
-      return {
-        eligible := capProxyTargets (hPlan.eligible.filter (fun t => !extraCooling.any (fun c => c.accountId == t.accountId)))
-        cooling := mergedCooling
-      }
+      let enabledTargets := chain.targets.filter (fun t => !disabledIds.contains t.accountId)
+      let mergedCooling := coolingFor enabledTargets (hPlan.cooling ++ extra)
+      return { eligible := capProxyTargets (eligibleTargets enabledTargets mergedCooling), cooling := mergedCooling }
   | none =>
     let cooldowns ← st.proxyCooldownsRef.get
     return planChain chain cooldowns nowEpochSec
@@ -1899,7 +1896,9 @@ private def isMissionOwnedChain
         defaultChainId? == some chainId then
       return true
     if bLow == "claudecode" || bLow == "claude" then
-      return (OrbCore.ProxyModelRouting.directEntry? chainId cleanPath).map Prod.fst == some "anthropic"
+      match OrbCore.ProxyModelRouting.directEntry? chainId cleanPath with
+      | some ("anthropic", mdl) => return !containsSubstring mdl.toLower "haiku"
+      | _ => return false
     return false
   match findMatchingRoutingChain? chains effMissionModel with
   | some mc => return mc.id == chainId
@@ -1946,20 +1945,27 @@ private def interruptMissionTurn
   let nowIso := formatEpochIso8601Utc nowEpochSec
   match ← hostedStop st.store mid nowIso termReason (onlyWhenRunning := true) with
   | .error _ => return ()
-  | .ok _ =>
+  | .ok stopGen =>
     let errPayload := renderCompact (.obj #[("message", .str errMsg)])
     discard <| appendMissionEvent st.store mid "error" errPayload nowIso
     if !(← isBroadcastHubBridged st.broadcastHub?) then
       publishControlEvent st.broadcastHub? "error" errPayload (some mid)
-    let statusPayload := renderCompact (.obj #[("status", .str "interrupted"), ("reason", .str termReason), ("mission_id", .str mid)])
-    publishControlEvent st.broadcastHub? "mission_status_changed" statusPayload (some mid)
-    try
-      discard <| cancelActiveRemoteJobForMission st.store st.managedStore? st.relayHub? mid errMsg "provider_error"
-    catch _ => pure ()
-    try
-      if let some mgr := st.warmMgr? then
-        OrbBin.ClaudeControl.stopHarnessRun mgr mid
-    catch _ => pure ()
+    let stillAtStopGen : IO Bool := do
+      match ← getMission? st.store mid with
+      | some m => return m.runGeneration == stopGen && m.status == "interrupted"
+      | none => return false
+    if ← stillAtStopGen then
+      try
+        if let some mgr := st.warmMgr? then
+          OrbBin.ClaudeControl.stopHarnessRun mgr mid
+      catch _ => pure ()
+    if ← stillAtStopGen then
+      try
+        discard <| cancelActiveRemoteJobForMission st.store st.managedStore? st.relayHub? mid errMsg "provider_error"
+      catch _ => pure ()
+    if ← stillAtStopGen then
+      let statusPayload := renderCompact (.obj #[("status", .str "interrupted"), ("reason", .str termReason), ("mission_id", .str mid)])
+      publishControlEvent st.broadcastHub? "mission_status_changed" statusPayload (some mid)
 
 /-- When a mission-bound `/v1/*` request authenticated by the mission's own `orb-mpt-v1_...`
     proxy token hits the mission's own routing chain with no eligible target and the soonest
@@ -2377,8 +2383,7 @@ private def handleProxyRequest (st : CoreAppState) (req : HttpRequest) (cleanPat
               else none
             else none
         if let some (termReason, rawErrMsg) := stopReason? then
-          let errMsg := loginMessage?.map (fun msg => s!"{msg} {rawErrMsg}") |>.getD rawErrMsg
-          interruptMissionTurn st mid termReason errMsg nowEpochSec
+          interruptMissionTurn st mid termReason rawErrMsg nowEpochSec
   -- Usage, spend and access-program receipts read the reply body, so for a relayed
   -- stream they run once the stream has ended.
   let accountBody : ByteArray → IO Unit := fun body => do
@@ -2847,7 +2852,7 @@ def buildCoreHarnessCallbacks (st : CoreAppState) (missionId : String) (generati
         #[missionId, nextStatus, tReason, ts, s!"{finalSnap.generation}"]
     else
       discard <| execParamQuery st.store.missionsDb
-        "UPDATE missions SET status=?2,state_revision=state_revision+1,updated_at=?3 WHERE id=?1 AND run_generation=CAST(?4 AS INTEGER) AND status IN ('active','pending');"
+        "UPDATE missions SET status=?2,terminal_reason='',state_revision=state_revision+1,updated_at=?3 WHERE id=?1 AND run_generation=CAST(?4 AS INTEGER) AND status IN ('active','pending');"
         #[missionId, nextStatus, ts, s!"{finalSnap.generation}"]
     discard <| execParamQuery st.store.missionsDb
       ("UPDATE mission_runs SET execution_state='terminal', terminal_reason=?3, updated_at=?4 " ++
@@ -3061,7 +3066,7 @@ private def launchLocalCoreMissionTurn
         | return .error "wakeup_claim_write_failed"
       if rows.size ≤ 1 then return .error "wakeup_claim_fenced"
     carryArmedWakeupsForward query missionId nextGen.toNat ts
-    let changed ← query ("UPDATE missions SET status='active', run_generation=CAST(?2 AS INTEGER), state_revision=state_revision+1, updated_at=?3 " ++
+    let changed ← query ("UPDATE missions SET status='active', terminal_reason='', run_generation=CAST(?2 AS INTEGER), state_revision=state_revision+1, updated_at=?3 " ++
       "WHERE id=?1 AND status!='acknowledged' AND run_generation=CAST(?4 AS INTEGER) RETURNING id;") #[missionId, s!"{nextGen}", ts, s!"{dbGen}"]
     if let .ok rows := changed then
       if rows.size ≤ 1 then return .error "launch_generation_fenced"
@@ -8082,7 +8087,7 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
       let fenceRes ← withImmediateTx st.store.missionsDb do
         let .ok _ ← promoteWaitingHeadUnlocked | return .error "queue_promote_failed"
         let upd ← execParamQueryUnlocked st.store.missionsDb
-          ("UPDATE missions SET status='active', run_generation=COALESCE(run_generation,1)+1, " ++
+          ("UPDATE missions SET status='active', terminal_reason='', run_generation=COALESCE(run_generation,1)+1, " ++
            "state_revision=COALESCE(state_revision,0)+1, updated_at=?2 " ++
            "WHERE id=?1 AND status NOT IN ('completed','succeeded','failed','cancelled','acknowledged','archived') RETURNING id;")
           #[qMid, nowIso]
