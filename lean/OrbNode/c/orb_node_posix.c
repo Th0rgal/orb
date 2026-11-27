@@ -208,12 +208,7 @@ LEAN_EXPORT lean_obj_res orb_node_poll_pid(uint64_t pid, lean_obj_arg w) {
 }
 
 LEAN_EXPORT lean_obj_res orb_node_kill_pgrp(uint64_t pid, uint32_t sig, lean_obj_arg w) {
-    (void)w; if (pid > 1) kill(-(pid_t)pid, (int)sig); return lean_io_result_mk_ok(lean_box(0));
-}
-LEAN_EXPORT lean_obj_res orb_node_execv(b_lean_obj_arg prog, b_lean_obj_arg args_arr, lean_obj_arg w) {
-    (void)w; size_t argc = lean_array_size(args_arr);
-    char **argv = (char **)calloc(argc + 2, sizeof(char *)); if (!argv) return lean_io_result_mk_ok(lean_box_uint32(1u));
-    argv[0] = (char *)lean_string_cstr(prog);
-    for (size_t i = 0; i < argc; i++) argv[i + 1] = (char *)lean_string_cstr(lean_array_get_core(args_arr, i));
-    execv(argv[0], argv); free(argv); return lean_io_result_mk_ok(lean_box_uint32(1u));
+    (void)w;
+    if (pid > 1) kill(-(pid_t)pid, (int)sig);
+    return lean_io_result_mk_ok(lean_box(0));
 }
