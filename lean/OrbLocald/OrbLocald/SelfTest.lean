@@ -1716,7 +1716,7 @@ private def runWarmClaudeRpcE2eChecks (validTok tmpStateDir : String) : IO (Nat 
   let wtStatRes ← dispatchRpcCommand warmStRef "local_worktree_status" (.obj #[("cwd", .str warmRpcDir.toString), ("mission_id", .str "m-rpc-2"), ("prefer_worktree", .bool true)])
 
   let rpcE2eOk :=
-    (match scanRes with | .ok (.arr rows) => rows.size == 6 | _ => false) &&
+    (match scanRes with | .ok (.arr rows) => rows.size == 7 && rows.any (fun r => r.fieldStr? "id" == some "pi") | _ => false) &&
     (match wsPathRes with | .ok (.str p) => !p.isEmpty | _ => false) &&
     (match writeRes with | .ok jv => ((jv.fieldArr? "written").map Array.size) == some 1 && ((jv.fieldArr? "skipped").map Array.size) == some 1 | _ => false) &&
     (match runLaunchRes with | .ok jv => (jv.fieldStr? "run_id").isSome && (jv.fieldUInt64? "generation") == some 1 | _ => false) &&

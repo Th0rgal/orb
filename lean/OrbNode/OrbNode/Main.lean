@@ -11,6 +11,7 @@ import OrbNode.AutoUpdate
 import OrbNode.Store
 import OrbNode.Dial
 import OrbNode.Runner
+import OrbNode.PiRpc
 import OrbNode.Server
 import OrbBin.ClaudeControl
 
@@ -81,10 +82,28 @@ private def runOpenCodeAcp (rest : List String) : IO UInt32 := do
   OrbBin.ClaudeControl.runOpenCodeAcpTurn "opencode" env { turn with prompt := prompt }
     (fun ln => do out.putStrLn ln; out.flush)
 
+private def runPiRpc (rest : List String) : IO UInt32 := do
+  if rest == ["--probe"] then
+    IO.println "pi-rpc 1"
+    return 0
+  let cwd := (← IO.currentDir).toString
+  let some cfg0 := OrbNode.PiRpc.parsePiRpcArgs cwd rest
+    | IO.eprintln "usage: sandboxed-node pi-rpc [--model M] [--provider P] [--switch-model M] [--effort E] [--session PATH] [--extension PATH] [--plan] [--readonly] [--bin PATH] < prompt"; return 2
+  let prompt ← (← IO.getStdin).readToEnd
+  let binPath ←
+    if cfg0.binPath != "pi" then pure cfg0.binPath
+    else pure (((← IO.getEnv "ORB_PI_BIN").map (·.trimAscii.toString) |>.filter (!·.isEmpty)).getD "pi")
+  let envPairs ← OrbBin.PosixExt.currentEnvPairs
+  let out ← IO.getStdout
+  OrbNode.PiRpc.runPiRpcTurn { cfg0 with prompt := prompt, binPath := binPath } envPairs
+    (fun ln => do out.putStrLn ln; out.flush)
+
 def runCli (args : List String) : IO UInt32 := do
   match args with
   | "opencode-acp" :: rest =>
     runOpenCodeAcp rest
+  | "pi-rpc" :: rest =>
+    runPiRpc rest
   | "--version" :: _ | "-V" :: _ =>
     let sha ← resolveNodeBuildSha
     if sha.isEmpty then
