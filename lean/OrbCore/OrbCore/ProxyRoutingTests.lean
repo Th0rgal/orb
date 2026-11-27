@@ -777,8 +777,8 @@ where
     s!"pinned committed stream must never fail over to unpinned target: complete={complete} hitsA={← hitsA.get} hitsB={← hitsB.get}"
 
  runLargeIncrementalStreamBeyondCap : IO Unit := do
-  -- Incrementally flushed streams exceeding `maxCopyBytes` must retain complete SSE tail frames
-  -- so `recoverBufferedStream`, `classifyProxyStreamOutcome`, and `extractProxyUsage` stay healthy.
+  -- (a) Incrementally flushed streams exceeding `maxCopyBytes` must retain complete SSE tail frames
+  --     so `recoverBufferedStream`, `classifyProxyStreamOutcome`, and `extractProxyUsage` stay healthy.
   let chunk := "data: {\"choices\":[{\"delta\":{\"content\":\"0123456789abcdef0123456789abcdef\"}}]}\n\n"
   let finalFrame := "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":12,\"completion_tokens\":99}}\n\ndata: [DONE]\n\n"
   let emittedCount ← IO.mkRef (0 : Nat)
@@ -798,6 +798,89 @@ where
   check (ok && copy.size ≤ 512 && (← emittedCount.get) == totalSent &&
       streamClass == "ok" && usage.input == 12 && usage.output == 99)
     s!"stream exceeding maxCopyBytes must finish ok with bounded head+tail copy and intact usage: ok={ok} copySize={copy.size} sent={← emittedCount.get}/{totalSent} class={streamClass} usage=({usage.input},{usage.output})"
+
+  -- (b) Oversized terminal frame (`> tailCap`, e.g. OpenAI Responses `response.completed` embedding
+  --     a large `output` array and Gemini `candidates` with large `functionCall` + `usageMetadata`)
+  --     must condense to a compact summary frame rather than wiping `emittedTailRef` to empty.
+  let padStr := String.ofList (List.replicate 400 'x')
+  let respDelta := "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"0123456789abcdef0123456789abcdef\"}\n\n"
+  let respBigCompleted :=
+    s!"event: response.completed\ndata: \{\"type\":\"response.completed\",\"response\":\{\"id\":\"resp_big_1\",\"status\":\"completed\",\"output\":[\{\"text\":\"{padStr}\"}],\"usage\":\{\"input_tokens\":120,\"output_tokens\":340,\"input_tokens_details\":\{\"cached_tokens\":20},\"output_tokens_details\":\{\"reasoning_tokens\":15}}}}\n\n"
+  let respBigPump : BodyPump := fun emit => do
+    for _ in [0:8] do
+      if !(← emit respDelta.toUTF8) then return (ByteArray.empty, false)
+    if !(← emit respBigCompleted.toUTF8) then return (ByteArray.empty, false)
+    return (ByteArray.empty, true)
+  let (rbCopy, rbOk) ← recoverBufferedStream "text/event-stream" respBigPump (pure ()) (fun _ => pure none) none
+    (fun _ => pure true) (maxCopyBytes := 768)
+  let rbClass := classifyProxyStreamOutcome "text/event-stream" true rbCopy rbOk false
+  let rbUsage := extractProxyUsage rbCopy
+  check (rbOk && rbCopy.size ≤ 768 && rbClass == "ok" &&
+      rbUsage.input == 100 && rbUsage.output == 340 && rbUsage.cacheRead == 20 && rbUsage.reasoning == 15)
+    s!"oversized (> tailCap) response.completed must finish ok with exact usage: ok={rbOk} size={rbCopy.size} class={rbClass} usage={repr rbUsage}"
+
+  -- (c) Single terminal `response.completed` frame exceeding `maxCopyBytes` (split across small chunks,
+  --     flipping `modeRef` to `some false`) must still classify as `ok` and preserve usage.
+  let hugePad := String.ofList (List.replicate 1100 'y')
+  let hugeCompleted :=
+    s!"event: response.completed\ndata: \{\"type\":\"response.completed\",\"response\":\{\"id\":\"resp_huge\",\"status\":\"completed\",\"output\":[\{\"text\":\"{hugePad}\"}],\"usage\":\{\"input_tokens\":50,\"output_tokens\":77}}}\n\n"
+  let hugeBytes := hugeCompleted.toUTF8
+  let hugePump : BodyPump := fun emit => do
+    for _ in [0:6] do
+      if !(← emit respDelta.toUTF8) then return (ByteArray.empty, false)
+    let mut off := 0
+    while off < hugeBytes.size do
+      let next := Nat.min hugeBytes.size (off + 97)
+      if !(← emit (hugeBytes.extract off next)) then return (ByteArray.empty, false)
+      off := next
+    return (ByteArray.empty, true)
+  let (hCopy, hOk) ← recoverBufferedStream "text/event-stream" hugePump (pure ()) (fun _ => pure none) none
+    (fun _ => pure true) (maxCopyBytes := 768)
+  let hClass := classifyProxyStreamOutcome "text/event-stream" true hCopy hOk false
+  let hUsage := extractProxyUsage hCopy
+  check (hOk && hCopy.size ≤ 768 && hClass == "ok" && hUsage.input == 50 && hUsage.output == 77)
+    s!"single terminal frame > maxCopyBytes split across chunks must finish ok with intact usage: ok={hOk} size={hCopy.size} class={hClass} usage={repr hUsage}"
+
+  -- (d) Large uncommitted prefix exceeding `headCap` on the very first flush must still populate
+  --     `emittedHeadRef` with the opening `message_start` frame so Anthropic input tokens survive.
+  let msgStart := "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_big_init\",\"usage\":{\"input_tokens\":88,\"cache_read_input_tokens\":11}}}\n\n"
+  let thinkChunk := "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"0123456789abcdef0123456789abcdef0123456789abcdef\"}}\n\n"
+  let txtDelta := "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"hello\"}}\n\n"
+  let msgEnd := "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":22}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
+  let initFlushPump : BodyPump := fun emit => do
+    if !(← emit msgStart.toUTF8) then return (ByteArray.empty, false)
+    for _ in [0:4] do
+      if !(← emit thinkChunk.toUTF8) then return (ByteArray.empty, false)
+    if !(← emit txtDelta.toUTF8) then return (ByteArray.empty, false)
+    if !(← emit msgEnd.toUTF8) then return (ByteArray.empty, false)
+    return (ByteArray.empty, true)
+  let (ifCopy, ifOk) ← recoverBufferedStream "text/event-stream" initFlushPump (pure ()) (fun _ => pure none) none
+    (fun _ => pure true) (maxCopyBytes := 1024)
+  let ifClass := classifyProxyStreamOutcome "text/event-stream" true ifCopy ifOk false
+  let ifUsage := extractProxyUsage ifCopy
+  check (ifOk && ifCopy.size ≤ 1024 && ifClass == "ok" &&
+      ifUsage.input == 88 && ifUsage.cacheRead == 11 && ifUsage.output == 22)
+    s!"large first flush crossing headCap must preserve opening message_start usage and terminal finish: ok={ifOk} size={ifCopy.size} class={ifClass} usage={repr ifUsage}"
+
+  -- (e) Raw passthrough (`modeRef = some false` entered via unrecognized leading `event: open\n\n`)
+  --     crossing `headCap` mid-line and mid-multibyte UTF-8 (`é`) must keep valid UTF-8 and SSE boundaries.
+  let openEvt := "event: open\n\n"
+  let utf8Frame := "data: {\"choices\":[{\"delta\":{\"content\":\"café-0123456789abcdef0123456789\"}}]}\n\n"
+  let passthroughStream := (openEvt ++ String.join (List.replicate 8 utf8Frame) ++ finalFrame).toUTF8
+  let ptPump : BodyPump := fun emit => do
+    let mut off := 0
+    while off < passthroughStream.size do
+      let next := Nat.min passthroughStream.size (off + 23)
+      if !(← emit (passthroughStream.extract off next)) then return (ByteArray.empty, false)
+      off := next
+    return (ByteArray.empty, true)
+  let (ptCopy, ptOk) ← recoverBufferedStream "text/event-stream" ptPump (pure ()) (fun _ => pure none) none
+    (fun _ => pure true) (maxCopyBytes := 512)
+  let ptClass := classifyProxyStreamOutcome "text/event-stream" true ptCopy ptOk false
+  let ptUsage := extractProxyUsage ptCopy
+  check (ptOk && ptCopy.size ≤ 512 && (String.fromUTF8? ptCopy).isSome &&
+      ptClass == "ok" && ptUsage.input == 12 && ptUsage.output == 99)
+    s!"raw passthrough crossing headCap mid-UTF8/mid-line must keep valid UTF-8, ok status, and usage: ok={ptOk} size={ptCopy.size} validUtf8={(String.fromUTF8? ptCopy).isSome} class={ptClass} usage={repr ptUsage}"
 
 def runStreamingPumpContracts : IO Unit := do
   let failures ← IO.mkRef (#[] : Array String)

@@ -1709,6 +1709,16 @@ private def synthesizeToolCallClose (contentType : String) (emitted head : ByteA
   else
     head ++ ("data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\ndata: [DONE]\n\n".toUTF8)
 
+/-- Keep a bounded prefix aligned to complete SSE event boundaries so head truncation
+    never splits a `data:` line or multi-byte UTF-8 character and preserves opening
+    frames (`message_start`, `response.created`) even when the first flush exceeds `maxBytes`. -/
+private def trimHeadToCompleteSseFrames (buf : ByteArray) (maxBytes : Nat) : ByteArray := Id.run do
+  let limit := Nat.min buf.size maxBytes
+  let mut lastEnd := 0
+  for (_, e) in sseCompleteFrameRanges buf do
+    if e ≤ limit then lastEnd := e else break
+  return buf.extract 0 lastEnd
+
 /-- Keep a bounded trailing suffix aligned to complete SSE event boundaries so
     long (> `maxCopyBytes`) incrementally streamed replies still preserve terminal
     `finish_reason` / `usage` frames for `classifyProxyStreamOutcome` and accounting. -/
@@ -1719,6 +1729,170 @@ private def trimTailToCompleteSseFrames (buf : ByteArray) (maxBytes : Nat) : Byt
     match (sseCompleteFrameRanges buf).find? (fun (_, e) => e ≥ dropTarget) with
     | some (_, e) => buf.extract e buf.size
     | none => ByteArray.empty
+
+private def renderCompactSseSummary (hasFinish hasError : Bool) (input output cacheCreate cacheRead reasoning : Nat) : ByteArray :=
+  if hasError then
+    "data: {\"error\":\"stream_error\"}\n\n".toUTF8
+  else if !hasFinish && input + output + cacheCreate + cacheRead == 0 then
+    ByteArray.empty
+  else
+    let usageFields : Array (String × JVal) :=
+      if input + output + cacheCreate + cacheRead == 0 then #[]
+      else #[("usage", .obj #[
+        ("input_tokens", .nat (input + cacheRead)),
+        ("output_tokens", .nat output),
+        ("cache_creation_input_tokens", .nat cacheCreate),
+        ("cache_read_input_tokens", .nat cacheRead),
+        ("input_tokens_details", .obj #[("cached_tokens", .nat cacheRead)]),
+        ("output_tokens_details", .obj #[("reasoning_tokens", .nat reasoning)])
+      ])]
+    let finishFields : Array (String × JVal) :=
+      if hasFinish then
+        #[("choices", .arr #[.obj #[("delta", .obj #[]), ("finish_reason", .str "stop")]])]
+      else #[]
+    (s!"data: {renderCompact (.obj (finishFields ++ usageFields))}\n\n").toUTF8
+
+private def extractUsageTupleOfObject (u : JVal) : Nat × Nat × Nat × Nat × Nat :=
+  let detail (obj key : String) : Nat := ((u.field? obj).bind (·.fieldNat? key)).getD 0
+  let cachedInPrompt := Nat.max (detail "prompt_tokens_details" "cached_tokens") (detail "input_tokens_details" "cached_tokens")
+  let anthropicCacheRead := (u.fieldNat? "cache_read_input_tokens").getD 0
+  let rawInput := ((u.fieldNat? "input_tokens").orElse (fun _ => u.fieldNat? "prompt_tokens")).getD 0
+  let input := rawInput - Nat.min rawInput cachedInPrompt
+  let output := ((u.fieldNat? "output_tokens").orElse (fun _ => u.fieldNat? "completion_tokens")).getD 0
+  let cacheCreate := (u.fieldNat? "cache_creation_input_tokens").getD 0
+  let cacheRead := Nat.max cachedInPrompt anthropicCacheRead
+  let reasoning := Nat.max (detail "completion_tokens_details" "reasoning_tokens") (detail "output_tokens_details" "reasoning_tokens")
+  (input, output, cacheCreate, cacheRead, reasoning)
+
+private def mergeUsageTuples (a b : Nat × Nat × Nat × Nat × Nat) : Nat × Nat × Nat × Nat × Nat :=
+  (Nat.max a.1 b.1, Nat.max a.2.1 b.2.1, Nat.max a.2.2.1 b.2.2.1,
+   Nat.max a.2.2.2.1 b.2.2.2.1, Nat.max a.2.2.2.2 b.2.2.2.2)
+
+private def extractUsageTupleOfEvent (jv : JVal) : Nat × Nat × Nat × Nat × Nat := Id.run do
+  let checkUsageMeta (metaObj : JVal) : Nat × Nat × Nat × Nat × Nat :=
+    let cached := (metaObj.fieldNat? "cachedContentTokenCount").getD 0
+    let thought := (metaObj.fieldNat? "thoughtsTokenCount").getD 0
+    let prompt := (metaObj.fieldNat? "promptTokenCount").getD 0
+    let cand := (metaObj.fieldNat? "candidatesTokenCount").getD 0
+    (prompt - Nat.min prompt cached, cand + thought, 0, cached, thought)
+  if let some usageMeta := (jv.fieldOrNull "response").field? "usageMetadata" then
+    return checkUsageMeta usageMeta
+  if let some usageMeta := jv.field? "usageMetadata" then
+    return checkUsageMeta usageMeta
+  let fromField (holder : JVal) : Nat × Nat × Nat × Nat × Nat :=
+    ((holder.field? "usage").map extractUsageTupleOfObject).getD (0, 0, 0, 0, 0)
+  return #["message", "response"].foldl
+    (fun acc key => mergeUsageTuples acc (((jv.field? key).map fromField).getD (0, 0, 0, 0, 0)))
+    (fromField jv)
+
+/-- Condense a single complete SSE frame larger than `tailCap` (e.g. an OpenAI Responses
+    `response.completed` embedding a large `output` array or a Gemini frame carrying a large
+    `functionCall`) into a compact canonical SSE summary frame preserving finish, error, and usage. -/
+private def summarizeOversizedCompleteSseFrame (frame : ByteArray) : ByteArray := Id.run do
+  let some text := String.fromUTF8? frame
+    | return ByteArray.empty
+  let mut hasFinish := false
+  let mut hasError := false
+  let mut acc : Nat × Nat × Nat × Nat × Nat := (0, 0, 0, 0, 0)
+  for rawLine in text.splitOn "\n" do
+    let line := rawLine.trimAscii.toString
+    if !line.startsWith "data:" then continue
+    let payload := (line.drop 5).toString.trimAscii.toString
+    if payload == "[DONE]" || payload.isEmpty then continue
+    if payload.startsWith "[DONE]" then
+      if !(payload.drop 6).toString.trimAscii.toString.isEmpty then
+        hasError := true
+    else
+      match OrbBin.Json.parse payload with
+      | .ok jv =>
+        if jsonFieldIndicatesError jv then hasError := true
+        if jsonEventHasTerminalFinish jv then hasFinish := true
+        acc := mergeUsageTuples acc (extractUsageTupleOfEvent jv)
+      | .error _ =>
+        if containsSubstring payload "[DONE]" || containsSubstring payload "\"error\"" ||
+           containsSubstring payload "\"choices\"" || containsSubstring payload "\"tool_calls\"" ||
+           containsSubstring payload "\"delta\"" then
+          hasError := true
+  return renderCompactSseSummary hasFinish hasError acc.1 acc.2.1 acc.2.2.1 acc.2.2.2.1 acc.2.2.2.2
+
+/-- Extract a balanced `{...}` JSON object immediately following `"<key>":` in a bounded tail
+    slice of a streaming frame that exceeded `maxCopyBytes` (`> 16 MiB`). -/
+private def extractBalancedFieldObject? (text key : String) : Option JVal := Id.run do
+  let needle := s!"\"{key}\""
+  let parts := text.splitOn needle
+  if parts.length ≤ 1 then return none
+  let tail := parts.getLast!
+  let bytes := tail.toUTF8
+  let mut i := 0
+  while i < bytes.size && (bytes[i]! == 32 || bytes[i]! == 9 || bytes[i]! == 10 || bytes[i]! == 13 || bytes[i]! == 58) do
+    i := i + 1
+  if i ≥ bytes.size || bytes[i]! != 123 then return none
+  let start := i
+  let mut depth : Nat := 0
+  let mut inStr := false
+  let mut escaped := false
+  while i < bytes.size do
+    let b := bytes[i]!
+    if inStr then
+      if escaped then escaped := false
+      else if b == 92 then escaped := true
+      else if b == 34 then inStr := false
+    else
+      if b == 34 then inStr := true
+      else if b == 123 then depth := depth + 1
+      else if b == 125 then
+        depth := depth - 1
+        if depth == 0 then
+          let slice := (String.fromUTF8? (bytes.extract start (i + 1))).getD ""
+          return (OrbBin.Json.parse slice).toOption
+    i := i + 1
+  return none
+
+/-- Decode a bounded byte slice that may start or end mid-UTF-8 codepoint across arbitrary
+    TCP chunk or rolling-window boundaries. -/
+private def utf8SafeSlice (bytes : ByteArray) : String := Id.run do
+  if let some s := String.fromUTF8? bytes then
+    return s
+  let mut lo := 0
+  while lo < bytes.size && (bytes[lo]! &&& 0xC0) == 0x80 do
+    lo := lo + 1
+  let mut hi := bytes.size
+  let mut back := 0
+  while hi > lo && back < 4 do
+    if let some s := String.fromUTF8? (bytes.extract lo hi) then
+      return s
+    hi := hi - 1
+    back := back + 1
+  return (String.fromUTF8? (bytes.extract lo hi)).getD ""
+
+/-- Heuristic metadata scan on a bounded chunk of an active `> maxCopyBytes` single SSE frame. -/
+private def scanOversizedFrameChunk (chunk : ByteArray) : Bool × Bool × (Nat × Nat × Nat × Nat × Nat) := Id.run do
+  let text := utf8SafeSlice chunk
+  let hasError :=
+    containsSubstring text "\"type\":\"error\"" ||
+    containsSubstring text "\"type\": \"error\"" ||
+    containsSubstring text "\"type\":\"response.failed\"" ||
+    containsSubstring text "\"type\": \"response.failed\"" ||
+    containsSubstring text "\"type\":\"response.incomplete\"" ||
+    containsSubstring text "\"type\": \"response.incomplete\""
+  let hasFinish :=
+    containsSubstring text "\"type\":\"response.completed\"" ||
+    containsSubstring text "\"type\": \"response.completed\"" ||
+    containsSubstring text "\"type\":\"message_stop\"" ||
+    containsSubstring text "\"type\": \"message_stop\"" ||
+    containsSubstring text "\"finish_reason\":\"stop\"" ||
+    containsSubstring text "\"finish_reason\":\"tool_calls\"" ||
+    containsSubstring text "\"finish_reason\":\"length\"" ||
+    containsSubstring text "\"finishReason\":\"STOP\"" ||
+    containsSubstring text "\"finishReason\":\"MAX_TOKENS\"" ||
+    containsSubstring text "\"stop_reason\":\"end_turn\"" ||
+    containsSubstring text "\"stop_reason\":\"tool_use\""
+  let mut usage : Nat × Nat × Nat × Nat × Nat := (0, 0, 0, 0, 0)
+  if let some uObj := extractBalancedFieldObject? text "usage" then
+    usage := mergeUsageTuples usage (extractUsageTupleOfObject uObj)
+  if let some mObj := extractBalancedFieldObject? text "usageMetadata" then
+    usage := mergeUsageTuples usage (extractUsageTupleOfEvent (.obj #[("usageMetadata", mObj)]))
+  return (hasFinish, hasError, usage)
 
 /-- Compute `(flushEnd, sawCommit, sawModel)` across complete SSE events in `body`:
     - Stops before the first tool-call frame so tool-call suffixes stay in the
@@ -1783,13 +1957,98 @@ def recoverBufferedStream
   let headCap := maxCopyBytes - tailCap
   let emittedHeadRef ← IO.mkRef ByteArray.empty
   let emittedTailRef ← IO.mkRef ByteArray.empty
+  let tailCarryRef ← IO.mkRef ByteArray.empty
+  let oversizedActiveRef ← IO.mkRef false
+  let oversizedFinishRef ← IO.mkRef false
+  let oversizedErrorRef ← IO.mkRef false
+  let oversizedUsageRef ← IO.mkRef ((0, 0, 0, 0, 0) : Nat × Nat × Nat × Nat × Nat)
+  let oversizedWindowRef ← IO.mkRef ByteArray.empty
   let truncatedRef ← IO.mkRef false
   let committedRef ← IO.mkRef initiallyCommitted
+  let appendTailFrame (frame : ByteArray) : IO Unit := do
+    if frame.isEmpty then return
+    let compact :=
+      if frame.size ≤ tailCap then frame
+      else summarizeOversizedCompleteSseFrame frame
+    if !compact.isEmpty then
+      emittedTailRef.modify fun oldTail =>
+        trimTailToCompleteSseFrames (oldTail ++ compact) tailCap
+  let feedOversizedBytes (bytes : ByteArray) : IO Unit := do
+    let prevWin ← oversizedWindowRef.get
+    let merged := prevWin ++ bytes
+    let (fin, err, u) := scanOversizedFrameChunk merged
+    if fin then oversizedFinishRef.set true
+    if err then oversizedErrorRef.set true
+    oversizedUsageRef.modify (fun cur => mergeUsageTuples cur u)
+    let keep := Nat.min 8192 merged.size
+    let mut startIdx := merged.size - keep
+    while startIdx < merged.size && (merged[startIdx]! &&& 0xC0) == 0x80 do
+      startIdx := startIdx + 1
+    oversizedWindowRef.set (merged.extract startIdx merged.size)
+  let flushOversizedSummary : IO Unit := do
+    let fin ← oversizedFinishRef.get
+    let err ← oversizedErrorRef.get
+    let u ← oversizedUsageRef.get
+    let summary := renderCompactSseSummary fin err u.1 u.2.1 u.2.2.1 u.2.2.2.1 u.2.2.2.2
+    if !summary.isEmpty then
+      emittedTailRef.modify fun oldTail =>
+        trimTailToCompleteSseFrames (oldTail ++ summary) tailCap
+    oversizedActiveRef.set false
+    oversizedFinishRef.set false
+    oversizedErrorRef.set false
+    oversizedUsageRef.set (0, 0, 0, 0, 0)
+    oversizedWindowRef.set ByteArray.empty
+  let ingestTruncatedTail (chunk : ByteArray) : IO Unit := do
+    if chunk.isEmpty then return
+    let mut work := chunk
+    if ← oversizedActiveRef.get then
+      let prevWin ← oversizedWindowRef.get
+      let probe := (if prevWin.size ≥ 2 then prevWin.extract (prevWin.size - 2) prevWin.size else prevWin) ++ work
+      let prefixLen := if prevWin.size ≥ 2 then 2 else prevWin.size
+      let ranges := sseCompleteFrameRanges probe
+      if let some (_, endInProbe) := ranges[0]? then
+        let endInWork := endInProbe - Nat.min endInProbe prefixLen
+        feedOversizedBytes (work.extract 0 endInWork)
+        flushOversizedSummary
+        work := work.extract endInWork work.size
+      else
+        feedOversizedBytes work
+        return
+    if work.isEmpty then return
+    let combined := (← tailCarryRef.get) ++ work
+    let ranges := sseCompleteFrameRanges combined
+    let mut consumed := 0
+    for (s, e) in ranges do
+      appendTailFrame (combined.extract s e)
+      consumed := e
+    let rem := combined.extract consumed combined.size
+    if rem.size > tailCap then
+      tailCarryRef.set ByteArray.empty
+      oversizedActiveRef.set true
+      oversizedFinishRef.set false
+      oversizedErrorRef.set false
+      oversizedUsageRef.set (0, 0, 0, 0, 0)
+      oversizedWindowRef.set ByteArray.empty
+      feedOversizedBytes rem
+    else
+      tailCarryRef.set rem
   let readEmittedCopy : IO ByteArray := do
     let head ← emittedHeadRef.get
     if !(← truncatedRef.get) then
       return head
-    let tail ← emittedTailRef.get
+    let mut tail ← emittedTailRef.get
+    if ← oversizedActiveRef.get then
+      let fin ← oversizedFinishRef.get
+      let err ← oversizedErrorRef.get
+      let u ← oversizedUsageRef.get
+      let summary := renderCompactSseSummary fin err u.1 u.2.1 u.2.2.1 u.2.2.2.1 u.2.2.2.2
+      if !summary.isEmpty then
+        tail := trimTailToCompleteSseFrames (tail ++ summary) tailCap
+    let carry ← tailCarryRef.get
+    if !carry.isEmpty then
+      let carrySummary := summarizeOversizedCompleteSseFrame carry
+      if !carrySummary.isEmpty then
+        tail := trimTailToCompleteSseFrames (tail ++ carrySummary) tailCap
     return head ++ tail
   let recordEmit : BodyEmit := fun piece => do
     let clientOpen ← emit piece
@@ -1800,10 +2059,12 @@ def recoverBufferedStream
           emittedHeadRef.set (old ++ piece)
         else
           truncatedRef.set true
-          emittedTailRef.set (trimTailToCompleteSseFrames piece tailCap)
+          let combined := old ++ piece
+          let head := trimHeadToCompleteSseFrames combined headCap
+          emittedHeadRef.set head
+          ingestTruncatedTail (combined.extract head.size combined.size)
       else
-        emittedTailRef.modify fun oldTail =>
-          trimTailToCompleteSseFrames (oldTail ++ piece) tailCap
+        ingestTruncatedTail piece
     pure clientOpen
   while result.isNone do
     let bufferRef ← IO.mkRef ByteArray.empty
