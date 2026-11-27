@@ -5087,6 +5087,8 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
         title? := jv.fieldStr? "title"
         sideQuestion := sideQ
         sidePrompt? := sidePrompt?
+        replaceMessageId? := jv.fieldStr? "replace_message_id"
+        replacement? := jv.fieldStr? "replacement"
         ownerUserId := caller.userId
         nowAt := nowIso
       }
