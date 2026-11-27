@@ -69,6 +69,9 @@ export const isLive = has(LIVE_STATUSES);
 export const isWorking = has(WORKING_STATUSES);
 export const isArchivable = has(ARCHIVABLE_STATUSES);
 export const isArchived = has(ARCHIVED_STATUSES);
+/** True when a mission is archived either by status (`acknowledged`/`archived`) or by tag (`archived`). */
+export const isArchivedMission = (mission: { status?: Status; tags?: readonly string[] | null }): boolean =>
+  isArchived(mission.status) || Boolean(mission.tags?.includes("archived"));
 export const isReopenable = has(REOPENABLE_STATUSES);
 export const isFailedStatus = has(FAILED_STATUSES);
 export const isReady = has(READY_STATUSES);

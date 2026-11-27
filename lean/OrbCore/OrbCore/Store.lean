@@ -3455,32 +3455,76 @@ def restoreMissionStatus
       | .ok _ => return .ok true
 
 /-- Apply a status chosen by a client (archive, reopen, mark finished) to a mission that is not running.
+    When `nextStatus == "acknowledged"`, atomically cascades to all `parent_mission_id` descendants,
+    refusing with `mission_running` if the mission or any descendant has a live run or live status.
+    Returns the array of mission IDs whose status actually changed. -/
+def setMissionStatusFromClientCascade
+    (st : CoreStore) (missionId nextStatus updatedAt : String)
+    (fenceArchiveFor : String → IO Bool := fun _ => pure true) : IO (Except String (Array String)) :=
+  withImmediateTx st.missionsDb do
+    if nextStatus != "acknowledged" then
+      let q ← execParamQueryUnlocked st.missionsDb
+        ("SELECT m.status, (SELECT COUNT(*) FROM mission_runs r WHERE r.mission_id=m.id AND " ++
+         "r.execution_state NOT IN ('terminal','completed','failed','aborted')) FROM missions m WHERE m.id=?1;")
+        #[missionId]
+      match q with
+      | .error e => return .error e
+      | .ok rows =>
+        if rows.size ≤ 1 then return .error "mission_not_found"
+        let curStatus := (rows[1]?.bind (·[0]?)).getD ""
+        let liveRuns := ((rows[1]?.bind (·[1]?)).bind String.toNat?).getD 0
+        if liveRuns > 0 then
+          return .error "mission_running"
+        if curStatus == nextStatus then return .ok #[]
+        let upd ← execParamQueryUnlocked st.missionsDb
+          "UPDATE missions SET status=?2,state_revision=state_revision+1,updated_at=?3 WHERE id=?1;"
+          #[missionId, nextStatus, updatedAt]
+        return upd.map (fun _ => #[missionId])
+    else
+      let q ← execParamQueryUnlocked st.missionsDb
+        ("WITH RECURSIVE tree(id) AS (" ++
+         "SELECT id FROM missions WHERE id=?1 " ++
+         "UNION " ++
+         "SELECT m.id FROM missions m JOIN tree t ON m.parent_mission_id = t.id) " ++
+         "SELECT m.id, m.status, (SELECT COUNT(*) FROM mission_runs r WHERE r.mission_id=m.id AND " ++
+         "r.execution_state NOT IN ('terminal','completed','failed','aborted')) " ++
+         "FROM missions m JOIN tree t ON m.id = t.id;")
+        #[missionId]
+      match q with
+      | .error e => return .error e
+      | .ok rows =>
+        if rows.size ≤ 1 then return .error "mission_not_found"
+        let mut toArchive : Array String := #[]
+        for i in [1:rows.size] do
+          let row := rows[i]!
+          let id := (row[0]?).getD ""
+          let curStatus := (row[1]?).getD ""
+          let liveRuns := ((row[2]?).bind String.toNat?).getD 0
+          -- Turn acceptance can mark a mission live before its run row is inserted.
+          if liveRuns > 0 || isLiveMissionStatus curStatus then
+            return .error "mission_running"
+          if !id.isEmpty && curStatus != "acknowledged" then
+            toArchive := toArchive.push id
+        if toArchive.isEmpty then return .ok #[]
+        for id in toArchive do
+          if !(← fenceArchiveFor id) then return .error "mission_running"
+        for id in toArchive do
+          let upd ← execParamQueryUnlocked st.missionsDb
+            "UPDATE missions SET status='acknowledged',state_revision=state_revision+1,run_generation=run_generation+1,updated_at=?2 WHERE id=?1;"
+            #[id, updatedAt]
+          if let .error e := upd then return .error e
+        return .ok toArchive
+
+/-- Apply a status chosen by a client (archive, reopen, mark finished) to a mission that is not running.
     Returns `false` when the mission already has that status. A mission with a live run is refused:
     stopping it is the job of cancel/interrupt, and writing a status over a live run would leave the
     run without an owner. -/
 def setMissionStatusFromClient
     (st : CoreStore) (missionId nextStatus updatedAt : String)
-    (fenceArchive : IO Bool := pure true) : IO (Except String Bool) :=
-  withImmediateTx st.missionsDb do
-    let q ← execParamQueryUnlocked st.missionsDb
-      ("SELECT m.status, (SELECT COUNT(*) FROM mission_runs r WHERE r.mission_id=m.id AND " ++
-       "r.execution_state NOT IN ('terminal','completed','failed','aborted')) FROM missions m WHERE m.id=?1;")
-      #[missionId]
-    match q with
-    | .error e => return .error e
-    | .ok rows =>
-      if rows.size ≤ 1 then return .error "mission_not_found"
-      let curStatus := (rows[1]?.bind (·[0]?)).getD ""
-      let liveRuns := ((rows[1]?.bind (·[1]?)).bind String.toNat?).getD 0
-      -- Turn acceptance can mark a mission live before its run row is inserted.
-      if liveRuns > 0 || (nextStatus == "acknowledged" && isLiveMissionStatus curStatus) then
-        return .error "mission_running"
-      if curStatus == nextStatus then return .ok false
-      if nextStatus == "acknowledged" && !(← fenceArchive) then return .error "mission_running"
-      let upd ← execParamQueryUnlocked st.missionsDb
-        "UPDATE missions SET status=?2,state_revision=state_revision+1,run_generation=run_generation+CASE WHEN ?2='acknowledged' THEN 1 ELSE 0 END,updated_at=?3 WHERE id=?1;"
-        #[missionId, nextStatus, updatedAt]
-      return upd.map (fun _ => true)
+    (fenceArchive : IO Bool := pure true) : IO (Except String Bool) := do
+  match ← setMissionStatusFromClientCascade st missionId nextStatus updatedAt (fun _ => fenceArchive) with
+  | .error e => return .error e
+  | .ok changed => return .ok (!changed.isEmpty)
 
 /-- Arm a `RemoteWait` recovery record (`mission_remote_waits`) when a remote node pauses on
     `usage_limit_wait` or `node_maintenance_wait`, persisting the failed remote job ID and optional

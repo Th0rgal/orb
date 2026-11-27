@@ -17,6 +17,7 @@ import projectHistoryRules from "./projectHistoryRules.json";
  *  - `reparentMission` is the only way to change or clear a remembered link.
  */
 import { createSignal } from "solid-js";
+import { isArchivedMission } from "./missionStatus";
 import { forkSource, hasTypedSuperseded } from "./missionTree";
 import { orbHierarchyMergeStep, orbPlacementMergeStep, type PlacementSourceKind } from "./orbKernel";
 import { shallowEqual } from "./poll";
@@ -684,6 +685,22 @@ export type Misses = Map<string, { n: number; since: number }>;
  * over `MISS_WINDOW_MS` omit it (a list served while Core or Hermes restarts can
  * be empty or short). Explicit deletes and archives remove rows directly.
  */
+/** Separate missions that Core reports as archived (`status === "acknowledged"`
+ * or `tags` includes `"archived"`). Delta polls pass `all=true` and return a
+ * `partialList`, so archived rows must be split out before reconciling the
+ * active list — otherwise they linger in `activityMissions` until a full sync. */
+export function partitionArchivedMissions<M extends { id: string; status?: string | null; tags?: readonly string[] | null }>(
+  rows: readonly M[],
+): { open: M[]; archived: M[] } {
+  const open: M[] = [];
+  const archived: M[] = [];
+  for (const row of rows) {
+    if (isArchivedMission(row)) archived.push(row);
+    else open.push(row);
+  }
+  return { open, archived };
+}
+
 export function reconcileMissionList<M extends HierarchyFields>(prev: readonly M[], next: readonly M[], misses: Misses, partial = isPartialList(next), now = Date.now()): M[] {
   const prevById = new Map(prev.map(m => [m.id, m]));
   const fresh = new Set(next.map(m => m.id));

@@ -1,6 +1,6 @@
 import { deleteFileOptimistically, fileMoveKey, filesMovedAway, filesMovedInto, isFilePathPending, mergeArrivingMissions, missionMoveKey, previewMove, movedMission, missionsMovedInto, moveOptimistically, movingOutOf, pendingMoves as pendingPlaceMoves, settleMove, upsertMissionPreservingOrder, waitForFilePathSettled, withMovedMissions } from "./moves";
 import { renamedTitle, renameOptimistically } from "./renames";
-import { isArchivable, isReopenable, isRunning, isLive, isWorking, isSettledStatus, missionActivity, presentedStatus } from "./missionStatus";
+import { isArchivable, isArchivedMission, isReopenable, isRunning, isLive, isWorking, isSettledStatus, missionActivity, presentedStatus } from "./missionStatus";
 import { localRunActive } from "./localAgents";
 import { swallow } from "./log";
 import { useTooltip } from "./Tooltip";
@@ -171,7 +171,7 @@ export function LiveProjectsSection(p: {
   const [expanded, setExpanded] = createStore<Record<string, boolean>>({});
   const [archiveMenu, setArchiveMenu] = createSignal<{ x: number; y: number; slug?: string } | null>(null);
   const [shareDialogMission, setShareDialogMission] = createSignal<Mission | null>(null);
-  const isArchived = (mission: Mission) => mission.status === "acknowledged";
+  const isArchived = (mission: Mission) => isArchivedMission(mission);
   const sharedWithMeMissions = createMemo(() =>
     withArchiveStatuses(p.activityMissions ?? []).filter(
       m =>
@@ -1039,9 +1039,29 @@ export function LiveProjectsSection(p: {
       archivedInSession.delete(id);
       for (const project of projects()) if (p.headless || expanded[project.slug]) void loadMissions(project.slug, p.headless ? { transcripts: false, background: true } : undefined);
     };
+    const onArchivedRemotely = (event: Event) => {
+      const archived = (event as CustomEvent<{ missions?: Mission[] }>).detail?.missions ?? [];
+      if (!archived.length) return;
+      const byId = new Map(archived.map(m => [m.id, m]));
+      const ids = new Set(byId.keys());
+      batch(() => {
+        for (const slug of Object.keys(missions)) {
+          const existing = missions[slug];
+          if (!existing?.some(m => ids.has(m.id))) continue;
+          const next = existing.map(m => {
+            const inc = byId.get(m.id);
+            return inc ? withArchiving(mergeMission(m, inc, "partial")) : m;
+          });
+          setMissions(slug, next);
+          p.onProjectMissions?.(slug, next);
+        }
+        setArchivedMissions(rows => [...archived, ...rows.filter(r => !ids.has(r.id))]);
+      });
+    };
     window.addEventListener("orb:mission-archived", onArchived);
     window.addEventListener("orb:mission-archive-failed", onArchiveFailed);
-    onCleanup(() => { window.removeEventListener("orb:mission-archived", onArchived); window.removeEventListener("orb:mission-archive-failed", onArchiveFailed); });
+    window.addEventListener("orb:missions-archived-remotely", onArchivedRemotely);
+    onCleanup(() => { window.removeEventListener("orb:mission-archived", onArchived); window.removeEventListener("orb:mission-archive-failed", onArchiveFailed); window.removeEventListener("orb:missions-archived-remotely", onArchivedRemotely); });
     const onVisible = () => {
       if (document.visibilityState === "visible" && isSidebarActive()) pumpWarmup();
     };

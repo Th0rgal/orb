@@ -5355,27 +5355,28 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
       if encodeRollbackStatus nextStatus == 255 then
         return .ok (mkJson 400 "{\"error\":\"unsupported_status\"}")
       let nowIso := formatEpochIso8601Utc nowEpochSec
-      let fenceArchive : IO Bool := do
+      let fenceArchiveFor (targetId : String) : IO Bool := do
         let some mgr := st.warmMgr? | return true
         mgr.registration.atomically do
-          if (← mgr.stoppingGroupsRef.get).any (·.1 == mid) then return false
-          if (← mgr.activeGroupsRef.get).any (·.1 == mid) then return false
-          if let some (_, entry) := (← mgr.warmProcsRef.get).find? (·.1 == mid) then
+          if (← mgr.stoppingGroupsRef.get).any (·.1 == targetId) then return false
+          if (← mgr.activeGroupsRef.get).any (·.1 == targetId) then return false
+          if let some (_, entry) := (← mgr.warmProcsRef.get).find? (·.1 == targetId) then
             if !(← entry.aliveRef.get) then return false
-            if (← OrbBin.ClaudeControl.getRunState? mgr mid).any (!·.done) then return false
-          mgr.launchGenerations.modify (·.erase mid)
+            if (← OrbBin.ClaudeControl.getRunState? mgr targetId).any (!·.done) then return false
+          mgr.launchGenerations.modify (·.erase targetId)
           return true
-      match ← setMissionStatusFromClient st.store mid nextStatus nowIso fenceArchive with
-      | .ok changed =>
-        if changed then
-          -- An archived mission must not be woken again by its own reminders.
-          if nextStatus == "acknowledged" then
-            discard <| revokeContinuations st.store mid nowIso true
+      match ← setMissionStatusFromClientCascade st.store mid nextStatus nowIso fenceArchiveFor with
+      | .ok changedIds =>
+        if !changedIds.isEmpty then
+          for changedId in changedIds do
+            -- An archived mission must not be woken again by its own reminders.
+            if nextStatus == "acknowledged" then
+              discard <| revokeContinuations st.store changedId nowIso true
+            let payload := renderCompact (.obj #[("status", .str nextStatus), ("mission_id", .str changedId)])
+            discard <| appendMissionEvent st.store changedId "mission_status_changed" payload nowIso
+            if !(← isBroadcastHubBridged st.broadcastHub?) then
+              publishControlEvent st.broadcastHub? "mission_status_changed" payload (some changedId)
           discard <| OrbCore.SecretAndApproval.reapPrivilegeLeases st.store nowEpochSec
-          let payload := renderCompact (.obj #[("status", .str nextStatus), ("mission_id", .str mid)])
-          discard <| appendMissionEvent st.store mid "mission_status_changed" payload nowIso
-          if !(← isBroadcastHubBridged st.broadcastHub?) then
-            publishControlEvent st.broadcastHub? "mission_status_changed" payload (some mid)
         return .ok (mkJson 200 s!"\{\"ok\":true,\"mission_id\":{jsonEscape mid},\"status\":{jsonEscape nextStatus}}")
       | .error "mission_not_found" => return .ok (mkJson 404 "{\"error\":\"mission_not_found\"}")
       | .error "mission_running" =>
