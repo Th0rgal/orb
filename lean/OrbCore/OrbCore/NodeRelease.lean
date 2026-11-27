@@ -24,8 +24,11 @@ open OrbBin.PosixExt
 private initialize releaseBinaryShaCache : Std.Mutex (Std.HashMap String (UInt64 × IO.FS.SystemTime × String)) ←
   Std.Mutex.new {}
 
+private initialize agyVersionCache : Std.Mutex (Std.HashMap String (UInt64 × IO.FS.SystemTime × String)) ←
+  Std.Mutex.new {}
+
 private def allowedReleaseBinaryName (name : String) : Bool :=
-  name == "sandboxed-node" || name == "orb-privd"
+  name == "sandboxed-node" || name == "orb-privd" || name == "agy"
 
 private def candidateBinaryPaths (name arch : String) : IO (Array String) := do
   let normArch := OrbNode.AutoUpdate.normalizeArch arch
@@ -51,6 +54,14 @@ private def candidateBinaryPaths (name arch : String) : IO (Array String) := do
       "/usr/local/sbin/orb-privd",
       "/usr/local/bin/orb-privd"
     ]
+  else if name == "agy" then
+    cands := cands ++ #[
+      s!"/usr/local/lib/orb/guest/{normArch}/agy",
+      "/usr/local/lib/orb/guest/agy",
+      "/usr/local/bin/agy",
+      "/opt/sandboxed-tools/bin/agy",
+      "/opt/orb/bin/agy"
+    ]
   return cands
 
 /-- Resolve the first existing, non-empty release binary matching `arch` (ELF `e_machine` check
@@ -71,8 +82,8 @@ def resolveReleaseBinaryBytes? (name arch : String) : IO (Option (String × Byte
             return some (p, bytes, sha)
   return none
 
-/-- Cached `(sha256, sizeBytes)` metadata for a release binary without re-hashing unchanged files. -/
-def resolveReleaseBinaryMeta? (name arch : String) : IO (Option (String × UInt64)) := do
+/-- Cached `(path, sha256, sizeBytes)` metadata for a release binary without re-hashing unchanged files. -/
+def resolveReleaseBinaryPathMeta? (name arch : String) : IO (Option (String × String × UInt64)) := do
   if !allowedReleaseBinaryName name then return none
   let skipElf := ((← IO.getEnv "ORB_NODE_RELEASE_SKIP_ELF_CHECK").getD "") == "1"
   let normArch := OrbNode.AutoUpdate.normalizeArch arch
@@ -87,7 +98,7 @@ def resolveReleaseBinaryMeta? (name arch : String) : IO (Option (String × UInt6
             return (← get).get? key
           if let some (sz, mt, hex) := cached? then
             if sz == md.byteSize && mt == md.modified then
-              return some (hex, md.byteSize)
+              return some (p, hex, md.byteSize)
           if let .ok bytes ← (IO.FS.readBinFile fp).toBaseIO then
             if !bytes.isEmpty then
               let archOk := skipElf || System.Platform.isOSX || OrbNode.AutoUpdate.verifyLinuxElfArch bytes normArch
@@ -95,8 +106,12 @@ def resolveReleaseBinaryMeta? (name arch : String) : IO (Option (String × UInt6
                 let sha := bytesToHexLower (sha256Bytes bytes)
                 releaseBinaryShaCache.atomically do
                   modify (·.insert key (md.byteSize, md.modified, sha))
-                return some (sha, bytes.size.toUInt64)
+                return some (p, sha, bytes.size.toUInt64)
   return none
+
+/-- Cached `(sha256, sizeBytes)` metadata for a release binary without re-hashing unchanged files. -/
+def resolveReleaseBinaryMeta? (name arch : String) : IO (Option (String × UInt64)) := do
+  return (← resolveReleaseBinaryPathMeta? name arch).map fun (_, sha, sz) => (sha, sz)
 
 /-- Default declarative harness CLI bundle manifest matching `scripts/orb-node-provision.sh`.
     Can be overridden via `ORB_CLI_BUNDLE_MANIFEST_PATH` or `<dataRoot>/cli_bundle_manifest.json`. -/
@@ -104,7 +119,7 @@ def defaultCliBundleManifestJVal : JVal :=
   let harnesses := JVal.obj #[
     ("agy", .obj #[
       ("bin", .str "agy"),
-      ("version", .str "1.0.0"),
+      ("version", .str "1.5.18"),
       ("url", .str ""),
       ("sha256", .str ""),
       ("format", .str "raw")
@@ -157,6 +172,55 @@ def loadCliBundleManifestJVal (dataRoot : String) : IO JVal := do
           return jv
   return defaultCliBundleManifestJVal
 
+private def probeAgyBinaryVersion (path : String) (fallback : String) : IO String := do
+  if let some envVer ← getEnvNonEmpty "ORB_CLI_BUNDLE_AGY_VERSION" then
+    return envVer.trimAscii.toString
+  let fp := System.FilePath.mk path
+  if let .ok md ← (fp.metadata).toBaseIO then
+    let cached? ← agyVersionCache.atomically do return (← get).get? path
+    if let some (sz, mt, ver) := cached? then
+      if sz == md.byteSize && mt == md.modified then
+        return if ver.isEmpty then fallback else ver
+    let mut probed := ""
+    match ← (IO.Process.output { cmd := "timeout", args := #["3s", path, "--version"] }).toBaseIO with
+    | .ok out =>
+      if out.exitCode == 0 then
+        let firstLine := ((out.stdout.splitOn "\n").find? (fun ln => !ln.trimAscii.isEmpty)).getD ""
+        probed := OrbNode.AutoUpdate.normalizeCliVersionToken (firstLine.trimAscii.toString.take 120).toString
+    | .error _ => pure ()
+    agyVersionCache.atomically do
+      modify (·.insert path (md.byteSize, md.modified, probed))
+    return if probed.isEmpty then fallback else probed
+  return fallback
+
+/-- When `cli_bundle.harnesses.agy` has no explicit download URL and Core has an `agy` binary
+    for `normArch`, serve it directly from `/api/node-releases/binaries/agy?arch=<arch>` so
+    fleet nodes (e.g. `babylon`) converge automatically to Core's `agy` version. -/
+private def hydrateAgyCliBundleSpec (normArch : String) (cliBundle : JVal) : IO JVal := do
+  let some (.obj bFields) := some cliBundle | return cliBundle
+  let some (.obj hFields) := cliBundle.field? "harnesses" | return cliBundle
+  let agyEntry? := (hFields.find? (fun p => p.1 == "agy")).map Prod.snd
+  let curUrl := (agyEntry?.bind (·.fieldStr? "url")).getD ""
+  if !curUrl.isEmpty then return cliBundle
+  let some (agyPath, agySha, _) ← resolveReleaseBinaryPathMeta? "agy" normArch | return cliBundle
+  let curVer := (agyEntry?.bind (·.fieldStr? "version")).getD "1.5.18"
+  let agyVer ← probeAgyBinaryVersion agyPath curVer
+  let newAgy := JVal.obj #[
+    ("bin", .str "agy"),
+    ("version", .str agyVer),
+    ("url", .str s!"/api/node-releases/binaries/agy?arch={normArch}"),
+    ("sha256", .str agySha),
+    ("format", .str "raw")
+  ]
+  let updatedHFields := (hFields.filter (fun p => p.1 != "agy")).push ("agy", newAgy)
+  let newHarnesses := JVal.obj updatedHFields
+  let verHash := (bytesToHexLower (sha256Bytes (renderCompact newHarnesses).toUTF8)).take 16 |>.toString
+  let updatedBFields :=
+    (bFields.filter (fun p => p.1 != "harnesses" && p.1 != "version"))
+      |>.push ("version", .str verHash)
+      |>.push ("harnesses", newHarnesses)
+  return .obj updatedBFields
+
 /-- Build the Core release manifest returned in `GET /api/node-releases/manifest` and
     `POST /api/node-releases/heartbeat`. -/
 def buildNodeReleaseManifestJVal (dataRoot arch : String) (cordoned : Bool := false) : IO JVal := do
@@ -174,7 +238,8 @@ def buildNodeReleaseManifestJVal (dataRoot arch : String) (cordoned : Bool := fa
         ("size_bytes", .uint64 sz),
         ("arch", .str normArch)
       ]
-  let cliBundle ← loadCliBundleManifestJVal dataRoot
+  let cliBundleRaw ← loadCliBundleManifestJVal dataRoot
+  let cliBundle ← hydrateAgyCliBundleSpec normArch cliBundleRaw
   let winSecs := (((← IO.getEnv "ORB_NODE_UPDATE_STARTUP_WINDOW_SECS") >>= String.toNat?).getD 90).toUInt64
   return .obj #[
     ("version", .nat 1),

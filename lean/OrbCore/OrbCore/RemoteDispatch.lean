@@ -833,10 +833,14 @@ private def antigravityAccountExhaustedOrRejected?
   return false
 
 /-- Determine whether an admin-owned Antigravity CLI turn on `effNodeId` may run through
-    the static node's `managed_auth` (`agy` with full workspace & MCP tools) because:
+    the node's `managed_auth` (`agy` with full workspace & MCP tools, provisioned via
+    `PUT /managed-auth/antigravity`) because:
     1. the caller is the bootstrap admin and the mission has no shared-workspace grant binding;
-    2. `effNodeId` is a static, non-dedicated fleet node neither reserved by `NativeCanary`
-       nor bound to `NativeSharedWorkspace.holderFor?` (ephemeral `managed-*` VMs never qualify);
+    2. `effNodeId` is either:
+       - a static, non-dedicated fleet node neither reserved by `NativeCanary` nor bound to
+         `NativeSharedWorkspace.holderFor?`, OR
+       - an ephemeral `managed-*` VM owned exclusively by `bootstrapAdminId` (verified against
+         `ManagedComputeStore`; non-admin/member callers and member-owned VMs never qualify);
     3. at least one admin-owned Antigravity provider is enabled (including caller prefs), and
        every enabled admin Antigravity provider is routed `Direct` (`country == ""` in
        `account_vpn_routes`), never bypassing a configured VPN exit.
@@ -847,12 +851,25 @@ def adminDirectAntigravityStaticTarget?
     (store : CoreStore) (coreWorkDir effNodeId ownerUserId bootstrapAdminId : String)
     (bound? : Option String) (rollout : NativeCanary.Scope)
     (holderPresent : Bool) (staticNodes : Array StaticRemoteNode)
-    (hub? : Option ProviderRuntimeHub := none) (nowSec : UInt64 := 0) : IO (Option String) := do
+    (hub? : Option ProviderRuntimeHub := none) (nowSec : UInt64 := 0)
+    (mc? : Option ManagedComputeStore := none) : IO (Option String) := do
   unless !bootstrapAdminId.isEmpty && ownerUserId == bootstrapAdminId && bound?.isNone do
     return none
   if rollout.reserves effNodeId || holderPresent then
     return none
-  unless staticNodes.any (fun n => n.id == effNodeId && n.dedicatedOwner?.isNone) do
+  let isStaticEligible := staticNodes.any (fun n => n.id == effNodeId && n.dedicatedOwner?.isNone)
+  let isAdminManagedEligible ←
+    if isStaticEligible then pure false
+    else if effNodeId.startsWith "managed-" then
+      match mc? with
+      | none => pure false
+      | some mc =>
+        let mid := (effNodeId.drop 8).toString
+        match ← OrbCore.Managed.getManagedMachine? mc mid with
+        | some (m, _) => pure (!m.ownerUserId.isEmpty && m.ownerUserId == bootstrapAdminId)
+        | none => pure false
+    else pure false
+  unless isStaticEligible || isAdminManagedEligible do
     return none
   let hydrated ← loadHydratedProviders store coreWorkDir
   let prefs ← getUserProviderPrefs store ownerUserId
@@ -1146,10 +1163,10 @@ def prepareRemoteHarnessCommand
     let adminDirectOauth? ←
       if legacyAdmin then pure none
       else
-        adminDirectAntigravityStaticTarget? store coreWorkDir effNodeId spec.ownerUserId bootstrapAdminId bound? rollout holder?.isSome staticNodes sup.providerHub? nowSec
+        adminDirectAntigravityStaticTarget? store coreWorkDir effNodeId spec.ownerUserId bootstrapAdminId bound? rollout holder?.isSome staticNodes sup.providerHub? nowSec mc?
     if let some oauthFile := adminDirectOauth? then
       if let some payload ← readAdminAntigravitySyncPayload? oauthFile then
-        discard <| (callRemoteNodeHttpOpt relayHub? mc? effNodeId "PUT" "/managed-auth/antigravity" (some payload) #[] 4000).toBaseIO
+        discard <| (callRemoteNodeHttpOpt relayHub? mc? effNodeId "PUT" "/managed-auth/antigravity" (some payload) #[] 8000).toBaseIO
     if !legacyAdmin && adminDirectOauth?.isNone then
       let some hub := sup.providerHub? | return .error "native_subscription_disabled"
       unless (← NativeSharedWorkspace.executionEnabled) && !sup.devMode do return .error "native_subscription_disabled"

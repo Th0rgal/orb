@@ -1068,12 +1068,44 @@ private def verifyAdminDirectAntigravityStaticTarget (root : String) : IO Unit :
         store workRoot "ashur" "u-member" "u-admin" none .unrestricted false staticNodes
       check (denyMember == none) "member never qualifies for admin static managed_auth"
 
-      -- 3. Dedicated owner node or ephemeral managed-* VM never qualifies.
+      -- 3. Dedicated static node is denied; ephemeral managed-* VM requires ManagedComputeStore
+      --    and admin ownership (strict tenant isolation for non-admin/member users & member VMs).
       let denyDed ← OrbCore.RemoteDispatch.adminDirectAntigravityStaticTarget?
         store workRoot "ded-node" "u-admin" "u-admin" none .unrestricted false staticNodes
-      let denyManaged ← OrbCore.RemoteDispatch.adminDirectAntigravityStaticTarget?
+      let denyManagedNoStore ← OrbCore.RemoteDispatch.adminDirectAntigravityStaticTarget?
         store workRoot "managed-1234" "u-admin" "u-admin" none .unrestricted false staticNodes
-      check (denyDed == none && denyManaged == none) "dedicated and managed nodes never qualify"
+      check (denyDed == none && denyManagedNoStore == none) "dedicated node and managed node without store never qualify"
+
+      let .ok mc ← openManagedComputeStore s!"{workRoot}/managed.db"
+        | throw (IO.userError "admin direct ag managed store open failed")
+      try
+        let insertMc (sql : String) (args : Array String := #[]) : IO Unit := do
+          if let .error err ← execParamQuery mc.db sql args then throw (IO.userError err)
+        insertMc
+          ("INSERT INTO managed_machines(id,sandbox_name,provider,size,status,owner_mission,ttl_minutes,spent_cents," ++
+           "cordoned,node_boot_epoch,deletable_at_sec,owner_kind,requested_by_mission_id,phase_code,active_compute_eligible,owner_user_id,provider_id) " ++
+           "VALUES('admin-vm-1','sbx-a','boat','small','running','m-a',60,0,0,1,0,'mission','m-a',1,1,'u-admin','p-a');")
+        insertMc
+          ("INSERT INTO managed_machines(id,sandbox_name,provider,size,status,owner_mission,ttl_minutes,spent_cents," ++
+           "cordoned,node_boot_epoch,deletable_at_sec,owner_kind,requested_by_mission_id,phase_code,active_compute_eligible,owner_user_id,provider_id) " ++
+           "VALUES('member-vm-1','sbx-m','boat','small','running','m-m',60,0,0,1,0,'mission','m-m',1,1,'u-member','p-m');")
+        let okAdminManaged ← OrbCore.RemoteDispatch.adminDirectAntigravityStaticTarget?
+          store workRoot "managed-admin-vm-1" "u-admin" "u-admin" none .unrestricted false staticNodes none 0 (some mc)
+        let denyMemberOnAdminManaged ← OrbCore.RemoteDispatch.adminDirectAntigravityStaticTarget?
+          store workRoot "managed-admin-vm-1" "u-member" "u-admin" none .unrestricted false staticNodes none 0 (some mc)
+        let denyAdminOnMemberManaged ← OrbCore.RemoteDispatch.adminDirectAntigravityStaticTarget?
+          store workRoot "managed-member-vm-1" "u-admin" "u-admin" none .unrestricted false staticNodes none 0 (some mc)
+        let denyMemberOnMemberManaged ← OrbCore.RemoteDispatch.adminDirectAntigravityStaticTarget?
+          store workRoot "managed-member-vm-1" "u-member" "u-admin" none .unrestricted false staticNodes none 0 (some mc)
+        let denyUnknownManaged ← OrbCore.RemoteDispatch.adminDirectAntigravityStaticTarget?
+          store workRoot "managed-nonexistent" "u-admin" "u-admin" none .unrestricted false staticNodes none 0 (some mc)
+        check (okAdminManaged == some "antigravity-admin.json")
+          s!"admin-owned managed-* VM resolves bound OAuth file, got {reprStr okAdminManaged}"
+        check (denyMemberOnAdminManaged == none && denyAdminOnMemberManaged == none &&
+               denyMemberOnMemberManaged == none && denyUnknownManaged == none)
+          "strict tenant isolation: members, member-owned VMs, and unknown managed-* VMs are denied"
+      finally
+        closeManagedComputeStore mc
 
       -- 4. Holder-backed node or canary-reserved node stays on NativeSharedWorkspace.
       let denyHolder ← OrbCore.RemoteDispatch.adminDirectAntigravityStaticTarget?
