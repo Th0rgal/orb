@@ -510,9 +510,34 @@ class Delivery(unittest.TestCase):
         for case in spec['writes']:
             self.assertEqual(live.account_vpn_write(case['country']), case['body'])
 
+        self.assertEqual(live.VPN_UPDATE_LABEL, spec['labels']['vpn_update'])
+        self.assertEqual(live.ROUTER_UPDATE_LABEL, spec['labels']['router_update'])
+
         for case in spec['read_errors']:
             self.assertEqual(live.missing_account_setting(case['status'], case['body'], case['path']),
                              case['missing_endpoint'])
+
+        def http_404(body):
+            return live.urllib.error.HTTPError('x', 404, 'Not Found', {}, io.BytesIO(body.encode()))
+
+        older_core = Mock(get=Mock(side_effect=[
+            http_404('{"error":"not_found","path":"/api/ai/providers/a/vpn"}'),
+            http_404('{"error":"not_found","path":"/api/ai/providers/a/alternative-routers"}'),
+        ]))
+        rows, should_poll = live.account_route_state(older_core, 'a', True)
+        self.assertFalse(should_poll)
+        self.assertEqual(rows, [
+            ('refresh', '', 'Account connection', spec['labels']['vpn_update']),
+            ('refresh', '', 'Alternative routers', spec['labels']['router_update']),
+        ])
+
+        wrong_404 = Mock(get=Mock(side_effect=[
+            http_404('{"error":"provider_not_found"}'),
+            http_404('{"error":"not_found","path":"/api/ai/providers/b/alternative-routers"}'),
+        ]))
+        rows, should_poll = live.account_route_state(wrong_404, 'a', True)
+        self.assertFalse(should_poll)
+        self.assertEqual(rows, [])
 
         for case in spec['router_access']:
             self.assertEqual(live.alternative_router_access(case['payload']), case['allowed'])

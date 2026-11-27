@@ -56,6 +56,15 @@ private def drain (a : Active) : IO Unit := do
   for o in a.occupants do unlock o.locks
   unlock a.retiredLocks
 
+/-- Retire a tunnel that stopped or had its underlying AirVPN secret replaced or
+deleted. Nothing starts another tunnel before an account's next request or a
+retry, so every occupant on it is told it stopped. -/
+private def retire (t : Active) : Std.AtomicT PoolState IO Unit := do
+  drain t
+  for o in t.occupants do
+    modify fun state => { state with
+      failures := state.failures.insert o.binding.account (o.generation, "vpn_tunnel_stopped") }
+
 /-- Commit an admin credential change under the admission lock and retire
 the children using the previous secret before accepting another request. -/
 def saveSecret (pool : Pool) : SaveSecret := fun root secret value => pool.atomically do
@@ -66,7 +75,7 @@ def saveSecret (pool : Pool) : SaveSecret := fun root secret value => pool.atomi
   if !affected.isEmpty && (← OrbCore.Managed.openAirVpnSecret root secret).toOption == some value then
     return .ok ()
   if let .error e ← OrbCore.Managed.sealAirVpnSecret root secret value then return .error e
-  for t in affected do drain t
+  for t in affected do retire t
   modify fun state => { state with active := keep }
   return .ok ()
 
@@ -78,7 +87,7 @@ def deleteSecret (pool : Pool) : DeleteSecret := fun root secret => pool.atomica
     | .apiKey => true
     | .device device => t.endpoint.device == device
   if let .error e ← OrbCore.Managed.deleteAirVpnSecret root secret then return .error e
-  for t in affected do drain t
+  for t in affected do retire t
   modify fun state => { state with active := keep }
   return .ok ()
 
@@ -86,7 +95,7 @@ def deleteSecret (pool : Pool) : DeleteSecret := fun root secret => pool.atomica
 def activeTunnels (pool : Pool) : IO (Array OrbBin.Json.JVal) := pool.atomically do
   let mut out := #[]
   for t in (← get).active do
-    if (← t.tunnel.child.tryWait).isNone && !t.occupants.isEmpty then
+    if !(← t.tunnel.exited) && !t.occupants.isEmpty then
       let accounts := (t.occupants.map (·.binding.account)).eraseDups.length
       let exits := t.evidence.exits.toArray.map fun ip => OrbBin.Json.JVal.str (OrbCore.AirVpnObservation.formatExit ip)
       out := out.push (.obj #[
@@ -139,14 +148,6 @@ private def install (dir : String) (db : SqliteDb) (account cat : String) (pref 
     return .error e
   let gateway : Gateway := ⟨t.tunnel.port, ← IO.mkRef false⟩
   return .ok ({ t with occupants := ⟨binding, pref.generation, locks, gateway⟩ :: t.occupants }, gateway)
-
-/-- Retire a tunnel that failed verification. Nothing starts another tunnel
-before an account's next request, so every account on it is told it stopped. -/
-private def retire (t : Active) : Std.AtomicT PoolState IO Unit := do
-  drain t
-  for o in t.occupants do
-    modify fun state => { state with
-      failures := state.failures.insert o.binding.account (o.generation, "vpn_tunnel_stopped") }
 
 /-- Recheck the credential's saved generation while serializing local admission.
 Each selected listener belongs to a running process with fresh exit evidence. -/

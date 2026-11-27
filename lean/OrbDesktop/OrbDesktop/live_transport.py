@@ -223,6 +223,8 @@ def bulk_write(c, kind, key):
 
 
 ACCOUNT_VPN_POLL_SECONDS = 5
+VPN_UPDATE_LABEL = 'Update Core to configure account VPNs.'
+ROUTER_UPDATE_LABEL = 'Update Core to configure alternative router access.'
 
 
 def account_path(account):
@@ -350,8 +352,9 @@ def account_route_state(c, account, antigravity):
     rows = []
     should_poll = False
     for suffix, title, kind in sections:
+        path = base + '/' + suffix
         try:
-            payload = c.get(base + '/' + suffix)
+            payload = c.get(path)
             if kind == 'vpn':
                 route = account_vpn_route(payload)
                 if route is None:
@@ -365,9 +368,19 @@ def account_route_state(c, account, antigravity):
             with error:
                 if error.code == 401:
                     raise
-                if error.code in (403, 404):
+                body = ''
+                if error.code == 404 and error.fp is not None:
+                    try:
+                        body = error.read().decode('utf-8', 'replace')
+                    except OSError:
+                        body = ''
+                if missing_account_setting(error.code, body, path):
+                    update_msg = VPN_UPDATE_LABEL if kind == 'vpn' else ROUTER_UPDATE_LABEL
+                    section_rows = [('refresh', '', title, update_msg)]
+                elif error.code in (403, 404):
                     continue
-            section_rows = [('refresh', '', title, 'Could not load. Retry')]
+                else:
+                    section_rows = [('refresh', '', title, 'Could not load. Retry')]
         except (OSError, ValueError, KeyError, TypeError):
             section_rows = [('refresh', '', title, 'Could not load. Retry')]
         rows.extend(section_rows)

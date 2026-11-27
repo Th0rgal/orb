@@ -103,3 +103,21 @@ it("hides router access when Core does not state it and explains an older Core",
   const toggle = await screen.findByRole("switch", { name: "Allow alternative routers" });
   expect(toggle.getAttribute("aria-checked")).toBe("true");
 });
+
+it("keeps a newer router-access toggle when an older focus reread finishes", async () => {
+  let finishRead!: (v: unknown) => void;
+  vi.mocked(api).mockResolvedValueOnce({ allowed: true })
+    .mockImplementationOnce(() => new Promise(resolve => { finishRead = resolve; }))
+    .mockResolvedValueOnce({ allowed: false });
+  render(() => <AlternativeRouterSettings account="focus-race" />);
+  const toggle = await screen.findByRole("switch", { name: "Allow alternative routers" }) as HTMLButtonElement;
+  expect(toggle.getAttribute("aria-checked")).toBe("true");
+  window.dispatchEvent(new Event("focus"));
+  await vi.waitFor(() => expect(api).toHaveBeenCalledTimes(2));
+  expect(toggle.disabled).toBe(false);
+  fireEvent.click(toggle);
+  await vi.waitFor(() => expect(toggle.getAttribute("aria-checked")).toBe("false"));
+  finishRead({ allowed: true });
+  await new Promise(resolve => setTimeout(resolve, 0));
+  expect(toggle.getAttribute("aria-checked")).toBe("false");
+});

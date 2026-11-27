@@ -144,6 +144,14 @@ def run (root : String) : IO Unit := do
       ((verified.fieldArr? "exits").getD #[]).map JVal.asStr? == #[some "1.2.3.4", some "2001:db8:0:0:0:0:0:1"] &&
       verified.fieldBool? "can_configure" == some true && (verified.fieldArr? "countries").isSome)
       "verified route names its server and both exits"
+    let liveSummaries ← AccountVpnPool.activeTunnels pool
+    check (liveSummaries.size == 1 &&
+      liveSummaries[0]!.fieldStr? "device" == some "device" &&
+      liveSummaries[0]!.fieldStr? "country" == some "NL" &&
+      liveSummaries[0]!.fieldStr? "server" == some "west" &&
+      liveSummaries[0]!.fieldNat? "accounts" == some 2 &&
+      ((liveSummaries[0]!.fieldArr? "exits").getD #[]).map JVal.asStr? == #[some "1.2.3.4", some "2001:db8:0:0:0:0:0:1"])
+      "activeTunnels reports live shared tunnel metadata and occupant count"
     -- The state every check after the first one finds once the tunnel process has exited.
     child.kill
     discard child.wait
@@ -154,6 +162,17 @@ def run (root : String) : IO Unit := do
       (afterExit.fieldStr? "message").any (·.startsWith "The VPN tunnel stopped."))
       "a stopped tunnel is reported as a failure to retry, not as awaiting verification"
     check (← tunnel.reaped.get) "the first observed exit is recorded on the tunnel"
+    check ((← AccountVpnPool.activeTunnels pool).isEmpty)
+      "activeTunnels omits an already-reaped tunnel without calling waitpid again"
+    -- If activeTunnels observes an exited child first, it must record `reaped` so later stops never signal a reused PID.
+    let shortLived ← IO.Process.spawn { cmd := "true", args := #[], stdin := .null, stdout := .null, stderr := .null }
+    IO.sleep 100
+    let shortTunnel : AirVpnTunnel.Tunnel :=
+      ⟨shortLived, 30003, seen, ← IO.mkRef none, ← IO.Promise.new, ← IO.asTask (pure ()), ← IO.mkRef false⟩
+    pool.atomically <| set ({ active := [{ running with tunnel := shortTunnel }] } : AccountVpnPool.PoolState)
+    check ((← AccountVpnPool.activeTunnels pool).isEmpty && (← shortTunnel.reaped.get))
+      "activeTunnels records tunnel exit via Tunnel.exited when observing exit first"
+    pool.atomically <| set ({ active := [running] } : AccountVpnPool.PoolState)
     let refused ← AccountVpnPool.allocate pool store.rootDir root db "v" "openai" pref
     check (refused.toOption.isNone && (← gateway.revoked.get) && (← pool.atomically get).active.isEmpty)
       "exited tunnel is refused, revoked and retired"
@@ -170,6 +189,8 @@ def run (root : String) : IO Unit := do
       let collected : AirVpnTunnel.Tunnel :=
         ⟨bystander, 30002, seen, ← IO.mkRef none, ← IO.Promise.new, ← IO.asTask (pure ()), ← IO.mkRef true⟩
       pool.atomically <| set ({ active := [{ running with tunnel := collected }] } : AccountVpnPool.PoolState)
+      check ((← AccountVpnPool.activeTunnels pool).isEmpty)
+        "activeTunnels ignores a collected tunnel even when another process reuses its PID"
       let (_, reused) ← shown
       check (reused.fieldStr? "reason" == some "vpn_tunnel_stopped")
         "a process that reuses a collected tunnel's id is not shown as its verified exit"
@@ -183,6 +204,31 @@ def run (root : String) : IO Unit := do
       let (_, joined) ← shownSharer
       check ((← pool.atomically get).active.isEmpty && joined.fieldStr? "reason" == some "vpn_tunnel_stopped")
         "an account on a tunnel retired when another account tried to join it is told it stopped"
+      -- Rotating the API key or deleting an active device profile retires affected tunnels and reports vpn_tunnel_stopped to every occupant.
+      let gwV1 : AccountVpnPool.Gateway := ⟨30004, ← IO.mkRef false⟩
+      let gwW1 : AccountVpnPool.Gateway := ⟨30004, ← IO.mkRef false⟩
+      let activeForSave : AccountVpnPool.Active :=
+        { running with tunnel := collected, occupants := [{ occupant with gateway := gwV1 }, { sharer with gateway := gwW1 }] }
+      pool.atomically <| set ({ active := [activeForSave] } : AccountVpnPool.PoolState)
+      IO.ofExcept (← AccountVpnPool.saveSecret pool store.rootDir .apiKey "rotated-api-key")
+      let (_, afterKeyV) ← shown
+      let (_, afterKeyW) ← shownSharer
+      check ((← gwV1.revoked.get) && (← gwW1.revoked.get) && (← AccountVpnPool.activeTunnels pool).isEmpty &&
+        afterKeyV.fieldStr? "reason" == some "vpn_tunnel_stopped" &&
+        afterKeyW.fieldStr? "reason" == some "vpn_tunnel_stopped")
+        "saveSecret retirement revokes gateways and reports vpn_tunnel_stopped to all occupants"
+      let gwV2 : AccountVpnPool.Gateway := ⟨30005, ← IO.mkRef false⟩
+      let gwW2 : AccountVpnPool.Gateway := ⟨30005, ← IO.mkRef false⟩
+      let activeForDel : AccountVpnPool.Active :=
+        { running with tunnel := collected, occupants := [{ occupant with gateway := gwV2 }, { sharer with gateway := gwW2 }] }
+      pool.atomically <| set ({ active := [activeForDel] } : AccountVpnPool.PoolState)
+      IO.ofExcept (← AccountVpnPool.deleteSecret pool store.rootDir (.device "device"))
+      let (_, afterDelV) ← shown
+      let (_, afterDelW) ← shownSharer
+      check ((← gwV2.revoked.get) && (← gwW2.revoked.get) && (← AccountVpnPool.activeTunnels pool).isEmpty &&
+        afterDelV.fieldStr? "reason" == some "vpn_tunnel_stopped" &&
+        afterDelW.fieldStr? "reason" == some "vpn_tunnel_stopped")
+        "deleteSecret retirement revokes gateways and reports vpn_tunnel_stopped to all occupants"
     finally stopFixture bystander
   finally OrbCore.Store.closeCoreStore store
   let first : ProviderUsageAndLogin.CliAuthFileInfo := { (default : ProviderUsageAndLogin.CliAuthFileInfo) with

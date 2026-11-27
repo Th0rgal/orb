@@ -203,9 +203,11 @@ shared tunnel. Changing the account’s country or switching to Direct revokes
 its existing relay connections. A sidecar with a pooled connection must
 connect again. Other accounts can continue using the same tunnel.
 
-Changing a device profile retires every Orb connection using that profile.
+Changing or deleting a device profile retires every Orb connection using that profile.
 Changing the API key retires all local Orb tunnels for fresh verification.
-Invalid or identical edits preserve running tunnels.
+Retired tunnels record `vpn_tunnel_stopped` for every occupant so clients offer
+Retry verification rather than polling indefinitely. Invalid or identical edits
+preserve running tunnels.
 
 A tunnel process that exits on its own counts as stopped. Core records the
 exit the first time it observes it. Collecting the exit status frees the
@@ -269,10 +271,11 @@ selection is being saved, no reread and no second selection starts. Retry
 connection settings appears only while the route is unread. A selection that
 Core refused keeps its message until the next selection.
 
-The pure `--leanui` row is not derived from this model yet. It offers Retry
-verification while an exit still awaits verification, does not reread a
-pending route on a timer, and is not checked against the shared fixture.
-Roadmap node V1a tracks it.
+The pure `--leanui` row (`lean/OrbDesktop/OrbDesktop/live_transport.py` and
+`Core.lean`) derives from the same model, checks every case of
+`shared/orb-spec/fixtures/account-vpn.json` in
+`lean/OrbDesktop/tests/test_live_delivery.py`, rereads pending exits every five
+seconds, and explains missing routing endpoints on older Cores with Retry.
 
 ### Reconnecting a Direct Codex subscription
 

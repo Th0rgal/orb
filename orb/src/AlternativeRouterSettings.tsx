@@ -22,7 +22,16 @@ export function AlternativeRouterSettings(p: { account: string }) {
   const [error, setError] = createSignal("");
   createEffect(() => {
     if (saving() || setting.state !== "ready") return;
-    onCleanup(pollWhileVisible(async () => { await refetch(); }, null, "alternative-routers"));
+    const [, id] = source();
+    let active = true;
+    const stop = pollWhileVisible(async () => {
+      const next = await access(id);
+      if (active) mutate(next);
+    }, null, "alternative-routers");
+    onCleanup(() => {
+      active = false;
+      stop();
+    });
   });
   async function save(allowed: boolean) {
     const [version, id] = source();
