@@ -1,13 +1,14 @@
 import {afterEach,expect,it,vi} from 'vitest';
 import {cleanup,fireEvent,render,screen,waitFor} from '@solidjs/testing-library';
 import {QueuedMessages} from '../src/QueuedMessages';
-const queue=vi.hoisted(()=>({rows:[] as any[],retry:vi.fn(),send:vi.fn(),prioritize:vi.fn(),remove:vi.fn()}));
+const queue=vi.hoisted(()=>({rows:[] as any[],accepted:[] as any[],retry:vi.fn(),send:vi.fn(),prioritize:vi.fn(),remove:vi.fn()}));
 vi.mock('../src/localMessageQueue',()=>({
  queuedLocalMessages:()=>queue.rows,
+ acceptedLocalMessages:()=>queue.accepted,
  retryQueuedMessage:queue.retry,sendQueuedNow:queue.send,
  prioritizeQueuedMessage:queue.prioritize,removeQueuedMessage:queue.remove,canDiscardQueuedMessage:()=>true,
 }));
-afterEach(()=>{cleanup();queue.rows=[];vi.resetAllMocks();});
+afterEach(()=>{cleanup();queue.rows=[];queue.accepted=[];vi.resetAllMocks();});
 it('offers Retry without a disabled Send now for an interrupted message',async()=>{
  queue.rows=[{id:'interrupted',text:'vas-y',state:'accepted',interrupted:true,error:'Previous agent may still be running.'}];
  let finish!:()=>void;queue.retry.mockImplementation(()=>new Promise<void>(resolve=>{finish=resolve;}));
@@ -56,5 +57,27 @@ it('does not render a duplicate bottom alert when a row already shows the retry 
  await fireEvent.click(screen.getByRole('button',{name:'Retry'}));
  await waitFor(()=>expect(queue.retry).toHaveBeenCalledWith('interrupted'));
  expect(screen.getAllByRole('alert')).toHaveLength(1);
+});
+it('deduplicates optimistic pending rows against queued, accepted, and duplicate pending items',()=>{
+ queue.rows=[
+  {id:'q1',text:'already queued',state:'queued',waiting:true},
+  {id:'d1',text:'already dispatching',state:'dispatching',waiting:true},
+ ];
+ queue.accepted=[
+  {id:'a1',text:'already accepted',state:'accepted'},
+ ];
+ render(()=><QueuedMessages mission="local" pending={[
+  {id:'q1',text:'already queued'},
+  {id:'q1-dup',text:'  already queued  '},
+  {id:'d1',text:'already dispatching'},
+  {id:'a1',text:'already accepted'},
+  {id:'p1',text:'fresh pending'},
+  {id:'p2',text:' fresh pending '},
+ ]}/>);
+ expect(screen.getByText('2 Queued')).toBeTruthy();
+ expect(screen.getAllByText('already queued')).toHaveLength(1);
+ expect(screen.getAllByText('fresh pending')).toHaveLength(1);
+ expect(screen.queryByText('already dispatching')).toBeNull();
+ expect(screen.queryByText('already accepted')).toBeNull();
 });
 
