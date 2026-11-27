@@ -90,6 +90,12 @@ const HARNESS_META: Record<
     projectRel: ".agents/skills",
     mechanism: "Workspace .agents/skills and global ~/.gemini/config/skills",
   },
+  pi: {
+    name: "Pi",
+    globalRel: "~/.pi/agent/skills",
+    projectRel: ".pi/skills",
+    mechanism: "Native Agent Skills (.pi/skills & .agents/skills) with /skill:name expansion",
+  },
   opencode: {
     name: "OpenCode",
     globalRel: "~/.config/opencode/skills",
@@ -116,6 +122,7 @@ const HARNESS_ORDER = [
   "codex",
   "antigravity",
   "vibe",
+  "pi",
   "opencode",
   "grok",
   "hermes",

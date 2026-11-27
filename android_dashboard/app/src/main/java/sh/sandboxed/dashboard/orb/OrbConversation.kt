@@ -909,7 +909,7 @@ fun OrbConversationPage(
             !OrbJSON.str(liveRow?.dict("cloud"), "provider").isNullOrEmpty()
     }
     val isCloudComposer = isCloudMission || selectedBackend in setOf("cursor_cloud", "grok_bot", "hermes") || selectedBackend.startsWith("cloud_")
-    val remoteGoalPhase = liveRow?.takeIf { it.bool("goal_mode") == true && it.str("backend") == "opencode" }
+    val remoteGoalPhase = liveRow?.takeIf { it.bool("goal_mode") == true && (it.str("backend") == "opencode" || it.str("backend") == "pi") }
         ?.let { OrbRemoteGoal.phase(it.str("status", "state"), it.str("terminal_reason")) }
     val effectiveProjectSlug = remember(currentMission, project) {
         currentMission?.str("project")?.takeIf { it.isNotEmpty() } ?: project.str("slug", "id") ?: project.id
@@ -5493,6 +5493,7 @@ object OrbAgentCatalog {
         "claudecode" to "Claude Code",
         "codex" to "Codex",
         "grok" to "Grok",
+        "pi" to "Pi",
         "opencode" to "OpenCode",
         "antigravity" to "Antigravity CLI",
         "vibe" to "Mistral Vibe",

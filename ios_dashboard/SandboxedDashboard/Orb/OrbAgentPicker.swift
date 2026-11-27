@@ -19,6 +19,7 @@ struct OrbSelection {
         case "": return "cpu"
         case "claudecode": return "sparkles"
         case "codex": return "chevron.left.forwardslash.chevron.right"
+        case "pi": return "terminal.fill"
         case "opencode": return "terminal"
         case "antigravity": return "wand.and.stars"
         case "grok": return "bolt.fill"
@@ -104,7 +105,7 @@ struct OrbSelection {
             throw OrbHTTPError(status: 400, detail: "Choose an explicit model to run OpenCode on a remote machine, or select Core.")
         }
         if !cloud && OrbManaged.isAutoManagedTarget(node) && (backend == "grok" || backend == "vibe") {
-            throw OrbHTTPError(status: 400, detail: "\(OrbStyle.serviceName(backend)) is not supported on managed cloud VMs. Choose Claude Code, Codex, OpenCode, or Antigravity, or select Core.")
+            throw OrbHTTPError(status: 400, detail: "\(OrbStyle.serviceName(backend)) is not supported on managed cloud VMs. Choose Claude Code, Codex, Pi, OpenCode, or Antigravity, or select Core.")
         }
     }
     static let minAutoNodeMemBytes: Double = 8.0 * 1024.0 * 1024.0 * 1024.0

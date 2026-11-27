@@ -110,7 +110,7 @@ struct OrbConversation: View {
         a.trimmingCharacters(in: .whitespacesAndNewlines) == b.trimmingCharacters(in: .whitespacesAndNewlines)
     }
     static let workingPhases: Set<String> = ["queued", "submitting", "running", "cancel_requested"]
-    static let goalHarnesses: Set<String> = ["antigravity", "claudecode", "codex", "grok", "opencode"]
+    static let goalHarnesses: Set<String> = ["antigravity", "claudecode", "codex", "grok", "opencode", "pi"]
     var supportsMode: Bool { !isCloud && (selection.backend.isEmpty || Self.goalHarnesses.contains(selection.backend)) }
     var remoteGoalTarget: Bool { !isCloud && !selection.node.isEmpty && selection.node != "core" }
     @State var launchFleet: OrbJSON = .null
@@ -119,7 +119,7 @@ struct OrbConversation: View {
     var remoteGoalHarnesses: Set<String> { Set(launchFleet["remote_launch"]["goal_harnesses"].items.map(\.text)) }
     var offersGoal: Bool { !remoteGoalTarget || (id == nil && remoteGoalHarnesses.contains(selection.backend)) }
     var remoteGoalPhase: OrbRemoteGoal.Phase? {
-        guard mission["goal_mode"].flag, mission["backend"].text == "opencode", remoteGoalTarget else { return nil }
+        guard mission["goal_mode"].flag, mission["backend"].text == "opencode" || mission["backend"].text == "pi", remoteGoalTarget else { return nil }
         return OrbRemoteGoal.phase(status: mission["status"].text, reason: mission["terminal_reason"].text)
     }
     var handoffActive: Bool { OrbHandoff.pending(status: mission["status"].text, handoff: handoff) }

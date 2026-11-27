@@ -195,8 +195,9 @@ struct OrbForkSheet: View {
         "antigravity": ["low", "medium", "high"],
         "codex": ["low", "medium", "high", "xhigh", "max"],
         "claudecode": ["low", "medium", "high", "xhigh", "max"],
+        "pi": ["low", "medium", "high", "xhigh"],
     ]
-    private static let remoteCapable: Set<String> = ["codex", "grok", "claudecode", "opencode", "antigravity", "vibe"]
+    private static let remoteCapable: Set<String> = ["codex", "grok", "claudecode", "opencode", "pi", "antigravity", "vibe"]
 
     private var isCloudSource: Bool {
         mission["backend"].text.hasPrefix("cloud_") || !mission["cloud"]["provider"].text.isEmpty

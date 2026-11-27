@@ -385,6 +385,7 @@ export function ChangeMachine(p: { mission: Mission; choices: HarnessChoice[]; c
           const allowedHarnesses = [
             "claudecode",
             "codex",
+            "pi",
             "opencode",
             ...(managedCatalog().settings?.antigravity_on_managed !== false ? ["antigravity"] : []),
           ];

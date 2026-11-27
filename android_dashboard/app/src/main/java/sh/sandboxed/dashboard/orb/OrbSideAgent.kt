@@ -1702,7 +1702,7 @@ object OrbBtwSettings {
     private const val MODEL_KEY = "orb.btw.model"
 
     val harnesses: List<Pair<String, String>> = listOf(
-        "opencode" to "OpenCode", "claudecode" to "Claude Code", "codex" to "Codex", "grok" to "Grok"
+        "opencode" to "OpenCode", "pi" to "Pi", "claudecode" to "Claude Code", "codex" to "Codex", "grok" to "Grok"
     )
 
     private var prefs: android.content.SharedPreferences? = null

@@ -6,6 +6,7 @@ export const EFFORT_BY_HARNESS: Readonly<Record<string, readonly Effort[]>> = {
   antigravity: ["low", "medium", "high"],
   codex: EFFORT_LADDER,
   claudecode: EFFORT_LADDER,
+  pi: ["low", "medium", "high", "xhigh"],
 };
 
 /** The efforts this harness accepts. Empty when it ignores effort entirely. */

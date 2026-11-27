@@ -954,7 +954,7 @@ export function Composer(p: {
             </button>
             <Show when={which() === "harness"}>
               <Picker label="Harness" searchable={false} selected={pick()?.backend}
-                emptyLabel={p.harnessIds ? "No local agent CLIs found on PATH (install claude, codex, opencode, agy, grok, or vibe-acp)" : undefined}
+                emptyLabel={p.harnessIds ? "No local agent CLIs found on PATH (install claude, codex, pi, opencode, agy, grok, or vibe-acp)" : undefined}
                 items={harnessChoices(p.uploadTarget)
                   .filter(c => !p.harnessIds || p.harnessIds.includes(c.backend.id))
                   .map(({backend, models}) => {
