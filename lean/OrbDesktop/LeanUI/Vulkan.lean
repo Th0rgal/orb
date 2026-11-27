@@ -363,6 +363,14 @@ and FreeType `FT_PIXEL_MODE_BGRA` color glyphs. -/
       else if d16 ≤ -8 then cov
       else (cov * (((8 - d16).toNat * 255) / 16) + 127) / 255) 255
 
+/-- `true` when every clip in `rclips` covers `(px, py)` fully: inside its rectangle and one pixel
+    clear of its corner squares, where `sdfRoundedRect16 ≤ -8` and `roundedClipCov` keeps `255`. -/
+@[inline] private def roundedClipFull (rclips : List (Rect × CornerRadii)) (px py : Int) : Bool :=
+  rclips.all fun (r, (tl, tr, br, bl)) =>
+    let m : Int := Int.ofNat (max (max tl tr) (max br bl)) + 1
+    px ≥ r.x && px < r.right && py ≥ r.y && py < r.bottom &&
+      ((px ≥ r.x + m && px < r.right - m) || (py ≥ r.y + m && py < r.bottom - m))
+
 /-- Apply rounded clip masks to newly painted pixels inside `region` by blending `painted` over `saved`. -/
 private def applyRoundedClips (vw vh : Nat) (saved painted : ByteArray) (region : Rect)
     (rclips : List (Rect × CornerRadii)) : ByteArray := Id.run do
@@ -617,7 +625,7 @@ def rasterizeSceneInto (vw vh : Nat) (clearColor : Color) (atlas : Text.GlyphAtl
               let la := layerBuf.get! (idx + 3)
               if la > 0 && modA > 0 then
                 let effModA : UInt8 :=
-                  if activeRClips.isEmpty then modA
+                  if activeRClips.isEmpty || roundedClipFull activeRClips (px : Int) (py : Int) then modA
                   else ((modA.toNat * roundedClipCov activeRClips (px : Int) (py : Int) + 127) / 255).toUInt8
                 if effModA > 0 then
                   let dr := fb.get! idx

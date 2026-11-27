@@ -285,10 +285,21 @@ class U8WindowEffectsParityTests(unittest.TestCase):
 
                 # Open Search modal (Ctrl+K) with backdrop blur + scrim and verify corners remain transparent
                 h_before_modal = comp.last_frame_hash
+                t_modal = time.monotonic()
                 comp.key_tap("k", u6.MOD_CTRL)
                 comp.wait_text_input(True, timeout=5.0)
                 comp.wait_frame_change(h_before_modal, timeout=5.0)
-                time.sleep(0.1)
+                # The first commit after Ctrl+K can be a spinner tick or the text-input focus; the
+                # backdrop-blurred modal follows once rendered. Wait for that frame, not a fixed delay.
+                ref_center = bgra_premul_to_rgba_array(normal_frame, w, h)[80:520, 240:760].astype(int)
+
+                def modal_painted():
+                    cur = bgra_premul_to_rgba_array(comp.last_frame_bytes, w, h)[80:520, 240:760].astype(int)
+                    return float(np.abs(cur - ref_center).mean()) > 5.0
+
+                with contextlib.suppress(TimeoutError):
+                    u6._wait_until("backdrop-blur search modal frame", modal_painted, timeout=5.0)
+                print(f"U8 modal latency: {(time.monotonic() - t_modal) * 1000:.0f} ms", file=sys.stderr)
                 modal_frame = comp.last_frame_bytes
                 comp.key_tap("esc", 0)
                 time.sleep(0.1)
