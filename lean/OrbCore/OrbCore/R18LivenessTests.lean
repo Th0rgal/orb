@@ -142,12 +142,16 @@ def recoveryAndOrphanReaping (root : String) : IO Unit := do
     discard <| require (← execParamQuery store.missionsDb
       ("INSERT INTO mission_runs(id,mission_id,generation,execution_state,terminal_reason,remote_job_id,owner_actor_id,scope_unit,updated_at) " ++
        "VALUES('r-local-dead','m-lost-local',1,'running','','','local-core','local-proc:99999','2026-01-01T00:00:00Z');") #[])
+    discard <| require (← mintMissionProxyToken store "m-lost-local" "" 1899999999)
     let archive ← setMissionStatusFromClient store "m-lost" "acknowledged" "2026-01-01T00:00:01Z"
     match archive with
     | .error e => check (e == "mission_running") "archive refuses an activated mission before its run is recorded"
     | .ok _ => throw (IO.userError "archive overwrote a live mission before run insertion")
     let lost ← interruptTurnsLostToRestart store.missionsDb
     check (lost == 2) s!"restart marks ownerless + dead-local active missions (got {lost})"
+    let localTokLive ← count store.missionsDb
+      "SELECT COUNT(*) FROM mission_proxy_tokens WHERE mission_id='m-lost-local' AND revoked=0;"
+    check (localTokLive == 0) s!"restart revokes mission_proxy_tokens for interrupted local turn (live={localTokLive})"
     let receipts ← count store.missionsDb
       "SELECT COUNT(*) FROM mission_events WHERE mission_id='m-lost' AND event_type='recovery_receipt';"
     check (receipts == 1) "restart writes one recovery receipt for the lost turn"
@@ -275,6 +279,45 @@ def lineageMissionBudget (root : String) : IO Unit := do
         "get_budget" (.obj #[("mission_id", .str "parent")]) 1700000004 none none "" true
       check (mcpParentBud.contains "\"carved_usd\":0.02")
         s!"FLT-08 MCP get_budget parent must report real carved_usd=0.02 (got {mcpParentBud})"
+
+      -- 4b. Multi-user cross-caller budget access must enforce target mission's owner_user_id lineage
+      -- (shared participant GET, legacy-unscoped PUT, and MCP operator get_budget all see/enforce
+      --  `mem-parent`'s pool owned by `u-mem-bud` rather than caller's userId!)
+      let (budApp, admUid, admJwt) ← mkTestApp core root (some mc)
+      let nowAuthBud ← coreEpochSec
+      discard <| require (← execParamQuery core.missionsDb
+        "INSERT OR REPLACE INTO users(id,username,role,password_hash,session_epoch,disabled,created_at,updated_at) VALUES('u-mem-bud','membud','member','x',1,0,?1,?1);"
+        #[s!"{nowAuthBud}"])
+      missionSql core.missionsDb "mem-parent" "active" "managed" 1
+      missionSql core.missionsDb "mem-child" "active" "managed" 1
+      discard <| require (← execParamQuery core.missionsDb
+        "UPDATE missions SET owner_user_id='u-mem-bud' WHERE id='mem-parent';" #[])
+      discard <| require (← execParamQuery core.missionsDb
+        "UPDATE missions SET owner_user_id='u-mem-bud', parent_mission_id='mem-parent' WHERE id='mem-child';" #[])
+      discard <| require (← execParamQuery core.missionsDb
+        "INSERT OR REPLACE INTO mission_shares(mission_id,user_id,role,created_at) VALUES('mem-child',?1,'participant',?2);"
+        #[admUid, s!"{nowAuthBud}"])
+      discard <| require (← saveMissionBudgetConfig mc { missionId := "mem-parent", budgetDeciMilliUsd? := some 1000 })
+      -- Shared participant (caller.userId = admUid != u-mem-bud) reading member's child sees inherited parent pool
+      let (admGetSt, admGetBody) ← sendRest budApp admJwt "GET" "/api/control/missions/mem-child/budget" "" (some nowAuthBud)
+      check (admGetSt == 200 && admGetBody.contains "\"mode\":\"inherited\"" && admGetBody.contains "\"pool_id\":\"mem-parent\"")
+        s!"FLT-08 shared-caller GET member child budget must see inherited pool (st={admGetSt} body={admGetBody})"
+      -- Member owner trying to over-carve child above parent's $0.10 cap gets 409
+      let memJwt := issueHs256Jwt budApp.cfg.jwtSecret "u-mem-bud" "membud" nowAuthBud (nowAuthBud + 86400) "member"
+      let (memOverSt, memOverBody) ← sendRest budApp memJwt "PUT" "/api/control/missions/mem-child/budget"
+        "{\"budget_usd\":0.5}" (some nowAuthBud)
+      check (memOverSt == 409 && memOverBody.contains "mission_budget_carve_exceeds_parent:mem-parent")
+        s!"FLT-08 member over-carve on child must be rejected 409 (st={memOverSt} body={memOverBody})"
+      -- Shared participant trying to PUT budget on member's child is rejected 403 owner_required
+      let (admPutSt, admPutBody) ← sendRest budApp admJwt "PUT" "/api/control/missions/mem-child/budget"
+        "{\"budget_usd\":0.5}" (some nowAuthBud)
+      check (admPutSt == 403 && admPutBody.contains "owner_required")
+        s!"FLT-08 shared participant PUT must be rejected 403 owner_required (st={admPutSt} body={admPutBody})"
+      -- MCP get_budget by operator (callerUserId = "") on member-owned child uses target mission owner_user_id
+      let mcpMemChild ← OrbCore.McpGateway.dispatchMcpToolCall core (some mc) none none fleet root mcpOp
+        "get_budget" (.obj #[("mission_id", .str "mem-child")]) nowAuthBud none none "" true
+      check (mcpMemChild.contains "\"mode\":\"inherited\"" && mcpMemChild.contains "\"pool_id\":\"mem-parent\"")
+        s!"FLT-08 MCP get_budget on member child must see inherited pool (got {mcpMemChild})"
 
       -- 5. Refund releases reservation cleanly
       discard <| require (← refundManagedCostReservation mc "create:vm-a")
@@ -585,7 +628,10 @@ def testRemoteFaultsAndFollowupPump (root : String) : IO Unit := do
     let dg2 ← tickRemoteFollowupPump store none (some rHub) (some bHub) remSup workDir (nowSec + 4)
     check (dg2 == 1) s!"RUN-10 /goal pump delivered after recovery (got {dg2})"
     let gModeAfter200 ← queryCell store.missionsDb "SELECT COALESCE(goal_mode,0) FROM missions WHERE id='m-run10-goal';"
-    check (gModeAfter200 == "1") s!"RUN-10 /goal activated goal_mode=1 on accepted dispatch (got {gModeAfter200})"
+    let gQPhaseAfter200 ← queryCell store.missionsDb "SELECT phase FROM remote_message_queue WHERE message_id='q-run10-goal';"
+    let gQDelivSeq ← queryCell store.missionsDb "SELECT delivered_seq FROM remote_message_queue WHERE message_id='q-run10-goal';"
+    check (gModeAfter200 == "1" && gQPhaseAfter200 == "2" && gQDelivSeq != "0" && !gQDelivSeq.isEmpty)
+      s!"RUN-10 /goal activated goal_mode=1 and transitioned queue item to phase=2 with delivered_seq>0 (goal={gModeAfter200} phase={gQPhaseAfter200} seq={gQDelivSeq})"
     IO.sleep 150
   finally
     closeCoreStore store
@@ -774,22 +820,40 @@ def testLiveSseAndWebSocketTransports (root : String) : IO Unit := do
         s!"RUN-05 context stream missed live change frame: {cChgStr}"
     finally discard <| closeFd ctxFd
 
-    -- 3b. RUN-05: emitMissionPresentationNotice (__presentation__) must translate to sanitized
-    -- `event: mission_presentation` (NO `id: 0`, NO `owner_uid`/`shared_uids`, NO `__presentation__`)
-    -- on BOTH unfiltered `/api/control/stream` and `?profile=presentation`.
+    -- 3b. RUN-05: emitMissionPresentationNotice (__presentation__) AND persisted activity/turn events
+    -- emit sanitized `event: mission_presentation` (NO `id: 0`, NO `owner_uid`/`shared_uids`) on
+    -- `?profile=presentation`, while `?kinds=assistant_message` does NOT leak `mission_presentation`,
+    -- and `mission_deleted` for an unowned mission still delivers to admin.
     let .ok presFd ← tcpConnect "127.0.0.1" port | throw (IO.userError "RUN-05 connect presentation SSE failed")
+    let .ok kindsFd ← tcpConnect "127.0.0.1" port | throw (IO.userError "RUN-05 connect kinds-filtered SSE failed")
     try
       let presReq := s!"GET /api/control/stream?profile=presentation HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nAuthorization: Bearer {jwt}\r\nAccept: text/event-stream\r\n\r\n".toUTF8
       discard <| writeAll presFd presReq false
       discard <| readUntilMs presFd 1500 fun b => ((String.fromUTF8? b).getD "").contains "event:"
+      let kindsReq := s!"GET /api/control/stream?kinds=assistant_message HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nAuthorization: Bearer {jwt}\r\nAccept: text/event-stream\r\n\r\n".toUTF8
+      discard <| writeAll kindsFd kindsReq false
+      discard <| readUntilMs kindsFd 1500 fun b => ((String.fromUTF8? b).getD "").contains "event:"
       emitMissionPresentationNotice store "m-sse" "mission_updated" adminId #["secret-peer-uid"] ""
-      let pBuf ← readUntilMs presFd 2000 fun b => ((String.fromUTF8? b).getD "").contains "mission_presentation"
+      discard <| require (← appendMissionEvent store "m-sse" "tool_call" "{\"tool_name\":\"bash\"}" nowIso)
+      discard <| require (← appendMissionEvent store "m-sse" "assistant_message" "{\"content\":\"pres-turn-done\"}" nowIso)
+      emitMissionPresentationNotice store "m-deleted-unowned" "mission_deleted" "" #[] ""
+      let pBuf ← readUntilMs presFd 2500 fun b =>
+        let s := (String.fromUTF8? b).getD ""
+        s.contains "mission_updated" && s.contains "mission_activity" && s.contains "assistant_message" && s.contains "m-deleted-unowned"
       let pStr := (String.fromUTF8? pBuf).getD ""
       check (pStr.contains "event: mission_presentation" && pStr.contains "\"mission_id\":\"m-sse\"" &&
+             pStr.contains "\"kind\":\"mission_activity\"" && pStr.contains "\"kind\":\"assistant_message\"" &&
+             pStr.contains "\"mission_id\":\"m-deleted-unowned\"" &&
              !pStr.contains "__presentation__" && !pStr.contains "id: 0" &&
              !pStr.contains "owner_uid" && !pStr.contains "shared_uids" && !pStr.contains "secret-peer-uid")
-        s!"RUN-05 presentation SSE leaked internal ACL or id:0 or dropped mission_presentation: {pStr}"
-    finally discard <| closeFd presFd
+        s!"RUN-05 presentation SSE missing derived/deleted events or leaked ACL/id:0: {pStr}"
+      let kBuf ← readUntilMs kindsFd 2000 fun b => ((String.fromUTF8? b).getD "").contains "pres-turn-done"
+      let kStr := (String.fromUTF8? kBuf).getD ""
+      check (kStr.contains "pres-turn-done" && !kStr.contains "event: mission_presentation")
+        s!"RUN-05 ?kinds=assistant_message must NOT leak mission_presentation frames: {kStr}"
+    finally
+      discard <| closeFd presFd
+      discard <| closeFd kindsFd
 
     -- 4. RUN-06: Live PTY WebSocket on /api/console/ws speaks TerminalSocket wire protocol
     -- (`{"t":"r",...}` / `{"t":"i",...}`, raw UTF-8 PTY output with NO JSON greeting/wrapper,
@@ -1145,6 +1209,62 @@ def testMcpAndQueueContracts (root : String) : IO Unit := do
     ])
     check ((ms3.fieldOrNull "error").fieldStr? "code" == some "conflict")
       s!"MCP-03 update_mission_settings conflict rejected: {renderCompact ms3}"
+
+    -- MCP-03: Ambiguous managed lifecycle failure settles as `uncertain` (`accepted: "unknown"`), NOT `failed`!
+    let .ok mcUnc ← openManagedComputeStore s!"{workDir}/managed_unc.db" (some store.missionsDb)
+      | throw (IO.userError "MCP-03 open managed store failed")
+    try
+      let uncFleet : ManagedFleetState :=
+        { enabled := true, boatEnabled := true, dailyCapCents := 5000, spentTodayCents := 0, maxConcurrent := 10 }
+      discard <| require (← saveManagedFleetConfig mcUnc true true 5000 0 10)
+      let uncVm : ManagedMachine :=
+        { id := "vm-unc-1", sandboxName := "orb-managed-vm-unc-1", provider := "boat", size := "small",
+          ownerMission := "m-board-c", ttlMinutes := 60, spentCents := 1 }
+      discard <| require (← provisionManagedMachine mcUnc uncFleet uncVm nowSec)
+      discard <| require (← execParamQuery mcUnc.db
+        "UPDATE managed_machines SET phase_code=1, status='running', provider_id='prov-unc-1' WHERE id='vm-unc-1';" #[])
+      let uncProv : ManagedProvider.Provider := {
+        name := "boat"
+        readinessDeadlineSecs := 60
+        isReady := fun s => s == "running"
+        isStopped := fun s => s == "stopped"
+        quoteCents := fun _ _ => .ok 1
+        spawn := fun _ => pure (.error { status := 504, code := "provider_http_error" })
+        get := fun id => pure (.ok { providerId := id, state := "running" })
+        list := pure (.ok #[])
+        destroy := fun _ => pure (.error { status := 504, code := "provider_http_error" })
+        stop := fun _ => pure (.error { status := 504, code := "provider_http_error" })
+        resume := fun _ _ => pure (.error { status := 504, code := "provider_http_error" })
+        fork := fun _ _ => pure (.error { status := 504, code := "provider_http_error" })
+        extend := fun _ _ => pure (.error { status := 504, code := "provider_http_error" })
+        saveSnapshot := fun _ _ => pure (.ok ())
+        getSnapshot := fun n => pure (.ok { name := n, status := "ready" })
+        listSnapshots := pure (.ok #[])
+        deleteSnapshot := fun _ => pure (.ok ())
+        writeFile := fun _ _ _ => pure (.ok ())
+        exec := fun _ _ _ => pure (.ok (.obj #[]))
+        supportsStopResume := pure true
+      }
+      let uncOverride : ManagedProvider.Provider × ManagedProvisioning.BootstrapConfig :=
+        (uncProv, { coreUrl := "https://core.example", script := "#!/bin/sh\nexit 0\n" })
+      let uncRaw ← OrbCore.McpGateway.dispatchMcpToolCall store (some mcUnc) none none uncFleet workDir opClaims
+        "stop_managed_machine" (.obj #[("machine_id", .str "vm-unc-1"), ("idempotency_key", .str "k-stop-unc-1")])
+        nowSec none (some uncOverride) "" true
+      let uncJv := (OrbBin.Json.parse uncRaw).toOption.getD (.obj #[])
+      let uncState ← queryCell store.projectsDb "SELECT state FROM mcp_actions_v1 WHERE retry_key='k-stop-unc-1' LIMIT 1;"
+      check (uncJv.fieldBool? "ok" == some false &&
+             (uncJv.fieldOrNull "error").fieldStr? "accepted" == some "unknown" &&
+             uncState == "uncertain")
+        s!"MCP-03 ambiguous managed lifecycle error must settle uncertain/unknown (state={uncState} resp={uncRaw})"
+      -- Replaying the same idempotency_key returns uncertain/unknown without re-executing!
+      let uncReplayRaw ← OrbCore.McpGateway.dispatchMcpToolCall store (some mcUnc) none none uncFleet workDir opClaims
+        "stop_managed_machine" (.obj #[("machine_id", .str "vm-unc-1"), ("idempotency_key", .str "k-stop-unc-1")])
+        nowSec none (some uncOverride) "" true
+      let uncReplayJv := (OrbBin.Json.parse uncReplayRaw).toOption.getD (.obj #[])
+      check (uncReplayJv.fieldBool? "ok" == some false &&
+             (uncReplayJv.fieldOrNull "error").fieldStr? "accepted" == some "unknown")
+        s!"MCP-03 replay of uncertain managed lifecycle must preserve accepted=unknown (resp={uncReplayRaw})"
+    finally closeManagedComputeStore mcUnc
 
     -- === MCP-07: Real end-to-end `POST /api/mcp/call` `answer_mission_question` through `Control.lean` ===
     missionSql store.missionsDb "m-qna" "active" "local" 1

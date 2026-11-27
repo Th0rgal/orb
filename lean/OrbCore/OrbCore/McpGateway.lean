@@ -48,13 +48,13 @@ private def mcpOk (res : JVal) : String :=
 private def cellNat (r : Array String) (i : Nat) : Nat :=
   ((r[i]?).bind String.toNat?).getD 0
 
-private def mcpErr (code message : String) (retryable : Bool := false) : String :=
+private def mcpErr (code message : String) (retryable : Bool := false) (accepted : String := "no") : String :=
   renderCompact (.obj #[
     ("ok", .bool false),
     ("error", .obj #[
       ("code", .str code),
       ("message", .str message),
-      ("accepted", .str "no"),
+      ("accepted", .str accepted),
       ("retryable", .bool retryable)
     ])
   ])
@@ -129,9 +129,12 @@ structure McpActionReservation where
     pretending `result: {}` is a completed payload (`MCP-03`). -/
 private def mcpReceiptReply (receipt : JVal) : String :=
   let st := (receipt.fieldStr? "state").getD ""
-  if st == "failed" || st == "rejected" then
-    renderCompact (.obj #[("ok", .bool false), ("result", receipt),
-      ("error", receipt.fieldOrNull "result")])
+  if st == "failed" || st == "rejected" || st == "uncertain" || st == "reconciliation_required" then
+    let baseErr := receipt.fieldOrNull "result"
+    let errObj := if st == "uncertain" || st == "reconciliation_required" then
+        baseErr.setField "accepted" (.str "unknown") |>.setField "retryable" (.bool false)
+      else baseErr
+    renderCompact (.obj #[("ok", .bool false), ("result", receipt), ("error", errObj)])
   else if st == "accepted" || st == "running" then
     let inProg := receipt.setField "accepted" (.str "unknown") |>.setField "in_progress" (.bool true)
     renderCompact (.obj #[
@@ -292,8 +295,8 @@ private def settleReservedMcpAction
   let .ok _ ← execParamQuery store.projectsDb
       "UPDATE mcp_actions_v1 SET state=?3,result=?4,updated_at=?5,owner=CASE WHEN ?6<>'' THEN ?6 ELSE owner END WHERE scope=?1 AND retry_key=?2 AND state='accepted';"
       #[scope, key, state, payload, nowIso, targetMissionId]
-    | return mcpErr "receipt_record_failed" "The mutation outcome could not be recorded." false
-  return mcpErr code message retryable
+    | return mcpErr "receipt_record_failed" "The mutation outcome could not be recorded." false accepted
+  return mcpErr code message retryable accepted
 
 private def failReservedOrErr
     (store : CoreStore) (claims : McpSessionClaims) (callerUserId toolName key code message nowIso : String)
@@ -301,6 +304,19 @@ private def failReservedOrErr
   if key.isEmpty then
     return mcpErr code message retryable
   settleReservedMcpAction store claims callerUserId toolName key "failed" message nowIso code (some retryable) targetMissionId
+
+/-- Classify managed VM lifecycle / fork errors that occur AFTER a durable reservation,
+    cost charge, or cloud provider call with an ambiguous remote outcome (`MCP-03`). -/
+private def isManagedLifecycleUncertainError (err : String) : Bool :=
+  if err.startsWith "managed_user_missing" || err.startsWith "managed_user_disabled" ||
+     err.startsWith "mission_budget_exceeded:" || err.startsWith "managed_ttl_invalid" then
+    false
+  else
+    err == "managed_extension_outcome_uncertain" ||
+    err == "managed_lifecycle_commit_failed" ||
+    err == "provider_http_error" ||
+    err.startsWith "provider_http_error:" ||
+    ManagedSpawnActions.uncertain err
 
 private def isPendingActionState (state : String) : Bool :=
   #["accepted", "running", "queued", "pending", "dispatching"].contains state
@@ -2077,7 +2093,8 @@ def dispatchMcpToolCall
         | .ok () => pure ()
         | .error _ => return mcpErr "not_found" "Mission not found"
       let bCfg ← getMissionBudgetConfig mc targetMid
-      let raw ← renderMissionBudgetJsonWithStore mc fleet bCfg callerUserId nowEpochSec
+      let targetOwnerUid := ((← getMission? store targetMid).map (·.ownerUserId)).getD callerUserId
+      let raw ← renderMissionBudgetJsonWithStore mc fleet bCfg targetOwnerUid nowEpochSec
       return mcpOk ((OrbBin.Json.parse raw).toOption.getD (.obj #[]))
     else
       let raw := renderManagedBudgetJson fleet scopedUid? userComputeSpent userCap?
@@ -2141,11 +2158,17 @@ def dispatchMcpToolCall
     let action := if toolName == "stop_managed_machine" then "stop"
       else if toolName == "destroy_managed_machine" then "destroy"
       else if toolName == "extend_managed_machine" then "extend" else "resume"
+    let targetOwner := if m.ownerMission.isEmpty then callerMid else m.ownerMission
     match ← runConfiguredManagedLifecycle mc { store, fleet := defaultFleet, override? := managedProvisioningOverride? }
         m.id action nowEpochSec args idemKeyTop with
-    | .error e => return ← failReservedOrErr store claims callerUserId toolName idemKeyTop "lifecycle_rejected" e nowIso
+    | .error e =>
+      if isManagedLifecycleUncertainError e then
+        if !idemKeyTop.isEmpty then
+          return ← settleReservedMcpAction store claims callerUserId toolName idemKeyTop "uncertain" e nowIso "lifecycle_uncertain" (some false) targetOwner
+        return mcpErr "lifecycle_uncertain" e false "unknown"
+      return ← failReservedOrErr store claims callerUserId toolName idemKeyTop "lifecycle_rejected" e nowIso false targetOwner
     | .ok result =>
-      let .ok settled ← recordSettledMcpAction store claims callerUserId toolName args result nowIso (if m.ownerMission.isEmpty then callerMid else m.ownerMission)
+      let .ok settled ← recordSettledMcpAction store claims callerUserId toolName args result nowIso targetOwner
         | return mcpErr "receipt_record_failed" "The lifecycle action completed but its receipt could not be recorded." false
       return mcpOk (if idemKeyTop.isEmpty then result.setField "action_id" (settled.fieldOrNull "action_id") else settled)
 
@@ -2293,14 +2316,20 @@ def dispatchMcpToolCall
       ("ttl_minutes", JVal.uint64 ((args.fieldUInt64? "ttl_minutes").getD source.ttlMinutes)),
       ("name", .str ((args.fieldStr? "name").getD "")),
       ("idempotency_key", .str idemKeyTop)]
+    let targetOwner := if source.ownerMission.isEmpty then callerMid else source.ownerMission
     match ← spawnForCaller spawnArgs source.effectiveProviderId with
-    | .error (code, message) => return ← failReservedOrErr store claims callerUserId toolName idemKeyTop (if code == "spawn_rejected" then "fork_rejected" else code) message nowIso
+    | .error (code, message) =>
+      if isManagedLifecycleUncertainError message then
+        if !idemKeyTop.isEmpty then
+          return ← settleReservedMcpAction store claims callerUserId toolName idemKeyTop "uncertain" message nowIso "fork_uncertain" (some false) targetOwner
+        return mcpErr "fork_uncertain" message false "unknown"
+      return ← failReservedOrErr store claims callerUserId toolName idemKeyTop (if code == "spawn_rejected" then "fork_rejected" else code) message nowIso false targetOwner
     | .ok (forked, _) =>
       let item := (OrbBin.Json.parse (renderManagedMachineItemJson forked)).toOption.getD (.obj #[])
       let resObj := match item with
         | .obj fields => .obj (fields.push ("forked_from", .str source.id))
         | other => other
-      let .ok settled ← recordSettledMcpAction store claims callerUserId toolName args resObj nowIso (if forked.ownerMission.isEmpty then callerMid else forked.ownerMission)
+      let .ok settled ← recordSettledMcpAction store claims callerUserId toolName args resObj nowIso (if forked.ownerMission.isEmpty then targetOwner else forked.ownerMission)
         | return mcpErr "receipt_record_failed" "The machine was forked but its receipt could not be recorded." false
       return mcpOk (if idemKeyTop.isEmpty then resObj.setField "action_id" (settled.fieldOrNull "action_id") else settled)
 

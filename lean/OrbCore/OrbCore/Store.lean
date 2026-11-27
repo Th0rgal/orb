@@ -1646,6 +1646,8 @@ def interruptTurnsLostToRestart (mDb : SqliteDb) : IO Nat := do
             ("UPDATE mission_runs SET execution_state='terminal',terminal_reason='core_restarted',updated_at=?2 " ++
              "WHERE mission_id=?1 AND COALESCE(remote_job_id,'')='' AND execution_state NOT IN ('terminal','completed','failed','aborted');")
             #[mid, nowIso]
+          discard <| execParamQueryUnlocked mDb
+            "UPDATE mission_proxy_tokens SET revoked=1 WHERE mission_id=?1 AND revoked=0;" #[mid]
           let seqRes ← execParamQueryUnlocked mDb nextEventSeqSql #[mid]
           let nextSeq : UInt64 :=
             match seqRes with

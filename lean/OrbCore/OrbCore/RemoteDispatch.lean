@@ -1137,6 +1137,28 @@ private structure RemoteStreamAcc where
   outputTokens?    : Option UInt64 := none
   cacheReadTokens? : Option UInt64 := none
 
+/-- Synchronize `claimed_generation` on an already-claimed (`phase = 1`) queue item after
+    `activateRemoteGoalOnMission` or `submitRemoteMissionTurn` advances `missions.run_generation`,
+    so `stepQueueItem` (`op = 1`, `confirmDelivered`) satisfies `claimedGeneration == runGeneration`
+    in `Orb.Lifecycle.verifyQueueItemAdmit` (`RUN-10` / `FUP-02`). -/
+private def syncClaimedQueueGeneration (store : CoreStore) (userId messageId : String) (newGen : UInt64) : IO Unit := do
+  discard <| withImmediateTx store.missionsDb do
+    discard <| execParamQueryUnlocked store.missionsDb
+      "UPDATE remote_message_queue SET claimed_generation=CAST(?3 AS INTEGER) WHERE user_id=?1 AND message_id=?2 AND phase=1;"
+      #[userId, messageId, s!"{newGen}"]
+    discard <| execParamQueryUnlocked store.missionsDb
+      "UPDATE queue_item_receipts SET claimed_generation=CAST(?2 AS INTEGER) WHERE message_id=?1 AND phase=1;"
+      #[messageId, s!"{newGen}"]
+    return .ok ()
+
+private def currentMissionRunGen (store : CoreStore) (missionId : String) (fallback : UInt64) : IO UInt64 := do
+  match ← execParamQuery store.missionsDb
+      "SELECT COALESCE(run_generation,1) FROM missions WHERE id=?1 LIMIT 1;" #[missionId] with
+  | .ok rows =>
+    if rows.size > 1 then return (cellNat rows[1]! 0).toUInt64
+    return fallback
+  | .error _ => return fallback
+
 private def emitMissionEventAndBroadcastSeq
     (store : CoreStore)
     (broadcastHub? : Option BroadcastHub)
@@ -2330,13 +2352,25 @@ partial def spawnRemoteJobPoller
                   let evSeq ← emitMissionEventAndBroadcastSeq store broadcastHub? missionId "user_message"
                     (renderCompact (.obj #[("type", .str "user_message"), ("id", .str nextMsgId), ("content", .str nextPrompt), ("source", .str "queue")])) nowIso
                   let seqStr := if evSeq > 0 then s!"{evSeq}" else "1"
-                  discard <| stepQueueItem store qUid nextMsgId 1 s!"{effGen}" s!"{store.bootEpoch}" seqStr nowIso
+                  let committedGen ← currentMissionRunGen store missionId effGen
+                  if committedGen != curRunGen then
+                    syncClaimedQueueGeneration store qUid nextMsgId committedGen
+                  match ← stepQueueItem store qUid nextMsgId 1 s!"{committedGen}" s!"{store.bootEpoch}" seqStr nowIso with
+                  | .ok (.ok _) => pure ()
+                  | .ok .notFound =>
+                    IO.eprintln s!"[orb-core] queue confirmDelivered missing row for {missionId}/{nextMsgId}"
+                  | .ok (.rejected r) =>
+                    IO.eprintln s!"[orb-core] queue confirmDelivered rejected for {missionId}/{nextMsgId}: {r}"
+                  | .error e =>
+                    IO.eprintln s!"[orb-core] queue confirmDelivered failed for {missionId}/{nextMsgId}: {e}"
                 | .error dispErr =>
                   if dispErr.startsWith "remote_dispatch_uncertain:" || dispErr.startsWith "remote_accept_persist_failed:" then
                     if let some cleanObj := goalActivatedObj? then
                       emitMissionEventAndBroadcast store broadcastHub? missionId "goal_status"
                         (renderCompact (.obj #[("status", .str "active"), ("objective", .str cleanObj),
                           ("iteration", .num "0"), ("reason", .str "remote_goal_started")])) nowIso
+                    if effGen != curRunGen then
+                      syncClaimedQueueGeneration store qUid nextMsgId effGen
                     discard <| stepQueueItem store qUid nextMsgId 3 s!"{effGen}" s!"{store.bootEpoch}" "1" nowIso 1 0
                   else
                     if goalActivatedObj?.isSome then
@@ -3122,7 +3156,17 @@ def tickRemoteFollowupPump
       let evSeq ← emitMissionEventAndBroadcastSeq store broadcastHub? mid "user_message"
         (renderCompact (.obj #[("type", .str "user_message"), ("id", .str nextMsgId), ("content", .str nextPrompt), ("source", .str "queue")])) nowIso
       let seqStr := if evSeq > 0 then s!"{evSeq}" else "1"
-      discard <| stepQueueItem store qUid nextMsgId 1 s!"{effGen}" s!"{store.bootEpoch}" seqStr nowIso
+      let committedGen ← currentMissionRunGen store mid effGen
+      if committedGen != gen then
+        syncClaimedQueueGeneration store qUid nextMsgId committedGen
+      match ← stepQueueItem store qUid nextMsgId 1 s!"{committedGen}" s!"{store.bootEpoch}" seqStr nowIso with
+      | .ok (.ok _) => pure ()
+      | .ok .notFound =>
+        IO.eprintln s!"[orb-core] pump queue confirmDelivered missing row for {mid}/{nextMsgId}"
+      | .ok (.rejected r) =>
+        IO.eprintln s!"[orb-core] pump queue confirmDelivered rejected for {mid}/{nextMsgId}: {r}"
+      | .error e =>
+        IO.eprintln s!"[orb-core] pump queue confirmDelivered failed for {mid}/{nextMsgId}: {e}"
       pumped := pumped + 1
     | .error e =>
       if e.startsWith "remote_dispatch_uncertain:" || e.startsWith "remote_accept_persist_failed:" then
@@ -3130,6 +3174,8 @@ def tickRemoteFollowupPump
           emitMissionEventAndBroadcast store broadcastHub? mid "goal_status"
             (renderCompact (.obj #[("status", .str "active"), ("objective", .str cleanObj),
               ("iteration", .num "0"), ("reason", .str "remote_goal_started")])) nowIso
+        if effGen != gen then
+          syncClaimedQueueGeneration store qUid nextMsgId effGen
         discard <| stepQueueItem store qUid nextMsgId 3 s!"{effGen}" s!"{store.bootEpoch}" "1" nowIso 1 0
       else
         if goalActivatedObj?.isSome then

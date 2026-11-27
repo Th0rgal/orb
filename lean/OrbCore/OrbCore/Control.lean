@@ -1426,31 +1426,62 @@ structure CoreHttpResponse where
   deriving Inhabited
 
 /-- Bridge every persisted `appendMissionEvent` onto `BroadcastHub` with its exact
-    SQLite `mission_events.seq` (`RUN-05`). Internal `__presentation__` notices are translated
-    into sanitized, per-subscriber-authorized `mission_presentation` frames with `owner_uid` /
-    `shared_uids` stripped and no `id: 0` cursor reset. -/
+    SQLite `mission_events.seq` (`RUN-05`). Internal `__presentation__` notices and persisted
+    activity/turn/status events emit sanitized, per-subscriber-authorized `mission_presentation`
+    hints (mirroring `/api/control/sync`, with `owner_uid`/`shared_uids` stripped and no `id: 0`
+    cursor reset) for `?profile=presentation` subscribers. -/
 def attachSseEventBridge (store : CoreStore) (hub : BroadcastHub) : IO (IO Unit) := do
   markBroadcastHubBridged hub
+  let lookupBtwParent? (mid : String) : IO (Option String) := do
+    match ← execParamQuery store.missionsDb "SELECT COALESCE(tags,'[]') FROM missions WHERE id=?1 LIMIT 1;" #[mid] with
+    | .ok rows =>
+      let tagsJson := if rows.size > 1 then (rows[1]![0]?).getD "[]" else "[]"
+      return extractBtwParentIdFromTagsJson? tagsJson
+    | .error _ => return none
+  let renderSsePresentation (mid kind : String) (label? btwParent? : Option String) : String := Id.run do
+    let mut fields : Array (String × JVal) := #[
+      ("type", .str "mission_presentation"),
+      ("mission_id", .str mid),
+      ("kind", .str kind)
+    ]
+    if let some lbl := label? then
+      fields := fields.push ("label", .str lbl)
+    if let some bp := btwParent? then
+      if !bp.isEmpty then
+        fields := fields.push ("btw_parent_id", .str bp)
+    return renderCompact (.obj fields)
   registerMissionEventListener store fun mid seq evType payloadJson _createdAt => do
     if evType == "__presentation__" then
       let jv := (OrbBin.Json.parse payloadJson).toOption.getD (.obj #[])
       let kind := (jv.fieldStr? "kind").getD "mission_updated"
       let hintBtw? := (jv.fieldStr? "btw_parent_id").filter (!·.isEmpty)
-      let mut fields : Array (String × JVal) := #[("mission_id", .str mid), ("kind", .str kind)]
-      if let some bp := hintBtw? then
-        fields := fields.push ("btw_parent_id", .str bp)
-      let sanitized := renderCompact (.obj fields)
       if kind == "mission_deleted" then
+        let sanitized := renderSsePresentation mid kind none hintBtw?
         let ownerUid? := (jv.fieldStr? "owner_uid").filter (!·.isEmpty)
         let sharedUids : Array String :=
           match jv.fieldArr? "shared_uids" with
           | some xs => xs.filterMap JVal.asStr?
           | none => #[]
-        publishControlEvent (some hub) "mission_presentation" sanitized (some mid) none ownerUid? sharedUids
+        publishControlEvent (some hub) "mission_presentation" sanitized (some mid) none ownerUid? sharedUids true
       else
+        let effBtw? ← match hintBtw? with
+          | some b => pure (some b)
+          | none => lookupBtwParent? mid
+        let sanitized := renderSsePresentation mid kind none effBtw?
         publishControlEvent (some hub) "mission_presentation" sanitized (some mid) none
     else
       publishControlEvent (some hub) evType payloadJson (some mid) (some seq)
+      if evType == "tool_call" || evType == "thinking" then
+        let dbBtw? ← lookupBtwParent? mid
+        let lbl := (deriveEventActivityLabel? evType payloadJson).getD (if evType == "thinking" then "Thinking…" else "Working…")
+        let presPayload := renderSsePresentation mid "mission_activity" (some lbl) dbBtw?
+        publishControlEvent (some hub) "mission_presentation" presPayload (some mid) none
+      else if evType == "user_message" || evType == "assistant_message" ||
+              evType == "assistant_message_canonical" || evType == "mission_status_changed" ||
+              evType == "mission_settings_updated" || evType == "error" then
+        let dbBtw? ← lookupBtwParent? mid
+        let presPayload := renderSsePresentation mid evType none dbBtw?
+        publishControlEvent (some hub) "mission_presentation" presPayload (some mid) none
 
 /-- Build a held-open `text/event-stream` response for the control SSE routes.
     `initialFrame` is emitted as the first chunk, then queued `BroadcastHub` frames are relayed
@@ -1479,9 +1510,13 @@ def sseStreamResponse (st : CoreAppState) (caller : CallerPrincipal) (reqOrigin?
         return true
       return (← authorizeMissionOp st liveCaller mid false).isNone
   let kindsAllows (evType : String) : Bool :=
-    if kindsFilter.isEmpty then true
-    else if evType == "mission_presentation" || evType == "stream_lagged" ||
-            evType == "missions_snapshot" || evType == "snapshot" then true
+    if evType == "mission_presentation" then
+      -- Emit `mission_presentation` ONLY when requested (`?profile=presentation` or
+      -- `?kinds=...mission_presentation...`), keeping mission transcript streams and
+      -- unrelated `?kinds=` filters completely clean (`RUN-05`).
+      kindsFilter.contains "mission_presentation"
+    else if kindsFilter.isEmpty then true
+    else if evType == "stream_lagged" || evType == "missions_snapshot" || evType == "snapshot" then true
     else kindsFilter.contains evType
   let resolveLiveCaller? : IO (Option CallerPrincipal) := do
     if !reqHdrs.isEmpty then
@@ -1547,27 +1582,37 @@ def sseStreamResponse (st : CoreAppState) (caller : CallerPrincipal) (reqOrigin?
                   | none => false
                 if !isDup then
                   let allowed ←
-                    if let some aclOwner := ev.aclOwnerUid? then
+                    if ev.isDeletedPresentation || ev.aclOwnerUid?.isSome then
                       if let some want := missionFilter? then
                         if ev.missionId? != some want then pure false
                         else if liveCaller.isLegacyUnscoped then pure true
                         else
-                          let isOwner := !liveCaller.userId.isEmpty && aclOwner == liveCaller.userId
+                          let aclOwner := ev.aclOwnerUid?.getD ""
+                          if ev.isDeletedPresentation && aclOwner.isEmpty &&
+                             liveCaller.role == "admin" && !liveCaller.disabled then
+                            pure true
+                          else
+                            let isOwner := !liveCaller.userId.isEmpty && !aclOwner.isEmpty && aclOwner == liveCaller.userId
+                            let isPart := !liveCaller.userId.isEmpty && ev.aclSharedUids.contains liveCaller.userId
+                            let disFlag : UInt8 := if liveCaller.disabled then 1 else 0
+                            let roleCode : UInt8 := if liveCaller.role == "admin" then 1 else 0
+                            let rbacWord := Orb.Kernel.multiuserRbacStep
+                              1 disFlag 1 roleCode 2 (if isOwner then 1 else 0) (if isPart then 1 else 0)
+                            pure ((rbacWord &&& 1) == 1)
+                      else if liveCaller.isLegacyUnscoped then pure true
+                      else
+                        let aclOwner := ev.aclOwnerUid?.getD ""
+                        if ev.isDeletedPresentation && aclOwner.isEmpty &&
+                           liveCaller.role == "admin" && !liveCaller.disabled then
+                          pure true
+                        else
+                          let isOwner := !liveCaller.userId.isEmpty && !aclOwner.isEmpty && aclOwner == liveCaller.userId
                           let isPart := !liveCaller.userId.isEmpty && ev.aclSharedUids.contains liveCaller.userId
                           let disFlag : UInt8 := if liveCaller.disabled then 1 else 0
                           let roleCode : UInt8 := if liveCaller.role == "admin" then 1 else 0
                           let rbacWord := Orb.Kernel.multiuserRbacStep
                             1 disFlag 1 roleCode 2 (if isOwner then 1 else 0) (if isPart then 1 else 0)
                           pure ((rbacWord &&& 1) == 1)
-                      else if liveCaller.isLegacyUnscoped then pure true
-                      else
-                        let isOwner := !liveCaller.userId.isEmpty && aclOwner == liveCaller.userId
-                        let isPart := !liveCaller.userId.isEmpty && ev.aclSharedUids.contains liveCaller.userId
-                        let disFlag : UInt8 := if liveCaller.disabled then 1 else 0
-                        let roleCode : UInt8 := if liveCaller.role == "admin" then 1 else 0
-                        let rbacWord := Orb.Kernel.multiuserRbacStep
-                          1 disFlag 1 roleCode 2 (if isOwner then 1 else 0) (if isPart then 1 else 0)
-                        pure ((rbacWord &&& 1) == 1)
                     else match ev.missionId? with
                     | none => visibleMissionUncached liveCaller none
                     | some mid =>
@@ -5274,7 +5319,7 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
     if req.method == "GET" then
       if let some (cCode, cBody) := (← authorizeMissionOp st caller mid false) then
         return .ok (mkJson cCode cBody)
-      let some _ ← getMission? st.store mid
+      let some mRec ← getMission? st.store mid
         | return .ok (mkJson 404 "{\"error\":\"mission_not_found\"}")
       let mf0 ← st.managedRef.get
       let live ← match st.managedStore? with
@@ -5286,15 +5331,14 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
       let cfg ← match st.managedStore? with
         | some mst => getMissionBudgetConfig mst mid
         | none => pure { missionId := mid }
-      let ownerUid := if caller.isLegacyUnscoped then "" else caller.userId
       let rendered ← match st.managedStore? with
-        | some mst => renderMissionBudgetJsonWithStore mst live cfg ownerUid nowEpochSec
+        | some mst => renderMissionBudgetJsonWithStore mst live cfg mRec.ownerUserId nowEpochSec
         | none => pure (renderMissionBudgetJson live cfg nowEpochSec)
       return .ok (mkJson 200 rendered)
     else if req.method == "PUT" || req.method == "PATCH" then
       if let some (cCode, cBody) := (← authorizeMissionOp st caller mid true) then
         return .ok (mkJson cCode cBody)
-      let some _ ← getMission? st.store mid
+      let some mRec ← getMission? st.store mid
         | return .ok (mkJson 404 "{\"error\":\"mission_not_found\"}")
       let some mst := st.managedStore?
         | return .ok (mkJson 503 "{\"error\":\"managed_store_unavailable\"}")
@@ -5303,7 +5347,7 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
       let cur ← getMissionBudgetConfig mst mid
       let mut nextCfg := cur
       let mut budgetFieldUpdated := false
-      let ownerUid := if caller.isLegacyUnscoped then "" else caller.userId
+      let targetOwnerUid := mRec.ownerUserId
       if let some bv := jv.field? "budget_usd" then
         budgetFieldUpdated := true
         if bv.isNull then
@@ -5339,7 +5383,7 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
           return .ok (mkJson 400 s!"\{\"error\":{jsonEscape errCode},\"message\":{jsonEscape errMsg}}")
       nextCfg := { nextCfg with updatedAt := nowEpochSec }
       -- Atomically validate budget carve/floor/un-carve rules and persist inside ONE immediate tx (`FLT-08`).
-      if let .error e ← saveMissionBudgetConfigWithCarveCheck mst nextCfg ownerUid nowEpochSec budgetFieldUpdated then
+      if let .error e ← saveMissionBudgetConfigWithCarveCheck mst nextCfg targetOwnerUid nowEpochSec budgetFieldUpdated then
         if e.startsWith "mission_budget_carve_exceeds_parent:" ||
            e.startsWith "mission_budget_below_committed:" ||
            e.startsWith "mission_budget_uncarve_exceeds_parent:" then
@@ -5350,7 +5394,7 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
         | .ok l => st.managedRef.set l; pure l
         | .error _ => pure mf0
       let savedCfg ← getMissionBudgetConfig mst mid
-      let rendered ← renderMissionBudgetJsonWithStore mst live savedCfg ownerUid nowEpochSec
+      let rendered ← renderMissionBudgetJsonWithStore mst live savedCfg targetOwnerUid nowEpochSec
       return .ok (mkJson 200 rendered)
 
   -- Mission Remote Wait Arm (`POST /api/control/missions/:id/remote-wait`)
@@ -8689,7 +8733,9 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
       req.method rawTarget cleanPath req.bodySlice.toByteArray nowEpochSec
       (((req.headers.filter (fun h => h.1.toLower == "x-paloma-approval")).toList.map (·.2))
         |> String.intercalate ",")
-      (some (fun mid evTy payload => publishControlEvent st.broadcastHub? evTy payload (some mid))) then
+      (some (fun mid evTy payload => do
+        if !(← isBroadcastHubBridged st.broadcastHub?) then
+          publishControlEvent st.broadcastHub? evTy payload (some mid))) then
     return .ok { status := sCode, contentType := sCtype, corsOrigin? := reqOrigin?, body := sBody.toUTF8 }
 
   if let some mst := st.managedStore? then

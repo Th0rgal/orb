@@ -331,12 +331,13 @@ def deleteProxyApiKey (dataRoot keyId : String) : IO Bool := do
 /-! ## SSE Broadcast Hub (`GET /api/control/stream`, `GET /api/control/missions/:id/stream`) -/
 
 structure SseQueuedEvent where
-  eventType     : String
-  missionId?    : Option String
-  frame         : String
-  seq?          : Option UInt64 := none
-  aclOwnerUid?  : Option String := none
-  aclSharedUids : Array String := #[]
+  eventType             : String
+  missionId?            : Option String
+  frame                 : String
+  seq?                  : Option UInt64 := none
+  aclOwnerUid?          : Option String := none
+  aclSharedUids         : Array String := #[]
+  isDeletedPresentation : Bool := false
   deriving Repr, DecidableEq, Inhabited
 
 structure SseSubscriber where
@@ -375,7 +376,8 @@ def publishControlEvent
     (missionId? : Option String := none)
     (eventSeq? : Option UInt64 := none)
     (aclOwnerUid? : Option String := none)
-    (aclSharedUids : Array String := #[]) : IO Unit := do
+    (aclSharedUids : Array String := #[])
+    (isDeletedPresentation : Bool := false) : IO Unit := do
   let some hub := hub? | return ()
   let bridged ← hub.bridgedRef.get
   let subs ← hub.mu.atomically do
@@ -406,6 +408,7 @@ def publishControlEvent
     seq? := cleanSeq?
     aclOwnerUid? := aclOwnerUid?
     aclSharedUids := aclSharedUids
+    isDeletedPresentation := isDeletedPresentation
   }
   for sub in subs.2 do
     let matchesMission :=

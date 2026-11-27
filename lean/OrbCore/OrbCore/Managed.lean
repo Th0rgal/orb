@@ -1094,6 +1094,8 @@ private def queryMissionPoolUsageTx (st : ManagedComputeStore) (poolId ownerUser
     IO (Except String (UInt64 × UInt64 × UInt64 × UInt64)) := do
   let .ok subtree ← managedMissionSubtree st poolId ownerUserId
     | return .error "managed_mission_lineage_read_failed"
+  if subtree.isEmpty then
+    return .ok (0, 0, 0, 0)
   let excludedSubtree : Array String ← match excludeSubtreeRoot? with
     | none => pure #[]
     | some exclRoot =>
