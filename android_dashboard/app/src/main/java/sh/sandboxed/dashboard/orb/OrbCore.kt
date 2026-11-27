@@ -3534,7 +3534,7 @@ class OrbCore private constructor(context: Context) {
             fun classifyEndpoint(url: String): Int {
                 val lower = OrbConnection.normalize(url).lowercase()
                 return when (lower) {
-                    OrbConnection.DEFAULT_BASE_URL -> 0
+                    OrbConnection.CLOUDFLARE_EDGE_BASE_URL -> 0
                     OrbConnection.ORBCORE_BASE_URL -> 1
                     OrbConnection.KNOWN_DIRECT_BASE_URL -> 2
                     else -> 3
