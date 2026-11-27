@@ -3907,148 +3907,173 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
     if req.method == "GET" && cleanPath == "/api/mcp/capabilities" then
       return .ok (mkJson 200 (buildMcpCapabilitiesJson activeClaims))
 
-    if req.method == "POST" && cleanPath == "/api/mcp/call" then
-      let .ok jv := OrbBin.Json.parseBytes req.bodySlice.toByteArray
-        | return .ok (mkJson 400 "{\"ok\":false,\"error\":{\"code\":\"invalid_json\",\"message\":\"Malformed JSON body\",\"accepted\":\"no\",\"retryable\":false}}")
-      let toolName := (jv.fieldStr? "name").getD ""
-      let args := (jv.field? "arguments").getD (.obj #[])
-      let roleNorm := normalizeMcpRole activeClaims.role
-      -- Dashboard bearers are tenant-scoped by mission ownership; the role
-      -- catalogue gate targets harness/external sessions that carry a role.
-      if (!activeClaims.missionId.isEmpty || activeClaims.isExternal) &&
-          !OrbBin.McpCatalog.rolePermitsCatalogTool roleNorm toolName then
-        return .ok (mkJson 200 (renderCompact (.obj #[("ok", .bool false), ("error", .obj #[
-          ("code", .str "forbidden_tool_role"),
-          ("message", .str s!"Tool `{toolName}` is not available to role `{roleNorm}`"),
-          ("accepted", .str "no"), ("retryable", .bool false)])])))
-      if (mcpCaller?.map (·.isDevOperator)).getD false &&
-          (isMemoryToolName toolName || isMacTetherToolName toolName || toolName.startsWith "secret_" || #["request_privileged_access", "list_privileged_access",
-            "revoke_privileged_access", "execute_privileged_command", "deploy_sandboxed_sh"].contains toolName) then
-        return .ok (mkJson 403 "{\"error\":\"dev_operator_scope_required\"}")
-      -- Personal memory and the owner's laptop belong to the server owner, not to shared tenant state.
-      -- Reuse the persisted MCP issuer identity, including shared missions.
-      let ownerAllowed : IO Bool := match scopedClaims? with
-        | none => pure ((mcpCaller?.map (fun c => !c.disabled && (c.role == "admin" || c.isLegacyUnscoped))).getD false)
-        | some claims => do
-          let some uid ← OrbCore.McpGateway.scopedCallerUserId? st.store claims nowEpochSec | pure false
-          userIsServerOwner st.store uid
-      if isMacTetherToolName toolName then
-        let denied (code message : String) : CoreHttpResponse :=
-          mkJson 200 (renderCompact (.obj #[("ok", .bool false), ("error", .obj #[
-            ("code", .str code), ("message", .str message), ("accepted", .str "no"), ("retryable", .bool false)])]))
-        unless (← ownerAllowed) do
-          return .ok (denied "mac_tether_denied" "Administrator required")
-        let bunkerSt ← match st.bunkerStateRef? with | some r => r.get | none => pure (0 : UInt8)
-        match ← executeMacTetherMcpTool st.store st.macTether? (st.managedStore?.map (·.db)) bunkerSt
-            (normalizeMcpRole activeClaims.role == "operator") activeClaims.missionId toolName args nowEpochSec with
-        | .ok resVal => return .ok (mkJson 200 (renderCompact (.obj #[("ok", .bool true), ("result", resVal)])))
-        | .error errMsg => return .ok (denied "mac_tether_rejected" errMsg)
-      if isMemoryToolName toolName then
-        unless (← ownerAllowed) do
-          return .ok (mkJson 200 "{\"ok\":false,\"error\":{\"code\":\"memory_tool_denied\",\"message\":\"Administrator required\"}}")
-        let mut onManagedNode := false
-        -- Memory authority comes from an attached/delivered `spark-memory` skill or an
-        -- explicit secret grant, never from the mere existence of a project (`SEC-11`).
-        let mut hasProjSkill := false
-        let mut missionProj := activeClaims.project
-        if !activeClaims.isExternal && !activeClaims.missionId.isEmpty then
-          if let .ok mRs ← execParamQuery st.store.missionsDb
-              "SELECT placement_kind, project, tags, COALESCE(owner_user_id,'') FROM missions WHERE id=?1;" #[activeClaims.missionId] then
-            if mRs.size > 1 then
-              let pk := (mRs[1]?.bind (·[0]?)).getD ""
-              let mProj := (mRs[1]?.bind (·[1]?)).getD ""
-              let mTags := parseStringJsonArray ((mRs[1]?.bind (·[2]?)).getD "[]")
-              let mOwner := (mRs[1]?.bind (·[3]?)).getD ""
-              if missionProj.isEmpty then
-                missionProj := mProj
-              if pk == "managed_vm" || pk.startsWith "managed-" then
-                onManagedNode := true
-              if mTags.contains "skill:spark-memory" then
-                hasProjSkill := true
-              else if !mProj.isEmpty then
-                let scopedProj := if !activeClaims.project.isEmpty then activeClaims.project else mProj
-                if let .ok pRs ← execParamQuery st.store.projectsDb
-                    "SELECT COALESCE(skills,'[]') FROM projects WHERE slug=?1 OR slug=?2 LIMIT 1;"
-                    #[mProj, scopedProj] then
-                  if pRs.size > 1 then
-                    let skills := parseStringJsonArray ((pRs[1]?.bind (·[0]?)).getD "[]")
-                    hasProjSkill := skills.contains "spark-memory" || skills.contains "skill:spark-memory"
-              if !hasProjSkill && !onManagedNode then
-                let effOwner ←
-                  if !mOwner.isEmpty then pure mOwner
-                  else match scopedClaims? with
-                    | some claims => pure ((← OrbCore.McpGateway.scopedCallerUserId? st.store claims nowEpochSec).getD "")
-                    | none => pure ((mcpCaller?.map (·.userId)).getD "")
-                let effProj := missionProj.trimAscii.toString
-                if let .ok plan ← buildDeliveryPlan st.cfg.workingDir
-                    (if effProj.isEmpty then none else some effProj)
-                    st.store.rootDir effOwner st.bootstrapAdminId then
-                  hasProjSkill := plan.skills.any (fun s => s.name == "spark-memory")
-          if !onManagedNode then
-            if let some mst := st.managedStore? then
-              if let .ok vmRs ← execParamQuery mst.db
-                  ("SELECT 1 FROM managed_machines WHERE owner_mission=?1 AND status<>'destroyed' " ++
-                   "UNION ALL SELECT 1 FROM managed_vm_claims WHERE owner_mission=?1 AND phase_code=1 LIMIT 1;")
-                  #[activeClaims.missionId] then
-                if vmRs.size > 1 then
+    if cleanPath == "/api/mcp/call" || cleanPath == "/api/mcp/rpc" then
+      let runAuthorizedMcpTool : String → JVal → IO (Nat × String) := fun toolName args => do
+        let roleNorm := normalizeMcpRole activeClaims.role
+        -- Dashboard bearers are tenant-scoped by mission ownership; the role
+        -- catalogue gate targets harness/external sessions that carry a role.
+        if (!activeClaims.missionId.isEmpty || activeClaims.isExternal) &&
+            !OrbBin.McpCatalog.rolePermitsCatalogTool roleNorm toolName then
+          return (200, renderCompact (.obj #[("ok", .bool false), ("error", .obj #[
+            ("code", .str "forbidden_tool_role"),
+            ("message", .str s!"Tool `{toolName}` is not available to role `{roleNorm}`"),
+            ("accepted", .str "no"), ("retryable", .bool false)])]))
+        if (mcpCaller?.map (·.isDevOperator)).getD false &&
+            (isMemoryToolName toolName || isMacTetherToolName toolName || toolName.startsWith "secret_" || #["request_privileged_access", "list_privileged_access",
+              "revoke_privileged_access", "execute_privileged_command", "deploy_sandboxed_sh"].contains toolName) then
+          return (403, "{\"error\":\"dev_operator_scope_required\"}")
+        -- Personal memory and the owner's laptop belong to the server owner, not to shared tenant state.
+        -- Reuse the persisted MCP issuer identity, including shared missions.
+        let ownerAllowed : IO Bool := match scopedClaims? with
+          | none => pure ((mcpCaller?.map (fun c => !c.disabled && (c.role == "admin" || c.isLegacyUnscoped))).getD false)
+          | some claims => do
+            let some uid ← OrbCore.McpGateway.scopedCallerUserId? st.store claims nowEpochSec | pure false
+            userIsServerOwner st.store uid
+        if isMacTetherToolName toolName then
+          let denied (code message : String) : Nat × String :=
+            (200, renderCompact (.obj #[("ok", .bool false), ("error", .obj #[
+              ("code", .str code), ("message", .str message), ("accepted", .str "no"), ("retryable", .bool false)])]))
+          unless (← ownerAllowed) do
+            return denied "mac_tether_denied" "Administrator required"
+          let bunkerSt ← match st.bunkerStateRef? with | some r => r.get | none => pure (0 : UInt8)
+          match ← executeMacTetherMcpTool st.store st.macTether? (st.managedStore?.map (·.db)) bunkerSt
+              (normalizeMcpRole activeClaims.role == "operator") activeClaims.missionId toolName args nowEpochSec with
+          | .ok resVal => return (200, renderCompact (.obj #[("ok", .bool true), ("result", resVal)]))
+          | .error errMsg => return denied "mac_tether_rejected" errMsg
+        if isMemoryToolName toolName then
+          unless (← ownerAllowed) do
+            return (200, "{\"ok\":false,\"error\":{\"code\":\"memory_tool_denied\",\"message\":\"Administrator required\"}}")
+          let mut onManagedNode := false
+          -- Memory authority comes from an attached/delivered `spark-memory` skill or an
+          -- explicit secret grant, never from the mere existence of a project (`SEC-11`).
+          let mut hasProjSkill := false
+          let mut missionProj := activeClaims.project
+          if !activeClaims.isExternal && !activeClaims.missionId.isEmpty then
+            if let .ok mRs ← execParamQuery st.store.missionsDb
+                "SELECT placement_kind, project, tags, COALESCE(owner_user_id,'') FROM missions WHERE id=?1;" #[activeClaims.missionId] then
+              if mRs.size > 1 then
+                let pk := (mRs[1]?.bind (·[0]?)).getD ""
+                let mProj := (mRs[1]?.bind (·[1]?)).getD ""
+                let mTags := parseStringJsonArray ((mRs[1]?.bind (·[2]?)).getD "[]")
+                let mOwner := (mRs[1]?.bind (·[3]?)).getD ""
+                if missionProj.isEmpty then
+                  missionProj := mProj
+                if pk == "managed_vm" || pk.startsWith "managed-" then
                   onManagedNode := true
-        let callerSubject := if activeClaims.isExternal then "session:" ++ activeClaims.sessionId
-          else if !activeClaims.missionId.isEmpty then "mission:" ++ activeClaims.missionId else ""
-        let hasSecAccess ←
-          if callerSubject.isEmpty then pure false
-          else missionHasApprovedMemorySecretAccess st.store.rootDir activeClaims.missionId missionProj nowEpochSec callerSubject
-        let bunkerSt ← match st.bunkerStateRef? with | some r => r.get | none => pure (0 : UInt8)
-        let memCache ← match st.memTokenCache? with | some c => pure c | none => newMemoryTokenCache
-        let ctx : MemoryCallerContext := {
-          callerRole := roleCodeFor activeClaims.role
-          isExternalSession := activeClaims.isExternal
-          onManagedNode := onManagedNode
-          bunkerState := bunkerSt
-          hasProjectMemorySkill := hasProjSkill
-          hasSecretAccess := hasSecAccess
-        }
-        match ← executeMemoryMcpTool memCache ctx toolName args nowEpochSec with
-        | .ok resVal =>
-          return .ok (mkJson 200 (renderCompact (.obj #[("ok", .bool true), ("result", resVal)])))
-        | .error errMsg =>
-          let errJson := renderCompact (.obj #[
-            ("ok", .bool false),
-            ("error", .obj #[
-              ("code", .str "memory_tool_denied"),
-              ("message", .str errMsg),
-              ("accepted", .str "no"),
-              ("retryable", .bool false)
+                if mTags.contains "skill:spark-memory" then
+                  hasProjSkill := true
+                else if !mProj.isEmpty then
+                  let scopedProj := if !activeClaims.project.isEmpty then activeClaims.project else mProj
+                  if let .ok pRs ← execParamQuery st.store.projectsDb
+                      "SELECT COALESCE(skills,'[]') FROM projects WHERE slug=?1 OR slug=?2 LIMIT 1;"
+                      #[mProj, scopedProj] then
+                    if pRs.size > 1 then
+                      let skills := parseStringJsonArray ((pRs[1]?.bind (·[0]?)).getD "[]")
+                      hasProjSkill := skills.contains "spark-memory" || skills.contains "skill:spark-memory"
+                if !hasProjSkill && !onManagedNode then
+                  let effOwner ←
+                    if !mOwner.isEmpty then pure mOwner
+                    else match scopedClaims? with
+                      | some claims => pure ((← OrbCore.McpGateway.scopedCallerUserId? st.store claims nowEpochSec).getD "")
+                      | none => pure ((mcpCaller?.map (·.userId)).getD "")
+                  let effProj := missionProj.trimAscii.toString
+                  if let .ok plan ← buildDeliveryPlan st.cfg.workingDir
+                      (if effProj.isEmpty then none else some effProj)
+                      st.store.rootDir effOwner st.bootstrapAdminId then
+                    hasProjSkill := plan.skills.any (fun s => s.name == "spark-memory")
+            if !onManagedNode then
+              if let some mst := st.managedStore? then
+                if let .ok vmRs ← execParamQuery mst.db
+                    ("SELECT 1 FROM managed_machines WHERE owner_mission=?1 AND status<>'destroyed' " ++
+                     "UNION ALL SELECT 1 FROM managed_vm_claims WHERE owner_mission=?1 AND phase_code=1 LIMIT 1;")
+                    #[activeClaims.missionId] then
+                  if vmRs.size > 1 then
+                    onManagedNode := true
+          let callerSubject := if activeClaims.isExternal then "session:" ++ activeClaims.sessionId
+            else if !activeClaims.missionId.isEmpty then "mission:" ++ activeClaims.missionId else ""
+          let hasSecAccess ←
+            if callerSubject.isEmpty then pure false
+            else missionHasApprovedMemorySecretAccess st.store.rootDir activeClaims.missionId missionProj nowEpochSec callerSubject
+          let bunkerSt ← match st.bunkerStateRef? with | some r => r.get | none => pure (0 : UInt8)
+          let memCache ← match st.memTokenCache? with | some c => pure c | none => newMemoryTokenCache
+          let ctx : MemoryCallerContext := {
+            callerRole := roleCodeFor activeClaims.role
+            isExternalSession := activeClaims.isExternal
+            onManagedNode := onManagedNode
+            bunkerState := bunkerSt
+            hasProjectMemorySkill := hasProjSkill
+            hasSecretAccess := hasSecAccess
+          }
+          match ← executeMemoryMcpTool memCache ctx toolName args nowEpochSec with
+          | .ok resVal =>
+            return (200, renderCompact (.obj #[("ok", .bool true), ("result", resVal)]))
+          | .error errMsg =>
+            let errJson := renderCompact (.obj #[
+              ("ok", .bool false),
+              ("error", .obj #[
+                ("code", .str "memory_tool_denied"),
+                ("message", .str errMsg),
+                ("accepted", .str "no"),
+                ("retryable", .bool false)
+              ])
             ])
-          ])
-          return .ok (mkJson 200 errJson)
-      else
-        let outJson ← dispatchMcpToolCall
-          st.store st.managedStore? st.relayHub? st.broadcastHub? (← st.managedRef.get)
-          st.cfg.workingDir activeClaims toolName args nowEpochSec st.remoteSup? st.managedProvisioningOverride?
-          (if scopedClaims?.isNone then (mcpCaller?.map (·.userId)).getD "" else "")
-          (scopedClaims?.isNone && (mcpCaller?.map (fun c => !c.disabled && (c.isLegacyUnscoped || c.role == "admin"))).getD false)
-          (some fun srcMid question idem => do
-            -- The gateway has checked read access; the side mission belongs to the mission's owner.
-            let owner ← match ← execParamQuery st.store.missionsDb
-                "SELECT COALESCE(owner_user_id,'') FROM missions WHERE id=?1;" #[srcMid] with
-              | .ok rs => pure ((rs[1]?.bind (·[0]?)).getD "")
-              | .error _ => pure ""
-            let asker : CallerPrincipal := (mcpCaller?.getD { userId := owner, username := "", isLegacyUnscoped := true })
-            let (code, body) ← launchBtwSideAgent st { asker with userId := if asker.userId.isEmpty then owner else asker.userId }
-              srcMid (.obj #[("side_question", .str question)]) idem nowEpochSec
-            pure (if code < 300 then .ok body else .error body))
-          (some fun mid callId answers => do
-            match st.warmMgr? with
-            | none => pure (.error "warm harness manager unavailable")
-            | some mgr =>
-              let ok ← OrbBin.ClaudeControl.respondToControlRequest mgr mid callId
-                (.obj #[("action", .str "accept"), ("answers", answers)])
-              if ok then
-                if let some ref := st.pendingControlCallsRef? then
-                  ref.modify fun xs => xs.filter (fun p => p.1 != callId)
-              pure (.ok ok))
-          st.cloudHub?
-        return .ok (mkJson 200 outJson)
+            return (200, errJson)
+        else
+          let outJson ← dispatchMcpToolCall
+            st.store st.managedStore? st.relayHub? st.broadcastHub? (← st.managedRef.get)
+            st.cfg.workingDir activeClaims toolName args nowEpochSec st.remoteSup? st.managedProvisioningOverride?
+            (if scopedClaims?.isNone then (mcpCaller?.map (·.userId)).getD "" else "")
+            (scopedClaims?.isNone && (mcpCaller?.map (fun c => !c.disabled && (c.isLegacyUnscoped || c.role == "admin"))).getD false)
+            (some fun srcMid question idem => do
+              -- The gateway has checked read access; the side mission belongs to the mission's owner.
+              let owner ← match ← execParamQuery st.store.missionsDb
+                  "SELECT COALESCE(owner_user_id,'') FROM missions WHERE id=?1;" #[srcMid] with
+                | .ok rs => pure ((rs[1]?.bind (·[0]?)).getD "")
+                | .error _ => pure ""
+              let asker : CallerPrincipal := (mcpCaller?.getD { userId := owner, username := "", isLegacyUnscoped := true })
+              let (code, body) ← launchBtwSideAgent st { asker with userId := if asker.userId.isEmpty then owner else asker.userId }
+                srcMid (.obj #[("side_question", .str question)]) idem nowEpochSec
+              pure (if code < 300 then .ok body else .error body))
+            (some fun mid callId answers => do
+              match st.warmMgr? with
+              | none => pure (.error "warm harness manager unavailable")
+              | some mgr =>
+                let ok ← OrbBin.ClaudeControl.respondToControlRequest mgr mid callId
+                  (.obj #[("action", .str "accept"), ("answers", answers)])
+                if ok then
+                  if let some ref := st.pendingControlCallsRef? then
+                    ref.modify fun xs => xs.filter (fun p => p.1 != callId)
+                pure (.ok ok))
+            st.cloudHub?
+          return (200, outJson)
+
+      if req.method == "POST" && cleanPath == "/api/mcp/call" then
+        let .ok jv := OrbBin.Json.parseBytes req.bodySlice.toByteArray
+          | return .ok (mkJson 400 "{\"ok\":false,\"error\":{\"code\":\"invalid_json\",\"message\":\"Malformed JSON body\",\"accepted\":\"no\",\"retryable\":false}}")
+        let toolName := (jv.fieldStr? "name").getD ""
+        let args := (jv.field? "arguments").getD (.obj #[])
+        let (code, body) ← runAuthorizedMcpTool toolName args
+        return .ok (mkJson code body)
+
+      if cleanPath == "/api/mcp/rpc" then
+        if req.method == "DELETE" then
+          return .ok { status := 204, contentType := "text/plain; charset=utf-8", corsOrigin? := reqOrigin?,
+                       extraHdrs := #[("Mcp-Session-Id", activeClaims.sessionId)], body := ByteArray.empty }
+        if req.method == "GET" then
+          return .ok { status := 405, contentType := "application/json", corsOrigin? := reqOrigin?,
+                       extraHdrs := #[("Allow", "POST, DELETE"), ("Mcp-Session-Id", activeClaims.sessionId)],
+                       body := "{\"error\":\"method_not_allowed\"}".toUTF8 }
+        if req.method == "POST" then
+          let (code, body?) ← handleStreamableMcpRpc activeClaims req.bodySlice.toByteArray runAuthorizedMcpTool
+          let hdrs := #[("Mcp-Session-Id", activeClaims.sessionId)]
+          match body? with
+          | none =>
+            return .ok { status := code, contentType := "application/json", corsOrigin? := reqOrigin?,
+                         extraHdrs := hdrs, body := ByteArray.empty }
+          | some payload =>
+            return .ok { status := code, contentType := "application/json", corsOrigin? := reqOrigin?,
+                         extraHdrs := hdrs, body := payload.toUTF8 }
+        return .ok (mkJson 405 "{\"error\":\"method_not_allowed\"}")
 
     return .ok (mkJson 501 "{\"ok\":false,\"error\":\"unsupported\",\"message\":\"Dynamic MCP server management is not implemented; no server was added, updated, enabled, disabled, refreshed or removed.\"}")
 

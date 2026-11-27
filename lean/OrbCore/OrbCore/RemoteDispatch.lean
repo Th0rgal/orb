@@ -453,7 +453,7 @@ private def ensureDurableJobsTableLocal (store : CoreStore) : IO Unit := do
      "wake_required INTEGER NOT NULL DEFAULT 0, wake_delivered_at TEXT, wake_suppressed_by TEXT, updated_at TEXT NOT NULL);")
     #[]
 
-private def remoteOpenCodeConfigJson (modelKey proxyBaseUrl : String) : String :=
+private def remoteOpenCodeConfigJson (modelKey proxyBaseUrl : String) (mcpRpcUrl? : Option String := none) : String :=
   let low := modelKey.toLower
   let ctxLimit : Nat := if (low.splitOn "gpt-").length > 1 then 272000 else 200000
   let modelEntry := JVal.obj #[
@@ -468,7 +468,7 @@ private def remoteOpenCodeConfigJson (modelKey proxyBaseUrl : String) : String :
       ("output", .nat 32000)
     ])
   ]
-  renderCompact (.obj #[
+  let baseFields : Array (String × JVal) := #[
     ("$schema", .str "https://opencode.ai/config.json"),
     ("update", .str "disable"),
     ("permission", .obj #[
@@ -489,7 +489,25 @@ private def remoteOpenCodeConfigJson (modelKey proxyBaseUrl : String) : String :
         ])
       ])
     ])
-  ])
+  ]
+  let topFields :=
+    match mcpRpcUrl? with
+    | some rpcUrl =>
+      if !rpcUrl.isEmpty then
+        baseFields.push ("mcp", .obj #[
+          ("sandboxed", .obj #[
+            ("type", .str "remote"),
+            ("url", .str rpcUrl),
+            ("headers", .obj #[
+              ("Authorization", .str "Bearer {env:SANDBOXED_MCP_TOKEN}")
+            ]),
+            ("enabled", .bool true),
+            ("timeout", .nat 60000)
+          ])
+        ])
+      else baseFields
+    | none => baseFields
+  renderCompact (.obj topFields)
 
 /-- What a harness needs to reach Core's model router: its environment, extra CLI arguments,
     and the model name to launch it with. Turns that Core runs itself use this; without it a
@@ -564,6 +582,53 @@ def resolveAntigravityVpnProxyEnvs
 
 private def wrapWithRemoteMcp (harness innerCmd : String) : String :=
   s!"if [ -x /usr/local/bin/sandboxed-mcp ]; then /usr/local/bin/sandboxed-mcp launch --harness {harness} -- {innerCmd}; else {innerCmd}; fi"
+
+/-- True unless operator explicitly forces legacy stdio `sandboxed-mcp launch` fallback. -/
+def useDirectHttpMcp : IO Bool := do
+  let legacy := ((← IO.getEnv "ORB_USE_LEGACY_STDIO_MCP").getD "").trimAscii.toString.toLower
+  return !(legacy == "1" || legacy == "true" || legacy == "yes")
+
+/-- Shell prelude that writes a private `0600` Claude Code Streamable HTTP MCP config file
+    (cleaned on EXIT) without placing `SANDBOXED_MCP_TOKEN` in CLI argv or holding any lock. -/
+def buildClaudeHttpMcpPrelude (rpcUrl : String) : String :=
+  let urlJson := jsonEscape rpcUrl
+  s!"orb_claude_mcp=\"$(umask 077 && mktemp)\" || exit 1; " ++
+  "trap 'rm -f \"$orb_claude_mcp\"' EXIT; " ++
+  s!"printf '\{\"mcpServers\":\{\"sandboxed\":\{\"type\":\"http\",\"url\":%s,\"headers\":\{\"Authorization\":\"Bearer %s\"}}}}\\n' {shellSingleQuote urlJson} \"$SANDBOXED_MCP_TOKEN\" > \"$orb_claude_mcp\" || exit 1; "
+
+/-- Codex `-c` overrides for direct Streamable HTTP MCP using `bearer_token_env_var` (no token in argv). -/
+def buildCodexHttpMcpArgs (rpcUrl : String) : String :=
+  " -c " ++ shellSingleQuote s!"mcp_servers.sandboxed.url={jsonEscape rpcUrl}" ++
+  " -c 'mcp_servers.sandboxed.bearer_token_env_var=\"SANDBOXED_MCP_TOKEN\"'" ++
+  " -c 'mcp_servers.sandboxed.startup_timeout_sec=30'" ++
+  " -c 'mcp_servers.sandboxed.tool_timeout_sec=60'" ++
+  " -c 'mcp_servers.sandboxed.enabled=true'" ++
+  " -c 'mcp_servers.sandboxed.default_tools_approval_mode=\"approve\"'"
+
+/-- Shell prelude that atomically writes Antigravity's `$HOME/.gemini/config/mcp_config.json` (`0600`)
+    pointing `sandboxed` directly at Core's Streamable HTTP MCP endpoint (`serverUrl` + Bearer header).
+    Eliminates `.agents/.sandboxed-mcp.lock` and workspace `.agents/mcp_config.json` lock contention. -/
+def buildAntigravityHttpMcpPrelude (rpcUrl : String) : String :=
+  let urlJson := jsonEscape rpcUrl
+  s!"(umask 077; mkdir -p \"$HOME/.gemini/config\"; tmp=\"$HOME/.gemini/config/.mcp_config.json.$$\"; " ++
+  s!"printf '\{\"mcpServers\":\{\"sandboxed\":\{\"serverUrl\":%s,\"headers\":\{\"Authorization\":\"Bearer %s\"},\"disabled\":false}}}\\n' {shellSingleQuote urlJson} \"$SANDBOXED_MCP_TOKEN\" > \"$tmp\" && mv -f \"$tmp\" \"$HOME/.gemini/config/mcp_config.json\") || exit 1; "
+
+private def claudeMcpParts (mcpRpcUrl? : Option String) : String × String × Bool :=
+  match mcpRpcUrl? with
+  | some rpcUrl => (buildClaudeHttpMcpPrelude rpcUrl, " --mcp-config \"$orb_claude_mcp\"", false)
+  | none => ("", "", true)
+
+private def codexMcpParts (mcpRpcUrl? : Option String) : String × Bool :=
+  match mcpRpcUrl? with
+  | some rpcUrl => (buildCodexHttpMcpArgs rpcUrl, false)
+  | none => ("", true)
+
+private def antigravityMcpCommand (mcpRpcUrl? : Option String) (isGoal : Bool) (inner : String) : String :=
+  match mcpRpcUrl? with
+  | some rpcUrl => buildAntigravityHttpMcpPrelude rpcUrl ++ inner
+  | none =>
+    if isGoal then "/usr/local/bin/sandboxed-mcp launch --harness antigravity -- " ++ inner
+    else wrapWithRemoteMcp "antigravity" inner
 
 private def buildWorkspacePrefix (coreWorkDir workingDir : String) (tags : Array String) : String :=
   let cleanWd := workingDir.trimAscii.toString
@@ -874,7 +939,7 @@ def buildFreshSessionTranscriptHandoff
   sections := sections.push "[End Mission Context Handoff — Current Turn Instruction]"
   return String.intercalate "\n\n" sections.toList ++ "\n\n" ++ currentPrompt
 
-private def prepareRemoteHarnessCommand
+def prepareRemoteHarnessCommand
     (store : CoreStore)
     (mc? : Option ManagedComputeStore)
     (relayHub? : Option RelayHub)
@@ -914,6 +979,12 @@ private def prepareRemoteHarnessCommand
     (if spec.project.trimAscii.toString.isEmpty then none else some spec.project) spec.backend.trimAscii.toString.toLower store.rootDir spec.ownerUserId bootstrapAdminId)
   let (skillPrelude, skillEnvs) := stageSkillBundle skillBundle
   let (fd3Prelude, promptEnvs) := stagePromptOnFd3 deliveredPrompt
+  let directHttpMcp ← useDirectHttpMcp
+  let mcpRpcUrl? : Option String :=
+    if directHttpMcp && !apiBase.isEmpty && !mcpEnvs.isEmpty then
+      some s!"{apiBase}/api/mcp/rpc"
+    else
+      none
   let bLow := spec.backend.trimAscii.toString.toLower
   let harness := if bLow == "claude" then "claudecode" else bLow
 
@@ -929,7 +1000,7 @@ private def prepareRemoteHarnessCommand
       else if rawModel.startsWith "sandboxed-sh/" then (rawModel.drop 13).toString
       else rawModel
     let modelKey := if strippedModel.isEmpty then "smart" else strippedModel
-    let ocCfg := remoteOpenCodeConfigJson modelKey proxyBase
+    let ocCfg := remoteOpenCodeConfigJson modelKey proxyBase mcpRpcUrl?
     let planArg := if isPlanPrompt || spec.authorityMode == "readonly" && false then " --agent plan" else if isPlanPrompt then " --agent plan" else ""
     let sessArg :=
       match resumeSid? with
@@ -940,11 +1011,13 @@ private def prepareRemoteHarnessCommand
     -- `opencode run`, which prints each text part only once it is finished.
     let acpPlan := if planArg.isEmpty then "" else " --plan"
     let acpInner := s!"sandboxed-node opencode-acp{acpPlan}{sessArg} --model {shellSingleQuote s!"builtin/{modelKey}"}"
+    let runAcp := if mcpRpcUrl?.isSome then acpInner else wrapWithRemoteMcp "opencode" acpInner
+    let runCli := if mcpRpcUrl?.isSome then inner else wrapWithRemoteMcp "opencode" inner
     let cmd :=
       wsPrefix ++ skillPrelude ++ fd3Prelude ++
       "command -v opencode >/dev/null 2>&1 || { echo 'opencode is not installed on this node' >&2; exit 127; }; " ++
       "if sandboxed-node opencode-acp --probe </dev/null >/dev/null 2>&1; then " ++
-      wrapWithRemoteMcp "opencode" acpInner ++ "; else " ++ wrapWithRemoteMcp "opencode" inner ++ "; fi <&3"
+      runAcp ++ "; else " ++ runCli ++ "; fi <&3"
     let envs :=
       skillEnvs ++ promptEnvs ++ mcpEnvs ++ #[
         ("SANDBOXED_PROXY_API_KEY", pTok),
@@ -968,13 +1041,15 @@ private def prepareRemoteHarnessCommand
       else s!" --effort {shellSingleQuote spec.modelEffort.trimAscii.toString}"
     let permArg := if isPlanPrompt then " --permission-mode plan" else ""
     let resArg := match resumeSid? with | some sid => s!" --resume {shellSingleQuote sid}" | none => ""
+    let (mcpPrelude, mcpFlag, useWrapper) := claudeMcpParts mcpRpcUrl?
     let inner :=
       "claude -p --dangerously-skip-permissions --output-format stream-json --verbose --include-partial-messages" ++
-      permArg ++ modelArg ++ effArg ++ resArg
+      mcpFlag ++ permArg ++ modelArg ++ effArg ++ resArg
+    let runCmd := if useWrapper then wrapWithRemoteMcp "claudecode" inner else inner
     let cmd :=
-      wsPrefix ++ skillPrelude ++ fd3Prelude ++
+      wsPrefix ++ skillPrelude ++ fd3Prelude ++ mcpPrelude ++
       "command -v claude >/dev/null 2>&1 || { echo 'claude is not installed on this node' >&2; exit 127; }; " ++
-      wrapWithRemoteMcp "claudecode" inner ++ " <&3"
+      runCmd ++ " <&3"
     let envs :=
       skillEnvs ++ promptEnvs ++ mcpEnvs ++ #[
         ("ANTHROPIC_BASE_URL", proxyBase),
@@ -1005,17 +1080,19 @@ private def prepareRemoteHarnessCommand
       s!" -c {baseUrlCfg}" ++
       " -c 'model_providers.sandboxed.wire_api=\"responses\"'" ++
       " -c 'model_providers.sandboxed.env_key=\"SANDBOXED_PROXY_API_KEY\"'"
+    let (codexMcpArgs, useWrapper) := codexMcpParts mcpRpcUrl?
     let tailArgs :=
       match resumeSid? with
       | some sid => s!" resume {shellSingleQuote sid} -"
       | none => " -"
     let inner :=
       "codex exec --json --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check" ++
-      provArgs ++ modelArg ++ effArg ++ tailArgs
+      provArgs ++ codexMcpArgs ++ modelArg ++ effArg ++ tailArgs
+    let runCmd := if useWrapper then wrapWithRemoteMcp "codex" inner else inner
     let cmd :=
       wsPrefix ++ skillPrelude ++ fd3Prelude ++
       "command -v codex >/dev/null 2>&1 || { echo 'codex is not installed on this node' >&2; exit 127; }; " ++
-      wrapWithRemoteMcp "codex" inner ++ " <&3"
+      runCmd ++ " <&3"
     let envs :=
       skillEnvs ++ promptEnvs ++ mcpEnvs ++ #[
         ("SANDBOXED_PROXY_API_KEY", pTok),
@@ -1058,10 +1135,7 @@ private def prepareRemoteHarnessCommand
       let goalSettings := include_str "antigravity_goal_settings.json"
       let goalFlags := if spec.goalDispatch?.isSome then " --settings " ++ shellSingleQuote goalSettings else ""
       let inner := "agy " ++ argv ++ goalFlags ++ " --print=\"${agy_prompt%.}\""
-      -- Permission to call the Orb tools applies only with the mission-scoped server installed.
-      return if spec.goalDispatch?.isSome then
-          "/usr/local/bin/sandboxed-mcp launch --harness antigravity -- " ++ inner
-        else wrapWithRemoteMcp "antigravity" inner
+      return antigravityMcpCommand mcpRpcUrl? spec.goalDispatch?.isSome inner
     let readPrompt := "agy_prompt=\"$(cat <&3 && printf .)\" || exit 1; "
     let .ok bound? ← nativeMissionAccount? store spec.missionId | return .error "antigravity_binding_unavailable"
     let rollout ← NativeCanary.load
