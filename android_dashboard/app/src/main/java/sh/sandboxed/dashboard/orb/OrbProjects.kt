@@ -412,13 +412,81 @@ fun OrbAppRoot(
                                 push(OrbNavScreen.Conversation(proj, mission))
                             },
                             bannerContent = {
-                                if (showBunkerBanner || totalWaitingApprovals > 0 || showEnrollBanner) {
+                                val ctx = LocalContext.current
+                                val curBase by core.baseURLFlow.collectAsState()
+                                val connIssue by core.connectionIssue.collectAsState()
+                                val localUrl = "http://127.0.0.1:3000"
+                                val onLocal = curBase.trim().trimEnd('/') == localUrl
+                                var offlineLocalReady by remember { mutableStateOf(false) }
+                                LaunchedEffect(curBase, connIssue) {
+                                    if (onLocal) {
+                                        offlineLocalReady = false
+                                        return@LaunchedEffect
+                                    }
+                                    val cm = ctx.getSystemService(android.content.Context.CONNECTIVITY_SERVICE) as? android.net.ConnectivityManager
+                                    val caps = cm?.getNetworkCapabilities(cm.activeNetwork)
+                                    val hasNet = caps != null && caps.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                                    if (!hasNet || connIssue != null) {
+                                        val ok = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                                            runCatching {
+                                                val c = okhttp3.OkHttpClient.Builder()
+                                                    .connectTimeout(350, java.util.concurrent.TimeUnit.MILLISECONDS)
+                                                    .readTimeout(350, java.util.concurrent.TimeUnit.MILLISECONDS)
+                                                    .build()
+                                                val req = okhttp3.Request.Builder().url("$localUrl/api/health").get().build()
+                                                c.newCall(req).execute().use { it.isSuccessful }
+                                            }.getOrDefault(false)
+                                        }
+                                        offlineLocalReady = ok
+                                    } else {
+                                        offlineLocalReady = false
+                                    }
+                                }
+                                if (offlineLocalReady || showBunkerBanner || totalWaitingApprovals > 0 || showEnrollBanner) {
                                     Column(
                                         modifier = Modifier
                                             .fillMaxWidth()
                                             .padding(horizontal = 18.dp, vertical = 4.dp),
                                         verticalArrangement = Arrangement.spacedBy(6.dp)
                                     ) {
+                                        if (offlineLocalReady) {
+                                            Row(
+                                                modifier = Modifier
+                                                    .fillMaxWidth()
+                                                    .clip(RoundedCornerShape(12.dp))
+                                                    .background(OrbStyle.success.copy(alpha = 0.14f))
+                                                    .border(1.dp, OrbStyle.success.copy(alpha = 0.5f), RoundedCornerShape(12.dp))
+                                                    .orbPressClickable {
+                                                        homeScope.launch {
+                                                            core.configureSession(localUrl, null, null)
+                                                            offlineLocalReady = false
+                                                        }
+                                                    }
+                                                    .padding(horizontal = 14.dp, vertical = 10.dp),
+                                                verticalAlignment = Alignment.CenterVertically,
+                                                horizontalArrangement = Arrangement.SpaceBetween
+                                            ) {
+                                                Column(modifier = Modifier.weight(1f)) {
+                                                    Text(
+                                                        text = "Offline · Local SideSystem Ready",
+                                                        color = Color.White,
+                                                        fontSize = 13.sp,
+                                                        fontWeight = FontWeight.SemiBold
+                                                    )
+                                                    Text(
+                                                        text = "Tap to switch to 127.0.0.1:3000 (Bonsai 27B NPU)",
+                                                        color = OrbStyle.textSecondary,
+                                                        fontSize = 11.sp
+                                                    )
+                                                }
+                                                Text(
+                                                    text = "Switch",
+                                                    color = OrbStyle.success,
+                                                    fontSize = 12.sp,
+                                                    fontWeight = FontWeight.SemiBold
+                                                )
+                                            }
+                                        }
                                         if (showBunkerBanner) {
                                             BunkerBannerContent()
                                         }

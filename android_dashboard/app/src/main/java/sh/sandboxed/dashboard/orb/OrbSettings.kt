@@ -268,7 +268,7 @@ fun OrbSettingsSheet(
                                 icon = sectionIcon(OrbSettingsSection.Account),
                                 title = if (localSideSystemReachable) "Local SideSystem (Ready)" else "Local SideSystem",
                                 subtitle = if (onLocal) "Connected to 127.0.0.1:3000 · Tap to switch" else "127.0.0.1:3000 · Tap to open Server settings",
-                                attention = onLocal,
+                                attention = false,
                                 onClick = {
                                     section = OrbSettingsSection.Account
                                     route = OrbSettingsRoute.Backend
@@ -554,7 +554,7 @@ fun OrbSetupView(
     val scope = rememberCoroutineScope()
     val savedBase by core.baseURLFlow.collectAsState()
     var urlInput by remember(savedBase) {
-        mutableStateOf(savedBase.ifEmpty { "https://agent-backend.thomas.md" })
+        mutableStateOf(savedBase.ifEmpty { "https://orbcore.thomas.md" })
     }
     var usernameInput by remember(savedBase) {
         mutableStateOf(core.savedUsername(savedBase))
@@ -731,7 +731,7 @@ fun OrbSetupView(
                     .padding(horizontal = 14.dp, vertical = 13.dp)
             ) {
                 if (urlInput.isEmpty()) {
-                    Text("https://agent-backend.thomas.md", color = OrbStyle.textMuted, fontSize = 15.sp)
+                    Text("https://orbcore.thomas.md", color = OrbStyle.textMuted, fontSize = 15.sp)
                 }
                 BasicTextField(
                     value = urlInput,
@@ -776,7 +776,7 @@ fun OrbSetupView(
                         .background(if (!onLocal) OrbStyle.surface else OrbStyle.surface)
                         .border(1.dp, if (!onLocal) Color.White else OrbStyle.border, RoundedCornerShape(8.dp))
                         .orbPressClickable {
-                            urlInput = "https://agent-backend.thomas.md"
+                            urlInput = "https://orbcore.thomas.md"
                         }
                         .padding(horizontal = 10.dp, vertical = 6.dp)
                 ) {

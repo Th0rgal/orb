@@ -24,7 +24,7 @@ data class OrbConnectionIssue(
 )
 
 object OrbConnection {
-    const val DEFAULT_BASE_URL = "https://agent-backend.thomas.md"
+    const val DEFAULT_BASE_URL = "https://orbcore.thomas.md"
     const val ORBCORE_BASE_URL = "https://orbcore.thomas.md"
     const val KNOWN_DIRECT_BASE_URL = "https://agent-backend.nico-best-pc-ever.ovh"
 
