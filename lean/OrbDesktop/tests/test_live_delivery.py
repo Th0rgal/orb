@@ -770,15 +770,21 @@ class Delivery(unittest.TestCase):
                     (5, 'assistant_message_canonical', MERMAID_TURN)):
                 db.execute("INSERT INTO mission_events VALUES(NULL,'a',?,?,?,?,'{}','')",
                            (seq, seq, kind, json.dumps({'content': content, 'queued': False})))
-        if mode in ('long-paging', 'older-403', 'paging-degraded-recover', 'stale-older-race'):
+        if mode in ('long-paging', 'older-403', 'paging-degraded-recover', 'stale-older-race',
+                    'canonical-split', 'paging-sidebar-expand'):
             # >1,000-row persisted mission: initial /open serves only the newest
             # 200 tail rows + 80 spine rows (280 total), and earlier rows page in
             # on demand via /events?before_seq=...&view=transcript&limit=200.
             db.execute("DELETE FROM mission_events WHERE mission_id='a'")
             db.execute("UPDATE missions SET status='completed' WHERE id='a'")
             for seq in range(1, 1051):
-                kind = 'user_message' if seq % 2 == 1 else 'assistant_message'
-                content = f'Turn {seq:04d}'
+                if mode == 'canonical-split' and seq == 770:
+                    kind, content = 'assistant_message', 'Boundary reply'
+                elif mode == 'canonical-split' and seq == 771:
+                    kind, content = 'assistant_message_canonical', 'Boundary reply'
+                else:
+                    kind = 'user_message' if seq % 2 == 1 else 'assistant_message'
+                    content = f'Turn {seq:04d}'
                 db.execute("INSERT INTO mission_events VALUES(NULL,'a',?,?,?,?,'{}','')",
                            (seq, seq, kind, json.dumps({'content': content, 'queued': False})))
         degraded_sent = threading.Event()
@@ -885,6 +891,10 @@ class Delivery(unittest.TestCase):
                         deadline = time.monotonic() + 8
                         while time.monotonic() < deadline and not (Path(root) / 'stale-race-cleared').exists():
                             time.sleep(0.02)
+                    if mode == 'paging-sidebar-expand':
+                        # Delay older page slightly so the recreated subscription's HS
+                        # arrives while olderFetch is still in flight.
+                        time.sleep(0.35)
                     qs = live.urllib.parse.parse_qs(live.urllib.parse.urlsplit(path).query)
                     before_seq = int(qs.get('before_seq', ['0'])[0])
                     limit = int(qs.get('limit', ['200'])[0])
@@ -1099,6 +1109,18 @@ class Delivery(unittest.TestCase):
                     # Initial /open + post-unavailable recovery /open; stale before_seq=771 cancelled/rejected.
                     self.assertEqual(paths.count(a + '/open'), 2)
                     self.assertGreaterEqual(len([p for p in paths if p.startswith(a + '/events?')]), 1)
+                    self.assertNotIn(b + events, paths)
+                elif mode == 'canonical-split':
+                    self.assertEqual(paths.count(a + '/open'), 1)
+                    page_paths = [p for p in paths if p.startswith(a + '/events?')]
+                    self.assertEqual(page_paths, [a + '/events?before_seq=771&view=transcript&limit=200'])
+                    self.assertNotIn(b + events, paths)
+                elif mode == 'paging-sidebar-expand':
+                    # Subscription recreated on sidebar project toggle triggers a second /open
+                    # without aborting the in-flight older page fetch.
+                    self.assertGreaterEqual(paths.count(a + '/open'), 2)
+                    page_paths = [p for p in paths if p.startswith(a + '/events?')]
+                    self.assertGreaterEqual(len(page_paths), 1)
                     self.assertNotIn(b + events, paths)
                 elif mode == 'mermaid-backedge':
                     # The driver renders and asserts from the first bubble; mission
@@ -1327,6 +1349,31 @@ class Delivery(unittest.TestCase):
             with self.assertRaises(live.urllib.error.HTTPError) as ctx:
                 live.fetch_older_turns('a', 'bound', '7')
             self.assertEqual(ctx.exception.code, 401)
+        # Mid-request credential/session rotation (ValueError('connection changed'))
+        # must invalidate the session without emitting a retryable 'HE' frame.
+        with patch.object(live, 'Connection') as factory:
+            c = factory.return_value
+            c.binding = 'bound'
+            c.get_page.side_effect = ValueError('connection changed')
+            c.check.side_effect = ValueError('connection changed')
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                with self.assertRaises(ValueError):
+                    live.fetch_older_turns('a', 'bound', '7')
+            self.assertEqual(out.getvalue(), '')
+        # Fallback row_identity without 'id' distinguishes different content at same (seq, type).
+        id_a = live.row_identity(dict(sequence=10, event_type='assistant_message', content='Alpha'))
+        id_b = live.row_identity(dict(sequence=10, event_type='assistant_message', content='Beta'))
+        self.assertNotEqual(id_a, id_b)
+        # pack_history_frame accounts for UTF-8 byte lengths (not just code-point count)
+        # and encodes canonical/plain kind tags for cross-page dedup.
+        cjk_entries = [
+            ('id:1', '漢' * 20, 1, 'p'),
+            ('id:2', '漢' * 20, 2, 'c'),
+        ]
+        packed = live.pack_history_frame('HO', cjk_entries, False, None, max_bytes=80)
+        self.assertTrue(packed.startswith('HO\t1\t2\t'))
+        self.assertIn('id:2\x1cc\x1c', packed)
 
     def test_large_transcript_loads_initial_window_fast_and_pages_to_turn_1(self):
         # 1,200 persisted turns: initial /open loads 280 rows in 1 request, then 5
@@ -1402,6 +1449,12 @@ class Delivery(unittest.TestCase):
 
     def test_stale_older_fetch_cancelled_and_rejected_across_unavailable_recovery(self):
         self.run_wire('stale-older-race')
+
+    def test_cross_page_canonical_split_deduplicates_without_layout_jump(self):
+        self.run_wire('canonical-split')
+
+    def test_sidebar_expand_during_older_load_does_not_abort_fetch(self):
+        self.run_wire('paging-sidebar-expand')
 
     def test_two_turn_live_keeps_history_and_renders_mermaid(self):
         self.run_wire('mermaid-turn')

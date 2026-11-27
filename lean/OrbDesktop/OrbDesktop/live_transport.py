@@ -1245,7 +1245,9 @@ def row_identity(r):
     seq = r.get('sequence')
     if isinstance(seq, int):
         kind = ''.join(ch for ch in str(r.get('event_type') or '')[:48] if ch.isprintable() and ch not in '\t\r\n')
-        return f'seq:{seq}:{kind}'
+        content_raw = str(r.get('content') or '')
+        digest = hashlib.sha256(content_raw.encode('utf-8')).hexdigest()[:12]
+        return f'seq:{seq}:{kind}:{digest}'
     return ''
 
 
@@ -1270,14 +1272,12 @@ def dedup_event_rows(rows):
     return unique_rows
 
 
-def extract_transcript_turns(rows, first_text=None):
-    """Project Core event rows into ascending `(turn_id, text, sequence)` tuples.
-    Core persists assistant turns either as assistant_message or, once finalized,
-    as assistant_message_canonical, and delivered user prompts as user_message.
-    A canonical event claims the latest unclaimed plain turn with identical
-    content so the archive keeps one copy at the original position; plain turns
-    that repeat an earlier text stay separate. When `first_text` matches the
-    newest persisted turn, the live bubble keeps owning it."""
+def extract_transcript_turns_with_kinds(rows, first_text=None):
+    """Project Core event rows into ascending `(turn_id, text, sequence, kind)` tuples.
+    `kind` distinguishes `'u'` (user prompt), `'p'` (unclaimed plain `assistant_message`),
+    `'a'` (`assistant_message` already claimed by a canonical in this page), and `'c'`
+    (unmatched `assistant_message_canonical` whose plain form may live in an older page).
+    When `first_text` matches the newest persisted turn, the live bubble keeps owning it."""
     rows = dedup_event_rows(rows)
     turns = []
     for r in rows:
@@ -1296,28 +1296,31 @@ def extract_transcript_turns(rows, first_text=None):
     unclaimed = []
     for _, seq, kind, content, tid in turns:
         if kind == 'user_message':
-            entries.append((tid, 'You: ' + content, seq))
+            entries.append((tid, 'You: ' + content, seq, 'u'))
             continue
         if kind == 'assistant_message':
             unclaimed.append(len(entries))
-            entries.append((tid, content, seq))
+            entries.append((tid, content, seq, 'p'))
             continue
         claim = next((i for i in reversed(unclaimed) if entries[i][1] == content), None)
         if claim is not None:
             unclaimed.remove(claim)
+            ctid, ctxt, cseq, _ = entries[claim]
+            entries[claim] = (ctid, ctxt, cseq, 'a')
             continue
-        entries.append((tid, content, seq))
+        entries.append((tid, content, seq, 'c'))
     if first_text is not None and entries and entries[-1][1] == first_text:
         entries.pop()
     return entries
 
 
-def history_page(c, mid, first_text=''):
-    """Initial transcript window from the real `/open` bundle (events + initial
-    spine) plus continuation metadata `(entries, has_more, next_cursor)` for
-    on-demand older paging. First paint never walks earlier `/events` pages.
-    Auth failures are not degradation: 401/403 re-raise so the caller's
-    access-revoked path (which clears prior content) still runs."""
+def extract_transcript_turns(rows, first_text=None):
+    """Project Core event rows into ascending `(turn_id, text, sequence)` tuples."""
+    return [(tid, text, seq) for tid, text, seq, _ in extract_transcript_turns_with_kinds(rows, first_text)]
+
+
+def _history_page_raw(c, mid, first_text=''):
+    """Initial transcript window from `/open` with per-turn canonical/plain kind tags."""
     try:
         bundle = c.get('/api/control/missions/' + mid + '/open', 8 << 20)
     except urllib.error.HTTPError as error:
@@ -1335,7 +1338,7 @@ def history_page(c, mid, first_text=''):
         if not isinstance(page, list):
             return ([], False, None)
         rows.extend(page)
-    entries = extract_transcript_turns(rows, first_text)
+    entries = extract_transcript_turns_with_kinds(rows, first_text)
     if isinstance(bundle.get('spine_has_more'), bool):
         has_more = bundle['spine_has_more']
         raw_cursor = bundle.get('spine_next_cursor')
@@ -1351,18 +1354,24 @@ def history_page(c, mid, first_text=''):
     return (entries, has_more, next_cursor)
 
 
+def history_page(c, mid, first_text=''):
+    """Initial transcript window from the real `/open` bundle (events + initial
+    spine) plus continuation metadata `(entries, has_more, next_cursor)` for
+    on-demand older paging. First paint never walks earlier `/events` pages.
+    Auth failures are not degradation: 401/403 re-raise so the caller's
+    access-revoked path (which clears prior content) still runs."""
+    entries, has_more, next_cursor = _history_page_raw(c, mid, first_text)
+    return ([(tid, text, seq) for tid, text, seq, _ in entries], has_more, next_cursor)
+
+
 def history_turns(c, mid, first_text):
     """Completed turns from the initial `/open` window, ascending."""
     entries, _, _ = history_page(c, mid, first_text)
     return [text for _, text, _ in entries]
 
 
-def older_history_page(c, mid, before_seq, limit=OLDER_PAGE_LIMIT):
-    """Fetch one on-demand older transcript page before `before_seq` using the
-    same exclusive before-cursor (`X-Has-More` / `X-Next-Cursor`) the web client
-    uses. Returns `(entries, has_more, next_cursor)` with ascending entries.
-    Auth failures (401/403) and transient HTTP/transport errors propagate to the
-    caller so revocation clears content and 5xx preserves the retryable cursor."""
+def _older_history_page_raw(c, mid, before_seq, limit=OLDER_PAGE_LIMIT):
+    """Fetch one on-demand older transcript page with per-turn canonical/plain kind tags."""
     cursor = int(before_seq)
     for _ in range(EMPTY_PAGE_SKIP_LIMIT):
         requested = cursor
@@ -1381,7 +1390,7 @@ def older_history_page(c, mid, before_seq, limit=OLDER_PAGE_LIMIT):
             return ([], False, None)
         older_rows = [r for r in page_rows
                       if isinstance(r, dict) and not (isinstance(r.get('sequence'), int) and r['sequence'] >= requested)]
-        entries = extract_transcript_turns(older_rows)
+        entries = extract_transcript_turns_with_kinds(older_rows)
         nxt = headers.get('x-next-cursor')
         has_more_hdr = headers.get('x-has-more')
         if has_more_hdr is not None:
@@ -1401,17 +1410,31 @@ def older_history_page(c, mid, before_seq, limit=OLDER_PAGE_LIMIT):
     return ([], True, cursor)
 
 
+def older_history_page(c, mid, before_seq, limit=OLDER_PAGE_LIMIT):
+    """Fetch one on-demand older transcript page before `before_seq` using the
+    same exclusive before-cursor (`X-Has-More` / `X-Next-Cursor`) the web client
+    uses. Returns `(entries, has_more, next_cursor)` with ascending entries.
+    Auth failures (401/403) and transient HTTP/transport errors propagate to the
+    caller so revocation clears content and 5xx preserves the retryable cursor."""
+    entries, has_more, next_cursor = _older_history_page_raw(c, mid, before_seq, limit)
+    return ([(tid, text, seq) for tid, text, seq, _ in entries], has_more, next_cursor)
+
+
 def pack_history_frame(tag, entries, has_more, next_cursor, max_bytes=1 << 20):
-    """Pack ascending `(turn_id, text, seq)` entries into one bounded IPC line.
-    If the byte cap trims older entries from the head of a page, advertise their
+    """Pack ascending `(turn_id, text, seq[, kind])` entries into one bounded IPC line.
+    If the UTF-8 byte cap trims older entries from the head of a page, advertise their
     boundary sequence as `next_cursor` so no turns are dropped."""
     newest = []
     total = 0
     oldest_kept_seq = None
     trimmed = False
-    for tid, turn, seq in reversed(entries):
-        packed = tid + '\x1c' + turn.replace('\n', '\x1e').replace('\t', '\x1f')
-        total += len(packed) + 1
+    for entry in reversed(entries):
+        if len(entry) >= 4:
+            tid, turn, seq, kind = entry[0], entry[1], entry[2], entry[3]
+        else:
+            tid, turn, seq, kind = entry[0], entry[1], entry[2], 'a'
+        packed = tid + '\x1c' + kind + '\x1c' + turn.replace('\n', '\x1e').replace('\t', '\x1f')
+        total += len(packed.encode('utf-8')) + 1
         if total > max_bytes and newest:
             trimmed = True
             break
@@ -1434,18 +1457,21 @@ def fetch_older_turns(mid, binding, before_seq):
         return
     cursor = int(before_seq)
     try:
-        entries, has_more, next_cursor = older_history_page(c, mid, cursor)
+        entries, has_more, next_cursor = _older_history_page_raw(c, mid, cursor)
     except urllib.error.HTTPError as error:
         if error.code in (403, 404):
             error.close()
+            c.check()
             print('D', flush=True)
             return
         if error.code == 401:
             raise
         error.close()
+        c.check()
         print('HE', flush=True)
         return
     except (urllib.error.URLError, TimeoutError, ValueError, KeyError, TypeError):
+        c.check()
         print('HE', flush=True)
         return
     c.check()
@@ -1470,7 +1496,7 @@ def poll_bubble(mid, binding):
                 # once on recovery so a wiped transcript reloads its persisted archive.
                 pending_history = False
                 degraded = False
-                entries, has_more, next_cursor = history_page(c, mid, text)
+                entries, has_more, next_cursor = _history_page_raw(c, mid, text)
                 if entries or has_more:
                     print(pack_history_frame('HS', entries, has_more, next_cursor), flush=True)
             fields = ('B', title, status, text.replace('\n', '\x1e').replace('\t', '\x1f'))

@@ -51,46 +51,90 @@ private def coldFixture : DesktopState :=
 #guard (applyHistoryTurns 120 vp { coldFixture with liveTurns := ["one"] } "m" ["one"]).2.isNone
 #guard (applyHistoryTurns 120 vp { coldFixture with liveTurns := ["old"] } "m" ["one", "two"]).1.liveTurns == ["one", "two"]
 
--- On-demand older transcript paging: deduplicates by event/row ID, triggers on
--- upward scroll near top or "Load older turns" activation, preserves scroll anchor,
--- rejects stale originating cursors, and merges degraded-recovery `HS` without wiping
--- already-paged older turns.
+-- On-demand older transcript paging: deduplicates by event/row ID and cross-page
+-- plain/canonical assistant turns, triggers on upward scroll near top or "Load older turns"
+-- activation, preserves scroll anchor (including short windows, stale offsets, and
+-- fractional HiDPI), rejects stale originating cursors, and preserves in-flight
+-- `historyLoading` across degraded-recovery `HS` merges.
 private def pagingUnitChecks : Bool := Id.run do
-  let pagedInit := (applyHistoryBatch 120 vp coldFixture "m" {
-    turns := [("id:10", "Turn 10"), ("id:11", "Turn 11")],
+  let smallVp : Rect := { x := 0, y := 0, w := 800, h := 200 }
+  let initTurns : List (String × String) :=
+    (List.range 6).map fun i => (s!"id:{10 + i}", s!"Turn {10 + i}")
+  let pagedInit := (applyHistoryBatch 120 smallVp coldFixture "m" {
+    turns := initTurns,
     hasMore := true, nextCursor := some 10 }).1
-  if !(pagedInit.liveTurns == ["Turn 10", "Turn 11"] && pagedInit.historyHasMore && pagedInit.historyNextCursor == some 10) then return false
-  if !(stepDesktopEvent 120 vp pagedInit (.activate loadOlderTurnsId)).1.historyLoading then return false
+  if !(pagedInit.liveTurns.length == 6 && pagedInit.historyHasMore && pagedInit.historyNextCursor == some 10) then return false
+  if !(stepDesktopEvent 120 smallVp pagedInit (.activate loadOlderTurnsId)).1.historyLoading then return false
   if !(stepTranscriptScroll { pagedInit with scroll := { pinned := false, topSub := pxToSub 120 } } (pxToSub 2000) (pxToSub 500) (-640)).any (·.historyLoading) then return false
   if (stepTranscriptScroll { pagedInit with scroll := { pinned := false, topSub := pxToSub 600 } } (pxToSub 2000) (pxToSub 500) (-640)).any (·.historyLoading) then return false
   let unpinned := { pagedInit with scroll := { pinned := false, topSub := pxToSub 80 }, historyLoading := true }
-  let pagedAfterOlder := (applyOlderHistoryBatch 120 vp unpinned "m" {
+  let pagedAfterOlder := (applyOlderHistoryBatch 120 smallVp unpinned "m" {
     turns := [("id:8", "Turn 8"), ("id:9", "Turn 9"), ("id:10", "Turn 10 dup")],
     hasMore := true, nextCursor := some 8 } (some 10)).1
-  if !(pagedAfterOlder.liveTurns == ["Turn 8", "Turn 9", "Turn 10", "Turn 11"] &&
+  if !(pagedAfterOlder.liveTurns.take 4 == ["Turn 8", "Turn 9", "Turn 10", "Turn 11"] &&
+      pagedAfterOlder.liveTurns.length == 8 &&
       !pagedAfterOlder.historyLoading && pagedAfterOlder.historyNextCursor == some 8 &&
       pagedAfterOlder.scroll.topSub > pxToSub 80 && !pagedAfterOlder.scroll.pinned) then return false
+  -- Stale unclamped topSub (> oldLimit) clamps against rendered oldLimit before adding delta.
+  let (oldH, bodyH) := measureTranscriptContentHeight unpinned 120 smallVp
+  let oldLim := scrollLimit oldH bodyH
+  let staleTop := { unpinned with scroll := { pinned := false, topSub := oldLim + pxToSub 500 } }
+  let clampedOlder := (applyOlderHistoryBatch 120 smallVp staleTop "m" {
+    turns := [("id:8", "Turn 8"), ("id:9", "Turn 9")],
+    hasMore := true, nextCursor := some 8 } (some 10)).1
+  let expectedDelta := measurePrependedHeightDelta unpinned 120 smallVp ["Turn 8", "Turn 9"] true true
+  if !(clampedOlder.scroll.topSub == (max 0 ((oldLim : Int) + expectedDelta)).toNat) then return false
+  -- Short initial window (oldContentH <= bodyH) with pinned=true unpins when older turns prepend.
+  let shortInit := (applyHistoryBatch 120 vp coldFixture "m" {
+    turns := [("id:100", "Turn 100")], hasMore := true, nextCursor := some 100 }).1
+  let shortPrepend := (applyOlderHistoryBatch 120 vp { shortInit with scroll := { pinned := true, topSub := 0 }, historyLoading := true } "m" {
+    turns := (List.range 20).map fun i => (s!"id:{i + 1}", s!"Older {i + 1}"),
+    hasMore := false, nextCursor := none } (some 100)).1
+  if !(!shortPrepend.scroll.pinned && shortPrepend.liveTurns.length == 21) then return false
+  -- Cross-page assistant_message + assistant_message_canonical deduplication:
+  -- unmatched canonical at boundary claims the newest matching plain assistant turn only,
+  -- leaving genuinely distinct earlier plain turns intact.
+  let canonInit := (applyHistoryBatch 120 smallVp coldFixture "m" {
+    turns := [("id:11", "Shared reply"), ("id:12", "Turn 12")]
+    turnKinds := [.unmatchedCanonical, .other]
+    hasMore := true, nextCursor := some 11 }).1
+  let canonMerged := (applyOlderHistoryBatch 120 smallVp { canonInit with scroll := { pinned := false, topSub := pxToSub 20 } } "m" {
+    turns := [("id:8", "Shared reply"), ("id:9", "You: Again?"), ("id:10", "Shared reply")]
+    turnKinds := [.plainAssistant, .other, .plainAssistant]
+    hasMore := false, nextCursor := none } (some 11)).1
+  if !(canonMerged.liveTurns == ["Shared reply", "You: Again?", "Shared reply", "Turn 12"] &&
+      canonMerged.unmatchedCanonicalTexts.isEmpty) then return false
+  -- Fractional HiDPI logicalSubSize avoids device-pixel ceiling rounding drift.
+  let fracVp : Rect := { x := 0, y := 0, w := 962, h := 800 } -- ceil(601 * 192 / 120) = 962
+  let exactLogical := some (pxToSub 601, pxToSub 500)
+  let (resolvedW, _) := resolvedLogicalSubSize 192 fracVp exactLogical
+  let (approxW, _) := resolvedLogicalSubSize 192 fracVp none
+  if !(resolvedW == pxToSub 601 && approxW != pxToSub 601) then return false
   let cleared := clearLiveTranscript pagedAfterOlder
-  if !(!cleared.historyHasMore && cleared.liveTurnIds.isEmpty) then return false
+  if !(!cleared.historyHasMore && cleared.liveTurnIds.isEmpty && cleared.unmatchedCanonicalTexts.isEmpty) then return false
   let stalePayload : HistoryBatch := { turns := [("id:6", "Turn 6"), ("id:7", "Turn 7")], hasMore := true, nextCursor := some 6 }
-  let staleMismatch := applyOlderHistoryBatch 120 vp pagedAfterOlder "m" stalePayload (some 10)
-  let staleAfterClear := applyOlderHistoryBatch 120 vp cleared "m" stalePayload (some 8)
+  let staleMismatch := applyOlderHistoryBatch 120 smallVp pagedAfterOlder "m" stalePayload (some 10)
+  let staleAfterClear := applyOlderHistoryBatch 120 smallVp cleared "m" stalePayload (some 8)
   if !(staleMismatch.2.isNone && staleMismatch.1.liveTurns == pagedAfterOlder.liveTurns &&
       staleAfterClear.2.isNone && staleAfterClear.1.liveTurns.isEmpty) then return false
+  -- Recovery merge preserves in-flight `historyLoading` and cursor while merging newer tail turns.
   let pagedWithLiveTail : DesktopState := { pagedAfterOlder with
-    liveTurns := pagedAfterOlder.liveTurns ++ ["Turn 12"]
+    liveTurns := pagedAfterOlder.liveTurns ++ ["Turn 16"]
     scroll := { pinned := false, topSub := pxToSub 140 }
     historyLoading := true }
-  let recoveredMerged := (applyHistoryBatch 120 vp pagedWithLiveTail "m" {
-    turns := [("id:10", "Turn 10"), ("id:11", "Turn 11"), ("id:12", "Turn 12"), ("id:13", "Turn 13")],
-    hasMore := true, nextCursor := some 10 }).1
-  if !(recoveredMerged.liveTurns == ["Turn 8", "Turn 9", "Turn 10", "Turn 11", "Turn 12", "Turn 13"] &&
+  let (recoveredMerged, _, recoveredReplaced) := applyHistoryBatchEx 120 smallVp pagedWithLiveTail "m" {
+    turns := [("id:15", "Turn 15"), ("id:16", "Turn 16"), ("id:17", "Turn 17")],
+    hasMore := true, nextCursor := some 10 }
+  if !(!recoveredReplaced &&
+      recoveredMerged.liveTurns.length == 10 &&
+      recoveredMerged.liveTurns.getLast? == some "Turn 17" &&
       recoveredMerged.historyHasMore && recoveredMerged.historyNextCursor == some 8 &&
-      recoveredMerged.scroll == { pinned := false, topSub := pxToSub 140 } && !recoveredMerged.historyLoading) then return false
-  let pagedToTurn1 := (applyOlderHistoryBatch 120 vp pagedAfterOlder "m" {
+      recoveredMerged.scroll == { pinned := false, topSub := pxToSub 140 } &&
+      recoveredMerged.historyLoading) then return false
+  let pagedToTurn1 := (applyOlderHistoryBatch 120 smallVp pagedAfterOlder "m" {
     turns := [("id:1", "Turn 1")], hasMore := false, nextCursor := none } (some 8)).1
-  let recoveredAtTurn1 := applyHistoryBatch 120 vp pagedToTurn1 "m" {
-    turns := [("id:10", "Turn 10"), ("id:11", "Turn 11")], hasMore := true, nextCursor := some 10 }
+  let recoveredAtTurn1 := applyHistoryBatch 120 smallVp pagedToTurn1 "m" {
+    turns := [("id:14", "Turn 14"), ("id:15", "Turn 15")], hasMore := true, nextCursor := some 10 }
   return recoveredAtTurn1.2.isNone && recoveredAtTurn1.1.liveTurns == pagedToTurn1.liveTurns &&
     !recoveredAtTurn1.1.historyHasMore && recoveredAtTurn1.1.historyNextCursor.isNone
 
@@ -722,6 +766,45 @@ private def runOlder403 (slot : IO.Ref (Option LiveSubscription)) (st : DesktopS
   unless next.liveTurns.isEmpty && (streamedText next).isEmpty && !next.historyHasMore do
     throw (IO.userError "older-page 403 did not revoke and clear transcript")
 
+private def runCanonicalSplit (slot : IO.Ref (Option LiveSubscription)) (st : DesktopState)
+    (a : MissionSummaryCard) : IO Unit := do
+  let st ← clickMission st a
+  let st ← awaitState slot st (fun s =>
+    s.liveTurns.length == 279 && streamedText s == "Turn 1050" &&
+    s.historyHasMore && s.historyNextCursor == some 771)
+  unless st.liveTurns.head? == some "Boundary reply" do
+    throw (IO.userError s!"expected unmatched canonical Boundary reply at head, got {st.liveTurns.head?}")
+  let stTop := { st with scroll := { pinned := false, topSub := pxToSub 64 } }
+  let yBefore ← anchorY stTop "Turn 1050" "Boundary reply"
+  let (stReq, _) := stepDesktopEvent 120 vp stTop (.activate loadOlderTurnsId)
+  let st1 ← awaitState slot stReq (fun s =>
+    !s.historyLoading && s.historyNextCursor == some 571)
+  -- seq=770 plain assistant_message ("Boundary reply") must be claimed by seq=771 canonical
+  -- rather than duplicated across the before_seq=771 boundary.
+  let copies := st1.liveTurns.filter (· == "Boundary reply")
+  unless copies.length == 1 && st1.liveTurns.length == 478 do
+    throw (IO.userError s!"canonical boundary split duplicated or dropped turn: copies={copies.length} len={st1.liveTurns.length}")
+  let yAfter ← anchorY st1 "Turn 1050" "Boundary reply"
+  unless yBefore == yAfter do
+    throw (IO.userError s!"canonical split caused layout jump: {yBefore} -> {yAfter}")
+
+private def runPagingSidebarExpand (slot : IO.Ref (Option LiveSubscription)) (st : DesktopState)
+    (a : MissionSummaryCard) : IO Unit := do
+  let st ← clickMission st a
+  let st ← awaitState slot st (fun s =>
+    s.liveTurns.length == 279 && streamedText s == "Turn 1050" &&
+    s.historyHasMore && s.historyNextCursor == some 771)
+  let stTop := { st with scroll := { pinned := false, topSub := pxToSub 64 } }
+  let (stReq, _) := stepDesktopEvent 120 vp stTop (.activate loadOlderTurnsId)
+  -- Trigger one readLiveFrame so the first olderFetch starts, then toggle sidebar project
+  -- expansion (forcing subscription recreation + a fresh recovery-merge HS) while loading.
+  let (stStarted, _) ← readLiveFrame slot 120 vp stReq
+  let toggled := { stStarted with expandedProjects := [] }
+  let st1 ← awaitState slot toggled (fun s =>
+    !s.historyLoading && s.liveTurns.length == 479 && s.historyNextCursor == some 571)
+  unless st1.liveTurns.head? == some "You: Turn 0571" && !st1.historyLoadError do
+    throw (IO.userError s!"sidebar expand aborted older-turn load: head={st1.liveTurns.head?} err={st1.historyLoadError}")
+
 private def runU6aLiveWrites (st0 : DesktopState) : IO Unit := do
   unless st0.hasLiveConnection && st0.screen == .controlEmpty && st0.missionCards.isEmpty do
     throw (IO.userError s!"expected empty connected New Agent screen, got screen={repr st0.screen} cards={st0.missionCards.length}")
@@ -1048,6 +1131,8 @@ def main (args : List String) : IO Unit := do
     if args == ["paging-degraded-recover"] then runPagingDegradedRecover slot st a; return
     if args == ["stale-older-race"] then runStaleOlderRace slot st a; return
     if args == ["older-403"] then runOlder403 slot st a; return
+    if args == ["canonical-split"] then runCanonicalSplit slot st a; return
+    if args == ["paging-sidebar-expand"] then runPagingSidebarExpand slot st a; return
     if args == ["cold-open"] then
       -- Cold open of a previously completed mission in the real Core persistence
       -- shape: user prompts and plain assistant_message turns, with the final turn
