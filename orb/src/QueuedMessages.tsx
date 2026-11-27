@@ -1,15 +1,27 @@
 import {For,Show,createMemo,createSignal} from 'solid-js';
 import { ErrorToast } from "./toast";
-import {canDiscardQueuedMessage,queuedLocalMessages,removeQueuedMessage,retryQueuedMessage,sendQueuedNow} from './localMessageQueue';
+import {canDiscardQueuedMessage,queuedLocalMessages,acceptedLocalMessages,removeQueuedMessage,retryQueuedMessage,sendQueuedNow} from './localMessageQueue';
 import * as Ic from './icons';
 import { skillPreview } from './skillSlash';
 /** Follow-ups waiting for the current turn, shown like Cursor's queue: one line per
  * message, hover actions, and the row being edited marked in place. */
 export function QueuedMessages(p:{mission:string;editing?:string;pending?:{id:string;text:string}[];onEdit?:(row:{id:string;text:string})=>void;onCancel?:(id:string)=>void;onCancelPending?:(id:string)=>void}){
- const storedRows=()=>queuedLocalMessages(p.mission).filter(row=>row.waiting&&row.state!=='accepted'&&row.state!=='dispatching'||!!row.error);
+ const allLocal=()=>queuedLocalMessages(p.mission);
+ const storedRows=()=>allLocal().filter(row=>row.waiting&&row.state!=='accepted'&&row.state!=='dispatching'||!!row.error);
  const pendingRows=()=> {
-  const known=new Set<string>(storedRows().map(r=>r.id));
-  return (p.pending??[]).filter(item=>!known.has(item.id));
+  const knownIds=new Set<string>([
+   ...allLocal().map(r=>r.id),
+   ...acceptedLocalMessages(p.mission).map(r=>r.id),
+  ]);
+  const storedTexts=new Set<string>(storedRows().map(r=>r.text.trim()).filter(Boolean));
+  const seenPendingTexts=new Set<string>();
+  return (p.pending??[]).filter(item=>{
+   if(knownIds.has(item.id))return false;
+   const norm=item.text.trim();
+   if(norm&&(storedTexts.has(norm)||seenPendingTexts.has(norm)))return false;
+   if(norm)seenPendingTexts.add(norm);
+   return true;
+  });
  };
  const totalCount=()=>storedRows().length+pendingRows().length;
  const rows=storedRows;
