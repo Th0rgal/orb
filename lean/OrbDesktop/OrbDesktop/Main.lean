@@ -429,14 +429,14 @@ def desktopReducer (rt : Runtime.RuntimeState DesktopState) :
           let some (_, r) := rt.hitRegions.find? (fun (entry : EntityId × Rect) => entry.1 == id) | return (st, none)
           let draft : Widgets.ComposerBuffer := { text := st.draftDirectory, cursorOffset := st.draftDirectory.length }
           let menu : MissionMenu := { mission := "", x := r.x, y := r.bottom, trigger := id, page := .draftDirectory, draft, browsePath := st.draftDirectory }
-          return ({ st with missionMenu := some menu }, some viewport)
+          return ({ st.clearAllPreedit with missionMenu := some menu }, some viewport)
         if id == 714 || (id == draftProjectPickerId && st.openMission.isNone) then
           let some (_, r) := rt.hitRegions.find? (fun (entry : EntityId × Rect) => entry.1 == id) | return (st, none)
-          return ({ st with missionMenu := some { mission := st.openMission.getD "", x := r.x, y := r.bottom, trigger := id, page := if id == draftProjectPickerId then .draftProject else .settings } }, some viewport)
+          return ({ st.clearAllPreedit with missionMenu := some { mission := st.openMission.getD "", x := r.x, y := r.bottom, trigger := id, page := if id == draftProjectPickerId then .draftProject else .settings } }, some viewport)
         if let some field := settingTrigger id then
           let some (_, r) := rt.hitRegions.find? (fun (entry : EntityId × Rect) => entry.1 == id) | return (st, none)
           let st := if field == .machine then { st with launchMachines := none, launchMachinesFailed := false } else st
-          return ({ st with missionMenu := some {
+          return ({ st.clearAllPreedit with missionMenu := some {
             mission := st.openMission.getD "", x := r.x, y := r.bottom, trigger := id,
             page := .picker field } }, some viewport)
     let menuTarget : Option (EntityId × Int × Int) := match ev with
@@ -460,7 +460,25 @@ def desktopReducer (rt : Runtime.RuntimeState DesktopState) :
         let targets := if group then
             st.multiRows.filterMap fun r => if r.startsWith "mission:" then some (r.drop 8).toString else none
           else [mid]
-        return ({ st with missionMenu := some { mission := mid, x, y, trigger := id, targets, mixed } }, some viewport)
+        return ({ st.clearAllPreedit with missionMenu := some { mission := mid, x, y, trigger := id, targets, mixed } }, some viewport)
+    if let .key key mods state := ev then
+      if state != .released && mods == 0 && (key == 0xff55 || key == 0xff56) &&
+          st.missionMenu.isNone && st.modal == .none &&
+          (st.screen == .missionTranscript || st.screen == .missionSplitDiff) then
+        if let some r := regions.find? (·.id == transcriptViewportId) then
+          let h := r.bounds.h.toNat
+          let content := r.limitY + h
+          let stepSub : Int := Int.ofNat (max (pxToSub 120) (h * 4 / 5))
+          let dy : Int := if key == 0xff55 then -stepSub else stepSub
+          let damage := some (roundRectOut scale r.bounds)
+          if st.liveData then
+            let some st' := stepTranscriptScroll st content h dy | return (st, none)
+            return (st', damage)
+          else
+            let current := if !st.scrolledManually then { pinned := false, topSub := 0 } else st.scroll.onLayout content h
+            let next := current.onUserScroll content h dy
+            if next == current && st.scrolledManually then return (st, none)
+            return ({ st with scroll := next, scrolledManually := true }, damage)
     if let .scrollTo regionId targetY := ev then
       if st.missionMenu.isNone && st.modal == .none then
         let some r := regions.find? (·.id == regionId) | return (st, none)
@@ -1215,7 +1233,8 @@ def main (args : List String) : IO UInt32 := do
               return (voiced, if updated.isSome || voiced.voiceAvailable != next.voiceAvailable ||
                 voiced.voicePhase != next.voicePhase then some vp else damage))
             (·.liveData) desktopFocusChange (some wakeFd) (·.writeRequest.isSome)
-            (fun rt => animations && (runningBadgeDamage rt).isSome) desktopFocusTraps
+            (fun rt => animations && (runningBadgeDamage rt).isSome) desktopFocusTraps desktopImeSessionKey
+            DesktopState.clearAllPreeditChecked
         finally
           discard (IO.wait probe)
           closeVoice voiceSlot

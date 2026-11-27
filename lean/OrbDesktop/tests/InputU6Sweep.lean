@@ -113,13 +113,13 @@ private def verifyNineScreenControls : IO Unit := do
   assertHitTargets "03_mission_transcript" (DesktopState.forScreen .missionTranscript)
     [sidebarToggleId, sidebarSearchId, sidebarBackId, sidebarForwardId,
      sidePanelDiffId, sidePanelFilesId, sidePanelChatId,
-     101, 105, 103, 1, 3, 2]
+     101, 102, 111, 112, 113, 114, 105, 103, 1, 3, 2, 720, 721, 722, 723, 724]
 
   -- Screen 04: missionSplitDiff
   assertHitTargets "04_mission_split_diff" (DesktopState.forScreen .missionSplitDiff)
     [sidebarToggleId, sidebarSearchId, sidebarBackId, sidebarForwardId,
      sidePanelDiffId, sidePanelFilesId, sidePanelChatId,
-     1, 3, 2, diffRefId, diffUnifiedId, diffSplitId, diffRefreshId, diffFileChipId]
+     1, 3, 2, 720, 721, 722, 723, 724, diffRefId, diffUnifiedId, diffSplitId, diffRefreshId, diffFileChipId]
 
   -- Screen 05: machinesFleet
   assertHitTargets "05_machines_fleet" (DesktopState.forScreen .machinesFleet)
@@ -634,6 +634,159 @@ private def verifyWaylandImeSerialGuard : IO Unit := do
   let expectedIme : Array Event := #[.imeBatch 0 0 "日本語" "" 0 0]
   unless reprStr evs4 == reprStr expectedIme && wl4.ime.commit.isEmpty do
     throw <| IO.userError s!"current zwp_text_input_v3.done(3) did not emit expected imeBatch: {reprStr evs4}"
+
+  -- Logical IME session keys must change across same-EntityId (1) composer switches:
+  -- New Agent -> Create/Mission -> Ctrl+N -> Rename -> close Rename, and Send reset.
+  let baseDraft : DesktopState := {
+    DesktopState.forScreen .controlEmpty true 120 with
+    liveData := true, connectionBinding := "u6", screen := .controlEmpty, openMission := none
+  }
+  let kDraft := desktopImeSessionKey baseDraft
+  let card1 : MissionSummaryCard := { (default : MissionSummaryCard) with widgetId := 2001, missionId := "m-u6", title := "Indigo" }
+  let afterCreate := resetSelection { baseDraft with screen := .missionTranscript } (some card1)
+  let kMission := desktopImeSessionKey afterCreate
+  unless kMission != kDraft do
+    throw <| IO.userError "desktopImeSessionKey did not change across New Agent -> Mission Create"
+  let afterSend := { afterCreate with imeResetGen := afterCreate.imeResetGen + 1 }
+  unless desktopImeSessionKey afterSend != kMission do
+    throw <| IO.userError "desktopImeSessionKey did not change after Send reset"
+  let afterCtrlN := (stepDesktopEvent 120 vpDev afterCreate (.key 0x6e 2 .pressed)).1
+  unless desktopImeSessionKey afterCtrlN != kMission do
+    throw <| IO.userError "desktopImeSessionKey did not change on Ctrl+N"
+  let withRename : DesktopState := {
+    afterCreate with
+    missionMenu := some { mission := "m-u6", x := 100, y := 100, trigger := 1, page := .rename }
+  }
+  let kRename := desktopImeSessionKey withRename
+  unless kRename != kMission do
+    throw <| IO.userError "desktopImeSessionKey did not change when opening inline Rename (id=1)"
+  let afterEscRename := (stepDesktopEvent 120 vpDev withRename (.key 0xff1b 0 .pressed)).1
+  unless desktopImeSessionKey afterEscRename != kRename do
+    throw <| IO.userError "desktopImeSessionKey did not change when closing inline Rename back to trigger 1"
+
+  -- Mid-batch focus switch (Ctrl+K opening Search 701 + trailing .imeBatch in same pumpEvents batch)
+  -- must drop the trailing IME commit instead of leaking it into Search query.
+  let rt0 : Runtime.RuntimeState DesktopState := {
+    app := baseDraft
+    focus := { owner := some 1 }
+    lastImeOwner := some 1
+    lastImeContext := desktopImeSessionKey baseDraft
+  }
+  let rtBatch := Runtime.applyEventBatch rt0
+    #[.key 0x6b 2 .pressed, .imeBatch 0 0 "LEAK_TO_SEARCH" "" 0 0]
+    (fun _ st ev => stepDesktopEvent 120 vpDev st ev) desktopFocusChange desktopFocusTraps desktopImeSessionKey
+    DesktopState.clearAllPreeditChecked
+  match rtBatch.app.modal with
+  | .searchPalette spec =>
+    unless spec.query.isEmpty do
+      throw <| IO.userError s!"mid-batch IME leaked into Search palette after Ctrl+K: {spec.query}"
+  | _ => throw <| IO.userError "Ctrl+K did not open searchPalette in applyEventBatch test"
+
+  -- Poll-frame logical IME context switch (e.g. Create/Send completing before syncTextFocus)
+  -- must also drop an in-flight .imeBatch sitting in the socket for that tick.
+  let rtPostCreate : Runtime.RuntimeState DesktopState := {
+    app := afterCreate
+    focus := { owner := some 1 }
+    lastImeOwner := some 1
+    lastImeContext := kDraft
+  }
+  let rtPolled := Runtime.applyEventBatch rtPostCreate
+    #[.imeBatch 0 0 "PRE_CREATE_LEAK" "" 0 0]
+    (fun _ st ev => stepDesktopEvent 120 vpDev st ev) desktopFocusChange desktopFocusTraps desktopImeSessionKey
+    DesktopState.clearAllPreeditChecked
+  unless rtPolled.app.composer.text.isEmpty do
+    throw <| IO.userError s!"in-flight IME leaked across pollFrame context switch: {rtPolled.app.composer.text}"
+
+  -- Stale off-screen focus owner must not synthesize Return/Space activation when absent from focusableOrder.
+  let rtOffscreen : Runtime.RuntimeState DesktopState := {
+    app := DesktopState.forScreen .machinesFleet
+    focus := { owner := some 105 }
+    focusableOrder := [fleetLocalId, fleetCoreId]
+  }
+  unless (match rtOffscreen.effectiveEvent (.key 0xff0d 0 .pressed) with | .key 0xff0d 0 .pressed => true | _ => false) do
+    throw <| IO.userError "off-screen focus owner must not synthesize .activate on Return"
+  let afterOffRet := rtOffscreen.stepEvent (stepDesktopEvent 120 vpDev) (.key 0xff0d 0 .pressed)
+  unless afterOffRet.app.screen == .machinesFleet do
+    throw <| IO.userError "off-screen focus Return unexpectedly navigated away from machinesFleet"
+
+  -- Draft directory Return must not commit while IME preedit is active or path is non-absolute.
+  let dirStPreedit : DesktopState := {
+    baseDraft with
+    missionMenu := some {
+      mission := "", x := 400, y := 400, trigger := draftDirectoryPickerId, page := .draftDirectory,
+      draft := { text := "/tmp", cursorOffset := 4, imePreeditText := "にほん" }
+    }
+  }
+  let (dirAfterPreedit, _) := stepDesktopEvent 120 vpDev dirStPreedit (.composerReturn false)
+  unless dirAfterPreedit.missionMenu.isSome && dirAfterPreedit.draftDirectory.isEmpty do
+    throw <| IO.userError "draftDirectory Return committed while IME preedit was active"
+  let dirStRelative : DesktopState := {
+    baseDraft with
+    missionMenu := some {
+      mission := "", x := 400, y := 400, trigger := draftDirectoryPickerId, page := .draftDirectory,
+      draft := { text := "relative/path", cursorOffset := 13 }
+    }
+  }
+  let (dirAfterRel, _) := stepDesktopEvent 120 vpDev dirStRelative (.composerReturn false)
+  unless dirAfterRel.missionMenu.isSome && dirAfterRel.draftDirectory.isEmpty do
+    throw <| IO.userError "draftDirectory Return accepted a non-absolute path"
+  let dirStValid : DesktopState := {
+    baseDraft with
+    missionMenu := some {
+      mission := "", x := 400, y := 400, trigger := draftDirectoryPickerId, page := .draftDirectory,
+      draft := { text := "/tmp/u6", cursorOffset := 7 }
+    }
+  }
+  let (dirAfterValid, _) := stepDesktopEvent 120 vpDev dirStValid (.composerReturn false)
+  unless dirAfterValid.missionMenu.isNone && dirAfterValid.draftDirectory == "/tmp/u6" do
+    throw <| IO.userError "draftDirectory Return failed to accept valid absolute path"
+
+  -- Search modal Return must not open a result while IME preedit is active, and filter switches reset selectedIdx.
+  let searchSt0 := DesktopState.forScreen .searchDialog
+  let searchPre := (stepDesktopEvent 120 vpDev searchSt0 (.preedit "検" 0 1)).1
+  let searchPreRet := (stepDesktopEvent 120 vpDev searchPre (.composerReturn false)).1
+  unless (searchPreRet.modal matches .searchPalette _) do
+    throw <| IO.userError "Search modal Return opened result while IME preedit was active"
+  let searchDown2 := (stepDesktopEvent 120 vpDev (stepDesktopEvent 120 vpDev searchSt0 (.key 0xff54 0 .pressed)).1 (.key 0xff54 0 .pressed)).1
+  let searchAfterTab := (stepDesktopEvent 120 vpDev searchDown2 (.activate searchTabToolsId)).1
+  match searchAfterTab.modal with
+  | .searchPalette spec =>
+    unless spec.selectedIdx == 0 && searchAfterTab.searchFilterTab == "Tools" do
+      throw <| IO.userError s!"Search filter tab change did not reset selectedIdx to 0: {repr spec.selectedIdx}"
+  | _ => throw <| IO.userError "Search filter tab closed modal unexpectedly"
+
+  -- Every previously-static control across screens 01..06 mutates state AND changes the rendered widget tree
+  -- (and non-text color/border controls also change raw SceneOutput.prims without font shaping).
+  let assertVisualChange (name : String) (st : DesktopState) (wid : WidgetId) (checkPrims : Bool := false) : IO Unit := do
+    let treeBefore := buildDesktopScreen st vpW vpH
+      { headerTitleRuns := [Widgets.overlaySynthRun (chromeTitleStyle st.theme) st.headerTitle] }
+    let (_, scBefore) := renderScreenScene st 120
+    let (stAfter, dmg) := stepDesktopEvent 120 vpDev st (.activate wid)
+    unless dmg.isSome do
+      throw <| IO.userError s!"{name} (widget {wid}) produced no damage"
+    let treeAfter := buildDesktopScreen stAfter vpW vpH
+      { headerTitleRuns := [Widgets.overlaySynthRun (chromeTitleStyle stAfter.theme) stAfter.headerTitle] }
+    unless treeAfter != treeBefore do
+      throw <| IO.userError s!"{name} (widget {wid}) did not change rendered widget tree"
+    if checkPrims then
+      let (_, scAfter) := renderScreenScene stAfter 120
+      unless scAfter.prims != scBefore.prims do
+        throw <| IO.userError s!"{name} (widget {wid}) did not change rendered scene primitives"
+  let c0 := DesktopState.forScreen .controlEmpty
+  for (lbl, wid, chkP) in [("draftProject", draftProjectPickerId, false), ("draftMachine", 720, false), ("draftFolder", draftDirectoryPickerId, false), ("attach", 3, false), ("draftModel", 722, false)] do
+    assertVisualChange s!"01_{lbl}" c0 wid chkP
+  assertVisualChange "04_diffFileChip" (DesktopState.forScreen .missionSplitDiff) diffFileChipId true
+  assertVisualChange "05_agentSoftware" (DesktopState.forScreen .machinesFleet) fleetSoftwareId true
+  let s06 := DesktopState.forScreen .settingsGeneral
+  for (lbl, wid) in [("models", 111), ("agents", 112), ("security", 113), ("notifs", 114), ("disconnect", settingsDisconnectId), ("connectGh", settingsConnectGhId), ("refreshCloud", settingsRefreshCloudId)] do
+    assertVisualChange s!"06_{lbl}" s06 wid false
+  let s06Back := (stepDesktopEvent 120 vpDev s06 (.activate 101)).1
+  unless s06Back.screen == .controlEmpty do
+    throw <| IO.userError "06_settings_general Back (101) did not leave Settings"
+  -- Verify under-composer controls 720..724 on 03_mission_transcript & 04_mission_split_diff visibly update labels.
+  let tx0 := DesktopState.forScreen .missionTranscript
+  for (lbl, wid) in [("machine", 720), ("backend", 721), ("model", 722), ("effort", 723), ("perm", 724)] do
+    assertVisualChange s!"03_under_{lbl}" tx0 wid false
 
 def main : IO UInt32 := do
   verifyOrbScrollEquivalence

@@ -1309,11 +1309,15 @@ class WaylandU6SessionTest(unittest.TestCase):
                     _wait_until("mission /current-bubble settled", lambda: count_req("GET", f"/api/control/missions/{mid}/current-bubble") >= 2, timeout=6.0)
                     tx_bottom = comp.wait_region_change(240, 45, 1450, 810, tx_before, timeout=5.0)
 
-                    # 2. Scroll transcript upward with `Orb.Scroll` policy, verify unpinned anchor stays
-                    #    put while new assistant text streams in, then scroll back down to re-pin.
+                    # 2. Scroll transcript upward with `Orb.Scroll` policy (wheel + PageUp/PageDown),
+                    #    verify unpinned anchor stays put while new assistant text streams in, then re-pin.
                     comp.pointer_scroll(740, 400, -1200)
                     tx_scrolled_up = comp.wait_region_change(240, 45, 1450, 810, tx_bottom, timeout=5.0)
                     self.assertNotEqual(tx_scrolled_up, tx_bottom, "upward wheel scroll must update transcript pixels")
+                    # Keyboard PageUp scrolls further upward through the shared Orb.Scroll policy.
+                    comp.key_tap("pgup")
+                    tx_pgup = comp.wait_region_change(240, 45, 1450, 810, tx_scrolled_up, timeout=5.0)
+                    self.assertNotEqual(tx_pgup, tx_scrolled_up, "PageUp must scroll transcript via Orb.Scroll")
 
                     # Append a streamed delta to the active assistant turn and wait for the next /current-bubble poll.
                     polls_before = count_req("GET", f"/api/control/missions/{mid}/current-bubble")
@@ -1327,30 +1331,50 @@ class WaylandU6SessionTest(unittest.TestCase):
                     # Unpinned reader anchor must keep the visible transcript viewport pixels unchanged!
                     self.assertEqual(
                         comp.region_hash(240, 45, 1450, 810),
-                        tx_scrolled_up,
+                        tx_pgup,
                         "Orb.Scroll unpinned viewport must remain stable when new assistant lines arrive",
                     )
-                    # Scroll back down to bottom to re-pin and reveal the newly appended delta.
+                    # Scroll back down via PageDown + wheel to re-pin and reveal the newly appended delta.
+                    comp.key_tap("pgdn")
+                    tx_pgdn = comp.wait_region_change(240, 45, 1450, 810, tx_pgup, timeout=5.0)
                     comp.pointer_scroll(740, 400, 3600)
-                    tx_repinned = comp.wait_region_change(240, 45, 1450, 810, tx_scrolled_up, timeout=5.0)
-                    self.assertNotEqual(tx_repinned, tx_scrolled_up, "scrolling back to bottom must reveal new streamed lines")
+                    tx_repinned = comp.wait_region_change(240, 45, 1450, 810, tx_pgdn, timeout=5.0)
+                    self.assertNotEqual(tx_repinned, tx_pgup, "scrolling back to bottom must reveal new streamed lines")
 
-                    # 3. Exercise Side Panels (header Diff, Files, Side-chat, Close, Escape-release guard, and Left Sidebar Ctrl+B).
-                    frame_no_panel = comp.last_frame_hash
+                    # 3. Exercise Side Panels (header Diff + every Diff toolbar/chip control, Files, Side-chat,
+                    #    Close button, Escape-release guard, and Left Sidebar Ctrl+B).
+                    right_pane_no_panel = comp.region_hash(995, 40, 1465, 810)
                     comp.pointer_click(1383, 17)  # Open Diff side panel
-                    frame_diff_panel = comp.wait_frame_change(frame_no_panel, timeout=5.0)
-                    self.assertNotEqual(frame_diff_panel, frame_no_panel, "clicking Diff header icon must open side panel")
+                    right_pane_diff = comp.wait_region_change(995, 40, 1465, 810, right_pane_no_panel, timeout=5.0)
+                    self.assertNotEqual(right_pane_diff, right_pane_no_panel, "clicking Diff header icon must open side panel")
 
-                    # Open Search (Ctrl+K) while side panel is open, verify IME in Search + interior click does not close,
-                    # then press Escape and verify Escape key-release does NOT bleed through to close the side panel!
+                    # Exercise every Diff side-panel control in live mode (Unified, Split, Ref, Refresh, File chip).
+                    comp.pointer_click(1196, 57)  # diffUnifiedId
+                    right_pane_uni = comp.wait_region_change(995, 40, 1465, 810, right_pane_diff, timeout=5.0)
+                    comp.pointer_click(1245, 57)  # diffSplitId
+                    right_pane_split = comp.wait_region_change(995, 40, 1465, 810, right_pane_uni, timeout=5.0)
+                    comp.pointer_click(1081, 57)  # diffRefId
+                    right_pane_ref = comp.wait_region_change(995, 40, 1465, 810, right_pane_split, timeout=5.0)
+                    comp.pointer_click(1311, 58)  # diffRefreshId
+                    right_pane_refresh = comp.wait_region_change(995, 40, 1465, 810, right_pane_ref, timeout=5.0)
+                    comp.pointer_click(1116, 98)  # diffFileChipId
+                    right_pane_chip = comp.wait_region_change(995, 40, 1465, 810, right_pane_refresh, timeout=5.0)
+
+                    # Open Search (Ctrl+K) while side panel is open, verify IME in Search + Return preedit guard
+                    # + interior click does not close, then press Escape and verify Diff side panel stays open!
+                    search_card_closed = comp.region_hash(380, 60, 1090, 560)
                     comp.key_tap("k", MOD_CTRL)
-                    frame_search_open = comp.wait_frame_change(frame_diff_panel, timeout=5.0)
+                    search_card_open = comp.wait_region_change(380, 60, 1090, 560, search_card_closed, timeout=5.0)
                     comp.wait_text_input(True, timeout=5.0)
+                    search_input_pre = comp.region_hash(330, 80, 1090, 115)
                     comp.ime_edit(commit="Hello", preedit="検")
-                    h_preedit = comp.wait_frame_change(frame_search_open, timeout=5.0)
+                    h_preedit = comp.wait_region_change(330, 80, 1090, 115, search_input_pre, timeout=5.0)
+                    # Return while Search IME preedit is active must NOT dismiss Search.
+                    comp.key_tap("return")
+                    time.sleep(0.12)
+                    self.assertEqual(comp.region_hash(330, 80, 1090, 115), h_preedit, "Return during Search preedit must stay open")
                     comp.ime_edit(commit="", preedit="")
-                    # Wait for the preedit-clear frame to settle before verifying interior click stability.
-                    h_in_search = comp.wait_frame_change(h_preedit, timeout=5.0)
+                    comp.wait_region_change(330, 80, 1090, 115, h_preedit, timeout=5.0)
                     search_card_before = comp.region_hash(380, 60, 1090, 560)
                     # Clicking inside the Search modal preview pane (900, 300) must NOT dismiss the modal.
                     comp.pointer_click(900, 300)
@@ -1362,29 +1386,30 @@ class WaylandU6SessionTest(unittest.TestCase):
                     )
                     # Pressing Escape closes Search while leaving Diff side panel intact.
                     comp.key_tap("esc")
-                    frame_after_search_esc = comp.wait_frame_change(h_in_search, timeout=5.0)
-                    self.assertNotEqual(
-                        comp.region_hash(1000, 50, 1450, 600),
-                        comp.region_hash(1000, 50, 1450, 600) if frame_after_search_esc == frame_no_panel else "",
+                    comp.wait_region_change(380, 60, 1090, 560, search_card_before, timeout=5.0)
+                    self.assertEqual(
+                        comp.region_hash(995, 40, 1465, 810),
+                        right_pane_chip,
+                        "Escape closing Search must leave Diff side panel intact",
                     )
 
                     comp.pointer_click(1415, 17)  # Switch to Files side panel
-                    frame_files_panel = comp.wait_frame_change(frame_after_search_esc, timeout=5.0)
-                    self.assertNotEqual(frame_files_panel, frame_after_search_esc, "switching to Files panel must repaint")
+                    right_pane_files = comp.wait_region_change(995, 40, 1465, 810, right_pane_chip, timeout=5.0)
+                    self.assertNotEqual(right_pane_files, right_pane_chip, "switching to Files panel must repaint")
 
                     comp.pointer_click(1447, 17)  # Switch to Side-chat panel
-                    frame_chat_panel = comp.wait_frame_change(frame_files_panel, timeout=5.0)
+                    right_pane_chat = comp.wait_region_change(995, 40, 1465, 810, right_pane_files, timeout=5.0)
 
-                    comp.pointer_click(1447, 17)  # Toggle Side-chat closed
-                    comp.wait_frame_change(frame_chat_panel, timeout=5.0)
+                    comp.pointer_click(1446, 61)  # Click sidePanelCloseId close button
+                    comp.wait_region_change(995, 40, 1465, 810, right_pane_chat, timeout=5.0)
 
                     # Left sidebar hide/show via Ctrl+B.
-                    h_open = comp.last_frame_hash
+                    sb_open = comp.region_hash(0, 0, 220, 400)
                     comp.key_tap("b", MOD_CTRL)
-                    h_hidden = comp.wait_frame_change(h_open, timeout=5.0)
-                    self.assertNotEqual(h_hidden, h_open, "Ctrl+B must hide sidebar")
+                    sb_hidden = comp.wait_region_change(0, 0, 220, 400, sb_open, timeout=5.0)
+                    self.assertNotEqual(sb_hidden, sb_open, "Ctrl+B must hide sidebar")
                     comp.key_tap("b", MOD_CTRL)
-                    comp.wait_frame_change(h_hidden, timeout=5.0)
+                    comp.wait_region_change(0, 0, 220, 400, sb_hidden, timeout=5.0)
 
                     # 4. Stop the running mission via pointer click on Stop button (widget 2 at x=1197, y=850).
                     polls_pre_stop = count_req("GET", f"/api/control/missions/{mid}/current-bubble")
@@ -1520,36 +1545,55 @@ class WaylandU6SessionTest(unittest.TestCase):
                     routes_alt_pending = comp.wait_region_change(525, 175, 1165, 390, routes_direct, timeout=5.0)
                     _wait_until("PUT /alternative-routers false", lambda: core_state.alt_routers["acct-ag-1"]["allowed"] is False)
                     _wait_until("refresh after PUT /alternative-routers", lambda: count_req("GET", "/api/ai/providers/acct-ag-1/alternative-routers") > alt_count_3)
-                    comp.wait_region_change(525, 175, 1165, 390, routes_alt_pending, timeout=5.0)
-                    h_alt = comp.last_frame_hash
+                    routes_alt_off = comp.wait_region_change(525, 175, 1165, 390, routes_alt_pending, timeout=5.0)
 
-                    # Escape returns to Inference list.
+                    # Select AirVPN · DE (row 3, center y=303) to confirm multi-country VPN switching.
+                    alt_count_4 = count_req("GET", "/api/ai/providers/acct-ag-1/alternative-routers")
+                    comp.pointer_click(845, 303)
+                    routes_de_pending = comp.wait_region_change(525, 175, 1165, 390, routes_alt_off, timeout=5.0)
+                    _wait_until("PUT /vpn DE", lambda: core_state.vpn_state["acct-ag-1"]["country"] == "DE")
+                    _wait_until("refresh after PUT /vpn DE", lambda: count_req("GET", "/api/ai/providers/acct-ag-1/alternative-routers") > alt_count_4)
+                    routes_de = comp.wait_region_change(525, 175, 1165, 390, routes_de_pending, timeout=5.0)
+
+                    # Toggle Alternative routers back ON via keyboard Return (focus already on row or click ‹ Inference back).
+                    # Click ‹ Inference back button (providersBackId at y=35..77 -> center y=56), then re-open & Escape.
+                    hdr_inf_pre = comp.region_hash(525, 35, 1165, 130)
+                    comp.pointer_click(700, 56)
+                    hdr_inf_list = comp.wait_region_change(525, 35, 1165, 130, hdr_inf_pre, timeout=5.0)
+                    # Re-open AccountRoutePage and close via Escape.
+                    comp.pointer_click(1123, 65)
+                    hdr_inf_reopen = comp.wait_region_change(525, 35, 1165, 130, hdr_inf_list, timeout=5.0)
                     comp.key_tap("esc")
-                    h_back_inf = comp.wait_frame_change(h_alt, timeout=5.0)
+                    comp.wait_region_change(525, 35, 1165, 130, hdr_inf_reopen, timeout=5.0)
 
-                    # 9. Exercise Machines (`Ctrl+3`), Resources (`Ctrl+6`), Cloud (`Ctrl+2`), Inbox (`Ctrl+I`), Settings (`Ctrl+,`).
+                    # 9. Exercise Machines (`Ctrl+3`), Resources (`Ctrl+6` + range filter), Cloud (`Ctrl+2`), Inbox (`Ctrl+I`), Settings (`Ctrl+,`).
+                    hdr_pre_m = comp.region_hash(225, 0, 500, 35)
                     comp.key_tap("3", MOD_CTRL)
-                    h_machines = comp.wait_frame_change(h_back_inf, timeout=5.0)
+                    hdr_machines = comp.wait_region_change(225, 0, 500, 35, hdr_pre_m, timeout=5.0)
                     # Click a machine row in live Machines fleet.
                     comp.pointer_click(845, 65)
 
                     comp.key_tap("6", MOD_CTRL)
                     _wait_until("GET /api/resources/overview?range=6h", lambda: count_req("GET", "/api/resources/overview?range=6h") >= 1)
-                    h_res = comp.wait_frame_change(h_machines, timeout=5.0)
+                    hdr_res = comp.wait_region_change(225, 0, 500, 35, hdr_machines, timeout=5.0)
+                    # Click `30m` range button (id 955, leftmost of 7 slots in 640px centered toolbar at x=525..616, y=35..67).
+                    comp.pointer_click(570, 51)
+                    _wait_until("GET /api/resources/overview?range=30m", lambda: count_req("GET", "/api/resources/overview?range=30m") >= 1)
 
                     comp.key_tap("2", MOD_CTRL)
                     _wait_until("GET /api/cloud/accounts", lambda: count_req("GET", "/api/cloud/accounts") >= 1)
-                    h_cloud = comp.wait_frame_change(h_res, timeout=5.0)
+                    hdr_cloud = comp.wait_region_change(225, 0, 500, 35, hdr_res, timeout=5.0)
 
                     comp.key_tap("i", MOD_CTRL)
-                    h_inbox = comp.wait_frame_change(h_cloud, timeout=5.0)
+                    hdr_inbox = comp.wait_region_change(225, 0, 500, 35, hdr_cloud, timeout=5.0)
 
                     comp.key_tap(",", MOD_CTRL)
-                    h_dark = comp.wait_frame_change(h_inbox, timeout=5.0)
+                    comp.wait_region_change(225, 0, 500, 35, hdr_inbox, timeout=5.0)
                     # Toggle theme in live Settings (second button below Account/Connected/endpoint/@user/Manage account, y=219..259).
+                    canvas_dark = comp.region_hash(700, 500, 900, 700)
                     comp.pointer_click(350, 239)
-                    h_light = comp.wait_frame_change(h_dark, timeout=5.0)
-                    self.assertNotEqual(h_light, h_dark, "clicking Theme toggle in Settings must switch theme")
+                    canvas_light = comp.wait_region_change(700, 500, 900, 700, canvas_dark, timeout=5.0)
+                    self.assertNotEqual(canvas_light, canvas_dark, "clicking Theme toggle in Settings must switch theme")
 
                     # Verify cursor shapes were emitted for pointer hover/text transitions.
                     self.assertTrue(len(comp.cursor_shapes) >= 1)
@@ -1559,69 +1603,169 @@ class WaylandU6SessionTest(unittest.TestCase):
                 server.shutdown()
 
     def test_all_nine_screens_wayland_input_sweep(self) -> None:
-        """Launch each of the 9 canonical screens under Wayland and exercise its interactive controls."""
+        """Launch each of the 9 canonical screens under Wayland and exercise EVERY interactive control."""
         # For each screen: (screen_id, height, steps). Every step asserts real framebuffer pixel change (`wait_frame_change`).
         screens = [
             ("01_control_empty", 923, [
-                ("click composer", lambda c: c.pointer_click(845, 435), True),
-                ("type text", lambda c: c.type_ascii("hello"), True),
+                ("click project picker (738)", lambda c: c.pointer_click(575, 390), True),
+                ("click machine picker (720)", lambda c: c.pointer_click(696, 390), True),
+                ("click folder picker (739)", lambda c: c.pointer_click(817, 390), True),
+                ("click attach plus (3)", lambda c: c.pointer_click(566, 489), True),
+                ("click model picker (722)", lambda c: c.pointer_click(845, 489), True),
+                ("click composer (1)", lambda c: c.pointer_click(845, 447), True),
+                ("type text", lambda c: c.type_ascii("hellox"), True),
+                ("backspace edit", lambda c: c.key_tap("backspace"), True),
                 ("ime preedit visible", lambda c: c.ime_edit(preedit="未確定"), True),
                 ("ime commit", lambda c: c.ime_edit(commit="世界", preedit=""), True),
-                ("click project picker", lambda c: c.pointer_click(575, 390), True),
-                ("click send", lambda c: c.pointer_click(1124, 488), True),
+                ("click send (2)", lambda c: c.pointer_click(1124, 489), True),
+                ("click sidebar toggle (117)", lambda c: c.pointer_click(19, 17), True),
+                ("restore sidebar via header toggle (117)", lambda c: c.pointer_click(27, 17), True),
+                ("click sidebar Search (351)", lambda c: c.pointer_click(45, 17), True),
+                ("close Search via Escape", lambda c: c.key_tap("esc"), True),
+                ("click sidebar Machines (112)", lambda c: c.pointer_click(109, 143), True),
+                ("click sidebar Back (352)", lambda c: c.pointer_click(173, 17), True),
+                ("click sidebar Forward (353)", lambda c: c.pointer_click(200, 17), True),
+                ("click sidebar Inference (113)", lambda c: c.pointer_click(109, 174), True),
+                ("click sidebar Resources (114)", lambda c: c.pointer_click(109, 205), True),
+                ("click sidebar Settings (103)", lambda c: c.pointer_click(109, 901), True),
+                ("click sidebar Back from Settings (101)", lambda c: c.pointer_click(109, 54), True),
             ]),
             ("02_control_populated", 923, [
                 ("tab focus", lambda c: c.key_tap("tab"), True),
                 ("shift-tab focus", lambda c: c.key_tap("tab", MOD_SHIFT), True),
                 ("ctrl+b sidebar toggle", lambda c: c.key_tap("b", MOD_CTRL), True),
                 ("ctrl+b sidebar restore", lambda c: c.key_tap("b", MOD_CTRL), True),
+                ("click sidebar project row (130)", lambda c: c.pointer_click(109, 271), True),
+                ("click project picker (738)", lambda c: c.pointer_click(575, 390), True),
+                ("click machine picker (720)", lambda c: c.pointer_click(696, 390), True),
+                ("click folder picker (739)", lambda c: c.pointer_click(817, 390), True),
+                ("click attach plus (3)", lambda c: c.pointer_click(566, 489), True),
+                ("click model picker (722)", lambda c: c.pointer_click(845, 489), True),
+                ("click composer (1)", lambda c: c.pointer_click(845, 447), True),
+                ("type text", lambda c: c.type_ascii("populated "), True),
+                ("ime commit", lambda c: c.ime_edit(commit="確認", preedit=""), True),
+                ("click send (2)", lambda c: c.pointer_click(1124, 489), True),
             ]),
             ("03_mission_transcript", 600, [
-                ("scroll transcript down (overflow > 0)", lambda c: c.pointer_scroll(740, 280, 600), True),
-                ("click composer", lambda c: c.pointer_click(700, 527), True),
+                ("scroll transcript down (Orb.Scroll)", lambda c: c.pointer_scroll(740, 280, 600), True),
+                ("scroll transcript up (Orb.Scroll)", lambda c: c.pointer_scroll(740, 280, -300), True),
+                ("PageDown keyboard scroll", lambda c: c.key_tap("pgdn"), True),
+                ("PageUp keyboard scroll", lambda c: c.key_tap("pgup"), True),
+                ("click under-row machine (720)", lambda c: c.pointer_click(556, 565), True),
+                ("click under-row backend (721)", lambda c: c.pointer_click(668, 565), True),
+                ("click under-row model (722)", lambda c: c.pointer_click(743, 565), True),
+                ("click under-row effort (723)", lambda c: c.pointer_click(805, 565), True),
+                ("click under-row permission (724)", lambda c: c.pointer_click(886, 565), True),
+                ("click attach plus (3)", lambda c: c.pointer_click(495, 527), True),
+                ("click Stop running turn (2)", lambda c: c.pointer_click(1197, 527), True),
+                ("click composer (1)", lambda c: c.pointer_click(700, 527), True),
                 ("type and ime", lambda c: (c.type_ascii("hi "), c.ime_edit(commit="テスト")), True),
-                ("open diff side panel", lambda c: c.pointer_click(1383, 17), True),
+                ("click Send message (2)", lambda c: c.pointer_click(1197, 527), True),
+                ("open Files side panel (355)", lambda c: c.pointer_click(1413, 17), True),
+                ("switch to Side-chat panel (356)", lambda c: c.pointer_click(1441, 17), True),
+                ("close side panel via Close button (357)", lambda c: c.pointer_click(1446, 61), True),
+                ("open Diff side panel (354)", lambda c: c.pointer_click(1365, 17), True),
             ]),
             ("04_mission_split_diff", 600, [
-                ("scroll left transcript (overflow > 0)", lambda c: c.pointer_scroll(500, 280, 600), True),
-                ("switch diff to Unified", lambda c: c.pointer_click(1115, 57), True),
-                ("switch diff to Split", lambda c: c.pointer_click(1165, 57), True),
-                ("cycle diff ref", lambda c: c.pointer_click(995, 57), True),
-                ("click diff Refresh", lambda c: c.pointer_click(1225, 57), True),
+                ("scroll left transcript (Orb.Scroll)", lambda c: c.pointer_scroll(500, 280, 600), True),
+                ("PageUp left transcript", lambda c: c.key_tap("pgup"), True),
+                ("switch diff to Unified (402)", lambda c: c.pointer_click(1114, 57), True),
+                ("switch diff to Split (403)", lambda c: c.pointer_click(1163, 57), True),
+                ("cycle diff ref (401)", lambda c: c.pointer_click(999, 57), True),
+                ("click diff Refresh (404)", lambda c: c.pointer_click(1229, 58), True),
+                ("click diff file chip (405)", lambda c: c.pointer_click(1034, 98), True),
+                ("click under-row machine (720)", lambda c: c.pointer_click(339, 565), True),
+                ("click under-row backend (721)", lambda c: c.pointer_click(451, 565), True),
+                ("click under-row model (722)", lambda c: c.pointer_click(526, 565), True),
+                ("click under-row effort (723)", lambda c: c.pointer_click(588, 565), True),
+                ("click under-row permission (724)", lambda c: c.pointer_click(669, 565), True),
+                ("click attach plus (3)", lambda c: c.pointer_click(278, 527), True),
+                ("click Stop (2)", lambda c: c.pointer_click(852, 527), True),
+                ("click composer (1)", lambda c: c.pointer_click(564, 527), True),
+                ("type and ime in split diff", lambda c: (c.type_ascii("diff "), c.ime_edit(commit="確認")), True),
+                ("click Send (2)", lambda c: c.pointer_click(852, 527), True),
+                ("switch to Files panel (355)", lambda c: c.pointer_click(1413, 17), True),
+                ("switch to Side-chat panel (356)", lambda c: c.pointer_click(1441, 17), True),
+                ("toggle back to Diff panel (354)", lambda c: c.pointer_click(1365, 17), True),
+                ("Escape closes split diff panel", lambda c: c.key_tap("esc"), True),
             ]),
             ("05_machines_fleet", 923, [
-                ("click local machine", lambda c: c.pointer_click(845, 193), True),
-                ("click remote machine", lambda c: c.pointer_click(845, 304), True),
-                ("click Copy key", lambda c: c.pointer_click(1123, 678), True),
+                ("click local machine (501)", lambda c: c.pointer_click(845, 193), True),
+                ("click Core machine (502)", lambda c: c.pointer_click(845, 304), True),
+                ("click Primary machine (503)", lambda c: c.pointer_click(845, 365), True),
+                ("click Large-A VM (504)", lambda c: c.pointer_click(845, 460), True),
+                ("click Default-B VM (505)", lambda c: c.pointer_click(845, 521), True),
+                ("click Agent software (506)", lambda c: c.pointer_click(845, 594), True),
+                ("click Copy key (507)", lambda c: c.pointer_click(1123, 678), True),
             ]),
             ("06_settings_general", 923, [
-                ("click Users tab", lambda c: c.pointer_click(657, 146), True),
-                ("click Account tab", lambda c: c.pointer_click(585, 146), True),
-                ("click API URL input", lambda c: c.pointer_click(1003, 246), True),
+                ("click sidebar Models (111)", lambda c: c.pointer_click(109, 125), True),
+                ("click sidebar Agents (112)", lambda c: c.pointer_click(109, 156), True),
+                ("click sidebar Security (113)", lambda c: c.pointer_click(109, 187), True),
+                ("click sidebar Notifications (114)", lambda c: c.pointer_click(109, 218), True),
+                ("click sidebar Account (102)", lambda c: c.pointer_click(109, 94), True),
+                ("click Users tab (602)", lambda c: c.pointer_click(657, 146), True),
+                ("click Telemetry tab (603)", lambda c: c.pointer_click(755, 146), True),
+                ("click Account tab (601)", lambda c: c.pointer_click(585, 146), True),
+                ("click API URL input (604)", lambda c: c.pointer_click(1003, 245), True),
                 ("type in API URL", lambda c: c.type_ascii("/v2"), True),
-                ("toggle Theme Dark/Light", lambda c: c.pointer_click(1093, 665), True),
-                ("toggle Background sync", lambda c: c.pointer_click(1093, 727), True),
+                ("backspace in API URL", lambda c: c.key_tap("backspace"), True),
+                ("ime commit in API URL", lambda c: c.ime_edit(commit="3", preedit=""), True),
+                ("click Disconnect (605)", lambda c: c.pointer_click(1083, 308), True),
+                ("click Connect GitHub (606)", lambda c: c.pointer_click(1067, 421), True),
+                ("click Refresh accounts (607)", lambda c: c.pointer_click(1059, 542), True),
+                ("toggle Theme Dark/Light (608)", lambda c: c.pointer_click(1093, 664), True),
+                ("toggle Background sync (609)", lambda c: c.pointer_click(1093, 727), True),
+                ("click sidebar Back (101)", lambda c: c.pointer_click(109, 54), True),
             ]),
             ("07_search_dialog", 923, [
                 ("arrow down result", lambda c: c.key_tap("down"), True),
-                ("click Clear query", lambda c: c.pointer_click(1100, 98), True),
-                ("type in search input", lambda c: c.type_ascii("w"), True),
-                ("click Titles filter", lambda c: c.pointer_click(470, 136), True),
+                ("click Clear query (706)", lambda c: c.pointer_click(1107, 98), True),
+                ("type in search input (701)", lambda c: c.type_ascii("w"), True),
+                ("ime preedit in search", lambda c: c.ime_edit(preedit="検"), True),
+                ("return blocked during search preedit", lambda c: c.key_tap("return"), False),
+                ("ime clear preedit in search", lambda c: c.ime_edit(commit="", preedit=""), True),
+                ("click Clear query again (706)", lambda c: c.pointer_click(1107, 98), True),
+                ("click User filter (732)", lambda c: c.pointer_click(362, 133), True),
+                ("click Assistant filter (733)", lambda c: c.pointer_click(419, 133), True),
+                ("click Titles filter (734)", lambda c: c.pointer_click(478, 133), True),
+                ("click Tools filter (735)", lambda c: c.pointer_click(526, 133), True),
+                ("click All filter (731)", lambda c: c.pointer_click(321, 133), True),
+                ("click Project filter (741)", lambda c: c.pointer_click(957, 133), True),
+                ("reset Project filter (741)", lambda c: c.pointer_click(957, 133), True),
+                ("click Time filter (742)", lambda c: c.pointer_click(1042, 133), True),
+                ("click Sort order (743)", lambda c: c.pointer_click(1122, 133), True),
+                ("click second result row (703)", lambda c: c.pointer_click(475, 244), True),
                 ("click inside preview pane stays open", lambda c: c.pointer_click(900, 300), False),
-                ("press Escape to close", lambda c: c.key_tap("esc"), True),
+                ("click Esc button (707) to close", lambda c: c.pointer_click(1144, 98), True),
                 ("post-Escape Tab moves focus", lambda c: c.key_tap("tab"), True),
-                ("post-Escape click composer restores focus", lambda c: c.pointer_click(845, 435), True),
+                ("post-Escape click composer restores focus", lambda c: c.pointer_click(845, 447), True),
                 ("post-Escape type proves trap popped", lambda c: c.type_ascii("ok"), True),
+                ("reopen Search via Ctrl+K", lambda c: c.key_tap("k", MOD_CTRL), True),
+                ("click backdrop (709) closes modal", lambda c: c.pointer_click(20, 20), True),
+                ("reopen Search via toolbar (351)", lambda c: c.pointer_click(45, 17), True),
+                ("click Open button (708) opens result", lambda c: c.pointer_click(1122, 183), True),
             ]),
             ("08_new_mission_dialog", 923, [
-                ("click composer", lambda c: c.pointer_click(845, 435), True),
-                ("type extra text", lambda c: c.type_ascii(" ok"), True),
-                ("click Send", lambda c: c.pointer_click(1124, 488), True),
+                ("click project picker (738)", lambda c: c.pointer_click(575, 390), True),
+                ("click machine picker (720)", lambda c: c.pointer_click(696, 390), True),
+                ("click folder picker (739)", lambda c: c.pointer_click(817, 390), True),
+                ("click attach plus (3)", lambda c: c.pointer_click(566, 489), True),
+                ("click model picker (722)", lambda c: c.pointer_click(845, 489), True),
+                ("click composer (1)", lambda c: c.pointer_click(845, 447), True),
+                ("type extra text + ime", lambda c: (c.type_ascii(" ok "), c.ime_edit(commit="新規")), True),
+                ("click Send (2)", lambda c: c.pointer_click(1124, 489), True),
+                ("toggle sidebar (117)", lambda c: c.pointer_click(19, 17), True),
+                ("restore sidebar (117)", lambda c: c.pointer_click(27, 17), True),
             ]),
             ("09_toast_notifications", 923, [
-                ("dismiss third toast", lambda c: c.pointer_click(1149, 862), True),
-                ("dismiss second toast", lambda c: c.pointer_click(1021, 800), True),
-                ("dismiss first toast", lambda c: c.pointer_click(1130, 738), True),
+                ("dismiss third toast (913)", lambda c: c.pointer_click(1149, 862), True),
+                ("dismiss second toast (912)", lambda c: c.pointer_click(1020, 800), True),
+                ("dismiss first toast (911)", lambda c: c.pointer_click(1129, 738), True),
+                ("click project picker after toasts (738)", lambda c: c.pointer_click(575, 390), True),
+                ("click composer after toasts (1)", lambda c: c.pointer_click(845, 447), True),
+                ("type after toasts", lambda c: c.type_ascii("clear"), True),
+                ("click Send after toasts (2)", lambda c: c.pointer_click(1124, 489), True),
             ]),
         ]
 
