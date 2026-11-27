@@ -196,6 +196,13 @@ def run (root : String) : IO Unit := do
     (identify "db-row" false "" "" "" "" true).isNone &&
     (identify "db-row" true "two.json" "" "" "" false).isNone)
     "conflicting, ambiguous and member-unowned bindings rejected"
+  let reconnected := { first with fileName := "reconnected.json", prefixId := "", email := "user@example.com" }
+  let reidentify := ProviderUsageAndLogin.matchCredential? #[reconnected]
+  check ((reidentify "db-row" false "stale.json" "" "" "user@example.com" false).any (·.fileName == "reconnected.json") &&
+    (reidentify "db-row" false "stale.json" "" "" "" true).isNone &&
+    (ProviderUsageAndLogin.matchCredential? #[{ first with email := "user@example.com" }, second]
+      "first" false "two.json" "" "" "user@example.com" false).isNone)
+    "stale filename falls back to email while conflicting active filename and unhinted singleton reject"
   check (ProviderUsageAndLogin.fileAccountId "openai" first.fileName != ProviderUsageAndLogin.fileAccountId "openai" second.fileName)
     "two unprefixed auth files get distinct IDs"
   routeStorage root

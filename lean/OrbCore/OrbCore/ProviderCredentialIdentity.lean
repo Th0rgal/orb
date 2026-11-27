@@ -67,7 +67,8 @@ def matchCredential? (files : Array CliAuthFileInfo) (account : String) (member 
     if !named.isEmpty then
       let byName := possible.filter (fun f => f.fileName == named)
       if !byName.isEmpty then possible := byName
-      else if own.isEmpty && linkedId.isEmpty && email.isEmpty then return none
+      else if files.any (fun f => f.fileName == named) || (own.isEmpty && linkedId.isEmpty && email.isEmpty) then
+        return none
     if !linkedId.isEmpty then possible := possible.filter (fun f => authFileMatchesRowId f linkedId false)
     if !email.isEmpty then possible := possible.filter (fun f => f.email.toLower == email.toLower)
     if own.isEmpty && named.isEmpty && linkedId.isEmpty && email.isEmpty && !legacySingleton then return none
