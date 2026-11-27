@@ -67,7 +67,7 @@ def matchCredential? (files : Array CliAuthFileInfo) (account : String) (member 
     if !named.isEmpty then
       let byName := possible.filter (fun f => f.fileName == named)
       if !byName.isEmpty then possible := byName
-      else if own.isEmpty && !email.isEmpty && !files.any (fun f => f.fileName == named) then
+      else if legacySingleton && own.isEmpty && !email.isEmpty && !files.any (fun f => f.fileName == named) then
         possible := possible
       else
         possible := #[]
