@@ -1436,74 +1436,195 @@ def streamingUpstreamRequest (isTls : Bool) (method host : String) (port : UInt1
           if let some ref := bodyTimedOutRef? then
             if complete then
               ref.set false
-            else if ← r.timedOut then
-              ref.set true
+            else
+              ref.set (← r.timedOut)
           return (copy, complete))
     else
       let whole ← if isBodylessHttpResponse method status then do r.close; pure ByteArray.empty
         else (·.1) <$> pumpUpstreamBody r framing tail (fun _ => pure true)
       return .ok ({ status, headers := hdrs, body := whole }, none)
 
+/-- Return `(start, endExclusive)` byte ranges of every complete SSE event
+    delimited by `\n\n` or `\r\n\r\n` in `body` starting from `fromOffset`. -/
+private def sseCompleteFrameRanges (body : ByteArray) (fromOffset : Nat := 0) : Array (Nat × Nat) := Id.run do
+  let mut ranges : Array (Nat × Nat) := #[]
+  let mut start := fromOffset
+  let mut i := fromOffset
+  while i < body.size do
+    if body[i]! == 10 &&
+        ((i ≥ start + 1 && body[i - 1]! == 10) ||
+         (i ≥ start + 2 && body[i - 1]! == 13 && body[i - 2]! == 10)) then
+      ranges := ranges.push (start, i + 1)
+      start := i + 1
+    i := i + 1
+  return ranges
+
+private def sseFrameIsCommentOnly (frame : String) : Bool := Id.run do
+  let mut sawComment := false
+  for rawLine in frame.splitOn "\n" do
+    let line := rawLine.trimAscii.toString
+    if line.isEmpty then continue
+    if line.startsWith ":" then
+      sawComment := true
+    else
+      return false
+  return sawComment
+
+private def sseFrameIsPingOnly (frame : String) : Bool := Id.run do
+  let mut sawPing := false
+  for rawLine in frame.splitOn "\n" do
+    let line := rawLine.trimAscii.toString
+    if line.isEmpty || line.startsWith ":" || line.startsWith "event:" ||
+       line.startsWith "id:" || line.startsWith "retry:" then
+      continue
+    if line.startsWith "data:" then
+      let payload := (line.drop 5).toString.trimAscii.toString
+      match OrbBin.Json.parse payload with
+      | .ok jv =>
+        if jv.fieldStr? "type" == some "ping" then
+          sawPing := true
+        else
+          return false
+      | .error _ => return false
+    else
+      return false
+  return sawPing
+
+private def jsonEventHasToolCall (jv : JVal) : Bool :=
+  let hasOpenAiTool := ((jv.fieldArr? "choices").getD #[]).any fun c =>
+    match (c.fieldOrNull "delta").fieldArr? "tool_calls" with
+    | some arr => !arr.isEmpty
+    | none => false
+  let hasGeminiTool := ((jv.fieldArr? "candidates").getD #[]).any fun cand =>
+    (((cand.fieldOrNull "content").fieldArr? "parts").getD #[]).any fun part =>
+      match part.field? "functionCall" with
+      | some .null | none => false
+      | some _ => true
+  let typ := (jv.fieldStr? "type").getD ""
+  let hasAnthropicTool :=
+    (typ == "content_block_start" &&
+      (jv.fieldOrNull "content_block").fieldStr? "type" == some "tool_use") ||
+    (typ == "content_block_delta" &&
+      (jv.fieldOrNull "delta").fieldStr? "type" == some "input_json_delta")
+  let hasResponsesTool :=
+    typ == "response.function_call_arguments.delta" ||
+    typ == "response.function_call_arguments.done" ||
+    ((typ == "response.output_item.added" || typ == "response.output_item.done") &&
+      (jv.fieldOrNull "item").fieldStr? "type" == some "function_call")
+  hasOpenAiTool || hasGeminiTool || hasAnthropicTool || hasResponsesTool
+
+private def jsonEventCommitsVisibleOutput (jv : JVal) : Bool :=
+  let openAiCommit := ((jv.fieldArr? "choices").getD #[]).any fun c =>
+    let d := c.fieldOrNull "delta"
+    !((d.fieldStr? "content").getD "").isEmpty ||
+    !((d.fieldStr? "refusal").getD "").isEmpty ||
+    (match d.field? "audio" with | some .null | none => false | some _ => true) ||
+    (match d.field? "function_call" with | some .null | none => false | some _ => true)
+  let geminiCommit := ((jv.fieldArr? "candidates").getD #[]).any fun cand =>
+    (((cand.fieldOrNull "content").fieldArr? "parts").getD #[]).any fun part =>
+      part.fieldBool? "thought" != some true && !((part.fieldStr? "text").getD "").isEmpty
+  let typ := (jv.fieldStr? "type").getD ""
+  let anthropicCommit :=
+    typ == "content_block_delta" &&
+    (jv.fieldOrNull "delta").fieldStr? "type" == some "text_delta" &&
+    !(((jv.fieldOrNull "delta").fieldStr? "text").getD "").isEmpty
+  let responsesCommit :=
+    (typ == "response.output_text.delta" || typ == "response.refusal.delta") &&
+    !((jv.fieldStr? "delta").getD "").isEmpty
+  openAiCommit || geminiCommit || anthropicCommit || responsesCommit
+
 private def completeToolCallBoundary? (body : ByteArray) : Option Nat := Id.run do
-  match String.fromUTF8? body with
-  | none => return none
-  | some text =>
-    let delimiter := if text.contains "\r\n\r\n" then "\r\n\r\n" else "\n\n"
-    let mut offset : Nat := 0
-    let mut arguments : Array (Nat × String) := #[]
-    let mut anthropicToolBlocks : Array (Nat × String) := #[]
-    for frame in text.splitOn delimiter do
-      let frameBytes := (frame ++ delimiter).toUTF8
-      offset := offset + frameBytes.size
-      let normalizedFrame := frame.replace "\r\n" "\n"
-      for line in normalizedFrame.splitOn "\n" do
-        let trimmed := line.trimAscii.toString
-        if trimmed.startsWith "data:" then
-          let payload := (trimmed.drop 5).toString.trimAscii.toString
-          if payload != "[DONE]" then
-            if let .ok jv := OrbBin.Json.parse payload then
-              let choices := (jv.fieldArr? "choices").getD #[]
-              for choice in choices do
-                let calls := ((choice.fieldOrNull "delta").fieldArr? "tool_calls").getD #[]
-                for call in calls do
-                  if let some args := (call.fieldOrNull "function").fieldStr? "arguments" then
-                    let index := (call.fieldNat? "index").getD 0
-                    let previous := (arguments.find? (fun (i, _) => i == index)).map Prod.snd |>.getD ""
-                    let combined := previous ++ args
-                    arguments := arguments.filter (fun (i, _) => i != index)
-                    arguments := arguments.push (index, combined)
-                    if (OrbBin.Json.parse combined).isOk then return some offset
-              let candidates := (jv.fieldArr? "candidates").getD #[]
-              for candidate in candidates do
-                let parts := ((candidate.fieldOrNull "content").fieldArr? "parts").getD #[]
-                for part in parts do
-                  if let some functionCall := part.field? "functionCall" then
-                    if functionCall.asObj?.isSome then
-                      return some offset
-              if jv.fieldStr? "type" == some "content_block_start" then
-                if let some block := jv.fieldOrNull "content_block" |>.fieldStr? "type" then
-                  if block == "tool_use" then
-                    let index := jv.fieldNat? "index" |>.getD 0
-                    let input := match (jv.fieldOrNull "content_block").field? "input" with
-                      | some value => renderCompact value
-                      | none => ""
-                    anthropicToolBlocks := anthropicToolBlocks.filter (fun (i, _) => i != index)
-                    anthropicToolBlocks := anthropicToolBlocks.push (index, input)
-              if jv.fieldStr? "type" == some "content_block_delta" then
-                let delta := jv.fieldOrNull "delta"
-                if delta.fieldStr? "type" == some "input_json_delta" then
-                  let index := jv.fieldNat? "index" |>.getD 0
-                  if let some fragment := delta.fieldStr? "partial_json" then
-                    let previous := (anthropicToolBlocks.find? (fun (i, _) => i == index)).map Prod.snd |>.getD ""
-                    let combined := previous ++ fragment
-                    anthropicToolBlocks := anthropicToolBlocks.filter (fun (i, _) => i != index)
-                    anthropicToolBlocks := anthropicToolBlocks.push (index, combined)
-              if jv.fieldStr? "type" == some "content_block_stop" then
-                let index := jv.fieldNat? "index" |>.getD 0
-                if let some input := (anthropicToolBlocks.find? (fun (i, _) => i == index)).map Prod.snd then
-                  if (OrbBin.Json.parse input).isOk then
-                    return some offset
-    return none
+  let mut lastBoundary : Option Nat := none
+  let mut openAiArgs : Array (Nat × String) := #[]
+  let mut anthropicToolBlocks : Array (Nat × String × Bool × Bool) := #[]
+  let mut responsesTools : Array (String × Bool) := #[]
+  let mut geminiCalls : Nat := 0
+  for (s, e) in sseCompleteFrameRanges body do
+    let some frame := String.fromUTF8? (body.extract s e)
+      | continue
+    let mut updatedCall := false
+    for rawLine in frame.splitOn "\n" do
+      let trimmed := rawLine.trimAscii.toString
+      if !trimmed.startsWith "data:" then continue
+      let payload := (trimmed.drop 5).toString.trimAscii.toString
+      if payload == "[DONE]" || payload.isEmpty then continue
+      let .ok jv := OrbBin.Json.parse payload | continue
+      let choices := (jv.fieldArr? "choices").getD #[]
+      for choice in choices do
+        let calls := ((choice.fieldOrNull "delta").fieldArr? "tool_calls").getD #[]
+        for call in calls do
+          let index := (call.fieldNat? "index").getD 0
+          let previous := (openAiArgs.find? (fun (i, _) => i == index)).map Prod.snd |>.getD ""
+          let fragment := ((call.fieldOrNull "function").fieldStr? "arguments").getD ""
+          let combined := previous ++ fragment
+          openAiArgs := openAiArgs.filter (fun (i, _) => i != index)
+          openAiArgs := openAiArgs.push (index, combined)
+          updatedCall := true
+      let candidates := (jv.fieldArr? "candidates").getD #[]
+      for candidate in candidates do
+        let parts := ((candidate.fieldOrNull "content").fieldArr? "parts").getD #[]
+        for part in parts do
+          if let some functionCall := part.field? "functionCall" then
+            if functionCall.asObj?.isSome then
+              geminiCalls := geminiCalls + 1
+              updatedCall := true
+      if jv.fieldStr? "type" == some "content_block_start" then
+        if (jv.fieldOrNull "content_block").fieldStr? "type" == some "tool_use" then
+          let index := (jv.fieldNat? "index").getD 0
+          let input := match (jv.fieldOrNull "content_block").field? "input" with
+            | some value => renderCompact value
+            | none => ""
+          anthropicToolBlocks := anthropicToolBlocks.filter (fun x => x.1 != index)
+          anthropicToolBlocks := anthropicToolBlocks.push (index, input, false, false)
+          updatedCall := true
+      else if jv.fieldStr? "type" == some "content_block_delta" then
+        let delta := jv.fieldOrNull "delta"
+        if delta.fieldStr? "type" == some "input_json_delta" then
+          let index := (jv.fieldNat? "index").getD 0
+          if let some fragment := delta.fieldStr? "partial_json" then
+            let (prevBuf, hasDelta, stopped) :=
+              match anthropicToolBlocks.find? (fun x => x.1 == index) with
+              | some (_, b, d, st) => (b, d, st)
+              | none => ("", false, false)
+            let nextBuf :=
+              if !hasDelta && (prevBuf.isEmpty || prevBuf == "{}") then fragment
+              else prevBuf ++ fragment
+            anthropicToolBlocks := anthropicToolBlocks.filter (fun x => x.1 != index)
+            anthropicToolBlocks := anthropicToolBlocks.push (index, nextBuf, true, stopped)
+            updatedCall := true
+      else if jv.fieldStr? "type" == some "content_block_stop" then
+        let index := (jv.fieldNat? "index").getD 0
+        if let some (_, buf, hasDelta, _) := anthropicToolBlocks.find? (fun x => x.1 == index) then
+          anthropicToolBlocks := anthropicToolBlocks.filter (fun x => x.1 != index)
+          anthropicToolBlocks := anthropicToolBlocks.push (index, buf, hasDelta, true)
+          updatedCall := true
+      else if jv.fieldStr? "type" == some "response.output_item.added" then
+        let item := jv.fieldOrNull "item"
+        if item.fieldStr? "type" == some "function_call" then
+          let key := (item.fieldStr? "id").orElse (fun _ => item.fieldStr? "call_id")
+            |>.getD (toString ((jv.fieldNat? "output_index").getD 0))
+          responsesTools := responsesTools.filter (fun (k, _) => k != key)
+          responsesTools := responsesTools.push (key, false)
+          updatedCall := true
+      else if jv.fieldStr? "type" == some "response.output_item.done" then
+        let item := jv.fieldOrNull "item"
+        if item.fieldStr? "type" == some "function_call" then
+          let key := (item.fieldStr? "id").orElse (fun _ => item.fieldStr? "call_id")
+            |>.getD (toString ((jv.fieldNat? "output_index").getD 0))
+          let args := (item.fieldStr? "arguments").getD ""
+          if (OrbBin.Json.parse args).isOk then
+            responsesTools := responsesTools.filter (fun (k, _) => k != key)
+            responsesTools := responsesTools.push (key, true)
+            updatedCall := true
+    if updatedCall then
+      let hasAny := !openAiArgs.isEmpty || !anthropicToolBlocks.isEmpty || !responsesTools.isEmpty || geminiCalls > 0
+      let allComplete :=
+        openAiArgs.all (fun (_, a) => (OrbBin.Json.parse a).isOk) &&
+        anthropicToolBlocks.all (fun (_, b, _, stopped) => stopped && (OrbBin.Json.parse b).isOk) &&
+        responsesTools.all (fun (_, done) => done)
+      if hasAny && allComplete then
+        lastBoundary := some e
+  return lastBoundary
 
 private partial def stripProviderReasoningContent : JVal → JVal
   | .arr xs => .arr (xs.filterMap fun x =>
@@ -1540,37 +1661,71 @@ private def synthesizeToolCallClose (contentType : String) (head : ByteArray) : 
     head ++ ("data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"}}\n\ndata: {\"type\":\"message_stop\"}\n\n".toUTF8)
   else if containsSubstring headText "\"functionCall\"" then
     head ++ ("data: {\"candidates\":[{\"finishReason\":\"STOP\"}]}\n\n".toUTF8)
+  else if containsSubstring headText "\"response.output_item." ||
+          containsSubstring headText "\"response.function_call_arguments." then
+    head ++ ("data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"}}\n\n".toUTF8)
   else
     head ++ ("data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\ndata: [DONE]\n\n".toUTF8)
 
-/-- Byte boundary after the last complete answer-text event. Never flush a
-    coalesced tool-call suffix or wait for a split UTF-8 character in it. -/
-private def answerTextBoundary (body : ByteArray) : Nat := Id.run do
-  let mut start := 0
-  let mut boundary := 0
-  for i in [:body.size] do
-    if body[i]! != 10 then continue
-    if !(i ≥ 1 && body[i-1]! == 10 || i ≥ 2 && body[i-1]! == 13 && body[i-2]! == 10) then continue
-    let frame := (String.fromUTF8? (body.extract start (i+1))).getD ""
-    start := i+1
-    for line in frame.splitOn "\n" do
-      if !line.startsWith "data:" then continue
-      if let .ok j := OrbBin.Json.parse ((line.drop 5).toString.trimAscii.toString) then
-        if ((j.fieldArr? "choices").getD #[]).any (fun c =>
-          !(((c.fieldOrNull "delta").fieldStr? "content").getD "").isEmpty) then
-          boundary := start
-  return boundary
+/-- Compute `(flushEnd, sawCommit, sawModel)` across complete SSE events in `body`:
+    - Stops before the first tool-call frame so tool-call suffixes stay in the
+      recovery buffer for R30 clean close or pre-commit retry.
+    - Flushes complete visible output deltas (OpenAI Chat, Anthropic Messages,
+      OpenAI Responses, Gemini) immediately without waiting for upstream EOF.
+    - Once already committed (`alreadyCommitted || sawCommit`), flushes subsequent
+      non-tool-call frames immediately as well.
+    - Leading SSE keepalive comments flush immediately without committing or
+      disabling model recovery. -/
+private def committingPrefixBoundary (body : ByteArray) (alreadyCommitted : Bool) : Nat × Bool × Bool := Id.run do
+  let mut flushEnd := 0
+  let mut sawCommit := false
+  let mut sawModel := false
+  for (s, e) in sseCompleteFrameRanges body do
+    let some frame := String.fromUTF8? (body.extract s e)
+      | break
+    if sseFrameIsCommentOnly frame then
+      if alreadyCommitted || sawCommit || flushEnd == s then
+        flushEnd := e
+      continue
+    let mut frameHasTool := false
+    let mut frameCommits := false
+    let mut frameIsModel := false
+    let frameIsPing := sseFrameIsPingOnly frame
+    for rawLine in frame.splitOn "\n" do
+      let trimmed := rawLine.trimAscii.toString
+      if !trimmed.startsWith "data:" then continue
+      let payload := (trimmed.drop 5).toString.trimAscii.toString
+      if payload == "[DONE]" || payload.isEmpty then continue
+      if let .ok jv := OrbBin.Json.parse payload then
+        if jsonEventIsStructuredModelPayload jv then
+          frameIsModel := true
+        if jsonEventHasToolCall jv then
+          frameHasTool := true
+        if jsonEventCommitsVisibleOutput jv then
+          frameCommits := true
+    if frameIsModel || frameIsPing then
+      sawModel := true
+    if frameHasTool then
+      break
+    if frameCommits then
+      sawCommit := true
+      flushEnd := e
+    else if alreadyCommitted || sawCommit then
+      flushEnd := e
+  return (flushEnd, sawCommit, sawModel)
 
 private def recoverBufferedStream
     (contentType : String)
     (initial : BodyPump)
     (releaseInitial : IO Unit)
     (retry : Nat → IO (Option BodyPump))
+    (bodyTimedOutRef? : Option (IO.Ref Bool))
     (emit : BodyEmit) : IO (ByteArray × Bool) := do
   let mut remaining := 2
   let mut pump := initial
   let mut result : Option (ByteArray × Bool) := none
   let emittedRef ← IO.mkRef ByteArray.empty
+  let committedRef ← IO.mkRef false
   let recordEmit : BodyEmit := fun piece => do
     let clientOpen ← emit piece
     if clientOpen && !piece.isEmpty then
@@ -1604,6 +1759,7 @@ private def recoverBufferedStream
             -- Once the bounded analysis buffer is full, stop trying to recover this
             -- attempt. Flush it exactly once and relay the rest without duplication.
             modeRef.set (some false)
+            committedRef.set true
             let firstOpen ← recordEmit buffered
             if !firstOpen then
               downstreamOpenRef.set false
@@ -1612,33 +1768,39 @@ private def recoverBufferedStream
             downstreamOpenRef.set clientOpen
             return clientOpen
           let nextBuffer := buffered ++ piece
-          let boundary := answerTextBoundary nextBuffer
-          if boundary > 0 then
+          let alreadyCommitted ← committedRef.get
+          let (boundary, sawCommit, sawModel) := committingPrefixBoundary nextBuffer alreadyCommitted
+          if sawModel || sawCommit then
             modeRef.set (some true)
+          if sawCommit then
+            committedRef.set true
+          if boundary > 0 then
             bufferRef.set (nextBuffer.extract boundary nextBuffer.size)
             let clientOpen ← recordEmit (nextBuffer.extract 0 boundary)
             downstreamOpenRef.set clientOpen
             return clientOpen
           bufferRef.set nextBuffer
-          let text := (String.fromUTF8? nextBuffer).getD ""
-          let model := containsSubstring text "\"choices\"" ||
-            containsSubstring text "\"candidates\"" ||
-            containsSubstring text "\"tool_calls\"" ||
-            containsSubstring text "\"response\"" ||
-            containsSubstring text "\"message_start\"" ||
-            containsSubstring text "\"content_block_start\"" ||
-            containsSubstring text "\"content_block_delta\"" ||
-            containsSubstring text "\"functionCall\""
-          if model then
-            modeRef.set (some true)
-          else if (← modeRef.get).isNone && (text.contains "\n\n" || text.contains "\r\n\r\n") then
-            -- An unrecognized complete SSE frame is safe to relay as-is. Holding
-            -- only the first frame avoids replay while preserving event latency.
-            modeRef.set (some false)
-            let clientOpen ← recordEmit nextBuffer
-            bufferRef.set ByteArray.empty
-            downstreamOpenRef.set clientOpen
-            return clientOpen
+          if (← modeRef.get).isNone then
+            let text := (String.fromUTF8? nextBuffer).getD ""
+            let model := containsSubstring text "\"choices\"" ||
+              containsSubstring text "\"candidates\"" ||
+              containsSubstring text "\"tool_calls\"" ||
+              containsSubstring text "\"response\"" ||
+              containsSubstring text "\"message_start\"" ||
+              containsSubstring text "\"content_block_start\"" ||
+              containsSubstring text "\"content_block_delta\"" ||
+              containsSubstring text "\"functionCall\""
+            if model then
+              modeRef.set (some true)
+            else if text.contains "\n\n" || text.contains "\r\n\r\n" then
+              -- An unrecognized complete SSE frame is safe to relay as-is. Holding
+              -- only the first frame avoids replay while preserving event latency.
+              modeRef.set (some false)
+              committedRef.set true
+              let clientOpen ← recordEmit nextBuffer
+              bufferRef.set ByteArray.empty
+              downstreamOpenRef.set clientOpen
+              return clientOpen
           downstreamOpenRef.get)
       finally
         if firstAttempt then
@@ -1656,11 +1818,13 @@ private def recoverBufferedStream
       result := some (← emittedRef.get, true)
       continue
     let emitted ← emittedRef.get
-    let committed := !emitted.isEmpty
+    let committed ← committedRef.get
     let streamStatus := classifyProxyStreamOutcome contentType true
       (emitted ++ buffered) complete false
     if complete && streamStatus == "ok" then
       discard <| recordEmit buffered
+      if let some ref := bodyTimedOutRef? then
+        ref.set false
       result := some (← emittedRef.get, true)
     else
       let completeCalls : UInt32 := if (completeToolCallBoundary? buffered).isSome then 1 else 0
@@ -1673,6 +1837,8 @@ private def recoverBufferedStream
           | result := some (← emittedRef.get, false); continue
         let clean := synthesizeToolCallClose contentType (buffered.extract 0 boundary)
         discard <| recordEmit clean
+        if let some ref := bodyTimedOutRef? then
+          ref.set false
         result := some (← emittedRef.get, true)
       else if committed || (ending &&& 0xFF) == 4 then
         discard <| recordEmit buffered
@@ -2079,8 +2245,9 @@ def forwardProxyChain
               if !wantsStream then
                 pure (some rawPump)
               else
-                let openRecoveryTarget (retryTarget : ProviderTarget) (retryBody : ByteArray)
-                    (attemptNo : Nat) : IO (Option BodyPump) := do
+                let nextFallbackIdxRef ← IO.mkRef (idx + 1)
+                let openRecoveryTarget (retryTarget : ProviderTarget) (retryBody : ByteArray) :
+                    IO (Option BodyPump) := do
                   let admitted ← match effPacing? with
                     | none => pure true
                     | some tracker => do
@@ -2097,13 +2264,15 @@ def forwardProxyChain
                         releaseTargetSlot tracker retryTarget
                       pure none
                     else
+                      if let some ref := bodyTimedOutRef? then
+                        ref.set false
                       match ← openAccountRequest resolveTransport retryTarget true retryTls method retryHost
                         retryPort retryPath retryHdrs retryWireBody effStreamLimits streamHeadDeadlineMs? bodyTimedOutRef? with
                       | .ok (retryResp, some p) =>
                         if let some tracker := effPacing? then
                           recordObservedHeaders tracker retryTarget.accountId retryResp.headers
                         streamSelectedAccountRef.set retryTarget.accountId
-                        streamAttemptsRef.set attemptNo
+                        streamAttemptsRef.modify (· + 1)
                         pure (some fun emit => do
                           try
                             p emit
@@ -2114,19 +2283,25 @@ def forwardProxyChain
                         if let some tracker := effPacing? then
                           releaseTargetSlot tracker retryTarget
                         pure none
+                let openNextFallback : IO (Option BodyPump) := do
+                  let stripped := stripProviderBoundReasoning body
+                  let mut opened : Option BodyPump := none
+                  while opened.isNone do
+                    let nextIdx ← nextFallbackIdxRef.get
+                    match targets[nextIdx]? with
+                    | none => break
+                    | some nextTarget =>
+                      nextFallbackIdxRef.set (nextIdx + 1)
+                      opened ← openRecoveryTarget nextTarget stripped
+                  return opened
                 let reopen (retryNo : Nat) : IO (Option BodyPump) := do
                   if retryNo == 0 then
-                    match ← openRecoveryTarget tgt outBody (idx + 2) with
+                    match ← openRecoveryTarget tgt body with
                     | some p => pure (some p)
-                    | none =>
-                      match targets[idx + 1]? with
-                      | some nextTarget => openRecoveryTarget nextTarget (stripProviderBoundReasoning outBody) (idx + 3)
-                      | none => pure none
+                    | none => openNextFallback
                   else
-                    match targets[idx + retryNo]? with
-                    | some retryTarget => openRecoveryTarget retryTarget (stripProviderBoundReasoning outBody) (idx + retryNo + 2)
-                    | none => pure none
-                pure (some fun emit => recoverBufferedStream ctype rawPump releaseSlotOnce reopen emit)
+                    openNextFallback
+                pure (some fun emit => recoverBufferedStream ctype rawPump releaseSlotOnce reopen bodyTimedOutRef? emit)
           return {
             status := resp.status
             contentType := ctype
