@@ -1623,9 +1623,9 @@ struct OrbAirVpnSettings: View {
                         OrbAccountVpnSettings(
                             client: client,
                             account: account.selfID,
-                            nativeAccount: account["provider_type"].text == "antigravity"
+                            nativeAccount: account["provider_type"].text == "antigravity",
+                            refreshKey: routesRevision
                         )
-                        .id("\(account.selfID)-\(routesRevision)")
                     }
                     .padding(.vertical, 2)
                 }

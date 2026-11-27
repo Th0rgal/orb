@@ -520,6 +520,44 @@ def loadHydratedProviders (store : CoreStore) (workingDir : String)
     | .ok rows => pure ((rows.extract 1 rows.size).filterMap (·[0]?))
     | .error _ => pure #[]
 
+  -- Collect auth files strictly claimed by any configured DB or legacy row so a
+  -- stale-filename display fallback on another row can never steal or collide with them.
+  let mut strictClaimedFiles : Array String := #[]
+  let mut dbIds : Array String := #[]
+  for p in dbProvs do
+    dbIds := dbIds.push p.id
+    let memberAdded := !p.createdByUserId.isEmpty && memberIds.contains p.createdByUserId
+    let leg? := if memberAdded then none else legacyArr.find? (fun j => (j.fieldStr? "id") == some p.id)
+    let legEmail := (leg?.bind (fun j => j.fieldStr? "account_email")).getD ""
+    let legOauthObj? := leg?.bind (fun j => j.field? "oauth")
+    let legRefreshFile := (legOauthObj?.bind (fun o => o.fieldStr? "refresh_token")).getD ""
+    let legAuthFile := (leg?.bind (fun j => (j.fieldStr? "cli_proxy_auth_file").orElse (fun _ => j.fieldStr? "auth_file"))).getD ""
+    let legSandboxedId := (leg?.bind (fun j => (j.fieldStr? "sandboxed_provider_id").orElse (fun _ => j.fieldStr? "account_id"))).getD ""
+    let allTyped := authFiles.filter (fun f => providerTypeMatchesAuthType p.providerType f.authType)
+    let typed := allTyped.filter (fun f => !f.disabled)
+    let b? := (matchCredential? typed p.id memberAdded legAuthFile legRefreshFile legSandboxedId legEmail false)
+      |>.orElse fun _ =>
+        if p.enabled && !includeDisabledForAll then none
+        else matchCredential? allTyped p.id memberAdded legAuthFile legRefreshFile legSandboxedId legEmail false
+    if let some f := b? then
+      if !strictClaimedFiles.contains f.fileName then strictClaimedFiles := strictClaimedFiles.push f.fileName
+  for leg in legacyArr do
+    let lid := ((leg.fieldStr? "id").getD "").trimAscii.toString
+    if !lid.isEmpty && !dbIds.contains lid then
+      let pType := ((leg.fieldStr? "provider_type").getD "custom").trimAscii.toString
+      let en := (leg.fieldBool? "enabled").getD true
+      let email := ((leg.fieldStr? "account_email").getD "").trimAscii.toString
+      let refFile := ((leg.field? "oauth").bind (fun o => o.fieldStr? "refresh_token")).getD ""
+      let authFile := ((leg.fieldStr? "cli_proxy_auth_file").orElse fun _ => leg.fieldStr? "auth_file").getD ""
+      let allTyped := authFiles.filter (fun f => providerTypeMatchesAuthType pType f.authType)
+      let typed := allTyped.filter (fun f => !f.disabled)
+      let b? := (matchCredential? typed lid false authFile refFile "" email false)
+        |>.orElse fun _ =>
+          if en && !includeDisabledForAll then none
+          else matchCredential? allTyped lid false authFile refFile "" email false
+      if let some f := b? then
+        if !strictClaimedFiles.contains f.fileName then strictClaimedFiles := strictClaimedFiles.push f.fileName
+
   let mut out : Array HydratedProvider := #[]
   let mut seenIds : Array String := #[]
 
@@ -542,9 +580,10 @@ def loadHydratedProviders (store : CoreStore) (workingDir : String)
     let singleton := plainKey == "cli-proxy-managed" && (dbProvs.filter (fun r => r.providerType == p.providerType)).size == 1
     let resolveIn := fun (fs : Array CliAuthFileInfo) =>
       let b := matchCredential? fs p.id memberAdded legAuthFile legRefreshFile legSandboxedId legEmail false
+      let unclaimed := fs.filter (fun f => !strictClaimedFiles.contains f.fileName)
       let m := b
-        |>.orElse (fun _ => matchCredential? fs p.id memberAdded legAuthFile legRefreshFile legSandboxedId legEmail false true)
-        |>.orElse (fun _ => if singleton then matchCredential? fs p.id memberAdded legAuthFile legRefreshFile legSandboxedId legEmail true else none)
+        |>.orElse (fun _ => matchCredential? unclaimed p.id memberAdded legAuthFile legRefreshFile legSandboxedId legEmail false true)
+        |>.orElse (fun _ => if singleton then matchCredential? unclaimed p.id memberAdded legAuthFile legRefreshFile legSandboxedId legEmail true else none)
       (b, m)
     let (boundActive?, matchedActive?) := resolveIn typed
     let (boundAuth?, matchedAuth?) :=
@@ -640,7 +679,8 @@ def loadHydratedProviders (store : CoreStore) (workingDir : String)
       let authFile := ((leg.fieldStr? "cli_proxy_auth_file").orElse fun _ => leg.fieldStr? "auth_file").getD ""
       let resolveLeg := fun (fs : Array CliAuthFileInfo) =>
         let b := matchCredential? fs lid false authFile refFile "" email false
-        let m := b.orElse fun _ => matchCredential? fs lid false authFile refFile "" email false true
+        let unclaimed := fs.filter (fun f => !strictClaimedFiles.contains f.fileName)
+        let m := b.orElse fun _ => matchCredential? unclaimed lid false authFile refFile "" email false true
         (b, m)
       let (boundActive?, matchedActive?) := resolveLeg typed
       let (boundAuth?, matchedAuth?) :=
@@ -708,9 +748,10 @@ def loadHydratedProviders (store : CoreStore) (workingDir : String)
   let indexed := out.mapIdx (fun i hp => (hp, i))
   return (indexed.qsort (fun a b => a.1.priority < b.1.priority || (a.1.priority == b.1.priority && a.2 < b.2))).map Prod.fst
 
-/-- Legacy rows can claim the same file. Only an unambiguous binding authorizes routing. -/
+/-- Legacy rows can claim the same file. Only an unambiguous strict binding authorizes routing. -/
 def accountRoutingFile (accounts : Array HydratedProvider) (hp : HydratedProvider) : String :=
-  if !hp.boundOauthFile.isEmpty && (accounts.filter (fun p => p.oauthFile == hp.boundOauthFile)).size == 1
+  if !hp.boundOauthFile.isEmpty &&
+      (accounts.filter (fun p => !p.boundOauthFile.isEmpty && p.boundOauthFile == hp.boundOauthFile)).size == 1
     then hp.boundOauthFile else ""
 
 /-- Discover from this subscription with the native CLI. The fresh private HOME
@@ -742,8 +783,9 @@ private def probeNativeAccount (hp : HydratedProvider) (resolve : ResolveTranspo
 /-- The admin CLI profile has its own catalog. Members see positively discovered
     models of enabled, unambiguously bound accounts they have opted into. -/
 def nativeAntigravityAccounts (hub : ProviderRuntimeHub) (store : CoreStore) (workingDir userId : String)
-    (probe : Bool) (onlyAccount : Option String := none) : IO (Array (String × Array (String × String))) := do
+    (probe : Bool) (onlyAccount : Option String := none) (force : Bool := false) : IO (Array (String × Array (String × String))) := do
   if userId.isEmpty then return #[]
+  let effectiveProbe := probe || force
   let accounts ← loadHydratedProviders store workingDir
   let prefs ← getUserProviderPrefs store userId
   let now ← nowEpoch
@@ -761,9 +803,10 @@ def nativeAntigravityAccounts (hub : ProviderRuntimeHub) (store : CoreStore) (wo
     let read? ← hub.mu.atomically do
       let state ← get
       let fresh := state.memberAgyCatalogs.filter (fun r => now ≤ r.started + 300)
-      if let some row := fresh.find? (fun r => r.account == hp.id && r.credentialHash == credentialHash &&
-          r.routeRevision == route.generation) then return some row
-      if !probe then return none
+      if !force then
+        if let some row := fresh.find? (fun r => r.account == hp.id && r.credentialHash == credentialHash &&
+            r.routeRevision == route.generation) then return some row
+      if !effectiveProbe then return none
       let resolve := match hub.resolveTransport? with
         | some coordinator => coordinator hp.providerType hp.id
         | none => AccountVpnRoutes.resolve store.missionsDb hp.id fun _ => pure (.error "vpn_coordinator_unavailable")
@@ -774,7 +817,7 @@ def nativeAntigravityAccounts (hub : ProviderRuntimeHub) (store : CoreStore) (wo
     if let some entry := read? then reads := reads.push entry
   let mut catalogs := #[]
   for entry in reads do
-    if !probe && !(← IO.hasFinished entry.result) then continue
+    if !effectiveProbe && !(← IO.hasFinished entry.result) then continue
     let .ok rows ← IO.wait entry.result |
       failed := true
       hub.mu.atomically do
@@ -783,14 +826,14 @@ def nativeAntigravityAccounts (hub : ProviderRuntimeHub) (store : CoreStore) (wo
             r.routeRevision == entry.routeRevision && r.credentialHash == entry.credentialHash) }
       continue
     catalogs := catalogs.push (entry.account, rows)
-  if probe && catalogs.isEmpty && failed then
+  if effectiveProbe && catalogs.isEmpty && failed then
     throw (IO.userError "Native Antigravity model discovery temporarily unavailable")
   return catalogs
 
 def memberAntigravityModels (hub : ProviderRuntimeHub) (store : CoreStore) (workingDir userId : String)
-    (probe : Bool) (onlyAccount : Option String := none) : IO (Array (String × String)) := do
+    (probe : Bool) (onlyAccount : Option String := none) (force : Bool := false) : IO (Array (String × String)) := do
   let mut models : Array (String × String) := #[]
-  for (_, rows) in ← nativeAntigravityAccounts hub store workingDir userId probe onlyAccount do
+  for (_, rows) in ← nativeAntigravityAccounts hub store workingDir userId probe onlyAccount force do
     for row in rows do
       unless models.any (fun m => m.1 == row.1) do models := models.push row
   return models
@@ -821,13 +864,13 @@ def nativeCatalogForRequest (scope : NativeCanary.Scope) (hub : ProviderRuntimeH
         if userId.isEmpty then
           if probe || force then throw (IO.userError "Native Antigravity model discovery requires an authenticated account")
           return #[]
-        return ← memberAntigravityModels hub store workingDir userId (probe || force)
-    return ← memberAntigravityModels hub store workingDir userId probe
+        return ← memberAntigravityModels hub store workingDir userId probe none force
+    return ← memberAntigravityModels hub store workingDir userId probe none force
   | .invalid _ => return #[]
   | .selected node .. =>
     let target := (qParam? (parseQueryMap rawTarget) "node_id").getD node
     let .ok account := scope.accountFor target userId | return #[]
-    return ← memberAntigravityModels hub store workingDir userId probe account
+    return ← memberAntigravityModels hub store workingDir userId probe account force
 
 def memberProviderDisplayName (hps : Array HydratedProvider) (hp : HydratedProvider) : String := Id.run do
   let metaInfo := lookupProviderMeta hp.providerType

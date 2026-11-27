@@ -196,4 +196,84 @@ describe("AirVpnSettings page", () => {
     fireEvent.click(retry);
     await screen.findByText("No AirVPN profile is imported for NL.");
   });
+
+  it("keeps unconfirmed rows visible under VPN-routed filter and prevents bulk refresh from clobbering a concurrent save", async () => {
+    vi.mocked(listProviders).mockResolvedValue([
+      { id: "acct-vpn", name: "Claude VPN", provider_type: "anthropic", has_credentials: true },
+      { id: "acct-direct", name: "Codex Direct", provider_type: "openai", has_credentials: true },
+    ]);
+    let failVpnRead = false;
+    let resolveBulkDirect!: (v: unknown) => void;
+    let directReads = 0;
+    let directSavedCountry = "";
+    vi.mocked(api).mockImplementation(async (path: string, init?: RequestInit) => {
+      if (path === "/api/settings/airvpn") {
+        return {
+          api_key_configured: true,
+          session_limit: 5,
+          devices: ["orb-nl"],
+          profiles: [{ device: "orb-nl", country: "NL", server: "Alcyone" }],
+          active_tunnels: [{ device: "orb-nl", country: "NL", server: "Alcyone", exits: ["213.152.161.155"], accounts: 1 }],
+        };
+      }
+      if (path === "/api/ai/providers/acct-vpn/vpn") {
+        if (failVpnRead) throw new Error("Core disconnected");
+        return {
+          mode: "vpn", country: "NL", countries: ["NL"], can_configure: true,
+          status: "verified", server: "Alcyone", exits: ["213.152.161.155"],
+        };
+      }
+      if (path === "/api/ai/providers/acct-direct/vpn") {
+        if (init?.method === "PUT") {
+          directSavedCountry = "NL";
+          return {
+            mode: "vpn", country: "NL", countries: ["NL"], can_configure: true,
+            status: "verified", server: "Alcyone", exits: ["213.152.161.155"],
+          };
+        }
+        directReads += 1;
+        if (directReads === 2) {
+          return await new Promise((resolve) => { resolveBulkDirect = resolve; });
+        }
+        return directSavedCountry
+          ? { mode: "vpn", country: directSavedCountry, countries: ["NL"], can_configure: true, status: "verified", server: "Alcyone", exits: ["213.152.161.155"] }
+          : { mode: "direct", countries: ["NL"], can_configure: true, status: "direct" };
+      }
+      return {};
+    });
+
+    render(() => <AirVpnSettings />);
+    await screen.findByText("Verified exit · Alcyone · 213.152.161.155");
+
+    // Switch filter to "VPN routed only" and fail reread on acct-vpn: row stays visible with Retry and never claims 0 VPN accounts.
+    fireEvent.change(screen.getByLabelText("Filter account routes"), { target: { value: "vpn" } });
+    failVpnRead = true;
+    window.dispatchEvent(new Event("focus"));
+    const retry = await screen.findByRole("button", { name: "Retry connection settings" });
+    expect(screen.queryByText("0 accounts routed via AirVPN")).toBeNull();
+    expect(screen.queryByText("No accounts currently use AirVPN")).toBeNull();
+    expect(screen.getByText("Could not confirm 1 account route")).toBeTruthy();
+
+    // Recover acct-vpn via single-row Retry (does not trigger bulk read of acct-direct).
+    failVpnRead = false;
+    fireEvent.click(retry);
+    await screen.findByText("Verified exit · Alcyone · 213.152.161.155");
+    expect(directReads).toBe(1);
+
+    // Switch back to all, start a bulk refresh via admin API key save, and save NL on acct-direct while bulk read is in flight.
+    fireEvent.change(screen.getByLabelText("Filter account routes"), { target: { value: "all" } });
+    fireEvent.click(screen.getByRole("button", { name: "Update key…" }));
+    fireEvent.input(screen.getByLabelText("AirVPN API key"), { target: { value: "synthetic-key" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save key" }));
+    await waitFor(() => expect(directReads).toBe(2));
+
+    const directSelect = screen.getByLabelText<HTMLSelectElement>("Route for Codex Direct");
+    fireEvent.change(directSelect, { target: { value: "NL" } });
+    await waitFor(() => expect(directSelect.value).toBe("NL"));
+
+    // Resolve the stale in-flight bulk read with Direct; newer NL selection must NOT be overwritten.
+    resolveBulkDirect({ mode: "direct", countries: ["NL"], can_configure: true, status: "direct" });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(directSelect.value).toBe("NL");
+  });
 });

@@ -1353,6 +1353,7 @@ struct OrbAccountVpnSettings: View {
     let client: OrbSettingsClient
     let account: String
     let nativeAccount: Bool
+    var refreshKey: Int = 0
     @State private var route: OrbJSON?
     @State private var requests = OrbAccountVpn.Requests()
     @State private var error = ""
@@ -1424,7 +1425,7 @@ struct OrbAccountVpnSettings: View {
             if route == nil && !error.isEmpty {
                 Button("Retry connection settings") { Task { await update() } }
             }
-        }.task(id: account) { await update() }
+        }.task(id: "\(account)-\(refreshKey)") { await update() }
         .task(id: polling) {
             // Verification is still running: reread until it settles or the row closes.
             guard polling else { return }
