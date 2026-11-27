@@ -2994,6 +2994,20 @@ def dispatchResourcesAndSystemRoute
           let msgId := (reqJv.fieldStr? "message_id").getD ""
           return some (jsonResp 200 (.obj #[("received", .str msgId)]))
         if op == "inspect" then
+          let missionStatus ← match ← execParamQuery store.missionsDb
+            "SELECT COALESCE(status,'') FROM missions WHERE id=?1 LIMIT 1;" #[mid] with
+            | .ok rows => pure ((rows[1]?.bind (·[0]?)).getD "").trimAscii.toString
+            | .error _ => pure ""
+          let missionSettled := missionStatus == "interrupted" || missionStatus == "completed" ||
+            missionStatus == "failed" || missionStatus == "acknowledged" ||
+            missionStatus == "awaiting_user" || missionStatus == "paused"
+          if missionSettled then
+            let nowIso := formatEpochIso8601Utc (← nowEpoch)
+            let _ ← execParamStmt store.missionsDb
+              ("UPDATE mission_runs SET execution_state='terminal', terminal_reason='client_runner_reconciled', updated_at=?2 " ++
+               "WHERE mission_id=?1 AND execution_state NOT IN ('terminal','completed','failed','aborted');")
+              #[mid, nowIso]
+            return some (jsonErr 409 "No active run on this computer")
           let activeRun? ← match ← execParamQuery store.missionsDb
             ("SELECT id, generation FROM mission_runs " ++
              "WHERE mission_id=?1 AND execution_state NOT IN ('terminal','completed','failed','aborted') " ++
@@ -3023,6 +3037,10 @@ def dispatchResourcesAndSystemRoute
         let gen := if reqGen > maxGen then reqGen else maxGen + 1
         let nowIso := formatEpochIso8601Utc (← nowEpoch)
         if op == "begin" then
+          let _ ← execParamStmt store.missionsDb
+            ("UPDATE mission_runs SET execution_state='terminal', terminal_reason='superseded_client_run', updated_at=?2 " ++
+             "WHERE mission_id=?1 AND execution_state NOT IN ('terminal','completed','failed','aborted');")
+            #[mid, nowIso]
           let _ ← insertMissionRun store.missionsDb
             runId mid (toString gen) "running" "" "" nowIso true "orb-client"
           let _ ← execParamStmt store.missionsDb
