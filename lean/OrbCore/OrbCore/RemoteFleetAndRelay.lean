@@ -476,10 +476,10 @@ def setPersistedNodeCordoned (dataRoot nodeName : String) (cordoned : Bool) : IO
 /-- Authoritative remote harness & typed-launch capability contract (`FLT-14`),
     shared between `GET /api/remote-nodes` capability discovery and `RemoteDispatch` preflight. -/
 def remoteSupportedHarnesses : Array String :=
-  #["claudecode", "opencode", "grok", "codex", "antigravity"]
+  #["claudecode", "opencode", "pi", "grok", "codex", "antigravity"]
 
 def remoteRequiresProxyHarnesses : Array String :=
-  #["claudecode", "opencode", "codex"]
+  #["claudecode", "opencode", "pi", "codex"]
 
 def remoteLaunchErrorPrefixes : Array String := #[
   "REMOTE_HARNESS_UNSUPPORTED",

@@ -34,6 +34,8 @@ def normalizeModelEffortForBackend (backend? : Option String) (raw : String) : O
     if level == "low" || level == "medium" || level == "high" then some level else none
   | some "claudecode" | some "codex" =>
     if level == "low" || level == "medium" || level == "high" || level == "xhigh" || level == "max" then some level else none
+  | some "pi" =>
+    if level == "low" || level == "medium" || level == "high" || level == "xhigh" then some level else none
   | _ => none
 
 structure Settings where

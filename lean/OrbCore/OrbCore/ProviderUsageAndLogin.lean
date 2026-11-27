@@ -2877,7 +2877,7 @@ def buildAiUsageSummaryJson (store : CoreStore) (qMap : Array (String × String)
     ("by_hour", .arr byHour),
     ("recent", .arr recent),
     ("filters_available", .obj #[
-      ("backends", .arr #[.str "claudecode", .str "codex", .str "opencode", .str "antigravity"]),
+      ("backends", .arr #[.str "claudecode", .str "codex", .str "opencode", .str "pi", .str "antigravity"]),
       ("providers", .arr (byProvider.filterMap (fun b => b.field? "key"))),
       ("models", .arr (byModel.filterMap (fun b => b.field? "key"))),
       ("caller_kinds", .arr (byCaller.filterMap (fun b => b.field? "key"))),

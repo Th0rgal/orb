@@ -540,9 +540,88 @@ structure HarnessProxySetup where
   args  : Array String := #[]
   model : Option String := none
 
+/-- Default Orb Core routable model catalog exposed in Pi's `models.json` so mid-session
+    `set_model` can switch to any Orb routing chain or curated provider model without restart. -/
+private def defaultPiCatalogEntries : Array (String × String) := #[
+  ("builtin/smart", "Routing — Smart"),
+  ("builtin/fast", "Routing — Fast"),
+  ("builtin/research", "Routing — Research"),
+  ("builtin/best", "Routing — Best"),
+  ("anthropic/claude-opus-5-5", "Anthropic — Claude Opus 5.5"),
+  ("anthropic/claude-opus-5", "Anthropic — Claude Opus 5"),
+  ("anthropic/claude-fable-5-2", "Anthropic — Claude Fable 5.2"),
+  ("anthropic/claude-mythos-5-2", "Anthropic — Claude Mythos 5.2"),
+  ("anthropic/claude-sonnet-5-5", "Anthropic — Claude Sonnet 5.5"),
+  ("anthropic/claude-sonnet-4-6", "Anthropic — Claude Sonnet 4.6"),
+  ("openai/gpt-6.2-sol", "OpenAI — GPT-6.2 Sol"),
+  ("openai/gpt-6.1-sol", "OpenAI — GPT-6.1 Sol"),
+  ("openai/gpt-6-astra", "OpenAI — GPT-6 Astra"),
+  ("xai/grok-4.7", "xAI — Grok 4.7"),
+  ("muse/muse-wonder-1.0", "Meta Muse — Muse Wonder 1.0"),
+  ("muse/muse-ember-1.0", "Meta Muse — Muse Ember 1.0"),
+  ("muse/muse-spark-1.3-contributor", "Meta Muse — Muse Spark 1.3 Contributor"),
+  ("muse/muse-spark-1.3", "Meta Muse — Muse Spark 1.3")
+]
+
+/-- Render Pi's `models.json` exposing the full Orb Core routable catalog under provider `"orb"`.
+    Uses `"apiKey": "SANDBOXED_PROXY_API_KEY"` (environment variable indirection) so no literal
+    secret is ever written to `models.json` or passed via `argv`. -/
+def remotePiModelsJson (proxyBaseUrl : String) (extraModels : Array (String × String) := #[]) : String := Id.run do
+  let mut seen : Array String := #[]
+  let mut entries : Array JVal := #[]
+  let allPairs := defaultPiCatalogEntries ++ extraModels
+  for (rawId, rawLabel) in allPairs do
+    let cleanId := rawId.trimAscii.toString
+    if !cleanId.isEmpty && !seen.contains cleanId then
+      seen := seen.push cleanId
+      let low := cleanId.toLower
+      let ctxWindow : Nat :=
+        if (low.splitOn "claude-").length > 1 then 1000000
+        else if (low.splitOn "gpt-").length > 1 then 272000
+        else 200000
+      let lbl := if rawLabel.trimAscii.toString.isEmpty then cleanId else rawLabel.trimAscii.toString
+      entries := entries.push (.obj #[
+        ("id", .str cleanId),
+        ("name", .str lbl),
+        ("reasoning", .bool true),
+        ("input", .arr #[.str "text", .str "image"]),
+        ("contextWindow", .nat ctxWindow),
+        ("maxTokens", .nat 32000),
+        ("cost", .obj #[("input", .nat 0), ("output", .nat 0), ("cacheRead", .nat 0), ("cacheWrite", .nat 0)])
+      ])
+  return renderCompact (.obj #[
+    ("providers", .obj #[
+      ("orb", .obj #[
+        ("baseUrl", .str s!"{proxyBaseUrl}/v1"),
+        ("api", .str "openai-completions"),
+        ("apiKey", .str "SANDBOXED_PROXY_API_KEY"),
+        ("authHeader", .bool true),
+        ("models", .arr entries)
+      ])
+    ])
+  ])
+
+/-- Embedded copy of `pi/orb-extension/index.ts` staged automatically on nodes that do not yet
+    have `/opt/sandboxed-tools/pi-orb-extension/index.ts` pre-installed. -/
+private def embeddedPiOrbExtensionTs : String :=
+  include_str "../../../pi/orb-extension/index.ts"
+
+/-- Normalize a Pi model identifier to the Orb catalog key (e.g. `builtin/smart`, `anthropic/claude-opus-5-5`). -/
+def normalizePiModelKey (rawModel : String) : String :=
+  let raw := rawModel.trimAscii.toString
+  let unprefixed :=
+    if raw.startsWith "orb/" then (raw.drop 4).toString
+    else if raw.startsWith "sandboxed-sh/" then (raw.drop 13).toString
+    else raw
+  if unprefixed.isEmpty then "builtin/smart" else unprefixed
+
 def harnessProxySetup (harness rawModel proxyBase proxyToken : String) : HarnessProxySetup :=
   let raw := rawModel.trimAscii.toString
-  if harness == "opencode" then
+  if harness == "pi" then
+    let key := normalizePiModelKey raw
+    { env := #[("SANDBOXED_PROXY_API_KEY", proxyToken), ("PI_OFFLINE", "1")]
+      model := some s!"orb/{key}" }
+  else if harness == "opencode" then
     let stripped :=
       if raw.startsWith "builtin/" then (raw.drop 8).toString
       else if raw.startsWith "sandboxed-sh/" then (raw.drop 13).toString
@@ -1101,7 +1180,69 @@ def prepareRemoteHarnessCommand
     else
       none
 
-  if harness == "opencode" then
+  if harness == "pi" then
+    if proxyBase.isEmpty then
+      return .error "SANDBOXED_PUBLIC_URL (or SANDBOXED_PROXY_PUBLIC_URL) must be configured for remote pi turns"
+    let pTok ← match ← mintMissionProxyToken store spec.missionId spec.ownerUserId (nowSec + 86400) with
+      | .ok t => pure t
+      | .error e => return .error s!"failed to mint mission proxy token: {e}"
+    let modelKey := normalizePiModelKey spec.modelOverride
+    -- Gather the complete Orb Core routable model catalog (chains + curated + user-configured + current override)
+    -- so mid-session `set_model` can switch to any model on the same persistent JSONL session.
+    let mut extraCatalog : Array (String × String) := #[(modelKey, modelKey)]
+    let ownerAdmin := spec.ownerUserId.isEmpty || spec.ownerUserId == bootstrapAdminId
+    let configuredOpts ← configuredOpenCodeOptions store spec.ownerUserId ownerAdmin
+    for opt in configuredOpts do
+      if let some v := opt.fieldStr? "value" then
+        let lbl := (opt.fieldStr? "label").getD v
+        extraCatalog := extraCatalog.push (v, lbl)
+    let modelsJson := remotePiModelsJson proxyBase extraCatalog
+    let modelsB64 := base64Encode modelsJson.toUTF8
+    let extB64 := base64Encode embeddedPiOrbExtensionTs.toUTF8
+    let effClean := spec.modelEffort.trimAscii.toString
+    let effArg := if effClean.isEmpty then "" else s!" --thinking {shellSingleQuote effClean}"
+    let readOnlyFlag := isPlanPrompt || spec.authorityMode == "readonly"
+    let planArg := if readOnlyFlag then " --plan" else ""
+    let safeMissionSeg :=
+      if isSafeWorkspaceIdSeg spec.missionId then spec.missionId else "mission"
+    -- Stage per-mission `0700` PI_CODING_AGENT_DIR, `0600` models.json (no literal secrets),
+    -- persistent mission session `.jsonl`, and Orb extension without placing any token in argv.
+    let piStagePrelude :=
+      s!"(umask 077; orb_pi_root=\"${"{HOME:-/tmp}"}/.pi/orb-missions/{safeMissionSeg}\"; " ++
+      "mkdir -p \"$orb_pi_root/sessions\" \"$orb_pi_root/extensions/orb-extension\" && chmod 700 \"$orb_pi_root\" \"$orb_pi_root/sessions\"; " ++
+      "printf %s \"$ORB_PI_MODELS_JSON_B64\" | base64 -d > \"$orb_pi_root/models.json\" && chmod 600 \"$orb_pi_root/models.json\"; " ++
+      "if [ -n \"${ORB_PI_EXTENSION_PATH:-}\" ] && [ -f \"$ORB_PI_EXTENSION_PATH\" ]; then " ++
+      "ln -sfn \"$ORB_PI_EXTENSION_PATH\" \"$orb_pi_root/extensions/orb-extension/index.ts\"; " ++
+      "elif [ -f /opt/sandboxed-tools/pi-orb-extension/index.ts ]; then " ++
+      "ln -sfn /opt/sandboxed-tools/pi-orb-extension/index.ts \"$orb_pi_root/extensions/orb-extension/index.ts\"; " ++
+      "else printf %s \"$ORB_PI_EXT_B64\" | base64 -d > \"$orb_pi_root/extensions/orb-extension/index.ts\" && chmod 600 \"$orb_pi_root/extensions/orb-extension/index.ts\"; fi) || exit 1; " ++
+      s!"export PI_CODING_AGENT_DIR=\"${"{HOME:-/tmp}"}/.pi/orb-missions/{safeMissionSeg}\"; " ++
+      "orb_pi_session=\"$PI_CODING_AGENT_DIR/sessions/mission.jsonl\"; " ++
+      "orb_pi_ext=\"$PI_CODING_AGENT_DIR/extensions/orb-extension/index.ts\"; "
+    let rpcInner :=
+      s!"sandboxed-node pi-rpc --provider orb --model {shellSingleQuote modelKey}{effArg}{planArg} --session \"$orb_pi_session\" --extension \"$orb_pi_ext\""
+    let cliFallback :=
+      s!"pi --mode json -p --provider orb --model {shellSingleQuote modelKey}{effArg}{planArg} --session \"$orb_pi_session\" --extension \"$orb_pi_ext\" \"$(cat)\""
+    let cmd :=
+      wsPrefix ++ skillPrelude ++ fd3Prelude ++ piStagePrelude ++
+      "command -v pi >/dev/null 2>&1 || { echo 'pi is not installed on this node' >&2; exit 127; }; " ++
+      "if sandboxed-node pi-rpc --probe </dev/null >/dev/null 2>&1; then " ++
+      rpcInner ++ "; else " ++ cliFallback ++ "; fi <&3"
+    let mut envs : Array (String × String) :=
+      skillEnvs ++ promptEnvs ++ mcpEnvs ++ #[
+        ("SANDBOXED_PROXY_API_KEY", pTok),
+        ("NO_COLOR", "1"),
+        ("PI_OFFLINE", "1"),
+        ("ORB_PI_MODELS_JSON_B64", modelsB64),
+        ("ORB_PI_EXT_B64", extB64)
+      ]
+    if let some rpcUrl := mcpRpcUrl? then
+      envs := envs.push ("SANDBOXED_MCP_URL", rpcUrl)
+    if readOnlyFlag then
+      envs := envs.push ("ORB_PI_READONLY", "1")
+    return .ok { command := cmd, envPairs := envs, managedAuth := #[], proxyToken := pTok }
+
+  else if harness == "opencode" then
     if proxyBase.isEmpty then
       return .error "REMOTE_AUTH_REQUIRED: SANDBOXED_PUBLIC_URL (or SANDBOXED_PROXY_PUBLIC_URL) must be configured for remote opencode turns"
     let pTok ← match ← mintMissionProxyToken store spec.missionId spec.ownerUserId (nowSec + 86400) with
@@ -1386,7 +1527,7 @@ private def resumableGoalSession (backend sid : String) : Bool :=
   match RemoteGoal.normalizeHarness backend with
   | "codex" | "antigravity" => parseUuidCanonical? sid == some sid
   | "opencode" => sid.startsWith "ses_"
-  | "claudecode" | "grok" => !sid.trimAscii.toString.isEmpty
+  | "claudecode" | "grok" | "pi" => !sid.trimAscii.toString.isEmpty
   | _ => false
 
 /-- Split an appended `withDirective` skill block from a parsed goal objective. -/
@@ -2551,7 +2692,7 @@ partial def spawnRemoteJobPoller
               let finalText :=
                 if !acc.text.trimAscii.toString.isEmpty then acc.text
                 else if jState == "succeeded" && !logTail.trimAscii.toString.isEmpty &&
-                        backend != "opencode" && backend != "claudecode" && backend != "claude" && backend != "codex" && backend != "antigravity" then
+                        backend != "opencode" && backend != "pi" && backend != "claudecode" && backend != "claude" && backend != "codex" && backend != "antigravity" then
                   logTail.trimAscii.toString
                 else ""
               let finalText ← if isGoal && backend == "codex" && jState == "succeeded" then

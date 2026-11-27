@@ -225,6 +225,32 @@ def run : IO Unit := do
         (sbEntry.bind (·.fieldStr? "serverUrl") == some "https://orbcore.thomas.md/api/mcp/rpc" &&
          (sbEntry.bind (·.field? "headers")).bind (·.fieldStr? "Authorization") == some "Bearer mcp1.second.after.interrupt" &&
          !lockExists)
+
+      -- Pi harness: direct Streamable HTTP MCP via SANDBOXED_MCP_URL + full-catalog models.json + zero tokens in argv + 0700/0600 staging
+      let .ok piPrep ← prepareRemoteHarnessCommand store none none sup root "uruk" "j-pi" (mkSpec "pi") nowSec
+        | throw (IO.userError "prepare pi failed")
+      let piMcpUrl := (piPrep.envPairs.find? (fun (k, _) => k == "SANDBOXED_MCP_URL")).map Prod.snd |>.getD ""
+      let piModelsB64 := (piPrep.envPairs.find? (fun (k, _) => k == "ORB_PI_MODELS_JSON_B64")).map Prod.snd |>.getD ""
+      let piExtB64 := (piPrep.envPairs.find? (fun (k, _) => k == "ORB_PI_EXT_B64")).map Prod.snd |>.getD ""
+      assertTrue "pi uses sandboxed-node pi-rpc, SANDBOXED_MCP_URL, full models.json, 0700/0600 staging, and zero tokens in argv"
+        ((piPrep.command.splitOn "sandboxed-node pi-rpc").length > 1 &&
+         (piPrep.command.splitOn "chmod 700").length > 1 &&
+         (piPrep.command.splitOn "chmod 600").length > 1 &&
+         (piPrep.command.splitOn "mcp1.").length == 1 &&
+         (piPrep.command.splitOn "orb-mpt-v1_").length == 1 &&
+         piMcpUrl == "https://orbcore.thomas.md/api/mcp/rpc" &&
+         !piModelsB64.isEmpty && !piExtB64.isEmpty &&
+         OrbCore.Skills.nativeDirectory "pi" == ".pi/skills")
+      let piModelsJson := remotePiModelsJson "https://orbcore.thomas.md" #[("custom/model-x", "Custom — Model X")]
+      let .ok piModelsJv := OrbBin.Json.parse piModelsJson | throw (IO.userError "parse remotePiModelsJson")
+      let orbProv := (piModelsJv.fieldOrNull "providers").fieldOrNull "orb"
+      let orbModels := (orbProv.fieldArr? "models").getD #[]
+      assertTrue "remotePiModelsJson registers env-var apiKey and full routable catalog for mid-session set_model"
+        (orbProv.fieldStr? "apiKey" == some "SANDBOXED_PROXY_API_KEY" &&
+         orbProv.fieldStr? "baseUrl" == some "https://orbcore.thomas.md/v1" &&
+         orbModels.any (fun m => m.fieldStr? "id" == some "builtin/smart") &&
+         orbModels.any (fun m => m.fieldStr? "id" == some "anthropic/claude-opus-5-5") &&
+         orbModels.any (fun m => m.fieldStr? "id" == some "custom/model-x"))
     finally
       unsetenvVar "SANDBOXED_PUBLIC_URL"
   finally

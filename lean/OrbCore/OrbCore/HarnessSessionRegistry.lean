@@ -30,6 +30,7 @@ inductive HarnessBackendKind where
   | openCode
   | grok
   | vibe
+  | pi
   deriving Repr, DecidableEq, BEq, Inhabited
 
 def HarnessBackendKind.code : HarnessBackendKind → UInt8
@@ -39,6 +40,7 @@ def HarnessBackendKind.code : HarnessBackendKind → UInt8
   | .openCode    => 3
   | .grok        => 4
   | .vibe        => 5
+  | .pi          => 6
 
 def HarnessBackendKind.asString : HarnessBackendKind → String
   | .codex       => "codex"
@@ -47,6 +49,7 @@ def HarnessBackendKind.asString : HarnessBackendKind → String
   | .openCode    => "opencode"
   | .grok        => "grok"
   | .vibe        => "vibe"
+  | .pi          => "pi"
 
 def HarnessBackendKind.ofString? (s : String) : Option HarnessBackendKind :=
   match s.trimAscii.toString.toLower with
@@ -56,6 +59,7 @@ def HarnessBackendKind.ofString? (s : String) : Option HarnessBackendKind :=
   | "opencode"                => some .openCode
   | "grok"                    => some .grok
   | "vibe"                    => some .vibe
+  | "pi"                      => some .pi
   | _                         => none
 
 /-! ## 2. `SM-17`: Non-Contended `ProcessKillHandle` Verified via `Orb.Kernel.procLivenessStep` -/
