@@ -88,4 +88,12 @@ def resolve (db : SqliteDb) (account : String) (verified : Preference → IO (Ex
     | .ok port => return .ok (some port)
     | .error e => return .error e
 
+/-- True if any account in the store has an active AirVPN country preference.
+Fails closed on SQLite errors so local harness launches never bypass a VPN route. -/
+def anyVpnConfigured (db : SqliteDb) : IO (Except String Bool) := do
+  let .ok rows ← execParamQuery db
+    "SELECT 1 FROM account_vpn_routes WHERE length(country) > 0 LIMIT 1;" #[]
+    | return .error "vpn_route_store_unavailable"
+  return .ok (rows.size > 1)
+
 end OrbCore.AccountVpnRoutes

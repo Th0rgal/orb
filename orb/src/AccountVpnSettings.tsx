@@ -17,20 +17,41 @@ export function AccountVpnSettings(p: { account: string; nativeAccount?: boolean
   const [route, { mutate, refetch }] = createResource(source, ([, id]) => readRoute(id));
   const [busy, setBusy] = createSignal(false);
   const [error, setError] = createSignal("");
+  const [readError, setReadError] = createSignal<unknown>(null);
   createEffect(() => {
-    if (busy() || route.state !== "ready") return;
-    const interval = accountVpnView(route(), !!p.nativeAccount).poll ? 5000 : null;
+    source();
+    setReadError(null);
+    setError("");
+  });
+  createEffect(() => {
+    if (busy() || readError() || route.state !== "ready" || !route()) return;
+    const interval = accountVpnView(route()!, !!p.nativeAccount).poll ? 5000 : null;
     const [, id] = source();
     let active = true;
     const stop = pollWhileVisible(async () => {
-      const next = await readRoute(id);
-      if (active) mutate(next);
+      try {
+        const next = await readRoute(id);
+        if (active) {
+          setReadError(null);
+          mutate(next);
+        }
+      } catch (e) {
+        if (active) {
+          mutate(undefined);
+          setReadError(e);
+        }
+      }
     }, interval, "account-vpn");
     onCleanup(() => {
       active = false;
       stop();
     });
   });
+  const retryRead = () => {
+    setReadError(null);
+    setError("");
+    void refetch();
+  };
   const save = async (value: string) => {
     const [version, id] = source();
     const current = () => version === connectionVersion() && id === p.account;
@@ -38,17 +59,21 @@ export function AccountVpnSettings(p: { account: string; nativeAccount?: boolean
     setError("");
     try {
       const result = await readRoute(id, { method: "PUT", body: JSON.stringify(accountVpnWrite(value)) });
-      if (current()) mutate({ ...result, saved: true });
+      if (current()) {
+        setReadError(null);
+        mutate({ ...result, saved: true });
+      }
     } catch (e) {
       if (current()) setError(e instanceof Error ? e.message : String(e));
     } finally {
       setBusy(false);
     }
   };
+  const activeReadError = () => readError() ?? route.error;
   return <SettingsRow title="Account connection" desc="Route this account through AirVPN or connect directly.">
     <Suspense fallback={<span class="p-ctrl-skel" aria-hidden="true" />}>
-      <Show when={!route.error} fallback={<AccountSettingReadError error={route.error} path={uri(p.account)}
-        updateMessage="Update Core to configure account VPNs." retryLabel="Retry connection settings" retry={() => void refetch()} />}>
+      <Show when={!activeReadError()} fallback={<AccountSettingReadError error={activeReadError()} path={uri(p.account)}
+        updateMessage="Update Core to configure account VPNs." retryLabel="Retry connection settings" retry={retryRead} />}>
         <Show when={route()}>{r => { const v = () => accountVpnView(r(), !!p.nativeAccount); return <div class="p-vpn-ctrl">
           <div class="p-native-controls">
             <Select aria-label="Account connection" disabled={busy() || !v().editable}
@@ -64,7 +89,7 @@ export function AccountVpnSettings(p: { account: string; nativeAccount?: boolean
               <button class="s-btn" disabled={busy()} onClick={() => void save("")}>Confirm Direct route</button>
             </Show>
             <Show when={!v().editable}>
-              <button class="s-btn" disabled={route.loading} onClick={() => void refetch()}>Refresh connection settings</button></Show>
+              <button class="s-btn" disabled={route.loading} onClick={retryRead}>Refresh connection settings</button></Show>
             <Show when={v().retry}>
               <button class="s-btn" disabled={busy() || !v().editable} onClick={() => void save(v().selected)}>Retry verification</button>
             </Show>

@@ -4,7 +4,12 @@ import { expect, it, vi } from "vitest";
 import { api } from "../src/api";
 import { AccountVpnSettings } from "../src/AccountVpnSettings";
 
-vi.mock("../src/api", () => ({ api: vi.fn(), connectionVersion: () => 1 }));
+vi.mock("../src/api", () => {
+  class ApiError extends Error {
+    constructor(public status: number, public detail: string) { super(`${status}: ${detail}`); }
+  }
+  return { api: vi.fn(), ApiError, connectionVersion: () => 1 };
+});
 
 it("saves only the expanded account and retries a saved route when a slot opens", async () => {
   const base = { can_configure: true, countries: ["NL"] };
@@ -112,4 +117,24 @@ it("does not trigger an outer page Suspense fallback while loading the account r
   resolveRoute({ mode: "direct", status: "direct", countries: ["NL"], can_configure: true });
   await screen.findByLabelText("Account connection");
   expect(screen.queryByTestId("outer-skeleton")).toBeNull();
+});
+
+it("clears the confirmed route and offers Retry when a focus reread fails", async () => {
+  const verified = {
+    mode: "vpn", country: "NL", countries: ["NL"], can_configure: true,
+    status: "verified", server: "west", exits: ["192.0.2.20"],
+  };
+  vi.mocked(api).mockClear()
+    .mockResolvedValueOnce(verified)
+    .mockRejectedValueOnce(new Error("Core disconnected"))
+    .mockResolvedValueOnce({ mode: "direct", status: "direct", countries: ["NL"], can_configure: true });
+  render(() => <AccountVpnSettings account="reread-fail" />);
+  await screen.findByText("Verified exit · west · 192.0.2.20");
+  window.dispatchEvent(new Event("focus"));
+  const retry = await screen.findByRole("button", { name: "Retry connection settings" });
+  expect(screen.queryByLabelText("Account connection")).toBeNull();
+  expect(screen.queryByText(/Verified exit/)).toBeNull();
+  fireEvent.click(retry);
+  const select = await screen.findByLabelText("Account connection") as HTMLSelectElement;
+  expect(select.value).toBe("");
 });

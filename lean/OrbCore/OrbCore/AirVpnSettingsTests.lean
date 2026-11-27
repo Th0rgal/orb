@@ -242,6 +242,10 @@ def run (root : String) : IO Unit := do
     (identify "db-row" false "" "" "" "" true).isNone &&
     (identify "db-row" true "two.json" "" "" "" false).isNone)
     "conflicting, ambiguous and member-unowned bindings rejected"
+  let withEmail := { first with fileName := "different.json", prefixId := "", email := "shared@fixture.invalid" }
+  check ((ProviderUsageAndLogin.matchCredential? #[withEmail] "legacy-row" false "missing.json" "" "" "shared@fixture.invalid" false).isNone &&
+    (ProviderUsageAndLogin.matchCredential? #[withEmail] "legacy-row" false "missing.json" "" "" "shared@fixture.invalid" false true).any (·.fileName == "different.json"))
+    "strict routing binding rejects stale filename email fallback while display fallback allows it"
   check (ProviderUsageAndLogin.fileAccountId "openai" first.fileName != ProviderUsageAndLogin.fileAccountId "openai" second.fileName)
     "two unprefixed auth files get distinct IDs"
   routeStorage root

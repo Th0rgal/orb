@@ -542,7 +542,9 @@ def loadHydratedProviders (store : CoreStore) (workingDir : String)
     let singleton := plainKey == "cli-proxy-managed" && (dbProvs.filter (fun r => r.providerType == p.providerType)).size == 1
     let resolveIn := fun (fs : Array CliAuthFileInfo) =>
       let b := matchCredential? fs p.id memberAdded legAuthFile legRefreshFile legSandboxedId legEmail false
-      let m := b.orElse fun _ => if singleton then matchCredential? fs p.id memberAdded legAuthFile legRefreshFile legSandboxedId legEmail true else none
+      let m := b
+        |>.orElse (fun _ => matchCredential? fs p.id memberAdded legAuthFile legRefreshFile legSandboxedId legEmail false true)
+        |>.orElse (fun _ => if singleton then matchCredential? fs p.id memberAdded legAuthFile legRefreshFile legSandboxedId legEmail true else none)
       (b, m)
     let (boundActive?, matchedActive?) := resolveIn typed
     let (boundAuth?, matchedAuth?) :=
@@ -636,10 +638,14 @@ def loadHydratedProviders (store : CoreStore) (workingDir : String)
       let allTyped := authFiles.filter (fun f => providerTypeMatchesAuthType pType f.authType)
       let typed := allTyped.filter (fun f => !f.disabled)
       let authFile := ((leg.fieldStr? "cli_proxy_auth_file").orElse fun _ => leg.fieldStr? "auth_file").getD ""
-      let matchedActive? := matchCredential? typed lid false authFile refFile "" email false
-      let matchedAuth? :=
-        if matchedActive?.isSome || (en && !includeDisabledForAll) then matchedActive?
-        else matchCredential? allTyped lid false authFile refFile "" email false
+      let resolveLeg := fun (fs : Array CliAuthFileInfo) =>
+        let b := matchCredential? fs lid false authFile refFile "" email false
+        let m := b.orElse fun _ => matchCredential? fs lid false authFile refFile "" email false true
+        (b, m)
+      let (boundActive?, matchedActive?) := resolveLeg typed
+      let (boundAuth?, matchedAuth?) :=
+        if matchedActive?.isSome || (en && !includeDisabledForAll) then (boundActive?, matchedActive?)
+        else resolveLeg allTyped
       let hasApi := !aKey.isEmpty && aKey != "cli-proxy-managed"
       let hasOa := matchedAuth?.isSome || !accTok.isEmpty || (pType.toLower == "muse-code" && !refFile.isEmpty && !refFile.endsWith ".json")
       let effLegTok :=
@@ -658,7 +664,7 @@ def loadHydratedProviders (store : CoreStore) (workingDir : String)
         oauthToken := (matchedAuth?.map (·.accessToken)).getD effLegTok
         oauthFile := (matchedAuth?.map (·.fileName)).getD (if !authFile.isEmpty then authFile else refFile)
         nativeOnly := matchedAuth?.any (·.nativeOnly)
-        boundOauthFile := (matchedAuth?.map (·.fileName)).getD ""
+        boundOauthFile := (boundAuth?.map (·.fileName)).getD ""
         modelPrefix := (matchedAuth?.map uniquePrefix).getD ""
         accountEmail := if !email.isEmpty then email else (matchedAuth?.map (·.email)).getD ""
         enabled := en
@@ -789,11 +795,33 @@ def memberAntigravityModels (hub : ProviderRuntimeHub) (store : CoreStore) (work
       unless models.any (fun m => m.1 == row.1) do models := models.push row
   return models
 
+/-- True if any Antigravity account has a non-Direct AirVPN route configured.
+    Fails closed on route store errors so admin catalog probes never bypass VPN. -/
+def anyAntigravityVpnConfigured? (store : CoreStore) (workingDir : String) : IO (Except String Bool) := do
+  let accounts ← loadHydratedProviders store workingDir
+  for hp in accounts do
+    if hp.providerType == "antigravity" then
+      match ← AccountVpnRoutes.snapshot store.missionsDb hp.id with
+      | .ok (.vpn _) => return .ok true
+      | .ok (.direct _) => pure ()
+      | .error _ => return .error "vpn_route_store_unavailable"
+  return .ok false
+
 def nativeCatalogForRequest (scope : NativeCanary.Scope) (hub : ProviderRuntimeHub) (store : CoreStore)
     (workingDir userId rawTarget : String) (admin probe force : Bool) : IO (Array (String × String)) := do
   match scope with
   | .unrestricted =>
-    if admin then return ← getCachedAntigravityModels hub force
+    if admin then
+      match ← anyAntigravityVpnConfigured? store workingDir with
+      | .ok false => return ← getCachedAntigravityModels hub force
+      | .error _ =>
+        if probe || force then throw (IO.userError "Native Antigravity model discovery unavailable")
+        return #[]
+      | .ok true =>
+        if userId.isEmpty then
+          if probe || force then throw (IO.userError "Native Antigravity model discovery requires an authenticated account")
+          return #[]
+        return ← memberAntigravityModels hub store workingDir userId (probe || force)
     return ← memberAntigravityModels hub store workingDir userId probe
   | .invalid _ => return #[]
   | .selected node .. =>
@@ -3213,7 +3241,7 @@ def dispatchProviderAndAiRoute
 
   if segs == ["api", "providers", "catalog", "refresh"] && method == "POST" then
     refreshCustomModelDiscovery store workingDir hub
-    let _ ← nativeCatalogForRequest (← NativeCanary.load) hub store workingDir callerUserId rawTarget effAdmin true true
+    discard <| (nativeCatalogForRequest (← NativeCanary.load) hub store workingDir callerUserId rawTarget effAdmin true true).toBaseIO
     let nowSec ← nowEpoch
     hub.mu.atomically do
       let st ← get

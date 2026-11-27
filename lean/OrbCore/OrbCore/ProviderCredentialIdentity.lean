@@ -57,7 +57,8 @@ def vpnModelPrefix (file : String) : String := "orb-vpn-" ++ fileDigest file
 /-- Explicit metadata must resolve uniquely. In particular a stale filename
 or conflicting identity hints must never select the first login of the type. -/
 def matchCredential? (files : Array CliAuthFileInfo) (account : String) (member : Bool)
-    (file refreshFile linkedId email : String) (legacySingleton : Bool) : Option CliAuthFileInfo := Id.run do
+    (file refreshFile linkedId email : String) (legacySingleton : Bool)
+    (allowStaleFileEmailFallback : Bool := false) : Option CliAuthFileInfo := Id.run do
   if account.isEmpty then return none
   let named := if !file.isEmpty then file else if refreshFile.endsWith ".json" then refreshFile else ""
   let own := files.filter (fun f => authFileMatchesRowId f account member)
@@ -67,7 +68,7 @@ def matchCredential? (files : Array CliAuthFileInfo) (account : String) (member 
     if !named.isEmpty then
       let byName := possible.filter (fun f => f.fileName == named)
       if !byName.isEmpty then possible := byName
-      else if own.isEmpty && !email.isEmpty && !files.any (fun f => f.fileName == named) then
+      else if allowStaleFileEmailFallback && own.isEmpty && !email.isEmpty && !files.any (fun f => f.fileName == named) then
         possible := possible
       else
         possible := #[]

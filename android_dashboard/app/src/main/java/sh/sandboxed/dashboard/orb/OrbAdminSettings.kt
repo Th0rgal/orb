@@ -2432,6 +2432,7 @@ fun OrbAirVpnSettingsPage(core: OrbCore, onBack: () -> Unit) {
     var serverDraft by remember { mutableStateOf("") }
     var profileDraft by remember { mutableStateOf("") }
     var deletingDevice by remember { mutableStateOf<String?>(null) }
+    var routesRevision by remember { mutableIntStateOf(0) }
 
     val pickConfLauncher = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         if (uri == null) return@rememberLauncherForActivityResult
@@ -2503,7 +2504,10 @@ fun OrbAirVpnSettingsPage(core: OrbCore, onBack: () -> Unit) {
             onRefresh = {
                 scope.launch {
                     isRefreshing = true
-                    try { load() } finally { isRefreshing = false }
+                    try {
+                        load()
+                        routesRevision += 1
+                    } finally { isRefreshing = false }
                 }
             },
             modifier = Modifier.fillMaxSize()
@@ -2669,7 +2673,7 @@ fun OrbAirVpnSettingsPage(core: OrbCore, onBack: () -> Unit) {
                                     verticalArrangement = Arrangement.spacedBy(4.dp)
                                 ) {
                                     Text(name, color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Medium)
-                                    AccountVpnSettings(core = core, account = id, nativeAccount = ptype == "antigravity")
+                                    AccountVpnSettings(core = core, account = id, nativeAccount = ptype == "antigravity", refreshKey = routesRevision)
                                 }
                             }
                         }
@@ -2708,6 +2712,7 @@ fun OrbAirVpnSettingsPage(core: OrbCore, onBack: () -> Unit) {
                                 editingKey = false
                                 notice = "API key saved."
                                 load()
+                                routesRevision += 1
                             } catch (e: CancellationException) {
                                 throw e
                             } catch (e: Throwable) {
@@ -2804,6 +2809,7 @@ fun OrbAirVpnSettingsPage(core: OrbCore, onBack: () -> Unit) {
                                 importingProfile = false
                                 notice = "Device profile saved."
                                 load()
+                                routesRevision += 1
                             } catch (e: CancellationException) {
                                 throw e
                             } catch (e: Throwable) {
@@ -2838,6 +2844,7 @@ fun OrbAirVpnSettingsPage(core: OrbCore, onBack: () -> Unit) {
                                 deletingDevice = null
                                 notice = "Removed profile $dev."
                                 load()
+                                routesRevision += 1
                             } catch (e: CancellationException) {
                                 throw e
                             } catch (e: Throwable) {

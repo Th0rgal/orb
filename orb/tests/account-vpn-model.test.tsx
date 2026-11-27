@@ -121,3 +121,38 @@ it("keeps a newer router-access toggle when an older focus reread finishes", asy
   await new Promise(resolve => setTimeout(resolve, 0));
   expect(toggle.getAttribute("aria-checked")).toBe("false");
 });
+
+it("clears the confirmed router toggle and offers Retry when a focus reread fails", async () => {
+  vi.mocked(api).mockResolvedValueOnce({ allowed: true })
+    .mockRejectedValueOnce(new ApiError(503, "{\"error\":\"unavailable\"}"))
+    .mockResolvedValueOnce({ allowed: false });
+  render(() => <AlternativeRouterSettings account="focus-fail" />);
+  const toggle = await screen.findByRole("switch", { name: "Allow alternative routers" });
+  expect(toggle.getAttribute("aria-checked")).toBe("true");
+  window.dispatchEvent(new Event("focus"));
+  const retry = await screen.findByRole("button", { name: "Retry router settings" });
+  expect(screen.queryByRole("switch")).toBeNull();
+  fireEvent.click(retry);
+  const restored = await screen.findByRole("switch", { name: "Allow alternative routers" });
+  expect(restored.getAttribute("aria-checked")).toBe("false");
+});
+
+it("keeps router toggle disabled until recovery reread completes and hides toggle if recovery reread fails", async () => {
+  let rejectRecovery!: (e: unknown) => void;
+  vi.mocked(api).mockResolvedValueOnce({ allowed: false })
+    .mockRejectedValueOnce(new ApiError(503, "{\"error\":\"write_failed\"}"))
+    .mockImplementationOnce(() => new Promise((_, reject) => { rejectRecovery = reject; }))
+    .mockResolvedValueOnce({ allowed: false });
+  render(() => <AlternativeRouterSettings account="recovery-fail" />);
+  const toggle = await screen.findByRole("switch", { name: "Allow alternative routers" }) as HTMLButtonElement;
+  fireEvent.click(toggle);
+  await vi.waitFor(() => expect(api).toHaveBeenCalledTimes(3));
+  expect(toggle.disabled).toBe(true);
+  rejectRecovery(new ApiError(503, "{\"error\":\"read_failed\"}"));
+  const retry = await screen.findByRole("button", { name: "Retry router settings" });
+  expect(screen.queryByRole("switch")).toBeNull();
+  expect(screen.queryByText(fixture.labels.router_unconfirmed)).toBeNull();
+  fireEvent.click(retry);
+  const restored = await screen.findByRole("switch", { name: "Allow alternative routers" });
+  expect(restored.getAttribute("aria-checked")).toBe("false");
+});
