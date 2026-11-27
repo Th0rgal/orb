@@ -935,12 +935,84 @@ structure HarnessCallbacks where
 inductive HarnessGroupState where
   | running | stopping | reaped (status : UInt32)
 
+/-- Read the Linux kernel boot UUID (`/proc/sys/kernel/random/boot_id`) when available. -/
+private def readLinuxBootId? : IO (Option String) := do
+  match ← (IO.FS.readFile (System.FilePath.mk "/proc/sys/kernel/random/boot_id")).toBaseIO with
+  | .ok raw =>
+    let s := raw.trimAscii.toString
+    return if s.isEmpty then none else some s
+  | .error _ => return none
+
+/-- Parse Linux `/proc/<pid>/stat` after the last `')'` of `(comm)`:
+    returns `(stateChar, starttimeTicks)` where field 19 after `") "` is 1-based field 22 (`starttime`). -/
+def parseLinuxProcStat? (raw : String) : Option (Char × UInt64) := Id.run do
+  let bytes := raw.toUTF8
+  let mut closeIdx? : Option Nat := none
+  for i in [0:bytes.size] do
+    if bytes.get! i == 41 then -- ')'
+      closeIdx? := some i
+  let some ci := closeIdx? | return none
+  let tailBytes := bytes.extract (ci + 1) bytes.size
+  let some tailStr := String.fromUTF8? tailBytes | return none
+  let fields := (tailStr.trimAscii.toString.splitOn " ").filter (!·.isEmpty)
+  let some stStr := fields[0]? | return none
+  let some stChar := stStr.toList.head? | return none
+  let some ticksStr := fields[19]? | return none
+  let some ticks := ticksStr.toNat? | return none
+  return some (stChar, ticks.toUInt64)
+
+/-- Sample `(starttime_ticks)` for `pid` from Linux `/proc/<pid>/stat` when alive (non-zombie). -/
+private def readLinuxProcStartTicks? (pid : Int64) : IO (Option UInt64) := do
+  if pid <= 0 then return none
+  match ← (IO.FS.readFile (System.FilePath.mk s!"/proc/{pid}/stat")).toBaseIO with
+  | .error _ => return none
+  | .ok raw =>
+    match parseLinuxProcStat? raw with
+    | some (stChar, ticks) =>
+      if stChar == 'Z' || stChar == 'X' then return none
+      else return some ticks
+    | none => return none
+
+/-- Verify whether `(pid, startTicks?, bootId?)` still refers to the same live process.
+    On Linux with a recorded `(startTicks, bootId)` anchor, verifies `boot_id` and `/proc/<pid>/stat`
+    `starttime` so PID reuse after exit/reboot is never misclassified as alive.
+    Falls back to `kill(pid, 0)` on non-Linux hosts without `/proc`. -/
+def isAnchoredProcessAlive (pid : Int64) (startTicks? : Option UInt64) (bootId? : Option String) : IO Bool := do
+  if pid <= 0 then return false
+  if let (some expectedTicks, some expectedBoot) := (startTicks?, bootId?) then
+    if let some curBoot ← readLinuxBootId? then
+      if curBoot != expectedBoot then return false
+      match ← readLinuxProcStartTicks? pid with
+      | some curTicks => return curTicks == expectedTicks
+      | none => return false
+  return (← killSig pid 0) == 0
+
+/-- Restrict persisted spool filenames to safe ASCII identifiers (`[A-Za-z0-9_-]`, `1..128`). -/
+def sanitizeSpoolId? (id : String) : Option String :=
+  let s := id.trimAscii.toString
+  if s.isEmpty || s.length > 128 then none
+  else if s.all (fun c => c.isAlphanum || c == '-' || c == '_') then some s
+  else none
+
 structure HarnessProcessGroup extends SpawnedPgrp where
   lock : Std.Mutex Unit
   state : IO.Ref HarnessGroupState
+  isDirectChild : Bool := true
+  startTicks? : Option UInt64 := none
+  bootId? : Option String := none
 
 private def ownGroup (sp : SpawnedPgrp) : IO HarnessProcessGroup := do
   return { toSpawnedPgrp := sp, lock := ← Std.Mutex.new (), state := ← IO.mkRef .running }
+
+private def reattachedGroup (pid : Int64) (startTicks? : Option UInt64) (bootId? : Option String) : IO HarnessProcessGroup := do
+  return {
+    toSpawnedPgrp := { pid := pid, stdinFd := -1, stdoutFd := -1 }
+    lock := ← Std.Mutex.new ()
+    state := ← IO.mkRef .running
+    isDirectChild := false
+    startTicks? := startTicks?
+    bootId? := bootId?
+  }
 
 private def HarnessProcessGroup.pollExit (g : HarnessProcessGroup) : IO (Option UInt32) :=
   g.lock.atomically do
@@ -948,6 +1020,7 @@ private def HarnessProcessGroup.pollExit (g : HarnessProcessGroup) : IO (Option 
     | .stopping => return none
     | .reaped code => return some code
     | .running =>
+      if !g.isDirectChild then return none
       let code ← waitpidWnohang g.pid
       if code == 0xFFFFFFFF then return none
       g.state.set (.reaped code)
@@ -961,7 +1034,11 @@ private def HarnessProcessGroup.waitExit (g : HarnessProcessGroup) : IO UInt32 :
 
 private def HarnessProcessGroup.signalRunning (g : HarnessProcessGroup) (sig : Int32) : IO Unit :=
   g.lock.atomically do
-    if let .running ← g.state.get then discard <| killSig (-g.pid) sig
+    if let .running ← g.state.get then
+      if g.isDirectChild then
+        discard <| killSig (-g.pid) sig
+      else if ← isAnchoredProcessAlive g.pid g.startTicks? g.bootId? then
+        discard <| killSig (-g.pid) sig
 
 private def HarnessProcessGroup.claimStop (g : HarnessProcessGroup) : IO Unit :=
   g.lock.atomically do
@@ -970,10 +1047,18 @@ private def HarnessProcessGroup.claimStop (g : HarnessProcessGroup) : IO Unit :=
 private def HarnessProcessGroup.finishStop (g : HarnessProcessGroup) : IO Unit :=
   g.lock.atomically do
     if let .stopping ← g.state.get then
-      discard <| killSig (-g.pid) 15
-      IO.sleep 80
-      discard <| killSig (-g.pid) 9
-      g.state.set (.reaped (← waitpidBlock g.pid))
+      if g.isDirectChild then
+        discard <| killSig (-g.pid) 15
+        IO.sleep 80
+        discard <| killSig (-g.pid) 9
+        g.state.set (.reaped (← waitpidBlock g.pid))
+      else
+        if ← isAnchoredProcessAlive g.pid g.startTicks? g.bootId? then
+          discard <| killSig (-g.pid) 15
+          IO.sleep 80
+          if ← isAnchoredProcessAlive g.pid g.startTicks? g.bootId? then
+            discard <| killSig (-g.pid) 9
+        g.state.set (.reaped 143)
 
 /-- Live warm Claude Code process entry held open across multiple conversational turns. -/
 structure WarmClaudeEntry extends HarnessProcessGroup where
@@ -992,6 +1077,9 @@ structure WarmClaudeEntry extends HarnessProcessGroup where
 structure WarmHarnessManager where
   mu           : Std.Mutex Unit
   registration : Std.Mutex Unit
+  reattachMu   : Std.Mutex Unit
+  reattachedRef : IO.Ref Bool
+  spoolDir?    : Option System.FilePath := none
   stopEpochs : IO.Ref (Std.HashMap String Nat)
   launchGenerations : IO.Ref (Std.HashMap String UInt64)
   runsRef      : IO.Ref (Array (String × IO.Ref LocalRunState))
@@ -1001,11 +1089,16 @@ structure WarmHarnessManager where
   stoppingGroupsRef : IO.Ref (Array (String × HarnessProcessGroup))
   callbacksRef : IO.Ref (Array (String × HarnessCallbacks))
 
-/-- Create a fresh `WarmHarnessManager`. -/
-def newWarmHarnessManager : IO WarmHarnessManager := do
+/-- Create a fresh `WarmHarnessManager`. When `spoolDir?` is provided, one-shot harnesses
+    (`antigravity`, `codex`, `grok`, `vibe`, one-shot `opencode`) spool stdout to disk and
+    persist a liveness-anchored manifest so runs survive `orb-locald` restarts. -/
+def newWarmHarnessManager (spoolDir? : Option System.FilePath := none) : IO WarmHarnessManager := do
   return {
     mu := ← Std.Mutex.new ()
     registration := ← Std.Mutex.new ()
+    reattachMu := ← Std.Mutex.new ()
+    reattachedRef := ← IO.mkRef false
+    spoolDir? := spoolDir?
     stopEpochs := ← IO.mkRef {}
     launchGenerations := ← IO.mkRef {}
     runsRef := ← IO.mkRef #[]
@@ -1014,6 +1107,12 @@ def newWarmHarnessManager : IO WarmHarnessManager := do
     stoppingGroupsRef := ← IO.mkRef #[]
     callbacksRef := ← IO.mkRef #[]
   }
+
+/-- Delete the persisted one-shot run manifest for `id`, if present. -/
+def removePersistedRunManifest (mgr : WarmHarnessManager) (id : String) : IO Unit := do
+  let some dir := mgr.spoolDir? | return ()
+  let some safe := sanitizeSpoolId? id | return ()
+  discard <| (IO.FS.removeFile (dir / s!"{safe}.json")).toBaseIO
 
 /-- Look up the current `LocalRunState` for `id`, if any. -/
 def getRunState? (mgr : WarmHarnessManager) (id : String) : IO (Option LocalRunState) := do
@@ -1150,6 +1249,7 @@ def stopHarnessRun (mgr : WarmHarnessManager) (id : String) : IO Unit := do
     mgr.registration.atomically do
       let pending ← mgr.stoppingGroupsRef.get
       mgr.stoppingGroupsRef.set (← pending.filterM fun (_, h) => return !(← g.state.ptrEq h.state))
+  removePersistedRunManifest mgr id
   if let some stRef := stateRef? then
     let finalSt ← stRef.get
     let cb ← getCallbacksFor mgr id
@@ -2171,6 +2271,214 @@ def runOpenCodeAcpTurn (bin : String) (env : Array String) (turn : OpenCodeAcpTu
     | none => spawnAcp bin env turn
   driveOpenCodeAcpTurn (← ownGroup sp) turn onLine onSpawn
 
+/-- Persisted manifest for a file-spooled one-shot local harness run, allowing a restarted
+    `orb-locald` to reattach to a still-running process or recover a completed answer. -/
+structure PersistedOneShotRun where
+  id          : String
+  harness     : String
+  cwd         : String
+  pid         : Int64
+  generation  : UInt64 := 1
+  startTicks? : Option UInt64 := none
+  bootId?     : Option String := none
+  model?      : Option String := none
+  sessionId?  : Option String := none
+  resumed     : Bool := false
+  turnCount   : Nat := 0
+  startedAt   : UInt64 := 0
+  spoolPath   : String
+  exitPath    : String
+  deriving Repr, BEq
+
+def PersistedOneShotRun.toJVal (m : PersistedOneShotRun) : JVal :=
+  let base : Array (String × JVal) := #[
+    ("id", .str m.id),
+    ("harness", .str m.harness),
+    ("cwd", .str m.cwd),
+    ("pid", JVal.int (Int.ofNat m.pid.toNatClampNeg)),
+    ("generation", JVal.uint64 m.generation),
+    ("resumed", .bool m.resumed),
+    ("turn_count", JVal.nat m.turnCount),
+    ("started_at", JVal.uint64 m.startedAt),
+    ("spool_path", .str m.spoolPath),
+    ("exit_path", .str m.exitPath)
+  ]
+  let base := match m.startTicks? with | some t => base.push ("start_ticks", JVal.uint64 t) | none => base
+  let base := match m.bootId? with | some b => base.push ("boot_id", .str b) | none => base
+  let base := match m.model? with | some mdl => base.push ("model", .str mdl) | none => base
+  let base := match m.sessionId? with | some sid => base.push ("session_id", .str sid) | none => base
+  .obj base
+
+def PersistedOneShotRun.fromJVal? (jv : JVal) : Option PersistedOneShotRun := do
+  let id ← jv.fieldStr? "id"
+  let harness ← jv.fieldStr? "harness"
+  let cwd ← jv.fieldStr? "cwd"
+  let pidInt ← jv.fieldInt? "pid"
+  if pidInt <= 0 then none
+  let spoolPath ← jv.fieldStr? "spool_path"
+  let exitPath ← jv.fieldStr? "exit_path"
+  some {
+    id := id
+    harness := harness
+    cwd := cwd
+    pid := Int64.ofInt pidInt
+    generation := (jv.fieldUInt64? "generation").getD 1
+    startTicks? := jv.fieldUInt64? "start_ticks"
+    bootId? := (jv.fieldStr? "boot_id").filter (!·.trimAscii.toString.isEmpty)
+    model? := (jv.fieldStr? "model").filter (!·.trimAscii.toString.isEmpty)
+    sessionId? := (jv.fieldStr? "session_id").filter (!·.trimAscii.toString.isEmpty)
+    resumed := (jv.fieldBool? "resumed").getD false
+    turnCount := (jv.fieldNat? "turn_count").getD 0
+    startedAt := (jv.fieldUInt64? "started_at").getD 0
+    spoolPath := spoolPath
+    exitPath := exitPath
+  }
+
+private def writePersistedRunManifest (dir : System.FilePath) (safe : String) (m : PersistedOneShotRun) : IO Unit := do
+  let tmp := dir / s!"{safe}.json.tmp"
+  let dst := dir / s!"{safe}.json"
+  IO.FS.writeFile tmp (renderCompact m.toJVal ++ "\n")
+  IO.FS.rename tmp dst
+
+private def readExitCodeFile? (path : System.FilePath) : IO (Option UInt32) := do
+  match ← (IO.FS.readFile path).toBaseIO with
+  | .error _ => return none
+  | .ok raw =>
+    match raw.trimAscii.toString.toNat? with
+    | some n => return some n.toUInt32
+    | none => return none
+
+private def removeSpoolArtifacts (dir : System.FilePath) (safe : String) : IO Unit := do
+  for ext in #[".json", ".json.tmp", ".jsonl", ".exit", ".exit.tmp"] do
+    discard <| (IO.FS.removeFile (dir / s!"{safe}{ext}")).toBaseIO
+
+/-- Shared one-shot NDJSON line processor used by both live spawns and restart-reattached tailers. -/
+private def makeOneShotLineHandler
+    (mgr : WarmHarnessManager)
+    (id harness : String)
+    (stRef : IO.Ref LocalRunState)
+    (lastMsgRef : IO.Ref (Option String))
+    (emitEvents : Bool := true) : String → IO Unit := fun ln => do
+  let nowSec ← nowEpoch
+  stRef.modify fun s => { s with lastProgressEpoch := nowSec }
+  let parsed := parseOneShotHarnessEvent harness ln
+  if let some sid := parsed.sessionId? then
+    stRef.modify fun s => { s with sessionId? := some sid }
+  if parsed.model?.isSome || parsed.inputTokens?.isSome || parsed.outputTokens?.isSome || parsed.cacheReadTokens?.isSome then
+    stRef.modify fun s => {
+      s with
+      model? := parsed.model?.orElse (fun _ => s.model?)
+      inputTokens? := match s.inputTokens?, parsed.inputTokens? with
+        | some a, some b => some (a + b)
+        | none, some b => some b
+        | some a, none => some a
+        | none, none => none
+      outputTokens? := match s.outputTokens?, parsed.outputTokens? with
+        | some a, some b => some (a + b)
+        | none, some b => some b
+        | some a, none => some a
+        | none, none => none
+      cacheReadTokens? := match s.cacheReadTokens?, parsed.cacheReadTokens? with
+        | some a, some b => some (a + b)
+        | none, some b => some b
+        | some a, none => some a
+        | none, none => none
+    }
+  if let some errMsg := parsed.errorMsg? then
+    stRef.modify fun s => { s with error? := some errMsg }
+  if let some th := parsed.thinking? then
+    if emitEvents then
+      let cb ← getCallbacksFor mgr id
+      cb.onStructuredEvent "thinking" (.obj #[("content", .str th)])
+  if let some act := parsed.activity? then
+    let nextActs ← stRef.modifyGet fun s =>
+      let updated :=
+        if s.activities.any (fun a => a.id == act.id) then
+          s.activities.map (fun a => if a.id == act.id then act else a)
+        else
+          s.activities.push act
+      (updated, { s with activities := updated })
+    if emitEvents then
+      let cb ← getCallbacksFor mgr id
+      cb.onStructuredEvent (if act.done then "tool_result" else "tool_call") act.toJVal
+      cb.onOutputEvent (.obj #[
+        ("text", .str ""),
+        ("reset", .bool false),
+        ("activities", .arr (nextActs.map LocalActivityItem.toJVal))
+      ])
+  if !parsed.textDelta.isEmpty then
+    let lastMsg ← lastMsgRef.get
+    let (emittedDelta, fullText) ← stRef.modifyGet fun s =>
+      let (piece, _) := joinHarnessText harness s.text lastMsg parsed
+      let nextText := s.text ++ piece
+      ((piece, nextText), { s with text := nextText })
+    lastMsgRef.set (joinHarnessText harness "" lastMsg parsed).2
+    if emitEvents then
+      let cb ← getCallbacksFor mgr id
+      cb.onStructuredEvent "text_delta" (.obj #[("content", .str fullText)])
+      cb.onOutputEvent (.obj #[("text", .str emittedDelta), ("reset", .bool false)])
+
+/-- Drain all currently available bytes from `spoolHandle`, feeding complete lines to `handleLine`. -/
+private def drainSpoolAvailable
+    (spoolHandle : IO.FS.Handle)
+    (initBuf : ByteArray)
+    (handleLine : String → IO Unit) : IO ByteArray := do
+  let mut buf := initBuf
+  repeat
+    match ← (spoolHandle.read 16384).toBaseIO with
+    | .error _ => break
+    | .ok chunk =>
+      if chunk.isEmpty then break
+      let (lines, rem) := drainNewlineByteLines (buf ++ chunk)
+      buf := rem
+      for ln in lines do
+        handleLine ln
+  return buf
+
+/-- Tail `spoolHandle` until `g` exits (or `exitPath` appears for a reattached run),
+    draining all remaining bytes before returning the exit code. -/
+private def tailSpoolUntilExit
+    (spoolHandle : IO.FS.Handle)
+    (exitPath : System.FilePath)
+    (g : HarnessProcessGroup)
+    (initBuf : ByteArray)
+    (handleLine : String → IO Unit) : IO UInt32 := do
+  let mut buf := initBuf
+  let mut exitCode? : Option UInt32 := none
+  while exitCode?.isNone do
+    match ← (spoolHandle.read 16384).toBaseIO with
+    | .ok chunk =>
+      if !chunk.isEmpty then
+        let (lines, rem) := drainNewlineByteLines (buf ++ chunk)
+        buf := rem
+        for ln in lines do
+          handleLine ln
+      else
+        if g.isDirectChild then
+          if let some code ← g.pollExit then
+            exitCode? := some code
+        else
+          if let some code ← readExitCodeFile? exitPath then
+            exitCode? := some code
+          else if !(← isAnchoredProcessAlive g.pid g.startTicks? g.bootId?) then
+            -- Re-check exitPath once after observing process death in case it landed right before exit.
+            let code ← match ← readExitCodeFile? exitPath with
+              | some ec => pure ec
+              | none =>
+                let st ← g.state.get
+                pure (match st with | .stopping | .reaped _ => 143 | .running => 137)
+            exitCode? := some code
+        if exitCode?.isNone then
+          IO.sleep 30
+    | .error _ =>
+      exitCode? := some 1
+  buf ← drainSpoolAvailable spoolHandle buf handleLine
+  if !buf.isEmpty then
+    if let some tail := String.fromUTF8? buf then
+      if !tail.trimAscii.toString.isEmpty then
+        handleLine tail
+  return exitCode?.getD 1
+
 /-- Launch a turn for any supported local harness (`claudecode` via warm bidirectional stdio, or one-shot CLI for others).
     Automatically evaluates worktree isolation when requested and captures pre/post-turn git checkpoints! -/
 def startHarnessTurn
@@ -2331,62 +2639,7 @@ def startHarnessTurn
       let sp ← ownGroup (← spawn)
       registerGroup sp
       return sp
-    let handleLine : String → IO Unit := fun ln => do
-      let nowSec ← nowEpoch
-      stRef.modify fun s => { s with lastProgressEpoch := nowSec }
-      let parsed := parseOneShotHarnessEvent harness ln
-      if let some sid := parsed.sessionId? then
-        stRef.modify fun s => { s with sessionId? := some sid }
-      if parsed.model?.isSome || parsed.inputTokens?.isSome || parsed.outputTokens?.isSome || parsed.cacheReadTokens?.isSome then
-        stRef.modify fun s => {
-          s with
-          model? := parsed.model?.orElse (fun _ => s.model?)
-          inputTokens? := match s.inputTokens?, parsed.inputTokens? with
-            | some a, some b => some (a + b)
-            | none, some b => some b
-            | some a, none => some a
-            | none, none => none
-          outputTokens? := match s.outputTokens?, parsed.outputTokens? with
-            | some a, some b => some (a + b)
-            | none, some b => some b
-            | some a, none => some a
-            | none, none => none
-          cacheReadTokens? := match s.cacheReadTokens?, parsed.cacheReadTokens? with
-            | some a, some b => some (a + b)
-            | none, some b => some b
-            | some a, none => some a
-            | none, none => none
-        }
-      if let some errMsg := parsed.errorMsg? then
-        stRef.modify fun s => { s with error? := some errMsg }
-      if let some th := parsed.thinking? then
-        let cb ← getCallbacksFor mgr id
-        cb.onStructuredEvent "thinking" (.obj #[("content", .str th)])
-      if let some act := parsed.activity? then
-        let nextActs ← stRef.modifyGet fun s =>
-          let updated :=
-            if s.activities.any (fun a => a.id == act.id) then
-              s.activities.map (fun a => if a.id == act.id then act else a)
-            else
-              s.activities.push act
-          (updated, { s with activities := updated })
-        let cb ← getCallbacksFor mgr id
-        cb.onStructuredEvent (if act.done then "tool_result" else "tool_call") act.toJVal
-        cb.onOutputEvent (.obj #[
-          ("text", .str ""),
-          ("reset", .bool false),
-          ("activities", .arr (nextActs.map LocalActivityItem.toJVal))
-        ])
-      if !parsed.textDelta.isEmpty then
-        let lastMsg ← lastMsgRef.get
-        let (emittedDelta, fullText) ← stRef.modifyGet fun s =>
-          let (piece, _) := joinHarnessText harness s.text lastMsg parsed
-          let nextText := s.text ++ piece
-          ((piece, nextText), { s with text := nextText })
-        lastMsgRef.set (joinHarnessText harness "" lastMsg parsed).2
-        let cb ← getCallbacksFor mgr id
-        cb.onStructuredEvent "text_delta" (.obj #[("content", .str fullText)])
-        cb.onOutputEvent (.obj #[("text", .str emittedDelta), ("reset", .bool false)])
+    let handleLine : String → IO Unit := makeOneShotLineHandler mgr id harness stRef lastMsgRef true
     let finishTurn : HarnessProcessGroup → UInt32 → IO Unit := fun g code => do
       let owned ← mgr.mu.atomically do
         let pids ← mgr.activeGroupsRef.get
@@ -2436,6 +2689,50 @@ def startHarnessTurn
             pure 1
         finishTurn sp code
       return .ok (← stRef.get)
+
+    if let (some spoolDir, some safeId) := (mgr.spoolDir?, sanitizeSpoolId? id) then
+      let spoolPrepared ← (do
+        IO.FS.createDirAll spoolDir
+        let spoolPath := spoolDir / s!"{safeId}.jsonl"
+        let exitPath := spoolDir / s!"{safeId}.exit"
+        IO.FS.writeFile spoolPath ""
+        discard <| (IO.FS.removeFile exitPath).toBaseIO
+        discard <| (IO.FS.removeFile (spoolDir / s!"{safeId}.exit.tmp")).toBaseIO
+        let spoolHandle ← IO.FS.Handle.mk spoolPath .read
+        pure (spoolPath, exitPath, spoolHandle)).toBaseIO
+      if let .ok (spoolPath, exitPath, spoolHandle) := spoolPrepared then
+        let shScript :=
+          "spool=\"$2\"; exitf=\"$3\"; if cd \"$1\"; then shift 3; \"$@\" >> \"$spool\" 2>/dev/null; ec=$?; else ec=$?; fi; printf '%s\\n' \"$ec\" > \"$exitf.tmp\" && mv -f \"$exitf.tmp\" \"$exitf\"; exit \"$ec\""
+        let shArgs := #["-c", shScript, "sh", effectiveCwd, spoolPath.toString, exitPath.toString, actualBin] ++ cliArgs
+        let spawned ← match ← (spawnRegistered (spawnPgrp "/bin/sh" shArgs envStrs (pipeStdin := false) (nullStdio := true) (pipeStdout := false))).toBaseIO with
+          | .error e =>
+            stRef.modify fun s => { s with done := true, exitCode? := some 1, error? := some s!"{e}" }
+            return .error s!"Failed to start {harness}: {e}"
+          | .ok sp => pure sp
+        let startTicks? ← readLinuxProcStartTicks? spawned.pid
+        let bootId? ← readLinuxBootId?
+        let manifest : PersistedOneShotRun := {
+          id := id
+          harness := harness
+          cwd := effectiveCwd
+          pid := spawned.pid
+          generation := generation
+          startTicks? := startTicks?
+          bootId? := bootId?
+          model? := initState.model?
+          sessionId? := effSid?
+          resumed := effSid?.isSome
+          turnCount := prevTurns
+          startedAt := startEpoch
+          spoolPath := spoolPath.toString
+          exitPath := exitPath.toString
+        }
+        discard <| (writePersistedRunManifest spoolDir safeId manifest).toBaseIO
+        discard <| IO.asTask (prio := .dedicated) do
+          let code ← tailSpoolUntilExit spoolHandle exitPath spawned ByteArray.empty handleLine
+          finishTurn spawned code
+        return .ok (← stRef.get)
+
     let shArgs := #["-c", "cd \"$1\" && shift && exec \"$@\"", "sh", effectiveCwd, actualBin] ++ cliArgs
     let spawned ← match ← (spawnRegistered (spawnPgrp "/bin/sh" shArgs envStrs (pipeStdin := false) (nullStdio := true) (pipeStdout := true))).toBaseIO with
       | .error e =>
@@ -2459,5 +2756,118 @@ def startHarnessTurn
       closeFdRaw spawned.stdoutFd
       finishTurn spawned (← spawned.waitExit)
     return .ok (← stRef.get)
+
+/-- Reattach to any persisted file-spooled one-shot runs left behind by a previous `orb-locald`
+    instance (either still running or completed while `orb-locald` was down). Idempotent and
+    serialized by `mgr.reattachMu` so concurrent startup polls observe the recovered runs. -/
+def ensurePersistedRunsReattached
+    (mgr : WarmHarnessManager)
+    (mkCallbacks : String → HarnessCallbacks) : IO Unit := do
+  if ← mgr.reattachedRef.get then return ()
+  mgr.reattachMu.atomically do
+    if ← mgr.reattachedRef.get then return ()
+    let some spoolDir := mgr.spoolDir?
+      | do mgr.reattachedRef.set true; return ()
+    let entries ← match ← spoolDir.readDir.toBaseIO with
+      | .ok es => pure es
+      | .error _ =>
+        mgr.reattachedRef.set true
+        return ()
+    let nowSec ← nowEpoch
+    for entry in entries do
+      let fname := entry.fileName
+      if !fname.endsWith ".json" then continue
+      let safeId := (fname.dropEnd 5).toString
+      let raw ← match ← (IO.FS.readFile entry.path).toBaseIO with
+        | .ok s => pure s
+        | .error _ => continue
+      let .ok jv := OrbBin.Json.parse raw | continue
+      let some m := PersistedOneShotRun.fromJVal? jv | continue
+      if (← mgr.runsRef.get).any (fun (k, _) => k == m.id) then continue
+      let spoolPath := System.FilePath.mk m.spoolPath
+      let exitPath := System.FilePath.mk m.exitPath
+      if !(← spoolPath.pathExists) then
+        removeSpoolArtifacts spoolDir safeId
+        continue
+      let alive ← isAnchoredProcessAlive m.pid m.startTicks? m.bootId?
+      let ageSec := if nowSec >= m.startedAt then nowSec - m.startedAt else 0
+      if !alive && ageSec > 86400 then
+        removeSpoolArtifacts spoolDir safeId
+        continue
+      let spoolHandle ← match ← (IO.FS.Handle.mk spoolPath .read).toBaseIO with
+        | .ok h => pure h
+        | .error _ => continue
+      let initState : LocalRunState := {
+        runId := m.id
+        harness := m.harness
+        cwd := m.cwd
+        generation := m.generation
+        done := false
+        resumed := m.resumed
+        sessionId? := m.sessionId?
+        activities := #[]
+        turnCount := m.turnCount
+        model? := m.model?
+        lastProgressEpoch := nowSec
+      }
+      let cb := mkCallbacks m.id
+      let stRef ← IO.mkRef initState
+      let lastMsgRef ← IO.mkRef (none : Option String)
+      mgr.mu.atomically do
+        mgr.runsRef.modify fun runs => (runs.filter (fun p => p.1 != m.id)).push (m.id, stRef)
+      setCallbacksFor mgr m.id cb
+      -- Synchronously replay all bytes already written to the spool before returning.
+      let replayLine := makeOneShotLineHandler mgr m.id m.harness stRef lastMsgRef false
+      let remBuf ← drainSpoolAvailable spoolHandle ByteArray.empty replayLine
+      if !alive then
+        if !remBuf.isEmpty then
+          if let some tail := String.fromUTF8? remBuf then
+            if !tail.trimAscii.toString.isEmpty then
+              replayLine tail
+        let code := (← readExitCodeFile? exitPath).getD 137
+        let priorErr? := (← stRef.get).error?
+        let err? := priorErr?.orElse (fun _ => if code == 0 then none else some s!"{m.harness} exited with code {code}")
+        stRef.modify fun s => {
+          s with
+          done := true
+          exitCode? := some (Int.ofNat code.toNat)
+          error? := err?
+          turnCount := s.turnCount + 1
+        }
+      else
+        let g ← reattachedGroup m.pid m.startTicks? m.bootId?
+        mgr.mu.atomically do
+          mgr.activeGroupsRef.modify fun pids => (pids.filter (fun (k, _) => k != m.id)).push (m.id, g)
+        let liveLine := makeOneShotLineHandler mgr m.id m.harness stRef lastMsgRef true
+        discard <| IO.asTask (prio := .dedicated) do
+          let code ← tailSpoolUntilExit spoolHandle exitPath g remBuf liveLine
+          let owned ← mgr.mu.atomically do
+            let pids ← mgr.activeGroupsRef.get
+            let live ← pids.filterM fun (_, h) => return !(← g.state.ptrEq h.state)
+            if live.size == pids.size then return false
+            mgr.activeGroupsRef.set live
+            return true
+          if !owned then return ()
+          let priorErr? := (← stRef.get).error?
+          let err? := priorErr?.orElse (fun _ => if code == 0 then none else some s!"{m.harness} exited with code {code}")
+          stRef.modify fun s => {
+            s with
+            done := true
+            exitCode? := some (Int.ofNat code.toNat)
+            error? := err?
+            turnCount := s.turnCount + 1
+          }
+          let finalSnap ← stRef.get
+          if !finalSnap.text.isEmpty && err?.isNone then
+            cb.onStructuredEvent "assistant_message" (.obj #[("content", .str finalSnap.text)])
+          if let some em := err? then
+            cb.onStructuredEvent "error" (.obj #[("message", .str em)])
+          cb.onOutputEvent (.obj #[
+            ("text", .str ""),
+            ("reset", .bool false),
+            ("state", finalSnap.toPollJVal)
+          ])
+          cb.onTurnFinished finalSnap
+    mgr.reattachedRef.set true
 
 end OrbBin.ClaudeControl

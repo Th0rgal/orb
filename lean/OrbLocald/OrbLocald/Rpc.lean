@@ -914,17 +914,6 @@ def LocaldState.publishInteractionSnapshot (st : LocaldState) (runId : String) :
       (match e.target? with | none => true | some t => t == clean)).foldl
     (fun acc e => acc.enqueueTokenEvent e.token snap) st
 
-def ensureWarmManager (stRef : IO.Ref LocaldState) : IO OrbBin.ClaudeControl.WarmHarnessManager := do
-  let cur ← stRef.get
-  match cur.warmMgr? with
-  | some m => return m
-  | none =>
-    let fresh ← OrbBin.ClaudeControl.newWarmHarnessManager
-    stRef.modifyGet fun s =>
-      match s.warmMgr? with
-      | some existing => (existing, s)
-      | none => (fresh, { s with warmMgr? := some fresh })
-
 def LocaldState.subscribe (st : LocaldState) (channel : String) (initialEvent? : Option JVal := none)
     (target? : Option String := none) : (Nat × LocaldState) :=
   let tok := st.nextSubToken
@@ -1821,6 +1810,67 @@ private def persistOriginsSnapshot (st : LocaldState) : IO Unit := do
     let arr := st.localOrigins.map LocalOriginEntry.toMissionJson
     let payload := (renderCompact (.arr arr) ++ "\n").toUTF8
     discard <| OrbBin.PosixExt.writeAtomicPrivate0600 path payload
+
+private def mkReattachedRunCallbacks (stRef : IO.Ref LocaldState) (targetMissionId : String) :
+    OrbBin.ClaudeControl.HarnessCallbacks := {
+  onOutputEvent := fun ev => do
+    stRef.modify fun s => s.publishChannelEvent "local_agents" ev (some targetMissionId)
+  onTurnFinished := fun finalRs => do
+    let finIso := formatUtcIso8601 (← OrbBin.PosixExt.nowEpoch)
+    let termStatus :=
+      if finalRs.stopping || finalRs.exitCode? == some 137 || finalRs.exitCode? == some 143 then "interrupted"
+      else if finalRs.error?.isSome || (finalRs.exitCode?.isSome && finalRs.exitCode? != some 0) then "failed"
+      else "awaiting_user"
+    let cleanTurnErr := finalRs.error?.map (·.trimAscii.toString) |>.filter (!·.isEmpty)
+    let (stFin, bindChangedFin) ← stRef.modifyGet fun (s : LocaldState) =>
+      let nextOrigins := s.localOrigins.map fun row =>
+        if row.id == targetMissionId then
+          let nextHist :=
+            if finalRs.text.trimAscii.toString.isEmpty then row.history
+            else row.history.push (.obj #[("role", .str "assistant"), ("content", .str finalRs.text)])
+          { row with
+            localRunActive := false
+            syncSeq := if row.localSyncPending then row.syncSeq + 1 else row.syncSeq
+            syncText := if row.localSyncPending then finalRs.text else row.syncText
+            statusMessage := if termStatus == "failed" then cleanTurnErr else none
+            status := termStatus
+            updatedAt := finIso
+            history := nextHist }
+        else row
+      let (nextBinds, bChanged) :=
+        match finalRs.sessionId? with
+        | none => (s.bindingsEntries, false)
+        | some sid =>
+          let updated := s.bindingsEntries.map fun (bk, (bv : JVal)) =>
+            if bk == targetMissionId then (bk, JVal.setField bv "sessionId" (.str sid)) else (bk, bv)
+          (updated, s.bindingsEntries.any (fun (bk, _) => bk == targetMissionId))
+      let sBase := ({ s with localOrigins := nextOrigins, bindingsEntries := nextBinds }).enqueueNamedEvent
+        "orb-local-origins-changed" (.obj #[("id", .str targetMissionId)])
+      let s' :=
+        if bChanged then
+          let nextRev := sBase.bindingsRevision + 1
+          let nextSnap : JVal := .obj #[("revision", JVal.nat nextRev), ("bindings", .obj nextBinds)]
+          ({ sBase with bindingsRevision := nextRev }).publishChannelEvent "local_bindings" nextSnap
+        else
+          sBase
+      ((s', bChanged), s')
+    persistOriginsSnapshot stFin
+    if bindChangedFin then persistBindingsSnapshot stFin
+}
+
+def ensureWarmManager (stRef : IO.Ref LocaldState) : IO OrbBin.ClaudeControl.WarmHarnessManager := do
+  let cur ← stRef.get
+  let mgr ← match cur.warmMgr? with
+    | some m => pure m
+    | none =>
+      let spoolDir? := (resolveOrbStateDir cur).map (· / "local-runs")
+      let fresh ← OrbBin.ClaudeControl.newWarmHarnessManager spoolDir?
+      stRef.modifyGet fun s =>
+        match s.warmMgr? with
+        | some existing => (existing, s)
+        | none => (fresh, { s with warmMgr? := some fresh })
+  OrbBin.ClaudeControl.ensurePersistedRunsReattached mgr (mkReattachedRunCallbacks stRef)
+  return mgr
 
 private def isSafeHttpUrl (raw : String) : Bool :=
   let u := raw.trimAscii.toString

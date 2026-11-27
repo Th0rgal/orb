@@ -1850,6 +1850,104 @@ def runAllTests : IO UInt32 := do
   assertTrue "OpenSSH PEM header present" (sshPem.startsWith "-----BEGIN OPENSSH PRIVATE KEY-----")
   assertTrue "OpenSSH authorized_keys line valid" (sshPub.startsWith "ssh-ed25519 ")
 
+  -- 11. File-backed one-shot spool + restart reattach + completed-while-down + reattached Stop
+  assertEq "parseLinuxProcStat? handles parens/spaces in comm"
+    (parseLinuxProcStat? "12345 (my (proc) name) S 1 12345 12345 0 -1 4194304 10 0 0 0 1 2 0 0 20 0 1 0 98765432 0 0")
+    (some ('S', 98765432))
+  assertEq "sanitizeSpoolId? accepts UUIDs" (sanitizeSpoolId? "5a49ed7a-14cf-426c-a9e6-2e1cf346d7b7") (some "5a49ed7a-14cf-426c-a9e6-2e1cf346d7b7")
+  assertEq "sanitizeSpoolId? rejects path traversal" (sanitizeSpoolId? "../escape") none
+  assertEq "sanitizeSpoolId? rejects slashes" (sanitizeSpoolId? "a/b") none
+
+  let spoolDir := tmpDir / "local-runs-spool"
+  let gateFile := tmpDir / "reattach_live_gate"
+  let testConvId := "7f215fc9-db49-4e98-ba81-b0ef9b5f3f11"
+  let mockAgyLive := tmpDir / "mock_agy_live.sh"
+  IO.FS.writeFile mockAgyLive (
+    "#!/bin/sh\n" ++
+    s!"printf '\{\"event\":\"init\",\"conversation_id\":\"{testConvId}\"}\\n'\n" ++
+    "printf '{\"event\":\"step_update\",\"step_update\":{\"step_type\":\"agent_response\",\"text_delta\":\"part1 \"}}\\n'\n" ++
+    "i=0\n" ++
+    s!"while [ ! -f \"{gateFile.toString}\" ] && [ \"$i\" -lt 300 ]; do sleep 0.05; i=$((i+1)); done\n" ++
+    "printf '{\"event\":\"step_update\",\"step_update\":{\"step_type\":\"agent_response\",\"text_delta\":\"part2\"}}\\n'\n" ++
+    s!"printf '\{\"event\":\"result\",\"result\":\{\"status\":\"SUCCESS\",\"conversation_id\":\"{testConvId}\"}}\\n'\n"
+  )
+  let _ ← IO.Process.output { cmd := "chmod", args := #["+x", mockAgyLive.toString] }
+
+  let mgr1 ← newWarmHarnessManager (some spoolDir)
+  let liveLaunch ← startHarnessTurn mgr1 "m-reattach-live" "antigravity" mockAgyLive.toString repoDir.toString "Go"
+    1 none none none .bypassPermissions "local" #[] {}
+  assertTrue "Spooled one-shot turn launches cleanly" liveLaunch.toOption.isSome
+
+  -- Wait until part1 is flushed to the spool and manifest is written.
+  let mut waitedLive := 0
+  while waitedLive < 5000 do
+    let manifestExists ← (spoolDir / "m-reattach-live.json").pathExists
+    if manifestExists then
+      if let some st ← getRunState? mgr1 "m-reattach-live" then
+        if !st.text.isEmpty then break
+    IO.sleep 25
+    waitedLive := waitedLive + 25
+
+  -- Simulate orb-locald restart while child is still alive (blocked on gateFile).
+  let mgr2 ← newWarmHarnessManager (some spoolDir)
+  let finishedRef ← IO.mkRef false
+  ensurePersistedRunsReattached mgr2 (fun _ => { onTurnFinished := fun _ => finishedRef.set true })
+  let st2Init := (← getRunState? mgr2 "m-reattach-live").get!
+  assertEq s!"Reattached manager sees live run as not done (exit={repr st2Init.exitCode?} err={repr st2Init.error?})" st2Init.done false
+  assertEq "Reattached manager restores session_id from spool" st2Init.sessionId? (some testConvId)
+  assertEq "Reattached manager replays initial text from spool" st2Init.text "part1 "
+
+  -- Release the child so it emits part2 and exits 0.
+  IO.FS.writeFile gateFile "go\n"
+
+  -- Wait for reattached tailer to observe completion and part2.
+  let mut waitedDone := 0
+  while waitedDone < 5000 do
+    if let some st ← getRunState? mgr2 "m-reattach-live" then
+      if st.done then break
+    IO.sleep 25
+    waitedDone := waitedDone + 25
+  let st2Final := (← getRunState? mgr2 "m-reattach-live").get!
+  assertEq "Reattached run completes cleanly" st2Final.done true
+  assertEq "Reattached run captures exit code 0" st2Final.exitCode? (some 0)
+  assertEq "Reattached run captures full streamed text" st2Final.text "part1 part2"
+  assertEq "Reattached run fires onTurnFinished callback" (← finishedRef.get) true
+
+  -- Simulate orb-locald restart AFTER the run already finished while down.
+  let mgr3 ← newWarmHarnessManager (some spoolDir)
+  ensurePersistedRunsReattached mgr3 (fun _ => {})
+  let st3 := (← getRunState? mgr3 "m-reattach-live").get!
+  assertEq "Completed-while-down manager recovers done=true" st3.done true
+  assertEq "Completed-while-down manager recovers exit_code=0" st3.exitCode? (some 0)
+  assertEq "Completed-while-down manager recovers full text" st3.text "part1 part2"
+  assertEq "Completed-while-down manager recovers session_id" st3.sessionId? (some testConvId)
+
+  -- Verify Stop works on a reattached live process and removes its manifest.
+  let mockAgySleep := tmpDir / "mock_agy_sleep.sh"
+  IO.FS.writeFile mockAgySleep (
+    "#!/bin/sh\n" ++
+    s!"printf '\{\"event\":\"init\",\"conversation_id\":\"{testConvId}\"}\\n'\n" ++
+    "sleep 30\n"
+  )
+  let _ ← IO.Process.output { cmd := "chmod", args := #["+x", mockAgySleep.toString] }
+  let stopLaunch ← startHarnessTurn mgr1 "m-reattach-stop" "antigravity" mockAgySleep.toString repoDir.toString "Sleep"
+    1 none none none .bypassPermissions "local" #[] {}
+  assertTrue "Long-running spooled turn launches cleanly" stopLaunch.toOption.isSome
+  let mut waitedStopManifest := 0
+  while waitedStopManifest < 3000 do
+    if ← (spoolDir / "m-reattach-stop.json").pathExists then break
+    IO.sleep 25
+    waitedStopManifest := waitedStopManifest + 25
+  let mgr4 ← newWarmHarnessManager (some spoolDir)
+  ensurePersistedRunsReattached mgr4 (fun _ => {})
+  let st4Before := (← getRunState? mgr4 "m-reattach-stop").get!
+  assertEq "Reattached sleeping run is alive before Stop" st4Before.done false
+  stopHarnessRun mgr4 "m-reattach-stop"
+  let st4After := (← getRunState? mgr4 "m-reattach-stop").get!
+  assertEq "Stop marks reattached run done" st4After.done true
+  assertEq "Stop marks reattached run stopping" st4After.stopping true
+  assertEq "Stop deletes persisted manifest" (← (spoolDir / "m-reattach-stop.json").pathExists) false
+
   try IO.FS.removeDirAll tmpDir catch _ => pure ()
   IO.println "=== ALL ORB-BIN WAVE 1 SELF-TESTS PASSED ==="
   return 0
