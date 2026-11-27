@@ -33,6 +33,7 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -867,6 +868,22 @@ fun OrbHomeScreen(
                         .weight(1f)
                         .fillMaxWidth()
                 ) {
+                    val homeBase by core.baseURLFlow.collectAsState()
+                    val localUrl = "http://127.0.0.1:3000"
+                    val onLocalHome = homeBase.trim().trimEnd('/') == localUrl
+                    var localHomeReady by remember { mutableStateOf(false) }
+                    LaunchedEffect(homeBase) {
+                        localHomeReady = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                            runCatching {
+                                val c = okhttp3.OkHttpClient.Builder()
+                                    .connectTimeout(350, java.util.concurrent.TimeUnit.MILLISECONDS)
+                                    .readTimeout(350, java.util.concurrent.TimeUnit.MILLISECONDS)
+                                    .build()
+                                val req = okhttp3.Request.Builder().url("$localUrl/api/health").get().build()
+                                c.newCall(req).execute().use { it.isSuccessful }
+                            }.getOrDefault(false)
+                        }
+                    }
                     LazyColumn(
                         modifier = Modifier.fillMaxSize(),
                         contentPadding = PaddingValues(
@@ -897,6 +914,59 @@ fun OrbHomeScreen(
                                     log = lastErrorLog,
                                     modifier = Modifier.padding(vertical = 6.dp)
                                 )
+                            }
+                        }
+
+                        if (localHomeReady || onLocalHome) {
+                            item(key = "local_sidesystem_project") {
+                                val dashColor = if (onLocalHome) OrbStyle.success.copy(alpha = 0.7f) else OrbStyle.border
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(vertical = 6.dp)
+                                        .clip(RoundedCornerShape(12.dp))
+                                        .background(if (onLocalHome) OrbStyle.success.copy(alpha = 0.08f) else OrbStyle.surface.copy(alpha = 0.5f))
+                                        .drawBehind {
+                                            drawRoundRect(
+                                                color = dashColor,
+                                                style = androidx.compose.ui.graphics.drawscope.Stroke(
+                                                    width = 1.dp.toPx(),
+                                                    pathEffect = androidx.compose.ui.graphics.PathEffect.dashPathEffect(floatArrayOf(14f, 10f), 0f)
+                                                ),
+                                                cornerRadius = androidx.compose.ui.geometry.CornerRadius(12.dp.toPx())
+                                            )
+                                        }
+                                        .orbPressClickable {
+                                            if (!onLocalHome) {
+                                                scope.launch { core.configureSession(localUrl, null, null) }
+                                            } else {
+                                                onSelectProject(OrbRow("local", mapOf("slug" to "local", "name" to "Local · SideSystem")))
+                                            }
+                                        }
+                                        .padding(horizontal = 14.dp, vertical = 12.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.SpaceBetween
+                                ) {
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(
+                                            text = "Local · SideSystem",
+                                            color = Color.White,
+                                            fontSize = 14.sp,
+                                            fontWeight = FontWeight.SemiBold
+                                        )
+                                        Text(
+                                            text = if (onLocalHome) "Connected · Tap to open local missions" else "Bonsai 2.5 27B NPU · Tap to switch local",
+                                            color = OrbStyle.textSecondary,
+                                            fontSize = 12.sp
+                                        )
+                                    }
+                                    Text(
+                                        text = if (onLocalHome) "Open" else "Local",
+                                        color = if (onLocalHome) OrbStyle.success else OrbStyle.textSecondary,
+                                        fontSize = 12.sp,
+                                        fontWeight = FontWeight.SemiBold
+                                    )
+                                }
                             }
                         }
 
