@@ -662,6 +662,10 @@ structure DesktopState where
   navForward : List NavEntry := []
   attachCount : Nat := 0
   scrolledManually : Bool := false
+  /-- Monotonic counter bumped whenever a logical composer session resets (Create, Send,
+      mission switch, `Ctrl+N`, Cloud send) so Wayland `zwp_text_input_v3` cycles disable/enable
+      even when the focused widget keeps the same `EntityId` (`1`). -/
+  imeResetGen : Nat := 0
   deriving Repr, Inhabited
 
 def settingsFooter : ChromeSidebarRow :=
@@ -700,18 +704,32 @@ def MissionSummaryCard.isRunning (card : MissionSummaryCard) : Bool :=
 
 def DesktopState.openCloud (st : DesktopState) (mission : String) : DesktopState :=
   { st with screen := .cloud, cloudMission := mission, cloudLines := none, cloudFailed := false,
-            cloudPage := 0, cloudActions := [], cloudDraft := {}, cloudAttempt := "", cloudProject := "", writeError := "" }
+            cloudPage := 0, cloudActions := [], cloudDraft := {}, cloudAttempt := "", cloudProject := "", writeError := "",
+            imeResetGen := st.imeResetGen + 1 }
 
 def DesktopState.voiceDraft (st : DesktopState) : Bool :=
   st.hasLiveConnection && st.openMission.isNone && st.writeRequest.isNone &&
     (st.screen == .controlEmpty || st.screen == .controlPopulated)
+
+/-- Logical text-input session identity for Wayland `zwp_text_input_v3` cycling.
+    Changes whenever the active text buffer switches logically even when its `EntityId`
+    (such as `1` for composer, inline Rename, or draft directory) stays the same. -/
+def desktopImeSessionKey (st : DesktopState) : String :=
+  let modalTag := match st.modal with
+    | .none => "none"
+    | .searchPalette .. => "search"
+    | .newMission .. => "newMission"
+  let menuTag := match st.missionMenu with
+    | none => "none"
+    | some m => s!"{reprStr m.page}:{m.mission}:{m.trigger}"
+  s!"{reprStr st.screen}|{st.openMission.getD ""}|{st.cloudMission}|{st.draftProject}|{modalTag}|{menuTag}|{st.imeResetGen}"
 
 def resetSelection (st : DesktopState) (card : Option MissionSummaryCard) : DesktopState :=
   let cloud := card.filter fun c => st.screen == .missionTranscript && c.backend.startsWith "cloud_"
   let st := cloud.elim st fun c => st.openCloud c.missionId
   let mid := if cloud.isSome then none else card.map (·.missionId)
   { st with
-    unconfirmedSend := none, writeError := ""
+    unconfirmedSend := none, writeError := "", imeResetGen := st.imeResetGen + 1
     voicePhase := .idle, voiceGeneration := st.voiceGeneration + 1, openMission := mid, missionMenu := none, stream := { shown := [], pending := [], renders := 1 }, liveTurns := [], liveTurnIds := [], unmatchedCanonicalTexts := [], livePersistedCount := 0, historyHasMore := false, historyNextCursor := none, historyLoading := false, historyLoadError := false, scroll := {}
     composer := { isRunning := card.any (·.isRunning) }
     messageSent := false, missionStopped := false, missionArchived := false, sidePanelOpen := false
@@ -1828,7 +1846,9 @@ private def stepMissionMenu (st : DesktopState) (menu : MissionMenu) (ev : Event
     return ({ st with missionMenu := none, writeRequest := some action }, some viewport)
   | .composerReturn false =>
     if menu.page == .draftDirectory then
-      return ({ st with draftDirectory := menu.draft.text.trimAscii.toString, missionMenu := none }, some viewport)
+      let dir := menu.draft.text.trimAscii.toString
+      if !menu.draft.imePreeditText.isEmpty || (!dir.isEmpty && !dir.startsWith "/") then return (st, none)
+      return ({ st with draftDirectory := dir, missionMenu := none, voicePhase := .idle }, some viewport)
     if menu.page == .rename then
       let some row := items.find? (·.id == 716) | return (st, none)
       let some action := row.action | return (st, none)

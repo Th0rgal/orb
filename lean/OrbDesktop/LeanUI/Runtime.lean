@@ -141,6 +141,7 @@ structure RuntimeState (σ : Type) where
   focusVisible : Bool := true
   windowFocused : Bool := true
   lastImeOwner : Option EntityId := none
+  lastImeContext : String := ""
   hoveredEntity : Option EntityId := none
   hitRegions : List (EntityId × Rect) := []
   scrollRegions : List ScrollRegion := []
@@ -456,6 +457,40 @@ def coalesceScrollEvents (evs : Array Event) : Array Event :=
         | _ => acc.push ev
     | _ => acc.push ev
 
+/-- Whether an event originates from Wayland `zwp_text_input_v3` IME delivery. -/
+def isImeEvent : Event → Bool
+  | .imeBatch .. | .preedit .. => true
+  | _ => false
+
+/-- Apply one `pumpEvents` batch to `rt`, dropping trailing `.imeBatch`/`.preedit` events once
+focus ownership or logical IME context changes within the frame (or changed during `pollFrame`
+before `Wayland.syncTextFocus` cycled `disable`/`enable` and advanced `imeEnableSerial`). -/
+def applyEventBatch {σ : Type} (rt : RuntimeState σ) (evs : Array Event)
+    (onEvent : RuntimeState σ → σ → Event → σ × Damage)
+    (focusChange : σ → σ → Event → Option Nat := fun _ _ _ => none)
+    (focusTraps : σ → List (List EntityId) := fun _ => [])
+    (imeSessionKey : σ → String := fun _ => "") : RuntimeState σ := Id.run do
+  let mut st := rt
+  let mut imeContextSwitched :=
+    rt.lastImeOwner.isSome && (rt.focus.owner != rt.lastImeOwner || imeSessionKey rt.app != rt.lastImeContext)
+  for ev in evs do
+    if imeContextSwitched && isImeEvent ev then
+      continue
+    let before := st.app
+    let prevOwner := st.focus.owner
+    let prevCtx := imeSessionKey before
+    let dispatched := st.effectiveEvent ev
+    st := st.stepEvent (onEvent st) ev
+    st := st.applyFocusTraps (focusTraps st.app)
+    if let some target := focusChange before st.app dispatched then
+      st := st.requestFocus target st.viewportDeviceRect
+      if prevOwner.any isTextInputEntity && st.focus.owner != prevOwner then
+        let (app', dmg') := onEvent st st.app (.preedit "" 0 0)
+        st := { st with app := app', damage := dmg'.elim st.damage (Damage.add st.damage) }
+    if st.focus.owner != prevOwner || imeSessionKey st.app != prevCtx then
+      imeContextSwitched := true
+  return st
+
 /-- Execute one frame tick:
 1. Pump Wayland events (`Wayland.pumpEvents`) and reduce them through `stepEvent`.
 2. Check `needsRedraw rt.damage`: if `false`, skip rendering completely (`quiescentSkips + 1`).
@@ -465,22 +500,12 @@ def stepFrameWithRegions {σ : Type} (rt : RuntimeState σ)
     (onEvent : RuntimeState σ → σ → Event → σ × Damage)
     (view : RuntimeState σ → IO (FrameView × List ScrollRegion))
     (focusChange : σ → σ → Event → Option Nat := fun _ _ _ => none)
-    (focusTraps : σ → List (List EntityId) := fun _ => []) :
+    (focusTraps : σ → List (List EntityId) := fun _ => [])
+    (imeSessionKey : σ → String := fun _ => "") :
     IO (RuntimeState σ) := do
   let (wl1, evs) ← Wayland.pumpEvents rt.wayland
   let evs := coalesceScrollEvents evs
-  let mut st := { rt with wayland := wl1 }
-  for ev in evs do
-    let before := st.app
-    let prevOwner := st.focus.owner
-    let dispatched := st.effectiveEvent ev
-    st := st.stepEvent (onEvent st) ev
-    st := st.applyFocusTraps (focusTraps st.app)
-    if let some target := focusChange before st.app dispatched then
-      st := st.requestFocus target st.viewportDeviceRect
-      if prevOwner.any isTextInputEntity && st.focus.owner != prevOwner then
-        let (app', dmg') := onEvent st st.app (.preedit "" 0 0)
-        st := { st with app := app', damage := dmg'.elim st.damage (Damage.add st.damage) }
+  let mut st := applyEventBatch { rt with wayland := wl1 } evs onEvent focusChange focusTraps imeSessionKey
   if !needsRedraw st.damage then
     return { st with quiescentSkips := st.quiescentSkips + 1 }
   if !st.wayland.headless && st.wayland.frameCallbackPending && !st.wayland.configurePendingCommit then
@@ -766,7 +791,8 @@ def runWindow {σ : Type} (rt0 : RuntimeState σ)
     (focusChange : σ → σ → Event → Option Nat := fun _ _ _ => none)
     (wakeFd : Option UInt32 := none) (workPending : σ → Bool := fun _ => false)
     (animationVisible : RuntimeState σ → Bool := fun _ => false)
-    (focusTraps : σ → List (List EntityId) := fun _ => []) : IO (RuntimeState σ) := withWindowWait rt0 wakeFd fun timedWait => do
+    (focusTraps : σ → List (List EntityId) := fun _ => [])
+    (imeSessionKey : σ → String := fun _ => "") : IO (RuntimeState σ) := withWindowWait rt0 wakeFd fun timedWait => do
   let mut rt := rt0
   while rt.running do
     if !rt.wayland.configured then
@@ -783,7 +809,7 @@ def runWindow {σ : Type} (rt0 : RuntimeState σ)
       if let some target := focusChange before app (.time 0) then
         rt := rt.requestFocus target rt.viewportDeviceRect
       let rendered := rt.framesRendered
-      rt ← stepFrameWithRegions rt onEvent view focusChange focusTraps
+      rt ← stepFrameWithRegions rt onEvent view focusChange focusTraps imeSessionKey
       let shape : UInt32 :=
         if rt.activeScrollbarDrag.isSome then 1
         else match rt.hoveredEntity with
@@ -796,11 +822,13 @@ def runWindow {σ : Type} (rt0 : RuntimeState σ)
         if rt.windowFocused then
           rt.focus.owner.filter (fun id => isTextInputEntity id && rt.focusableOrder.contains id)
         else none
-      let wl ← if textOwner.isSome && rt.lastImeOwner.isSome && textOwner != rt.lastImeOwner then
+      let imeCtx := imeSessionKey rt.app
+      let wl ← if textOwner.isSome && rt.lastImeOwner.isSome &&
+          (textOwner != rt.lastImeOwner || imeCtx != rt.lastImeContext) then
           Wayland.syncTextFocus wl false
         else pure wl
       let wl ← Wayland.syncTextFocus wl textOwner.isSome
-      rt := { rt with wayland := wl, lastImeOwner := textOwner }
+      rt := { rt with wayland := wl, lastImeOwner := textOwner, lastImeContext := imeCtx }
       if rt.framesRendered != rendered && rt.vulkan.backend == .cpuShm then
         let wl ← Wayland.present rt.wayland rt.vulkan.framebuffer
         rt := { rt with wayland := wl, presentCount := rt.presentCount + 1 }

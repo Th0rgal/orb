@@ -132,13 +132,13 @@ jobs:
             | tee -a "$GITHUB_WORKSPACE/.ci/leanui/reference-hashes.txt"
           exit "$hash_status"
 
-      - name: Build native desktop
+      - name: Build native desktop and local Core
         if: ${{ !cancelled() }}
         id: native_build
         run: |
           set -euo pipefail
           unset ORB_ALLOW_RAW_LAKE_FALLBACK ORB_SKIP_TURBO_LEAN
-          scripts/build_orb_bins.sh --only orb-desktop-native --out-dir "$PWD/target/native"
+          scripts/build_orb_bins.sh --only orb-desktop-native --only orb-core --out-dir "$PWD/target/native"
 
       - name: Check U5 bootstrap, rendered mission selection and live delivery
         if: ${{ !cancelled() && steps.native_build.outcome == 'success' }}
@@ -160,7 +160,9 @@ jobs:
           # Window-effects self-test, with the GPU readback half required on lavapipe.
           VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json ORB_REQUIRE_WINDOW_EFFECTS_GPU=1 \
             "$PWD/../../target/native/orb-desktop-native" --self-test
-          ORB_LEANUI_TEST_BINARY="$PWD/../../target/native/orb-desktop-native" python3 -IB tests/test_wayland_u6_session.py -v
+          ORB_LEANUI_TEST_BINARY="$PWD/../../target/native/orb-desktop-native" \
+            ORB_CORE_TEST_BINARY="$PWD/../../target/native/orb-core" \
+            python3 -IB tests/test_wayland_u6_session.py -v
           ORB_LEANUI_TEST_BINARY="$PWD/../../target/native/orb-desktop-native" python3 -IB tests/test_u8_window_effects_parity.py -v
 
       - name: Palette on its Vulkan subsurface under Weston

@@ -39,9 +39,9 @@ import mmap
 import os
 from pathlib import Path
 import select
+import shutil
 import signal
 import socket
-import sqlite3
 import struct
 import subprocess
 import sys
@@ -57,7 +57,6 @@ from urllib.parse import parse_qs, urlsplit
 
 ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_BINARY = ROOT / "lean/OrbDesktop/.lake/build/bin/orb-desktop-native"
-CURRENT_BUBBLE_SQL = (ROOT / "lean/OrbCore/OrbCore/current_bubble.sql").read_text()
 
 
 def _wl_str(text: str | None) -> bytes:
@@ -529,6 +528,27 @@ class WaylandTestCompositor:
                 hasher.update(frame[row_off + rx0 * 4 : row_off + rx1 * 4])
             return hasher.hexdigest()
 
+    def region_mean_luma(self, x0: int, y0: int, x1: int, y1: int) -> float:
+        with self._lock:
+            frame = self.last_frame_bytes
+            stride = getattr(self, "last_frame_stride", self.width * 4)
+            w = getattr(self, "last_frame_w", self.width)
+            h = getattr(self, "last_frame_h", self.height)
+            rx0, rx1 = max(0, min(w, x0)), max(0, min(w, x1))
+            ry0, ry1 = max(0, min(h, y0)), max(0, min(h, y1))
+            if not frame or rx1 <= rx0 or ry1 <= ry0:
+                return 0.0
+            total = 0.0
+            count = 0
+            for y in range(ry0, ry1, 2):
+                row_off = y * stride
+                for x in range(rx0, rx1, 2):
+                    off = row_off + x * 4
+                    b, g, r = frame[off], frame[off + 1], frame[off + 2]
+                    total += 0.114 * b + 0.587 * g + 0.299 * r
+                    count += 1
+            return total / count if count else 0.0
+
     def wait_region_change(self, x0: int, y0: int, x1: int, y1: int, previous_hash: str, timeout: float = 5.0) -> str:
         deadline = time.monotonic() + timeout
         while True:
@@ -549,6 +569,38 @@ class WaylandTestCompositor:
                 if rem <= 0:
                     raise TimeoutError(f"expected text_input_enabled={enabled}, got {self.text_input_enabled}")
                 self._cond.wait(rem)
+
+    def wait_text_input_commits(self, minimum: int, timeout: float = 5.0) -> int:
+        deadline = time.monotonic() + timeout
+        with self._lock:
+            while self.text_input_commit_count < minimum:
+                rem = deadline - time.monotonic()
+                if rem <= 0:
+                    raise TimeoutError(
+                        f"expected text_input_commit_count>={minimum}, got {self.text_input_commit_count}"
+                    )
+                self._cond.wait(rem)
+            return self.text_input_commit_count
+
+    def send_key_and_ime_batch(self, key_name: str, mods: int, commit: str, preedit: str = "") -> None:
+        """Send a focus-changing keypress plus a trailing zwp_text_input_v3 commit+done in one socket write."""
+        code = EV[key_name]
+        with self._lock:
+            assert self.keyboard_id is not None and self.text_input_id is not None
+            chunks: list[bytes] = []
+            if mods:
+                chunks.append(_wl_msg(self.keyboard_id, 4, struct.pack("=IIIII", self._next_serial(), mods, 0, 0, 0)))
+            chunks.append(_wl_msg(self.keyboard_id, 3, struct.pack("=IIII", self._next_serial(), self._ms(), code, 1)))
+            chunks.append(_wl_msg(self.keyboard_id, 3, struct.pack("=IIII", self._next_serial(), self._ms(), code, 0)))
+            if mods:
+                chunks.append(_wl_msg(self.keyboard_id, 4, struct.pack("=IIIII", self._next_serial(), 0, 0, 0, 0)))
+            if commit:
+                chunks.append(_wl_msg(self.text_input_id, 3, _wl_str(commit)))
+            chunks.append(
+                _wl_msg(self.text_input_id, 2, _wl_str(preedit) + struct.pack("=ii", 0, len(preedit.encode("utf-8"))))
+            )
+            chunks.append(_wl_msg(self.text_input_id, 5, struct.pack("=I", self.text_input_commit_count & 0xFFFFFFFF)))
+            self._send(b"".join(chunks))
 
     def _ms(self) -> int:
         return int(time.monotonic() * 1000) & 0xFFFFFFFF
@@ -955,257 +1007,46 @@ def _resolve_binary() -> Path:
     raise FileNotFoundError("orb-desktop-native binary not found; set ORB_LEANUI_TEST_BINARY")
 
 
-def _start_sqlite_core(db_path: Path, token: str):
-    """Persistent SQLite-backed local Core HTTP server for U6a end-to-end verification."""
-    conn = sqlite3.connect(db_path, check_same_thread=False)
-    conn.executescript(
-        """
-        CREATE TABLE IF NOT EXISTS missions(
-            id TEXT PRIMARY KEY,
-            title TEXT NOT NULL,
-            status TEXT NOT NULL,
-            project TEXT NOT NULL DEFAULT '',
-            backend TEXT NOT NULL DEFAULT 'codex',
-            owner_user_id TEXT NOT NULL DEFAULT 'owner',
-            history_json TEXT NOT NULL DEFAULT '[]',
-            stopped_turns INTEGER NOT NULL DEFAULT 0
-        );
-        CREATE TABLE IF NOT EXISTS mission_shares(
-            mission_id TEXT NOT NULL,
-            user_id TEXT NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS mission_events(
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            mission_id TEXT NOT NULL,
-            seq INTEGER NOT NULL,
-            sequence INTEGER NOT NULL,
-            event_type TEXT NOT NULL,
-            payload TEXT NOT NULL,
-            metadata TEXT NOT NULL DEFAULT '{}',
-            content TEXT NOT NULL DEFAULT ''
-        );
-        CREATE TABLE IF NOT EXISTS seen_messages(
-            client_message_id TEXT PRIMARY KEY,
-            mission_id TEXT NOT NULL
-        );
-        """
+def _resolve_core_binary() -> Path:
+    env_bin = os.environ.get("ORB_CORE_TEST_BINARY")
+    if env_bin:
+        return Path(env_bin).resolve(strict=True)
+    for cand in (
+        ROOT / "target/native/orb-core",
+        ROOT / "target/release/orb-core",
+        ROOT / "target/debug/orb-core",
+        ROOT / "lean/OrbCore/.lake/build/bin/orb-core",
+    ):
+        if cand.is_file() and os.access(cand, os.X_OK):
+            return cand
+    raise FileNotFoundError(
+        "orb-core binary not found; build with scripts/build_orb_bins.sh --only orb-core or set ORB_CORE_TEST_BINARY"
     )
-    conn.commit()
-    lock = threading.Lock()
-    requests_log: list[tuple[str, str, int]] = []
-    state = {"counter": 0, "busy_archive_409": 0}
 
-    def next_seq(mid: str) -> int:
-        row = conn.execute(
-            "SELECT COALESCE(MAX(sequence), 0) FROM mission_events WHERE mission_id=?",
-            (mid,),
-        ).fetchone()
-        return (row[0] or 0) + 1
 
-    def add_event(mid: str, kind: str, content: str, extra: dict | None = None) -> int:
-        seq = next_seq(mid)
-        payload = {"content": content, **(extra or {})}
-        conn.execute(
-            "INSERT INTO mission_events(mission_id,seq,sequence,event_type,payload,metadata,content) VALUES(?,?,?,?,?,?,?)",
-            (mid, seq, seq, kind, json.dumps(payload), "{}", content),
-        )
-        conn.commit()
-        return seq
-
-    class Handler(BaseHTTPRequestHandler):
-        def _reply(self, body, code: int = 200) -> None:
-            raw = json.dumps(body).encode("utf-8")
-            self.send_response(code)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(raw)))
-            self.end_headers()
-            try:
-                self.wfile.write(raw)
-            except (BrokenPipeError, ConnectionResetError):
-                pass
-            requests_log.append((self.command, self.path, code))
-
-        def _read_json(self) -> dict:
-            length = int(self.headers.get("Content-Length") or "0")
-            return json.loads(self.rfile.read(length)) if length else {}
-
-        def do_GET(self) -> None:
-            if self.headers.get("Authorization") != f"Bearer {token}":
-                return self._reply({"error": "unauthorized"}, 401)
-            base_path = urlsplit(self.path).path
-            with lock:
-                if base_path == "/api/auth/me":
-                    return self._reply({"user": {"id": "owner", "username": "u6a-wayland", "role": "admin"}})
-                if base_path == "/api/projects":
-                    return self._reply({"projects": [{"slug": "source", "title": "Source", "objective": "", "color": "blue"}]})
-                if base_path == "/api/machines":
-                    return self._reply([{"id": "core", "name": "orb-core", "state": "online", "status": "online"}])
-                if base_path == "/api/backends":
-                    return self._reply({"backends": [{"id": "codex", "name": "Codex"}]})
-                if base_path == "/api/providers/backend-models":
-                    return self._reply({"backends": {"codex": [{"value": "gpt-6.2-astra", "label": "Astra"}]}})
-                if base_path == "/api/model-routing/chains":
-                    return self._reply([])
-                if base_path == "/api/control/inbox-state":
-                    return self._reply({"_versions": {}})
-                if base_path == "/api/control/missions":
-                    rows = conn.execute("SELECT id,title,status,project,backend,stopped_turns FROM missions").fetchall()
-                    return self._reply([
-                        {
-                            "id": r[0],
-                            "title": r[1],
-                            "status": r[2],
-                            "project": r[3] or "source",
-                            "backend": r[4],
-                            "stopped_turns": r[5],
-                            "updated_at": "2026-11-27T10:00:00Z",
-                            "created_at": "2026-11-27T10:00:00Z",
-                            "tags": [],
-                        }
-                        for r in rows
-                    ])
-                if base_path.startswith("/api/control/missions/"):
-                    parts = base_path.removeprefix("/api/control/missions/").split("/")
-                    mid = parts[0]
-                    row = conn.execute(
-                        "SELECT id,title,status,project,backend,stopped_turns FROM missions WHERE id=?",
-                        (mid,),
-                    ).fetchone()
-                    if not row:
-                        return self._reply({"error": "not_found"}, 404)
-                    if len(parts) == 1:
-                        return self._reply({
-                            "id": row[0],
-                            "title": row[1],
-                            "status": row[2],
-                            "project": row[3] or "source",
-                            "backend": row[4],
-                            "stopped_turns": row[5],
-                            "execution": {"state": "running" if row[2] == "active" else "idle"},
-                        })
-                    sub = parts[1]
-                    if sub == "events":
-                        evs = conn.execute(
-                            "SELECT id,sequence,event_type,content FROM mission_events WHERE mission_id=? ORDER BY sequence ASC, id ASC",
-                            (mid,),
-                        ).fetchall()
-                        return self._reply([
-                            {"id": e[0], "mission_id": mid, "sequence": e[1], "event_type": e[2], "content": e[3]}
-                            for e in evs
-                        ])
-                    if sub == "open":
-                        evs = conn.execute(
-                            "SELECT id,sequence,event_type,content FROM mission_events WHERE mission_id=? ORDER BY sequence ASC, id ASC",
-                            (mid,),
-                        ).fetchall()
-                        events = [
-                            {"id": e[0], "mission_id": mid, "sequence": e[1], "event_type": e[2], "content": e[3]}
-                            for e in evs
-                        ]
-                        return self._reply({
-                            "protocol": 1,
-                            "mission": {"id": mid},
-                            "events": events,
-                            "spine": [],
-                            "queue": [],
-                            "max_seq": events[-1]["sequence"] if events else 0,
-                            "has_more": False,
-                            "spine_has_more": False,
-                            "spine_next_cursor": None,
-                            "next_cursor": None,
-                            "page_max_seq": None,
-                            "reset": False,
-                        })
-                    if sub == "current-bubble":
-                        if row[2] == "active" and not conn.execute(
-                            "SELECT 1 FROM mission_events WHERE mission_id=? AND event_type='assistant_message'",
-                            (mid,),
-                        ).fetchone():
-                            add_event(mid, "assistant_message", "Turn 1 reply", {"queued": False})
-                            conn.execute("UPDATE missions SET status='awaiting_user' WHERE id=?", (mid,))
-                            conn.commit()
-                        user_count = conn.execute(
-                            "SELECT COUNT(*) FROM mission_events WHERE mission_id=? AND event_type='user_message'",
-                            (mid,),
-                        ).fetchone()[0]
-                        if row[2] == "active" and user_count >= 2 and not conn.execute(
-                            "SELECT 1 FROM mission_events WHERE mission_id=? AND event_type='text_delta'",
-                            (mid,),
-                        ).fetchone():
-                            add_event(mid, "text_delta", "Turn 2 streaming...", {"queued": False})
-                        qrow = conn.execute(CURRENT_BUBBLE_SQL, {"1": mid, "2": "0", "3": "owner", "4": "0"}).fetchone()
-                        if not qrow:
-                            return self._reply({"error": "not_found"}, 404)
-                        return self._reply({"id": mid, "title": qrow[0], "status": qrow[1], "text": qrow[2]})
-                return self._reply({"error": "not_found"}, 404)
-
-        def do_POST(self) -> None:
-            if self.headers.get("Authorization") != f"Bearer {token}":
-                return self._reply({"error": "unauthorized"}, 401)
-            path = urlsplit(self.path).path
-            data = self._read_json()
-            with lock:
-                if path == "/api/control/missions":
-                    state["counter"] += 1
-                    mid = f"m-u6a-{state['counter']}"
-                    prompt = data.get("prompt", "")
-                    title = data.get("title") or "New mission"
-                    project = data.get("project") or "source"
-                    backend = data.get("backend") or "codex"
-                    conn.execute(
-                        "INSERT INTO missions(id,title,status,project,backend) VALUES(?,?,'active',?,?)",
-                        (mid, title, project, backend),
-                    )
-                    if prompt:
-                        add_event(mid, "user_message", prompt, {"queued": False})
-                    conn.commit()
-                    return self._reply({
-                        "id": mid,
-                        "title": title,
-                        "status": "active",
-                        "project": project,
-                        "backend": backend,
-                        "model_override": data.get("model_override") or "",
-                        "model_effort": data.get("model_effort") or "",
-                        "permission_mode": data.get("permission_mode") or "supervised",
-                    })
-                if path == "/api/control/message":
-                    mid = data["mission_id"]
-                    cid = data["client_message_id"]
-                    content = data["content"]
-                    if not conn.execute("SELECT 1 FROM seen_messages WHERE client_message_id=?", (cid,)).fetchone():
-                        conn.execute("INSERT INTO seen_messages VALUES(?,?)", (cid, mid))
-                        add_event(mid, "user_message", content, {"queued": False})
-                        conn.execute("UPDATE missions SET status='active' WHERE id=?", (mid,))
-                        conn.commit()
-                    return self._reply({"id": cid, "message_accepted": True})
-                if path.startswith("/api/control/missions/") and path.endswith("/cancel"):
-                    mid = path.removeprefix("/api/control/missions/").removesuffix("/cancel")
-                    conn.execute(
-                        "UPDATE missions SET status='interrupted', stopped_turns=stopped_turns+1 WHERE id=?",
-                        (mid,),
-                    )
-                    add_event(mid, "turn_stopped", "stopped by user", {"queued": False})
-                    return self._reply({"ok": True, "status": "interrupted"})
-                if path.startswith("/api/control/missions/") and path.endswith("/status"):
-                    mid = path.removeprefix("/api/control/missions/").removesuffix("/status")
-                    row = conn.execute("SELECT status FROM missions WHERE id=?", (mid,)).fetchone()
-                    if not row:
-                        return self._reply({"error": "not_found"}, 404)
-                    if data.get("status") == "acknowledged" and row[0] == "active":
-                        state["busy_archive_409"] += 1
-                        return self._reply({"error": "mission_running"}, 409)
-                    conn.execute("UPDATE missions SET status=? WHERE id=?", (data["status"], mid))
-                    conn.commit()
-                    return self._reply({"ok": True, "status": data["status"]})
-                return self._reply({"error": "not_found"}, 404)
-
-        def log_message(self, *_args) -> None:
-            pass
-
-    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-    threading.Thread(target=server.serve_forever, daemon=True).start()
-    return server, conn, lock, requests_log, state
+@contextlib.contextmanager
+def _run_process_group(args: list[str], env: dict[str, str], cwd: Path):
+    child = subprocess.Popen(
+        args,
+        cwd=str(cwd),
+        env=env,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        start_new_session=True,
+    )
+    try:
+        yield child
+    finally:
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(child.pid, signal.SIGTERM)
+        try:
+            child.wait(timeout=8)
+        except subprocess.TimeoutExpired:
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(child.pid, signal.SIGKILL)
+            child.wait(timeout=3)
+        if child.stderr is not None:
+            child.stderr.close()
 
 
 class WaylandU6SessionTest(unittest.TestCase):
@@ -1289,7 +1130,12 @@ class WaylandU6SessionTest(unittest.TestCase):
                     comp.wait_text_input(True, timeout=10.0)
 
                     # 1. Create a mission via Wayland Ctrl+N + keyboard + Wayland IME preedit/delete/commit + Return.
+                    # Ctrl+N cycles zwp_text_input_v3 (disable+commit, enable+commit) even when widget 1 stays focused.
+                    comp.wait_text_input(True, timeout=5.0)
+                    with comp._lock:
+                        commits_pre_n = comp.text_input_commit_count
                     comp.key_tap("n", MOD_CTRL)
+                    comp.wait_text_input_commits(commits_pre_n + 2, timeout=5.0)
                     comp.wait_text_input(True, timeout=5.0)
                     comp.type_ascii("Hello U6 ")
                     # Exercise Wayland IME preedit, replacement via delete_surrounding_text, and commit.
@@ -1343,8 +1189,11 @@ class WaylandU6SessionTest(unittest.TestCase):
 
                     # Open Search (Ctrl+K) while side panel is open, verify IME in Search + interior click does not close,
                     # then press Escape and verify Escape key-release does NOT bleed through to close the side panel!
+                    with comp._lock:
+                        commits_pre_k = comp.text_input_commit_count
                     comp.key_tap("k", MOD_CTRL)
                     frame_search_open = comp.wait_frame_change(frame_diff_panel, timeout=5.0)
+                    comp.wait_text_input_commits(commits_pre_k + 1, timeout=5.0)
                     comp.wait_text_input(True, timeout=5.0)
                     comp.ime_edit(commit="Hello", preedit="検")
                     h_preedit = comp.wait_frame_change(frame_search_open, timeout=5.0)
@@ -1387,22 +1236,22 @@ class WaylandU6SessionTest(unittest.TestCase):
                     comp.wait_frame_change(h_hidden, timeout=5.0)
 
                     # 4. Stop the running mission via pointer click on Stop button (widget 2 at x=1197, y=850).
-                    polls_pre_stop = count_req("GET", f"/api/control/missions/{mid}/current-bubble")
+                    # Observe the actual painted Stop -> Send glyph transition on widget 2 (1184..1210, 837..863)
+                    # instead of using server-side poll counts as a proxy for window-thread state.
+                    btn_stop_1 = comp.region_hash(1184, 837, 1210, 863)
                     comp.pointer_click(1197, 850)
                     _wait_until("mission stopped on Core", lambda: core_state.missions[0]["status"] == "interrupted")
-                    # Wait deterministically for poll_bubble to observe the interrupted status and repaint the Send button.
-                    _wait_until(
-                        "bubble poll observes interrupted",
-                        lambda: count_req("GET", f"/api/control/missions/{mid}/current-bubble") >= polls_pre_stop + 2,
-                        timeout=6.0,
-                    )
+                    btn_idle_1 = comp.wait_region_change(1184, 837, 1210, 863, btn_stop_1, timeout=6.0)
 
                     # 5. Send a follow-up message via pointer click on composer + keyboard + IME + Send click.
                     comp.pointer_click(700, 850)
                     comp.wait_text_input(True, timeout=5.0)
+                    comp_pre_fu = comp.region_hash(480, 825, 1180, 880)
                     comp.type_ascii("Followup ")
+                    comp_typed_fu = comp.wait_region_change(480, 825, 1180, 880, comp_pre_fu, timeout=5.0)
                     comp.ime_edit(commit="確認", preedit="")
-                    polls_pre_send = count_req("GET", f"/api/control/missions/{mid}/current-bubble")
+                    comp.wait_region_change(480, 825, 1180, 880, comp_typed_fu, timeout=5.0)
+                    btn_send_ready = comp.region_hash(1184, 837, 1210, 863)
                     comp.pointer_click(1197, 850)
                     _wait_until(
                         "POST /api/control/message",
@@ -1411,20 +1260,15 @@ class WaylandU6SessionTest(unittest.TestCase):
                     followup_msgs = [e["content"] for e in core_state.events[mid] if e["event_type"] == "user_message"]
                     self.assertEqual(followup_msgs, ["Hello U6 日本語", "Followup 確認"])
 
-                    # Wait for poll_bubble to report active again, then Stop the follow-up turn before archiving.
-                    _wait_until(
-                        "bubble poll observes active follow-up",
-                        lambda: count_req("GET", f"/api/control/missions/{mid}/current-bubble") >= polls_pre_send + 2,
-                        timeout=6.0,
-                    )
-                    polls_pre_stop2 = count_req("GET", f"/api/control/missions/{mid}/current-bubble")
+                    # Wait for the client window thread to paint widget 2 back into the Stop (isRunning=true) glyph.
+                    def _btn_is_stop_2():
+                        cur = comp.region_hash(1184, 837, 1210, 863)
+                        return cur if (cur != btn_send_ready and cur != btn_idle_1) else None
+
+                    btn_stop_2 = _wait_until("widget 2 repainted as Stop for follow-up", _btn_is_stop_2, timeout=6.0)
                     comp.pointer_click(1197, 850)
                     _wait_until("follow-up turn stopped", lambda: core_state.missions[0]["status"] == "interrupted")
-                    _wait_until(
-                        "bubble poll observes stopped follow-up",
-                        lambda: count_req("GET", f"/api/control/missions/{mid}/current-bubble") >= polls_pre_stop2 + 2,
-                        timeout=6.0,
-                    )
+                    comp.wait_region_change(1184, 837, 1210, 863, btn_stop_2, timeout=6.0)
 
                     # 6. Exercise Back / Forward (`Ctrl+[` / `Ctrl+]`) between mission transcript and New Agent without zombie state.
                     h_tx = comp.last_frame_hash
@@ -1528,28 +1372,41 @@ class WaylandU6SessionTest(unittest.TestCase):
                     h_back_inf = comp.wait_frame_change(h_alt, timeout=5.0)
 
                     # 9. Exercise Machines (`Ctrl+3`), Resources (`Ctrl+6`), Cloud (`Ctrl+2`), Inbox (`Ctrl+I`), Settings (`Ctrl+,`).
+                    # Synchronize each screen transition by header + loaded content regions so two-frame
+                    # ("Loading …" + loaded) async views never cascade into subsequent clicks.
+                    hdr_inf = comp.region_hash(230, 0, 600, 42)
                     comp.key_tap("3", MOD_CTRL)
-                    h_machines = comp.wait_frame_change(h_back_inf, timeout=5.0)
-                    # Click a machine row in live Machines fleet.
+                    hdr_machines = comp.wait_region_change(230, 0, 600, 42, hdr_inf, timeout=5.0)
+                    # Click a machine row in live Machines fleet and wait for the resulting frame commit.
+                    with comp._lock:
+                        commits_pre_machine_click = comp.commit_count
                     comp.pointer_click(845, 65)
+                    comp.wait_commit(commits_pre_machine_click, timeout=5.0)
 
                     comp.key_tap("6", MOD_CTRL)
+                    hdr_res = comp.wait_region_change(230, 0, 600, 42, hdr_machines, timeout=5.0)
                     _wait_until("GET /api/resources/overview?range=6h", lambda: count_req("GET", "/api/resources/overview?range=6h") >= 1)
-                    h_res = comp.wait_frame_change(h_machines, timeout=5.0)
 
                     comp.key_tap("2", MOD_CTRL)
+                    hdr_cloud = comp.wait_region_change(230, 0, 600, 42, hdr_res, timeout=5.0)
                     _wait_until("GET /api/cloud/accounts", lambda: count_req("GET", "/api/cloud/accounts") >= 1)
-                    h_cloud = comp.wait_frame_change(h_res, timeout=5.0)
 
                     comp.key_tap("i", MOD_CTRL)
-                    h_inbox = comp.wait_frame_change(h_cloud, timeout=5.0)
+                    hdr_inbox = comp.wait_region_change(230, 0, 600, 42, hdr_cloud, timeout=5.0)
 
+                    settings_btn_pre = comp.region_hash(230, 210, 620, 270)
                     comp.key_tap(",", MOD_CTRL)
-                    h_dark = comp.wait_frame_change(h_inbox, timeout=5.0)
-                    # Toggle theme in live Settings (second button below Account/Connected/endpoint/@user/Manage account, y=219..259).
+                    comp.wait_region_change(230, 0, 600, 42, hdr_inbox, timeout=5.0)
+                    comp.wait_region_change(230, 210, 620, 270, settings_btn_pre, timeout=5.0)
+                    # Confirm Settings is rendered in dark theme before clicking Theme toggle (y=219..259).
+                    dark_luma = comp.region_mean_luma(1200, 400, 1400, 600)
+                    self.assertLess(dark_luma, 80.0, f"expected dark canvas before Theme toggle, got luma={dark_luma:.1f}")
                     comp.pointer_click(350, 239)
-                    h_light = comp.wait_frame_change(h_dark, timeout=5.0)
-                    self.assertNotEqual(h_light, h_dark, "clicking Theme toggle in Settings must switch theme")
+                    _wait_until(
+                        "Settings theme switched from dark to light",
+                        lambda: comp.region_mean_luma(1200, 400, 1400, 600) > 180.0,
+                        timeout=5.0,
+                    )
 
                     # Verify cursor shapes were emitted for pointer hover/text transitions.
                     self.assertTrue(len(comp.cursor_shapes) >= 1)
@@ -1803,173 +1660,342 @@ class WaylandU6SessionTest(unittest.TestCase):
                     server.shutdown()
 
     def test_u6a_live_wayland_writes_and_separate_core_client(self) -> None:
-        """Roadmap Row U6a end-to-end verification:
-        Launch `--leanui` against a persistent SQLite-backed local Core, type and commit
-        Wayland IME text to create a mission, reject stale IME serials, send a follow-up
-        with IME text, verify busy Archive is refused while active, stop the running turn,
-        archive the mission, restart Core on the same SQLite DB, and verify from a separate
-        independent Core HTTP client that the new mission ID, exact submitted texts, stopped
-        turn, and persisted archive state all survived."""
-        token = "u6a-wayland-e2e-token"
+        """Roadmap Row U6a end-to-end verification against a REAL local `orb-core` binary:
+        1. Launches disposable `orb-core` in a private temp dir with a deterministic fake `codex`
+           harness on PATH (Launch #1 completes Turn 1 cleanly; Launch #2 streams until killed).
+        2. Launches `--leanui` under scripted Wayland, types ASCII + commits Wayland IME preedit,
+           multi-byte UTF-8 text, and `delete_surrounding_text` replacement, verifies Return is
+           blocked while IME preedit is active, drops stale-serial `done`, and submits Create.
+        3. Verifies `zwp_text_input_v3` cycles disable/enable across same-EntityId (`1`) switches
+           (Create and Send) and drops stale pre-Create serials + mid-batch `Ctrl+K` IME commits.
+        4. Sends an IME follow-up message (Turn 2), verifies the real child harness PID is alive
+           via `os.pidfd_open`, confirms busy Archive is refused while running, clicks Stop,
+           and asserts real child-process teardown (`pidfd` exit) + `interrupted` status on Core.
+        5. Archives the stopped mission via Wayland context menu, restarts the real `orb-core`
+           binary on the same SQLite database, and verifies from a separate independent Core HTTP
+           client that the archived mission is excluded from active `/api/control/missions`,
+           present in `/api/control/missions?status=acknowledged`, persisted as `acknowledged`,
+           and preserves the exact submitted initial + follow-up IME texts in `/events`."""
+        core_bin = _resolve_core_binary()
         expected_initial = "Indigo U6a 日本語 🚀"
         expected_followup = "Follow-up café 漢字テスト ✓"
 
-        def http_get_json(base_url: str, path: str) -> dict | list:
-            req = urllib.request.Request(
-                base_url + path,
-                headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
-            )
-            with urllib.request.urlopen(req, timeout=5) as resp:
-                return json.loads(resp.read().decode("utf-8"))
-
-        with tempfile.TemporaryDirectory(prefix="orb-u6a-e2e-") as td:
+        with tempfile.TemporaryDirectory(prefix="orb-u6a-real-core-") as td:
             tmp = Path(td)
-            db_path = tmp / "core.db"
-            server1, db1, lock1, reqs1, _state1 = _start_sqlite_core(db_path, token)
-            base1 = f"http://127.0.0.1:{server1.server_port}"
+            home = tmp / "home"
+            home.mkdir()
+            launches = tmp / "launches"
 
-            def count_req1(method: str, prefix: str) -> int:
-                with lock1:
-                    return sum(1 for m, p, _c in reqs1 if m == method and p.startswith(prefix))
+            # Deterministic `codex` harness:
+            # - Launch #1 (Create turn): logs PID, emits one completed agent message, exits 0 cleanly
+            #   so Turn 1 settles to `awaiting_user`/`completed` and unlocks follow-up Send.
+            # - Launch #2+ (Follow-up turn): logs PID and streams agent messages until SIGTERM/SIGKILL
+            #   so Stop must genuinely tear down the child process (verified via os.pidfd_open).
+            harness = tmp / "codex"
+            harness.write_text(
+                f"#!{sys.executable}\n"
+                "import fcntl, json, os, time\n"
+                f"launches_path = {str(launches)!r}\n"
+                "with open(launches_path, 'a+') as f:\n"
+                "    fcntl.flock(f.fileno(), fcntl.LOCK_EX)\n"
+                "    f.seek(0)\n"
+                "    prev = [ln for ln in f.read().splitlines() if ln.strip()]\n"
+                "    turn_no = len(prev) + 1\n"
+                "    f.seek(0, os.SEEK_END)\n"
+                "    print(os.getpid(), file=f, flush=True)\n"
+                "    fcntl.flock(f.fileno(), fcntl.LOCK_UN)\n"
+                "if turn_no == 1:\n"
+                "    for i in range(3):\n"
+                "        item = {'id': f't1-{i}', 'type': 'agent_message', 'text': f'Turn 1 line {i}\\n'}\n"
+                "        print(json.dumps({'type': 'item.completed', 'item': item}), flush=True)\n"
+                "        time.sleep(0.05)\n"
+                "else:\n"
+                "    for i in range(600):\n"
+                "        item = {'id': f't2-{i}', 'type': 'agent_message', 'text': f'Turn 2 streaming line {i:03d}\\n'}\n"
+                "        print(json.dumps({'type': 'item.completed', 'item': item}), flush=True)\n"
+                "        time.sleep(0.10)\n",
+                encoding="utf-8",
+            )
+            harness.chmod(0o700)
 
-            try:
-                (tmp / "connection.json").write_text(json.dumps({"api_url": base1, "token": token}))
-                comp, proc = self._launch(tmp, [], via_leanui_flag=True)
+            # Shadow host provider CLIs on the desktop client PATH so local model discovery
+            # never spawns detached host CLIs during this disposable test.
+            provider_bins = tmp / "provider-fixtures"
+            provider_bins.mkdir()
+            unavailable = shutil.which("false")
+            assert unavailable is not None, "missing `false` executable"
+            for cli_name in ("claude", "codex", "opencode", "agy", "grok", "vibe-acp"):
+                (provider_bins / cli_name).symlink_to(unavailable)
+            client_path = f"{provider_bins}{os.pathsep}{os.environ['PATH']}"
+
+            with socket.socket() as sock:
+                sock.bind(("127.0.0.1", 0))
+                port = sock.getsockname()[1]
+            base = f"http://127.0.0.1:{port}"
+
+            core_env = {
+                "PATH": f"{tmp}{os.pathsep}{os.environ['PATH']}",
+                "HOME": str(home),
+                "HOST": "127.0.0.1",
+                "PORT": str(port),
+                "LD_LIBRARY_PATH": os.getenv("LD_LIBRARY_PATH", ""),
+                "WORKING_DIR": str(tmp),
+                "DEV_MODE": "true",
+            }
+
+            def make_client(api_base: str):
+                state = {"token": ""}
+
+                def api(path: str, body=None):
+                    headers = {"Accept": "application/json"}
+                    if state["token"]:
+                        headers["Authorization"] = "Bearer " + state["token"]
+                    data = None
+                    if body is not None:
+                        data = json.dumps(body).encode("utf-8")
+                        headers["Content-Type"] = "application/json"
+                    req = urllib.request.Request(api_base + path, data=data, headers=headers)
+                    with urllib.request.urlopen(req, timeout=5) as resp:
+                        raw = resp.read()
+                        return json.loads(raw.decode("utf-8")) if raw else None
+
+                def login() -> str:
+                    res = api("/api/auth/login", {"password": ""})
+                    state["token"] = res["token"]
+                    return state["token"]
+
+                return api, login
+
+            def read_launch_pids() -> list[int]:
+                if not launches.exists():
+                    return []
+                return [int(ln.strip()) for ln in launches.read_text().splitlines() if ln.strip()]
+
+            with contextlib.ExitStack() as stack:
+                core_proc = stack.enter_context(_run_process_group([str(core_bin)], core_env, tmp))
+                api1, login1 = make_client(base)
+
+                def _try_login1():
+                    try:
+                        return login1()
+                    except (ConnectionError, urllib.error.URLError, TimeoutError):
+                        return None
+
+                token1 = _wait_until("real orb-core login", _try_login1, timeout=20.0)
+                self.assertEqual(api1("/api/control/missions"), [])
+                api1("/api/projects", {"slug": "source", "title": "Source"})
+                (tmp / "connection.json").write_text(json.dumps({"api_url": base, "token": token1}))
+
+                comp, proc = self._launch(
+                    tmp,
+                    [],
+                    extra_env={"PATH": client_path, "HOME": str(home)},
+                    via_leanui_flag=True,
+                )
                 try:
                     comp.wait_ready(timeout=15.0)
-                    _wait_until("U6a initial /api/auth/me", lambda: count_req1("GET", "/api/auth/me") >= 1)
-                    # Initial live connect auto-focuses New Agent composer and enables zwp_text_input_v3.
-                    comp.wait_text_input(True, timeout=10.0)
+                    # Wait for live connect to auto-focus the New Agent composer and enable zwp_text_input_v3.
+                    comp.wait_text_input(True, timeout=12.0)
 
                     # 1. Type ASCII + Wayland IME preedit (Return must be blocked while preedit is active),
-                    #    multi-byte UTF-8 commit + delete_surrounding_text replacement, then Create via Return.
+                    #    multi-byte UTF-8 commit + delete_surrounding_text replacement, using composer-scoped
+                    #    region hashes so background catalog/voice probes cannot shift frame waits.
+                    comp_box_pre = comp.region_hash(440, 380, 1220, 540)
                     comp.type_ascii("Indigo U6a ")
-                    h_pre_ime = comp.last_frame_hash
+                    comp_box_typed = comp.wait_region_change(440, 380, 1220, 540, comp_box_pre, timeout=5.0)
+
                     comp.ime_edit(commit="", preedit="にほん")
-                    h_preedit = comp.wait_frame_change(h_pre_ime, timeout=5.0)
+                    comp_box_preedit = comp.wait_region_change(440, 380, 1220, 540, comp_box_typed, timeout=5.0)
                     comp.key_tap("return")
-                    time.sleep(0.15)
+                    time.sleep(0.2)
                     self.assertEqual(
-                        count_req1("POST", "/api/control/missions"),
-                        0,
+                        api1("/api/control/missions"),
+                        [],
                         "Return must not submit Create while IME preedit is active",
                     )
+
                     comp.ime_edit(commit="日本猫", preedit="")
-                    h_cat = comp.wait_frame_change(h_preedit, timeout=5.0)
+                    comp_box_cat = comp.wait_region_change(440, 380, 1220, 540, comp_box_preedit, timeout=5.0)
                     comp.ime_edit(commit="語 🚀", preedit="", del_before=len("猫".encode("utf-8")))
-                    comp.wait_frame_change(h_cat, timeout=5.0)
-                    # Inject a stale-serial done event (serial - 1); Wayland.lean must drop it cleanly
-                    # before the subsequent Return on the same Wayland socket submits the draft.
+                    comp.wait_region_change(440, 380, 1220, 540, comp_box_cat, timeout=5.0)
+
+                    # Inject a stale-serial done event (commit_count - 1); Wayland.lean must drop it.
                     with comp._lock:
-                        stale_serial = max(0, comp.text_input_commit_count - 1)
-                    comp.ime_edit(commit="STALE_LEAK", preedit="", serial=stale_serial)
+                        commits_before_create = comp.text_input_commit_count
+                    comp.ime_edit(commit="STALE_LEAK", preedit="", serial=max(0, commits_before_create - 1))
                     comp.key_tap("return")
 
-                    _wait_until("U6a POST /api/control/missions", lambda: count_req1("POST", "/api/control/missions") >= 1)
-                    missions = http_get_json(base1, "/api/control/missions")
-                    self.assertEqual(len(missions), 1, missions)
-                    mid = missions[0]["id"]
+                    created = _wait_until(
+                        "real orb-core created mission",
+                        lambda: api1("/api/control/missions"),
+                        timeout=15.0,
+                    )
+                    self.assertEqual(len(created), 1, created)
+                    mid = created[0]["id"]
                     mpath = f"/api/control/missions/{mid}"
 
-                    # Wait for Turn 1 completion so the mission transitions to awaiting_user and composer unlocks.
-                    _wait_until("U6a Turn 1 completed", lambda: http_get_json(base1, mpath)["status"] == "awaiting_user")
-                    polls_turn1 = count_req1("GET", f"{mpath}/current-bubble")
-                    _wait_until(
-                        "U6a client observed Turn 1 awaiting_user",
-                        lambda: count_req1("GET", f"{mpath}/current-bubble") >= polls_turn1 + 2,
-                        timeout=6.0,
-                    )
+                    # Verify same-EntityId (1) IME session cycled across Create (disable+commit, enable+commit).
+                    commits_after_create = comp.wait_text_input_commits(commits_before_create + 2, timeout=8.0)
+                    self.assertGreaterEqual(commits_after_create, commits_before_create + 2)
+                    # A stale `done` carrying the pre-Create enable serial must now be rejected.
+                    comp.ime_edit(commit="STALE_PRE_CREATE_LEAK", preedit="", serial=commits_before_create)
 
-                    # 2. Type + commit IME follow-up text in the Mission Transcript composer and Send via Return.
+                    # Verify mid-batch focus switch (`Ctrl+K` + trailing IME commit in one socket write)
+                    # does not leak text into Search (701) or the composer (1).
+                    with comp._lock:
+                        commits_pre_k = comp.text_input_commit_count
+                    search_region_pre = comp.region_hash(380, 60, 1090, 560)
+                    comp.send_key_and_ime_batch("k", MOD_CTRL, "MID_BATCH_LEAK")
+                    comp.wait_region_change(380, 60, 1090, 560, search_region_pre, timeout=5.0)
+                    comp.wait_text_input_commits(commits_pre_k + 2, timeout=5.0)
+                    with comp._lock:
+                        commits_pre_esc = comp.text_input_commit_count
+                    search_region_open = comp.region_hash(380, 60, 1090, 560)
+                    comp.key_tap("esc")
+                    comp.wait_region_change(380, 60, 1090, 560, search_region_open, timeout=5.0)
+                    comp.wait_text_input_commits(commits_pre_esc + 2, timeout=5.0)
+
+                    # Wait for Turn 1 harness launch and clean completion on real orb-core.
+                    _wait_until("Turn 1 harness launch", lambda: len(read_launch_pids()) >= 1, timeout=15.0)
+                    _wait_until(
+                        "Turn 1 settled on real orb-core",
+                        lambda: api1(mpath)["status"] in ("awaiting_user", "completed", "paused"),
+                        timeout=20.0,
+                    )
+                    # Wait for widget 2 (Send/Stop button) to paint idle Send state before typing follow-up.
                     comp.pointer_click(700, 850)
                     comp.wait_text_input(True, timeout=5.0)
+                    btn_idle_empty = comp.region_hash(1184, 837, 1210, 863)
+
+                    # 2. Type + commit IME follow-up text in Mission Transcript composer and Send via Return.
+                    tx_comp_pre = comp.region_hash(480, 825, 1180, 880)
                     comp.type_ascii("Follow-up ")
+                    tx_comp_typed = comp.wait_region_change(480, 825, 1180, 880, tx_comp_pre, timeout=5.0)
                     comp.ime_edit(commit="café ", preedit="かんじ")
+                    tx_comp_preedit = comp.wait_region_change(480, 825, 1180, 880, tx_comp_typed, timeout=5.0)
                     comp.key_tap("return")
-                    time.sleep(0.15)
+                    time.sleep(0.2)
+                    msgs_during_preedit = [
+                        e["content"] for e in api1(f"{mpath}/events") if e["event_type"] == "user_message"
+                    ]
                     self.assertEqual(
-                        count_req1("POST", "/api/control/message"),
-                        0,
+                        msgs_during_preedit,
+                        [expected_initial],
                         "Return must not submit Send while IME preedit is active",
                     )
+
                     comp.ime_edit(commit="漢字仮", preedit="")
+                    tx_comp_kanji = comp.wait_region_change(480, 825, 1180, 880, tx_comp_preedit, timeout=5.0)
                     comp.ime_edit(commit="テスト ✓", preedit="", del_before=len("仮".encode("utf-8")))
-                    polls_pre_send = count_req1("GET", f"{mpath}/current-bubble")
+                    comp.wait_region_change(480, 825, 1180, 880, tx_comp_kanji, timeout=5.0)
+                    btn_before_send = comp.region_hash(1184, 837, 1210, 863)
+                    with comp._lock:
+                        commits_before_send = comp.text_input_commit_count
                     comp.key_tap("return")
 
-                    _wait_until("U6a POST /api/control/message", lambda: count_req1("POST", "/api/control/message") >= 1)
-                    _wait_until("U6a Turn 2 active", lambda: http_get_json(base1, mpath)["status"] == "active")
-                    _wait_until(
-                        "U6a client observed Turn 2 streaming",
-                        lambda: count_req1("GET", f"{mpath}/current-bubble") >= polls_pre_send + 2,
-                        timeout=6.0,
+                    # Wait for Turn 2 harness launch (real child PID) and verify it is alive via pidfd.
+                    pids = _wait_until(
+                        "Turn 2 harness launch",
+                        lambda: p if len(p := read_launch_pids()) >= 2 else None,
+                        timeout=15.0,
                     )
+                    pid2 = pids[1]
+                    pidfd = os.pidfd_open(pid2)
+                    stack.callback(os.close, pidfd)
+                    exited = select.poll()
+                    exited.register(pidfd, select.POLLIN)
+                    self.assertFalse(exited.poll(0), f"Turn 2 harness {pid2} exited before Stop")
 
-                    # 3. Verify busy Archive is refused while Turn 2 is active (single project `source` is auto-expanded;
-                    #    mission row sits at y=287..317, context menu Archive row 1 sits at y=333..359 center 346).
-                    menu_out_pre = comp.region_hash(225, 310, 325, 405)
+                    # Verify same-EntityId (1) IME session cycled across Send (disable+commit, enable+commit).
+                    comp.wait_text_input_commits(commits_before_send + 2, timeout=8.0)
+                    _wait_until("Turn 2 active on real orb-core", lambda: api1(mpath)["status"] == "active", timeout=15.0)
+
+                    # Wait for widget 2 on the client window thread to paint the Stop (isRunning=true) glyph.
+                    def _btn_is_stop():
+                        cur = comp.region_hash(1184, 837, 1210, 863)
+                        return cur if (cur != btn_before_send and cur != btn_idle_empty) else None
+
+                    btn_stop_hash = _wait_until("widget 2 repainted as Stop", _btn_is_stop, timeout=8.0)
+
+                    # 3. Verify busy Archive is refused while Turn 2 is active.
+                    # Mission was created with no explicit project, so it sits as the first ungrouped row
+                    # below the single `Source` project row (Source at y=272, mission row at y=303).
+                    menu_out_pre = comp.region_hash(225, 310, 325, 430)
                     comp.pointer_click(100, 303, button=0x111)
-                    comp.wait_region_change(225, 310, 325, 405, menu_out_pre, timeout=5.0)
-                    status_checks_pre = count_req1("GET", f"{mpath}?include_history=false")
+                    comp.wait_region_change(225, 310, 325, 430, menu_out_pre, timeout=5.0)
                     toast_pre = comp.region_hash(1020, 770, 1465, 815)
-                    comp.pointer_click(160, 346)
-                    _wait_until(
-                        "U6a busy archive pre-check",
-                        lambda: count_req1("GET", f"{mpath}?include_history=false") > status_checks_pre,
-                        timeout=6.0,
-                    )
-                    comp.wait_region_change(1020, 770, 1465, 815, toast_pre, timeout=5.0)
-                    self.assertEqual(http_get_json(base1, mpath)["status"], "active")
+                    # With 1 project (`Source`), context menu rows are: Rename (0), Move to (1), Archive (2, y=359..385).
+                    comp.pointer_click(160, 372)
+                    comp.wait_region_change(1020, 770, 1465, 815, toast_pre, timeout=6.0)
+                    self.assertEqual(api1(mpath)["status"], "active")
+                    self.assertFalse(exited.poll(0), "busy Archive refusal must not terminate active harness")
 
-                    # 4. Stop the running turn via Stop button click (widget 2 at x=1197, y=850).
-                    polls_pre_stop = count_req1("GET", f"{mpath}/current-bubble")
+                    # 4. Stop the running turn via Wayland Stop button click (widget 2 at x=1197, y=850)
+                    #    and verify BOTH Core `interrupted` status AND real harness process teardown (`pidfd`).
                     comp.pointer_click(1197, 850)
-                    _wait_until("U6a Turn 2 stopped", lambda: http_get_json(base1, mpath)["status"] == "interrupted")
-                    _wait_until(
-                        "U6a client observed interrupted",
-                        lambda: count_req1("GET", f"{mpath}/current-bubble") >= polls_pre_stop + 2,
-                        timeout=6.0,
-                    )
+                    _wait_until("Turn 2 stopped on real orb-core", lambda: api1(mpath)["status"] == "interrupted", timeout=15.0)
+                    self.assertTrue(exited.poll(3000), f"original harness PID {pid2} still alive after Stop")
+                    comp.wait_region_change(1184, 837, 1210, 863, btn_stop_hash, timeout=8.0)
 
                     # 5. Archive the stopped mission via Wayland right-click context menu -> Archive.
-                    menu_out_pre2 = comp.region_hash(225, 310, 325, 405)
+                    menu_out_pre2 = comp.region_hash(225, 310, 325, 430)
                     comp.pointer_click(100, 303, button=0x111)
-                    comp.wait_region_change(225, 310, 325, 405, menu_out_pre2, timeout=5.0)
+                    comp.wait_region_change(225, 310, 325, 430, menu_out_pre2, timeout=5.0)
                     dock_pre_arch = comp.region_hash(450, 820, 1220, 915)
-                    comp.pointer_click(160, 346)
+                    comp.pointer_click(160, 372)
                     _wait_until(
-                        "U6a mission archived on Core",
-                        lambda: http_get_json(base1, mpath)["status"] == "acknowledged",
+                        "mission archived on real orb-core",
+                        lambda: api1(mpath)["status"] == "acknowledged",
+                        timeout=15.0,
                     )
-                    comp.wait_region_change(450, 820, 1220, 915, dock_pre_arch, timeout=5.0)
+                    comp.wait_region_change(450, 820, 1220, 915, dock_pre_arch, timeout=6.0)
                     comp.wait_text_input(True, timeout=5.0)
                 finally:
                     self._shutdown(comp, proc)
-            finally:
-                server1.shutdown()
-                server1.server_close()
-                db1.close()
 
-            # 6. Restart Core on the same SQLite DB and verify via a SEPARATE independent Core HTTP client.
-            server2, db2, _lock2, _reqs2, _state2 = _start_sqlite_core(db_path, token)
-            base2 = f"http://127.0.0.1:{server2.server_port}"
-            try:
-                all_missions = http_get_json(base2, "/api/control/missions")
-                self.assertEqual([m["id"] for m in all_missions], [mid])
-                mission = http_get_json(base2, f"/api/control/missions/{mid}")
-                events = http_get_json(base2, f"/api/control/missions/{mid}/events")
-                user_messages = [e["content"] for e in events if e["event_type"] == "user_message"]
-                stopped_events = [e for e in events if e["event_type"] == "turn_stopped"]
+                # Stop the first real orb-core instance cleanly so SQLite flushes and closes.
+                with contextlib.suppress(ProcessLookupError):
+                    os.killpg(core_proc.pid, signal.SIGTERM)
+                core_proc.wait(timeout=8)
+
+                # 6. Restart real `orb-core` on the exact same HOME/WORKING_DIR SQLite DB and verify
+                #    from a SEPARATE independent Core HTTP client.
+                stack.enter_context(_run_process_group([str(core_bin)], core_env, tmp))
+                api2, login2 = make_client(base)
+
+                def _try_login2():
+                    try:
+                        return login2()
+                    except (ConnectionError, urllib.error.URLError, TimeoutError):
+                        return None
+
+                _wait_until("restarted real orb-core login", _try_login2, timeout=20.0)
+                # Real OrbCore excludes `acknowledged` missions from default active roster:
+                active_missions = api2("/api/control/missions")
+                self.assertEqual(active_missions, [], f"archived mission leaked into active list: {active_missions}")
+                archived_missions = api2("/api/control/missions?status=acknowledged")
+                self.assertEqual([m["id"] for m in archived_missions], [mid])
+
+                mission = api2(mpath)
+                events = api2(f"{mpath}/events")
+                user_messages = [
+                    e["content"] for e in events if e["event_type"] == "user_message" and e["mission_id"] == mid
+                ]
+                assistant_deltas = [
+                    e["content"]
+                    for e in events
+                    if e["event_type"] in ("text_delta", "assistant_message", "assistant_message_canonical")
+                    and e["mission_id"] == mid
+                ]
 
                 self.assertEqual(mission["id"], mid)
                 self.assertEqual(mission["status"], "acknowledged")
-                self.assertEqual(mission["stopped_turns"], 1)
                 self.assertEqual(user_messages, [expected_initial, expected_followup])
-                self.assertEqual(len(stopped_events), 1)
-            finally:
-                server2.shutdown()
-                server2.server_close()
-                db2.close()
+                self.assertTrue(
+                    any("Turn 1 line" in c for c in assistant_deltas)
+                    and any("Turn 2 streaming line" in c for c in assistant_deltas),
+                    f"expected both Turn 1 and Turn 2 harness output in Core events, got {assistant_deltas[:6]}",
+                )
 
 
 if __name__ == "__main__":

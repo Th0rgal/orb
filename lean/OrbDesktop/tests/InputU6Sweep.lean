@@ -635,6 +635,98 @@ private def verifyWaylandImeSerialGuard : IO Unit := do
   unless reprStr evs4 == reprStr expectedIme && wl4.ime.commit.isEmpty do
     throw <| IO.userError s!"current zwp_text_input_v3.done(3) did not emit expected imeBatch: {reprStr evs4}"
 
+  -- Logical IME session keys must change across same-EntityId (1) composer switches:
+  -- New Agent -> Create/Mission -> Ctrl+N -> Rename -> close Rename, and Send reset.
+  let baseDraft : DesktopState := {
+    DesktopState.forScreen .controlEmpty true 120 with
+    liveData := true, connectionBinding := "u6a", screen := .controlEmpty, openMission := none
+  }
+  let kDraft := desktopImeSessionKey baseDraft
+  let card1 : MissionSummaryCard := { (default : MissionSummaryCard) with widgetId := 2001, missionId := "m-u6a", title := "Indigo" }
+  let afterCreate := resetSelection { baseDraft with screen := .missionTranscript } (some card1)
+  let kMission := desktopImeSessionKey afterCreate
+  unless kMission != kDraft do
+    throw <| IO.userError "desktopImeSessionKey did not change across New Agent -> Mission Create"
+  let afterSend := { afterCreate with imeResetGen := afterCreate.imeResetGen + 1 }
+  unless desktopImeSessionKey afterSend != kMission do
+    throw <| IO.userError "desktopImeSessionKey did not change after Send reset"
+  let afterCtrlN := (stepDesktopEvent 120 vpDev afterCreate (.key 0x6e 2 .pressed)).1
+  unless desktopImeSessionKey afterCtrlN != kMission do
+    throw <| IO.userError "desktopImeSessionKey did not change on Ctrl+N"
+  let withRename : DesktopState := {
+    afterCreate with
+    missionMenu := some { mission := "m-u6a", x := 100, y := 100, trigger := 1, page := .rename }
+  }
+  let kRename := desktopImeSessionKey withRename
+  unless kRename != kMission do
+    throw <| IO.userError "desktopImeSessionKey did not change when opening inline Rename (id=1)"
+  let afterEscRename := (stepDesktopEvent 120 vpDev withRename (.key 0xff1b 0 .pressed)).1
+  unless desktopImeSessionKey afterEscRename != kRename do
+    throw <| IO.userError "desktopImeSessionKey did not change when closing inline Rename back to trigger 1"
+
+  -- Mid-batch focus switch (Ctrl+K opening Search 701 + trailing .imeBatch in same pumpEvents batch)
+  -- must drop the trailing IME commit instead of leaking it into Search query.
+  let rt0 : Runtime.RuntimeState DesktopState := {
+    app := baseDraft
+    focus := { owner := some 1 }
+    lastImeOwner := some 1
+    lastImeContext := desktopImeSessionKey baseDraft
+  }
+  let rtBatch := Runtime.applyEventBatch rt0
+    #[.key 0x6b 2 .pressed, .imeBatch 0 0 "LEAK_TO_SEARCH" "" 0 0]
+    (fun _ st ev => stepDesktopEvent 120 vpDev st ev) desktopFocusChange desktopFocusTraps desktopImeSessionKey
+  match rtBatch.app.modal with
+  | .searchPalette spec =>
+    unless spec.query.isEmpty do
+      throw <| IO.userError s!"mid-batch IME leaked into Search palette after Ctrl+K: {spec.query}"
+  | _ => throw <| IO.userError "Ctrl+K did not open searchPalette in applyEventBatch test"
+
+  -- Poll-frame logical IME context switch (e.g. Create/Send completing before syncTextFocus)
+  -- must also drop an in-flight .imeBatch sitting in the socket for that tick.
+  let rtPostCreate : Runtime.RuntimeState DesktopState := {
+    app := afterCreate
+    focus := { owner := some 1 }
+    lastImeOwner := some 1
+    lastImeContext := kDraft
+  }
+  let rtPolled := Runtime.applyEventBatch rtPostCreate
+    #[.imeBatch 0 0 "PRE_CREATE_LEAK" "" 0 0]
+    (fun _ st ev => stepDesktopEvent 120 vpDev st ev) desktopFocusChange desktopFocusTraps desktopImeSessionKey
+  unless rtPolled.app.composer.text.isEmpty do
+    throw <| IO.userError s!"in-flight IME leaked across pollFrame context switch: {rtPolled.app.composer.text}"
+
+  -- Draft directory Return must not commit while IME preedit is active or path is non-absolute.
+  let dirStPreedit : DesktopState := {
+    baseDraft with
+    missionMenu := some {
+      mission := "", x := 400, y := 400, trigger := draftDirectoryPickerId, page := .draftDirectory,
+      draft := { text := "/tmp", cursorOffset := 4, imePreeditText := "にほん" }
+    }
+  }
+  let (dirAfterPreedit, _) := stepDesktopEvent 120 vpDev dirStPreedit (.composerReturn false)
+  unless dirAfterPreedit.missionMenu.isSome && dirAfterPreedit.draftDirectory.isEmpty do
+    throw <| IO.userError "draftDirectory Return committed while IME preedit was active"
+  let dirStRelative : DesktopState := {
+    baseDraft with
+    missionMenu := some {
+      mission := "", x := 400, y := 400, trigger := draftDirectoryPickerId, page := .draftDirectory,
+      draft := { text := "relative/path", cursorOffset := 13 }
+    }
+  }
+  let (dirAfterRel, _) := stepDesktopEvent 120 vpDev dirStRelative (.composerReturn false)
+  unless dirAfterRel.missionMenu.isSome && dirAfterRel.draftDirectory.isEmpty do
+    throw <| IO.userError "draftDirectory Return accepted a non-absolute path"
+  let dirStValid : DesktopState := {
+    baseDraft with
+    missionMenu := some {
+      mission := "", x := 400, y := 400, trigger := draftDirectoryPickerId, page := .draftDirectory,
+      draft := { text := "/tmp/u6a", cursorOffset := 8 }
+    }
+  }
+  let (dirAfterValid, _) := stepDesktopEvent 120 vpDev dirStValid (.composerReturn false)
+  unless dirAfterValid.missionMenu.isNone && dirAfterValid.draftDirectory == "/tmp/u6a" do
+    throw <| IO.userError s!"draftDirectory Return did not commit valid absolute path: {repr dirAfterValid.draftDirectory}"
+
 def main : IO UInt32 := do
   verifyOrbScrollEquivalence
   verifyNineScreenControls

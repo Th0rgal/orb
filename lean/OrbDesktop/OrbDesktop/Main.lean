@@ -1215,7 +1215,7 @@ def main (args : List String) : IO UInt32 := do
               return (voiced, if updated.isSome || voiced.voiceAvailable != next.voiceAvailable ||
                 voiced.voicePhase != next.voicePhase then some vp else damage))
             (·.liveData) desktopFocusChange (some wakeFd) (·.writeRequest.isSome)
-            (fun rt => animations && (runningBadgeDamage rt).isSome) desktopFocusTraps
+            (fun rt => animations && (runningBadgeDamage rt).isSome) desktopFocusTraps desktopImeSessionKey
         finally
           discard (IO.wait probe)
           closeVoice voiceSlot
