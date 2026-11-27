@@ -1411,8 +1411,6 @@ fun OrbProjectPage(
     var showNewFolderDialog by remember { mutableStateOf(false) }
     var newFolderParent by remember { mutableStateOf("") }
     var newFolderDraft by remember { mutableStateOf("") }
-    var boardRefreshID by remember(project) { mutableStateOf(0) }
-    var selectedMissionBoard by remember(project) { mutableStateOf<Pair<OrbMissionBoardSummary, Long>?>(null) }
     var isRefreshing by remember { mutableStateOf(false) }
     var folderActionError by remember { mutableStateOf<String?>(null) }
 
@@ -1618,7 +1616,16 @@ fun OrbProjectPage(
 
     val foldersMap = remember(nestedRoots, manifestFolders, customFolders.keys.toSet(), pendingFolderDeletes.keys.toSet(), filtering) {
         val map = linkedMapOf<String, MutableList<OrbNestedMission>>()
-        val allPaths = sortedSetOf<String>()
+        val allPaths = sortedSetOf(Comparator<String> { a, b ->
+            val pa = a.split("/")
+            val pb = b.split("/")
+            val n = minOf(pa.size, pb.size)
+            for (i in 0 until n) {
+                val c = pa[i].compareTo(pb[i])
+                if (c != 0) return@Comparator c
+            }
+            pa.size.compareTo(pb.size)
+        })
         val isDeleting: (String) -> Boolean = { candidate ->
             pendingFolderDeletes.keys.any { candidate == it || candidate.startsWith("$it/") }
         }
@@ -2034,7 +2041,6 @@ fun OrbProjectPage(
                 onRefresh = {
                     scope.launch {
                         isRefreshing = true
-                        boardRefreshID += 1
                         loadProjectData()
                         core.refreshAll()
                         isRefreshing = false
@@ -2053,9 +2059,6 @@ fun OrbProjectPage(
                         bottom = 96.dp
                     )
                 ) {
-                    item(key = "project_board") {
-                        OrbMissionBoardsSection(core, liveProject, projectMissions, boardRefreshID) { board, revision -> selectedMissionBoard = board to revision }
-                    }
                     if (filter != OrbProjectFilter.All) {
                         item(key = "active_filter_bar") {
                             Row(
@@ -2169,6 +2172,16 @@ fun OrbProjectPage(
 
                     // Folder sections
                     foldersMap.forEach { (folderPath, rootsInFolder) ->
+                        var ancestorCollapsed = false
+                        var slashIdx = folderPath.indexOf('/')
+                        while (slashIdx >= 0) {
+                            if (collapsedFolders[folderPath.substring(0, slashIdx)] == true) {
+                                ancestorCollapsed = true
+                                break
+                            }
+                            slashIdx = folderPath.indexOf('/', slashIdx + 1)
+                        }
+                        if (ancestorCollapsed) return@forEach
                         val collapsed = collapsedFolders[folderPath] == true
                         val folderDepth = (folderPath.count { it == '/' }).coerceAtLeast(0)
                         val folderIndentDp = minOf(36, folderDepth * 12).dp
@@ -2831,9 +2844,6 @@ fun OrbProjectPage(
         },
         onError = { folderActionError = it }
     )
-    selectedMissionBoard?.let { (board, revision) ->
-        OrbMissionBoardView(core, board, liveProject.id, revision) { selectedMissionBoard = null }
-    }
 }
 
 @OptIn(ExperimentalFoundationApi::class)
