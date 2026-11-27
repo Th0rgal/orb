@@ -363,6 +363,14 @@ and FreeType `FT_PIXEL_MODE_BGRA` color glyphs. -/
       else if d16 ≤ -8 then cov
       else (cov * (((8 - d16).toNat * 255) / 16) + 127) / 255) 255
 
+/-- `true` when every clip in `rclips` covers `(px, py)` fully: inside its rectangle and one pixel
+    clear of its corner squares, where `sdfRoundedRect16 ≤ -8` and `roundedClipCov` keeps `255`. -/
+@[inline] private def roundedClipFull (rclips : List (Rect × CornerRadii)) (px py : Int) : Bool :=
+  rclips.all fun (r, (tl, tr, br, bl)) =>
+    let m : Int := Int.ofNat (max (max tl tr) (max br bl)) + 1
+    px ≥ r.x && px < r.right && py ≥ r.y && py < r.bottom &&
+      ((px ≥ r.x + m && px < r.right - m) || (py ≥ r.y + m && py < r.bottom - m))
+
 /-- Apply rounded clip masks to newly painted pixels inside `region` by blending `painted` over `saved`. -/
 private def applyRoundedClips (vw vh : Nat) (saved painted : ByteArray) (region : Rect)
     (rclips : List (Rect × CornerRadii)) : ByteArray := Id.run do
@@ -390,11 +398,16 @@ private def applyRoundedClips (vw vh : Nat) (saved painted : ByteArray) (region 
             |>.set! (idx + 3) (mixC (painted.get! (idx + 3)) (saved.get! (idx + 3)))
   return out
 
-/-- Saved offscreen layer state for `Prim.layerPush` / `Prim.layerPop`. -/
+/-- Saved offscreen layer state for `Prim.layerPush` / `Prim.layerPop`. The rounded clips active
+at the push are set aside while the layer is painted and applied once, when it is composited.
+The clip stack is saved with them, so clip commands inside a layer cannot outlive or escape it. -/
 private structure LayerFrame where
   opacity : Nat
   clip : Rect
   savedBuf : ByteArray
+  clipStack : List Rect
+  rclipStack : List (Option (Rect × CornerRadii))
+  activeRClips : List (Rect × CornerRadii)
 
 /-- Helper to rasterize a rounded rect fill + optional inner border onto `fb`. -/
 private def drawRoundedBox (vw vh : Nat) (fb : ByteArray) (curClip r : Rect)
@@ -590,8 +603,9 @@ def rasterizeSceneInto (vw vh : Nat) (clearColor : Color) (atlas : Text.GlyphAtl
       rclipStack := some (r, radii) :: rclipStack
       activeRClips := (r, radii) :: activeRClips
     | .clipPop =>
+      -- The base entry stays: an unmatched pop cannot widen the clip of the enclosing layer.
       if let _ :: tail := clipStack then
-        clipStack := if tail.isEmpty then [renderClip] else tail
+        if !tail.isEmpty then clipStack := tail
       if let top :: rtail := rclipStack then
         rclipStack := if rtail.isEmpty then [none] else rtail
         if top.isSome then
@@ -599,12 +613,19 @@ def rasterizeSceneInto (vw vh : Nat) (clearColor : Color) (atlas : Text.GlyphAtl
     | .layerPush opacity =>
       let saved := fb
       fb := Text.AtlasPageBuffer.zeroBytes totalBytes
-      layerStack := { opacity := min opacity 255, clip := curClip, savedBuf := saved } :: layerStack
+      layerStack := { opacity := min opacity 255, clip := curClip, savedBuf := saved,
+                      clipStack, rclipStack, activeRClips } :: layerStack
+      clipStack := [curClip]
+      rclipStack := [none]
+      activeRClips := []
     | .layerPop =>
       if let top :: rest := layerStack then
         layerStack := rest
         let layerBuf := fb
         fb := top.savedBuf
+        clipStack := top.clipStack
+        rclipStack := top.rclipStack
+        activeRClips := top.activeRClips
         let (x0, y0, x1, y1) := clampBounds vw vh top.clip renderClip
         if x1 > x0 && y1 > y0 then
           let modA : UInt8 := top.opacity.toUInt8
@@ -616,12 +637,16 @@ def rasterizeSceneInto (vw vh : Nat) (clearColor : Color) (atlas : Text.GlyphAtl
               let lb := layerBuf.get! (idx + 2)
               let la := layerBuf.get! (idx + 3)
               if la > 0 && modA > 0 then
-                let dr := fb.get! idx
-                let dg := fb.get! (idx + 1)
-                let db := fb.get! (idx + 2)
-                let da := fb.get! (idx + 3)
-                let (nr, ng, nb, na) := blendOverPremul dr dg db da lr lg lb la modA
-                fb := fb.set! idx nr |>.set! (idx + 1) ng |>.set! (idx + 2) nb |>.set! (idx + 3) na
+                let effModA : UInt8 :=
+                  if activeRClips.isEmpty || roundedClipFull activeRClips (px : Int) (py : Int) then modA
+                  else ((modA.toNat * roundedClipCov activeRClips (px : Int) (py : Int) + 127) / 255).toUInt8
+                if effModA > 0 then
+                  let dr := fb.get! idx
+                  let dg := fb.get! (idx + 1)
+                  let db := fb.get! (idx + 2)
+                  let da := fb.get! (idx + 3)
+                  let (nr, ng, nb, na) := blendOverPremul dr dg db da lr lg lb la effModA
+                  fb := fb.set! idx nr |>.set! (idx + 1) ng |>.set! (idx + 2) nb |>.set! (idx + 3) na
     | .quad r fill rad bw border =>
       let radii : CornerRadii := (rad, rad, rad, rad)
       instances := instances.push {
@@ -1098,8 +1123,11 @@ def renderAndPresentGpu (ctx : VulkanContext) (clearColor : Color) (atlas : Text
   let some sess := ctx.gpuSession | return (ctx, atlas, false, false)
   match ctx.backend, sess.pipe with
   | .vkInstanced, some pipe =>
+    -- Backdrop blur and layers spread a change beyond its damage rect: present the whole surface,
+    -- as `renderFrameDamage` does on the CPU path.
+    let presentDirty := if hasGlobalEffect scene then none else dirty
     let (wsi', pipe', outcome, primCount, ssboBytes, atlasBytes) ←
-      Vk.presentInstancedScene sess.wsi pipe ctx.width ctx.height clearColor atlas scene dirty prePresent onPresentAborted
+      Vk.presentInstancedScene sess.wsi pipe ctx.width ctx.height clearColor atlas scene presentDirty prePresent onPresentAborted
     let allocBytes ← wsi'.dev.allocatedBytes.get
     match outcome with
     | .presented _ acqNs upNs subNs presNs =>

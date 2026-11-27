@@ -353,8 +353,11 @@ def buildComposerWidget (theme : Theme) (availW composerH : SubPx)
           , WidgetNode.rrect (BoxStyle.row 0 |>.withFixedSize (pxToSub 2) (pxToSub 4)) pal.textMuted CornerRadii.zero ]]
         buf.attachButtonId
   let hasText := !buf.text.isEmpty || !buf.imePreeditText.isEmpty
-  -- Two 24px buttons, two 8px gaps, pill padding, text inset and border.
-  let placeholderWidth := colW - pxToSub (48 + 16 + 22 + 2) - 2 * theme.borderWidth
+  -- Two 24px buttons, two 8px gaps and the pill padding (which already holds the 1px border).
+  -- The text inset is padding inside the text box, so it is not subtracted again: the text
+  -- fills the pill and the send button stays on its right padding edge, as `.send` in the DOM
+  -- (`OrbDesktop.Spec.ChromeGeometry`).
+  let placeholderWidth := colW - pxToSub (48 + 16 + 22)
   let runs := buildComposerInlineRuns theme buf overrideRuns
   let lineH := pxToSub 18
   let editW := colW - pxToSub 26

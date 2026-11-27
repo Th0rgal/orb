@@ -52,8 +52,14 @@ private def widget (scale120 : Nat) (id : Nat) : Option Rect :=
 
 -- Core emits active for running turns, while the preview uses running.
 #guard liveBadgeKind "active" == "loader" && liveBadgeKind "running" == "loader"
-#guard liveBadgeKind "paused" == "pause" && liveBadgeKind "failed" == "alert"
+#guard liveBadgeKind "RUNNING" == "loader" && liveBadgeKind "ACTIVE" == "loader"
+#guard liveBadgeKind "paused" == "pause" && liveBadgeKind "PAUSED" == "pause"
+#guard liveBadgeKind "cancelled" == "pause" && liveBadgeKind "canceled" == "pause"
+#guard liveBadgeKind "failed" == "alert" && liveBadgeKind "waiting_for_approval" == "alert"
+-- `missionStatus.ts` and `gtk_icons.c` both show the plain mission icon for ready statuses.
 #guard liveBadgeKind "completed" == "check" && liveBadgeKind "awaiting_user" == ""
+#guard liveBadgeKind "awaiting_approval" == ""
+#guard liveSpinnerPhase 0 == 0 && liveSpinnerPhase 500 == 30 && liveSpinnerPhase 984 == 59 && liveSpinnerPhase 1000 == 0
 
 -- Embedded sidebar (GTK hybrid host) omits its own right border & padding so GtkPaned paints the
 -- sole 1 px seam; standalone LeanUI retains its 1 px right border across themes and DPI scales.
