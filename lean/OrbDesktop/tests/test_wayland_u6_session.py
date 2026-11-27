@@ -41,6 +41,7 @@ from pathlib import Path
 import select
 import signal
 import socket
+import sqlite3
 import struct
 import subprocess
 import sys
@@ -48,12 +49,15 @@ import tempfile
 import threading
 import time
 import unittest
+import urllib.error
+import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit
 
 
 ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_BINARY = ROOT / "lean/OrbDesktop/.lake/build/bin/orb-desktop-native"
+CURRENT_BUBBLE_SQL = (ROOT / "lean/OrbCore/OrbCore/current_bubble.sql").read_text()
 
 
 def _wl_str(text: str | None) -> bytes:
@@ -609,7 +613,14 @@ class WaylandTestCompositor:
             else:
                 self.key_tap(ch, 0)
 
-    def ime_edit(self, commit: str = "", preedit: str = "", del_before: int = 0, del_after: int = 0) -> None:
+    def ime_edit(
+        self,
+        commit: str = "",
+        preedit: str = "",
+        del_before: int = 0,
+        del_after: int = 0,
+        serial: int | None = None,
+    ) -> None:
         self.wait_text_input(True)
         with self._lock:
             assert self.text_input_id is not None
@@ -621,7 +632,8 @@ class WaylandTestCompositor:
                 self._send(_wl_msg(self.text_input_id, 2, _wl_str(preedit) + struct.pack("=ii", 0, len(preedit.encode("utf-8")))))
             else:
                 self._send(_wl_msg(self.text_input_id, 2, _wl_str("") + struct.pack("=ii", 0, 0)))
-            self._send(_wl_msg(self.text_input_id, 5, struct.pack("=I", self.text_input_commit_count)))
+            done_serial = self.text_input_commit_count if serial is None else serial
+            self._send(_wl_msg(self.text_input_id, 5, struct.pack("=I", done_serial & 0xFFFFFFFF)))
 
     def send_close(self) -> None:
         with self._lock:
@@ -943,8 +955,268 @@ def _resolve_binary() -> Path:
     raise FileNotFoundError("orb-desktop-native binary not found; set ORB_LEANUI_TEST_BINARY")
 
 
+def _start_sqlite_core(db_path: Path, token: str):
+    """Persistent SQLite-backed local Core HTTP server for U6a end-to-end verification."""
+    conn = sqlite3.connect(db_path, check_same_thread=False)
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS missions(
+            id TEXT PRIMARY KEY,
+            title TEXT NOT NULL,
+            status TEXT NOT NULL,
+            project TEXT NOT NULL DEFAULT '',
+            backend TEXT NOT NULL DEFAULT 'codex',
+            owner_user_id TEXT NOT NULL DEFAULT 'owner',
+            history_json TEXT NOT NULL DEFAULT '[]',
+            stopped_turns INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE TABLE IF NOT EXISTS mission_shares(
+            mission_id TEXT NOT NULL,
+            user_id TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS mission_events(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            mission_id TEXT NOT NULL,
+            seq INTEGER NOT NULL,
+            sequence INTEGER NOT NULL,
+            event_type TEXT NOT NULL,
+            payload TEXT NOT NULL,
+            metadata TEXT NOT NULL DEFAULT '{}',
+            content TEXT NOT NULL DEFAULT ''
+        );
+        CREATE TABLE IF NOT EXISTS seen_messages(
+            client_message_id TEXT PRIMARY KEY,
+            mission_id TEXT NOT NULL
+        );
+        """
+    )
+    conn.commit()
+    lock = threading.Lock()
+    requests_log: list[tuple[str, str, int]] = []
+    state = {"counter": 0, "busy_archive_409": 0}
+
+    def next_seq(mid: str) -> int:
+        row = conn.execute(
+            "SELECT COALESCE(MAX(sequence), 0) FROM mission_events WHERE mission_id=?",
+            (mid,),
+        ).fetchone()
+        return (row[0] or 0) + 1
+
+    def add_event(mid: str, kind: str, content: str, extra: dict | None = None) -> int:
+        seq = next_seq(mid)
+        payload = {"content": content, **(extra or {})}
+        conn.execute(
+            "INSERT INTO mission_events(mission_id,seq,sequence,event_type,payload,metadata,content) VALUES(?,?,?,?,?,?,?)",
+            (mid, seq, seq, kind, json.dumps(payload), "{}", content),
+        )
+        conn.commit()
+        return seq
+
+    class Handler(BaseHTTPRequestHandler):
+        def _reply(self, body, code: int = 200) -> None:
+            raw = json.dumps(body).encode("utf-8")
+            self.send_response(code)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(raw)))
+            self.end_headers()
+            try:
+                self.wfile.write(raw)
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+            requests_log.append((self.command, self.path, code))
+
+        def _read_json(self) -> dict:
+            length = int(self.headers.get("Content-Length") or "0")
+            return json.loads(self.rfile.read(length)) if length else {}
+
+        def do_GET(self) -> None:
+            if self.headers.get("Authorization") != f"Bearer {token}":
+                return self._reply({"error": "unauthorized"}, 401)
+            base_path = urlsplit(self.path).path
+            with lock:
+                if base_path == "/api/auth/me":
+                    return self._reply({"user": {"id": "owner", "username": "u6a-wayland", "role": "admin"}})
+                if base_path == "/api/projects":
+                    return self._reply({"projects": [{"slug": "source", "title": "Source", "objective": "", "color": "blue"}]})
+                if base_path == "/api/machines":
+                    return self._reply([{"id": "core", "name": "orb-core", "state": "online", "status": "online"}])
+                if base_path == "/api/backends":
+                    return self._reply({"backends": [{"id": "codex", "name": "Codex"}]})
+                if base_path == "/api/providers/backend-models":
+                    return self._reply({"backends": {"codex": [{"value": "gpt-6.2-astra", "label": "Astra"}]}})
+                if base_path == "/api/model-routing/chains":
+                    return self._reply([])
+                if base_path == "/api/control/inbox-state":
+                    return self._reply({"_versions": {}})
+                if base_path == "/api/control/missions":
+                    rows = conn.execute("SELECT id,title,status,project,backend,stopped_turns FROM missions").fetchall()
+                    return self._reply([
+                        {
+                            "id": r[0],
+                            "title": r[1],
+                            "status": r[2],
+                            "project": r[3] or "source",
+                            "backend": r[4],
+                            "stopped_turns": r[5],
+                            "updated_at": "2026-11-27T10:00:00Z",
+                            "created_at": "2026-11-27T10:00:00Z",
+                            "tags": [],
+                        }
+                        for r in rows
+                    ])
+                if base_path.startswith("/api/control/missions/"):
+                    parts = base_path.removeprefix("/api/control/missions/").split("/")
+                    mid = parts[0]
+                    row = conn.execute(
+                        "SELECT id,title,status,project,backend,stopped_turns FROM missions WHERE id=?",
+                        (mid,),
+                    ).fetchone()
+                    if not row:
+                        return self._reply({"error": "not_found"}, 404)
+                    if len(parts) == 1:
+                        return self._reply({
+                            "id": row[0],
+                            "title": row[1],
+                            "status": row[2],
+                            "project": row[3] or "source",
+                            "backend": row[4],
+                            "stopped_turns": row[5],
+                            "execution": {"state": "running" if row[2] == "active" else "idle"},
+                        })
+                    sub = parts[1]
+                    if sub == "events":
+                        evs = conn.execute(
+                            "SELECT id,sequence,event_type,content FROM mission_events WHERE mission_id=? ORDER BY sequence ASC, id ASC",
+                            (mid,),
+                        ).fetchall()
+                        return self._reply([
+                            {"id": e[0], "mission_id": mid, "sequence": e[1], "event_type": e[2], "content": e[3]}
+                            for e in evs
+                        ])
+                    if sub == "open":
+                        evs = conn.execute(
+                            "SELECT id,sequence,event_type,content FROM mission_events WHERE mission_id=? ORDER BY sequence ASC, id ASC",
+                            (mid,),
+                        ).fetchall()
+                        events = [
+                            {"id": e[0], "mission_id": mid, "sequence": e[1], "event_type": e[2], "content": e[3]}
+                            for e in evs
+                        ]
+                        return self._reply({
+                            "protocol": 1,
+                            "mission": {"id": mid},
+                            "events": events,
+                            "spine": [],
+                            "queue": [],
+                            "max_seq": events[-1]["sequence"] if events else 0,
+                            "has_more": False,
+                            "spine_has_more": False,
+                            "spine_next_cursor": None,
+                            "next_cursor": None,
+                            "page_max_seq": None,
+                            "reset": False,
+                        })
+                    if sub == "current-bubble":
+                        if row[2] == "active" and not conn.execute(
+                            "SELECT 1 FROM mission_events WHERE mission_id=? AND event_type='assistant_message'",
+                            (mid,),
+                        ).fetchone():
+                            add_event(mid, "assistant_message", "Turn 1 reply", {"queued": False})
+                            conn.execute("UPDATE missions SET status='awaiting_user' WHERE id=?", (mid,))
+                            conn.commit()
+                        user_count = conn.execute(
+                            "SELECT COUNT(*) FROM mission_events WHERE mission_id=? AND event_type='user_message'",
+                            (mid,),
+                        ).fetchone()[0]
+                        if row[2] == "active" and user_count >= 2 and not conn.execute(
+                            "SELECT 1 FROM mission_events WHERE mission_id=? AND event_type='text_delta'",
+                            (mid,),
+                        ).fetchone():
+                            add_event(mid, "text_delta", "Turn 2 streaming...", {"queued": False})
+                        qrow = conn.execute(CURRENT_BUBBLE_SQL, {"1": mid, "2": "0", "3": "owner", "4": "0"}).fetchone()
+                        if not qrow:
+                            return self._reply({"error": "not_found"}, 404)
+                        return self._reply({"id": mid, "title": qrow[0], "status": qrow[1], "text": qrow[2]})
+                return self._reply({"error": "not_found"}, 404)
+
+        def do_POST(self) -> None:
+            if self.headers.get("Authorization") != f"Bearer {token}":
+                return self._reply({"error": "unauthorized"}, 401)
+            path = urlsplit(self.path).path
+            data = self._read_json()
+            with lock:
+                if path == "/api/control/missions":
+                    state["counter"] += 1
+                    mid = f"m-u6a-{state['counter']}"
+                    prompt = data.get("prompt", "")
+                    title = data.get("title") or "New mission"
+                    project = data.get("project") or "source"
+                    backend = data.get("backend") or "codex"
+                    conn.execute(
+                        "INSERT INTO missions(id,title,status,project,backend) VALUES(?,?,'active',?,?)",
+                        (mid, title, project, backend),
+                    )
+                    if prompt:
+                        add_event(mid, "user_message", prompt, {"queued": False})
+                    conn.commit()
+                    return self._reply({
+                        "id": mid,
+                        "title": title,
+                        "status": "active",
+                        "project": project,
+                        "backend": backend,
+                        "model_override": data.get("model_override") or "",
+                        "model_effort": data.get("model_effort") or "",
+                        "permission_mode": data.get("permission_mode") or "supervised",
+                    })
+                if path == "/api/control/message":
+                    mid = data["mission_id"]
+                    cid = data["client_message_id"]
+                    content = data["content"]
+                    if not conn.execute("SELECT 1 FROM seen_messages WHERE client_message_id=?", (cid,)).fetchone():
+                        conn.execute("INSERT INTO seen_messages VALUES(?,?)", (cid, mid))
+                        add_event(mid, "user_message", content, {"queued": False})
+                        conn.execute("UPDATE missions SET status='active' WHERE id=?", (mid,))
+                        conn.commit()
+                    return self._reply({"id": cid, "message_accepted": True})
+                if path.startswith("/api/control/missions/") and path.endswith("/cancel"):
+                    mid = path.removeprefix("/api/control/missions/").removesuffix("/cancel")
+                    conn.execute(
+                        "UPDATE missions SET status='interrupted', stopped_turns=stopped_turns+1 WHERE id=?",
+                        (mid,),
+                    )
+                    add_event(mid, "turn_stopped", "stopped by user", {"queued": False})
+                    return self._reply({"ok": True, "status": "interrupted"})
+                if path.startswith("/api/control/missions/") and path.endswith("/status"):
+                    mid = path.removeprefix("/api/control/missions/").removesuffix("/status")
+                    row = conn.execute("SELECT status FROM missions WHERE id=?", (mid,)).fetchone()
+                    if not row:
+                        return self._reply({"error": "not_found"}, 404)
+                    if data.get("status") == "acknowledged" and row[0] == "active":
+                        state["busy_archive_409"] += 1
+                        return self._reply({"error": "mission_running"}, 409)
+                    conn.execute("UPDATE missions SET status=? WHERE id=?", (data["status"], mid))
+                    conn.commit()
+                    return self._reply({"ok": True, "status": data["status"]})
+                return self._reply({"error": "not_found"}, 404)
+
+        def log_message(self, *_args) -> None:
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server, conn, lock, requests_log, state
+
+
 class WaylandU6SessionTest(unittest.TestCase):
-    def _launch(self, tmp: Path, extra_args: list[str], extra_env: dict[str, str] | None = None, height: int = 923):
+    def _launch(
+        self,
+        tmp: Path,
+        extra_args: list[str],
+        extra_env: dict[str, str] | None = None,
+        height: int = 923,
+        via_leanui_flag: bool = False,
+    ):
         binary = _resolve_binary()
         rt_dir = tmp / "xdg-rt"
         rt_dir.mkdir(mode=0o700, exist_ok=True)
@@ -958,8 +1230,17 @@ class WaylandU6SessionTest(unittest.TestCase):
         })
         if extra_env:
             env.update(extra_env)
+        if via_leanui_flag:
+            native_target = (ROOT / "target/native/orb-desktop-native").resolve()
+            if binary.resolve() == native_target:
+                env["ORB_DESKTOP_SKIP_BUILD"] = "1"
+                cmd = [str(ROOT / "scripts/orb_desktop_dev.sh"), "--leanui", "--width", "1470", "--height", str(height), *extra_args]
+            else:
+                cmd = [str(binary), "--leanui", "--width", "1470", "--height", str(height), *extra_args]
+        else:
+            cmd = [str(binary), "--width", "1470", "--height", str(height), *extra_args]
         proc = subprocess.Popen(
-            [str(binary), "--width", "1470", "--height", str(height), *extra_args],
+            cmd,
             env=env,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -1002,10 +1283,10 @@ class WaylandU6SessionTest(unittest.TestCase):
                 comp, proc = self._launch(tmp, [])
                 try:
                     comp.wait_ready(timeout=15.0)
-                    # Wait for the FINAL request of initial roster() bootstrap (/api/auth/me) AND frame commit.
-                    h_boot = comp.last_frame_hash
+                    # Wait for the FINAL request of initial roster() bootstrap (/api/auth/me) AND
+                    # composer text-input enable (which fires only after the connected frame paints).
                     _wait_until("initial roster /api/auth/me", lambda: count_req("GET", "/api/auth/me") >= 1)
-                    comp.wait_frame_change(h_boot, timeout=5.0)
+                    comp.wait_text_input(True, timeout=10.0)
 
                     # 1. Create a mission via Wayland Ctrl+N + keyboard + Wayland IME preedit/delete/commit + Return.
                     comp.key_tap("n", MOD_CTRL)
@@ -1070,10 +1351,15 @@ class WaylandU6SessionTest(unittest.TestCase):
                     comp.ime_edit(commit="", preedit="")
                     # Wait for the preedit-clear frame to settle before verifying interior click stability.
                     h_in_search = comp.wait_frame_change(h_preedit, timeout=5.0)
+                    search_card_before = comp.region_hash(380, 60, 1090, 560)
                     # Clicking inside the Search modal preview pane (900, 300) must NOT dismiss the modal.
                     comp.pointer_click(900, 300)
                     time.sleep(0.15)
-                    self.assertEqual(comp.last_frame_hash, h_in_search, "clicking inside Search card must not close modal")
+                    self.assertEqual(
+                        comp.region_hash(380, 60, 1090, 560),
+                        search_card_before,
+                        "clicking inside Search card must not close modal",
+                    )
                     # Pressing Escape closes Search while leaving Diff side panel intact.
                     comp.key_tap("esc")
                     frame_after_search_esc = comp.wait_frame_change(h_in_search, timeout=5.0)
@@ -1144,20 +1430,52 @@ class WaylandU6SessionTest(unittest.TestCase):
                     h_tx = comp.last_frame_hash
                     comp.key_tap("[", MOD_CTRL)
                     h_back = comp.wait_frame_change(h_tx, timeout=5.0)
+                    open_pre_fwd = count_req("GET", f"/api/control/missions/{mid}/open")
+                    bubble_pre_fwd = count_req("GET", f"/api/control/missions/{mid}/current-bubble")
                     comp.key_tap("]", MOD_CTRL)
                     comp.wait_frame_change(h_back, timeout=5.0)
+                    # Let the restarted subscription's /open + /current-bubble settle so background
+                    # repaints cannot race with sidebar expansion or context-menu hit regions.
+                    _wait_until(
+                        "mission /open after Forward",
+                        lambda: count_req("GET", f"/api/control/missions/{mid}/open") > open_pre_fwd,
+                        timeout=6.0,
+                    )
+                    _wait_until(
+                        "mission /current-bubble after Forward",
+                        lambda: count_req("GET", f"/api/control/missions/{mid}/current-bubble") > bubble_pre_fwd,
+                        timeout=6.0,
+                    )
 
                     # 7. Archive the mission: expand Source Project in sidebar, right-click the mission row, click Archive.
-                    h_pre_exp = comp.last_frame_hash
+                    # Hash the child row slot directly below Source Project (y=288..316), which pointer hover
+                    # on Source Project (y=272) never touches, and wait for the restarted project/bubble polls.
+                    child_row_pre = comp.region_hash(10, 288, 210, 316)
+                    proj_reqs_pre = count_req("GET", "/api/control/missions?project=source")
+                    bubble_pre_exp = count_req("GET", f"/api/control/missions/{mid}/current-bubble")
                     comp.pointer_click(100, 272)  # Expand Source Project
-                    h_exp = comp.wait_frame_change(h_pre_exp, timeout=5.0)
+                    comp.wait_region_change(10, 288, 210, 316, child_row_pre, timeout=5.0)
+                    _wait_until(
+                        "project history after Source Project expand",
+                        lambda: count_req("GET", "/api/control/missions?project=source") > proj_reqs_pre,
+                        timeout=6.0,
+                    )
+                    _wait_until(
+                        "bubble poll after Source Project expand",
+                        lambda: count_req("GET", f"/api/control/missions/{mid}/current-bubble") > bubble_pre_exp,
+                        timeout=6.0,
+                    )
+                    # Hash the right half of the context menu popup (x=225..325, outside the 220px sidebar)
+                    # so sidebar hover or unrelated updates cannot satisfy the menu-open wait prematurely.
+                    menu_outside_pre = comp.region_hash(225, 310, 325, 430)
                     comp.pointer_click(100, 303, button=0x111)  # Right-click context menu
-                    comp.wait_frame_change(h_exp, timeout=5.0)
+                    comp.wait_region_change(225, 310, 325, 430, menu_outside_pre, timeout=5.0)
                     # Hash bottom composer dock (present on missionTranscript, blank on controlEmpty) so we wait until archive finishes.
                     dock_pre_arch = comp.region_hash(450, 820, 1220, 915)
-                    comp.pointer_click(160, 384)  # Click Archive
+                    comp.pointer_click(160, 372)  # Click dead-center of Archive row (712: y=359..385)
                     _wait_until("mission archived on Core", lambda: core_state.missions[0]["status"] == "acknowledged")
                     comp.wait_region_change(450, 820, 1220, 915, dock_pre_arch, timeout=5.0)
+                    comp.wait_text_input(True, timeout=5.0)
 
                     # 8. Exercise Inference VPN & alternative-router controls (`Ctrl+4`).
                     # Row 0 of Inference lives at (525..1165, 35..95); blank during "Loading accounts…" and painted once providers load.
@@ -1173,36 +1491,37 @@ class WaylandU6SessionTest(unittest.TestCase):
                     comp.wait_region_change(525, 35, 1165, 95, row0_toggled, timeout=5.0)
 
                     # Open AccountRoutePage (`Settings ›`) for Antigravity account.
-                    routes_pre = comp.region_hash(525, 220, 1165, 385)
+                    routes_pre = comp.region_hash(525, 175, 1165, 390)
                     comp.pointer_click(1123, 65)
                     _wait_until("GET /vpn", lambda: count_req("GET", "/api/ai/providers/acct-ag-1/vpn") >= 1)
                     _wait_until("GET /alternative-routers", lambda: count_req("GET", "/api/ai/providers/acct-ag-1/alternative-routers") >= 1)
-                    comp.wait_region_change(525, 220, 1165, 385, routes_pre, timeout=5.0)
-                    h_routes = comp.last_frame_hash
+                    routes_init = comp.wait_region_change(525, 175, 1165, 390, routes_pre, timeout=5.0)
 
-                    # Select AirVPN · NL (row 2, center y=251) and wait for both Core refresh AND painted non-pending frame.
+                    # Select AirVPN · NL (row 2, center y=251): frame A paints pending before `readSources`
+                    # spawns `account_routes`, then frame B paints settled after refresh completes.
                     alt_count_1 = count_req("GET", "/api/ai/providers/acct-ag-1/alternative-routers")
                     comp.pointer_click(845, 251)
-                    h_nl_pending = comp.wait_frame_change(h_routes, timeout=5.0)
+                    routes_nl_pending = comp.wait_region_change(525, 175, 1165, 390, routes_init, timeout=5.0)
                     _wait_until("PUT /vpn NL", lambda: core_state.vpn_state["acct-ag-1"]["country"] == "NL")
                     _wait_until("refresh after PUT /vpn NL", lambda: count_req("GET", "/api/ai/providers/acct-ag-1/alternative-routers") > alt_count_1)
-                    h_nl = comp.wait_frame_change(h_nl_pending, timeout=5.0)
+                    routes_nl = comp.wait_region_change(525, 175, 1165, 390, routes_nl_pending, timeout=5.0)
 
-                    # Switch back to Direct (row 1, center y=199) and wait for both Core refresh AND painted non-pending frame.
+                    # Switch back to Direct (row 1, center y=199) and wait for pending -> refresh -> settled.
                     alt_count_2 = count_req("GET", "/api/ai/providers/acct-ag-1/alternative-routers")
                     comp.pointer_click(845, 199)
-                    h_direct_pending = comp.wait_frame_change(h_nl, timeout=5.0)
+                    routes_direct_pending = comp.wait_region_change(525, 175, 1165, 390, routes_nl, timeout=5.0)
                     _wait_until("PUT /vpn direct", lambda: core_state.vpn_state["acct-ag-1"]["mode"] == "direct")
                     _wait_until("refresh after PUT /vpn direct", lambda: count_req("GET", "/api/ai/providers/acct-ag-1/alternative-routers") > alt_count_2)
-                    h_direct = comp.wait_frame_change(h_direct_pending, timeout=5.0)
+                    routes_direct = comp.wait_region_change(525, 175, 1165, 390, routes_direct_pending, timeout=5.0)
 
-                    # Toggle Alternative routers (row 4, center y=355) and wait for refresh + repaint.
+                    # Toggle Alternative routers (row 4, center y=355) and wait for pending -> refresh -> settled.
                     alt_count_3 = count_req("GET", "/api/ai/providers/acct-ag-1/alternative-routers")
                     comp.pointer_click(845, 355)
-                    h_alt_pending = comp.wait_frame_change(h_direct, timeout=5.0)
+                    routes_alt_pending = comp.wait_region_change(525, 175, 1165, 390, routes_direct, timeout=5.0)
                     _wait_until("PUT /alternative-routers false", lambda: core_state.alt_routers["acct-ag-1"]["allowed"] is False)
                     _wait_until("refresh after PUT /alternative-routers", lambda: count_req("GET", "/api/ai/providers/acct-ag-1/alternative-routers") > alt_count_3)
-                    h_alt = comp.wait_frame_change(h_alt_pending, timeout=5.0)
+                    comp.wait_region_change(525, 175, 1165, 390, routes_alt_pending, timeout=5.0)
+                    h_alt = comp.last_frame_hash
 
                     # Escape returns to Inference list.
                     comp.key_tap("esc")
@@ -1432,9 +1751,8 @@ class WaylandU6SessionTest(unittest.TestCase):
                     comp, proc = self._launch(sub_live, [], height=923)
                     try:
                         comp.wait_ready(timeout=15.0)
-                        h_boot = comp.last_frame_hash
                         _wait_until("roster /api/auth/me", lambda: count_req("GET", "/api/auth/me") >= 1)
-                        comp.wait_frame_change(h_boot, timeout=5.0)
+                        comp.wait_text_input(True, timeout=10.0)
 
                         comp.key_tap("n", MOD_CTRL)
                         comp.wait_text_input(True, timeout=5.0)
@@ -1483,6 +1801,175 @@ class WaylandU6SessionTest(unittest.TestCase):
                         self._shutdown(comp, proc)
                 finally:
                     server.shutdown()
+
+    def test_u6a_live_wayland_writes_and_separate_core_client(self) -> None:
+        """Roadmap Row U6a end-to-end verification:
+        Launch `--leanui` against a persistent SQLite-backed local Core, type and commit
+        Wayland IME text to create a mission, reject stale IME serials, send a follow-up
+        with IME text, verify busy Archive is refused while active, stop the running turn,
+        archive the mission, restart Core on the same SQLite DB, and verify from a separate
+        independent Core HTTP client that the new mission ID, exact submitted texts, stopped
+        turn, and persisted archive state all survived."""
+        token = "u6a-wayland-e2e-token"
+        expected_initial = "Indigo U6a 日本語 🚀"
+        expected_followup = "Follow-up café 漢字テスト ✓"
+
+        def http_get_json(base_url: str, path: str) -> dict | list:
+            req = urllib.request.Request(
+                base_url + path,
+                headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
+            )
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                return json.loads(resp.read().decode("utf-8"))
+
+        with tempfile.TemporaryDirectory(prefix="orb-u6a-e2e-") as td:
+            tmp = Path(td)
+            db_path = tmp / "core.db"
+            server1, db1, lock1, reqs1, _state1 = _start_sqlite_core(db_path, token)
+            base1 = f"http://127.0.0.1:{server1.server_port}"
+
+            def count_req1(method: str, prefix: str) -> int:
+                with lock1:
+                    return sum(1 for m, p, _c in reqs1 if m == method and p.startswith(prefix))
+
+            try:
+                (tmp / "connection.json").write_text(json.dumps({"api_url": base1, "token": token}))
+                comp, proc = self._launch(tmp, [], via_leanui_flag=True)
+                try:
+                    comp.wait_ready(timeout=15.0)
+                    _wait_until("U6a initial /api/auth/me", lambda: count_req1("GET", "/api/auth/me") >= 1)
+                    # Initial live connect auto-focuses New Agent composer and enables zwp_text_input_v3.
+                    comp.wait_text_input(True, timeout=10.0)
+
+                    # 1. Type ASCII + Wayland IME preedit (Return must be blocked while preedit is active),
+                    #    multi-byte UTF-8 commit + delete_surrounding_text replacement, then Create via Return.
+                    comp.type_ascii("Indigo U6a ")
+                    h_pre_ime = comp.last_frame_hash
+                    comp.ime_edit(commit="", preedit="にほん")
+                    h_preedit = comp.wait_frame_change(h_pre_ime, timeout=5.0)
+                    comp.key_tap("return")
+                    time.sleep(0.15)
+                    self.assertEqual(
+                        count_req1("POST", "/api/control/missions"),
+                        0,
+                        "Return must not submit Create while IME preedit is active",
+                    )
+                    comp.ime_edit(commit="日本猫", preedit="")
+                    h_cat = comp.wait_frame_change(h_preedit, timeout=5.0)
+                    comp.ime_edit(commit="語 🚀", preedit="", del_before=len("猫".encode("utf-8")))
+                    comp.wait_frame_change(h_cat, timeout=5.0)
+                    # Inject a stale-serial done event (serial - 1); Wayland.lean must drop it cleanly
+                    # before the subsequent Return on the same Wayland socket submits the draft.
+                    with comp._lock:
+                        stale_serial = max(0, comp.text_input_commit_count - 1)
+                    comp.ime_edit(commit="STALE_LEAK", preedit="", serial=stale_serial)
+                    comp.key_tap("return")
+
+                    _wait_until("U6a POST /api/control/missions", lambda: count_req1("POST", "/api/control/missions") >= 1)
+                    missions = http_get_json(base1, "/api/control/missions")
+                    self.assertEqual(len(missions), 1, missions)
+                    mid = missions[0]["id"]
+                    mpath = f"/api/control/missions/{mid}"
+
+                    # Wait for Turn 1 completion so the mission transitions to awaiting_user and composer unlocks.
+                    _wait_until("U6a Turn 1 completed", lambda: http_get_json(base1, mpath)["status"] == "awaiting_user")
+                    polls_turn1 = count_req1("GET", f"{mpath}/current-bubble")
+                    _wait_until(
+                        "U6a client observed Turn 1 awaiting_user",
+                        lambda: count_req1("GET", f"{mpath}/current-bubble") >= polls_turn1 + 2,
+                        timeout=6.0,
+                    )
+
+                    # 2. Type + commit IME follow-up text in the Mission Transcript composer and Send via Return.
+                    comp.pointer_click(700, 850)
+                    comp.wait_text_input(True, timeout=5.0)
+                    comp.type_ascii("Follow-up ")
+                    comp.ime_edit(commit="café ", preedit="かんじ")
+                    comp.key_tap("return")
+                    time.sleep(0.15)
+                    self.assertEqual(
+                        count_req1("POST", "/api/control/message"),
+                        0,
+                        "Return must not submit Send while IME preedit is active",
+                    )
+                    comp.ime_edit(commit="漢字仮", preedit="")
+                    comp.ime_edit(commit="テスト ✓", preedit="", del_before=len("仮".encode("utf-8")))
+                    polls_pre_send = count_req1("GET", f"{mpath}/current-bubble")
+                    comp.key_tap("return")
+
+                    _wait_until("U6a POST /api/control/message", lambda: count_req1("POST", "/api/control/message") >= 1)
+                    _wait_until("U6a Turn 2 active", lambda: http_get_json(base1, mpath)["status"] == "active")
+                    _wait_until(
+                        "U6a client observed Turn 2 streaming",
+                        lambda: count_req1("GET", f"{mpath}/current-bubble") >= polls_pre_send + 2,
+                        timeout=6.0,
+                    )
+
+                    # 3. Verify busy Archive is refused while Turn 2 is active (single project `source` is auto-expanded;
+                    #    mission row sits at y=287..317, context menu Archive row 1 sits at y=333..359 center 346).
+                    menu_out_pre = comp.region_hash(225, 310, 325, 405)
+                    comp.pointer_click(100, 303, button=0x111)
+                    comp.wait_region_change(225, 310, 325, 405, menu_out_pre, timeout=5.0)
+                    status_checks_pre = count_req1("GET", f"{mpath}?include_history=false")
+                    toast_pre = comp.region_hash(1020, 770, 1465, 815)
+                    comp.pointer_click(160, 346)
+                    _wait_until(
+                        "U6a busy archive pre-check",
+                        lambda: count_req1("GET", f"{mpath}?include_history=false") > status_checks_pre,
+                        timeout=6.0,
+                    )
+                    comp.wait_region_change(1020, 770, 1465, 815, toast_pre, timeout=5.0)
+                    self.assertEqual(http_get_json(base1, mpath)["status"], "active")
+
+                    # 4. Stop the running turn via Stop button click (widget 2 at x=1197, y=850).
+                    polls_pre_stop = count_req1("GET", f"{mpath}/current-bubble")
+                    comp.pointer_click(1197, 850)
+                    _wait_until("U6a Turn 2 stopped", lambda: http_get_json(base1, mpath)["status"] == "interrupted")
+                    _wait_until(
+                        "U6a client observed interrupted",
+                        lambda: count_req1("GET", f"{mpath}/current-bubble") >= polls_pre_stop + 2,
+                        timeout=6.0,
+                    )
+
+                    # 5. Archive the stopped mission via Wayland right-click context menu -> Archive.
+                    menu_out_pre2 = comp.region_hash(225, 310, 325, 405)
+                    comp.pointer_click(100, 303, button=0x111)
+                    comp.wait_region_change(225, 310, 325, 405, menu_out_pre2, timeout=5.0)
+                    dock_pre_arch = comp.region_hash(450, 820, 1220, 915)
+                    comp.pointer_click(160, 346)
+                    _wait_until(
+                        "U6a mission archived on Core",
+                        lambda: http_get_json(base1, mpath)["status"] == "acknowledged",
+                    )
+                    comp.wait_region_change(450, 820, 1220, 915, dock_pre_arch, timeout=5.0)
+                    comp.wait_text_input(True, timeout=5.0)
+                finally:
+                    self._shutdown(comp, proc)
+            finally:
+                server1.shutdown()
+                server1.server_close()
+                db1.close()
+
+            # 6. Restart Core on the same SQLite DB and verify via a SEPARATE independent Core HTTP client.
+            server2, db2, _lock2, _reqs2, _state2 = _start_sqlite_core(db_path, token)
+            base2 = f"http://127.0.0.1:{server2.server_port}"
+            try:
+                all_missions = http_get_json(base2, "/api/control/missions")
+                self.assertEqual([m["id"] for m in all_missions], [mid])
+                mission = http_get_json(base2, f"/api/control/missions/{mid}")
+                events = http_get_json(base2, f"/api/control/missions/{mid}/events")
+                user_messages = [e["content"] for e in events if e["event_type"] == "user_message"]
+                stopped_events = [e for e in events if e["event_type"] == "turn_stopped"]
+
+                self.assertEqual(mission["id"], mid)
+                self.assertEqual(mission["status"], "acknowledged")
+                self.assertEqual(mission["stopped_turns"], 1)
+                self.assertEqual(user_messages, [expected_initial, expected_followup])
+                self.assertEqual(len(stopped_events), 1)
+            finally:
+                server2.shutdown()
+                server2.server_close()
+                db2.close()
 
 
 if __name__ == "__main__":

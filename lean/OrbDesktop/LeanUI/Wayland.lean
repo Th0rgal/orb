@@ -535,6 +535,8 @@ structure WaylandClient where
   ime : ImePending := {}
   imeEntered : Bool := false
   imeEnabled : Bool := false
+  imeCommitSerial : UInt32 := 0
+  imeEnableSerial : UInt32 := 0
   deriving Repr, Inhabited
 
 /-- Compute the device buffer dimensions `(bufW, bufH)` using `Kernel.bufferSize`. -/
@@ -669,11 +671,16 @@ def syncCursor (c : WaylandClient) (shape : UInt32) : IO WaylandClient := do
   return { c with appliedCursor := some shape }
 
 def syncTextFocus (c : WaylandClient) (focused : Bool) : IO WaylandClient := do
+  if c.window.textInput == 0 then return c
   let enabled := c.imeEntered && focused
   if enabled == c.imeEnabled then return c
   discard <| marshalRequest c.window.textInput (if enabled then 1 else 2) 0 1 0 0 #[]
   discard <| marshalRequest c.window.textInput 7 0 1 0 0 #[]
-  return { c with imeEnabled := enabled, ime := {} }
+  if c.window.fnFlush != 0 && c.display != 0 then
+    let _ ← nativeCall c.window.fnFlush c.display.toUInt64
+  let nextSerial := c.imeCommitSerial + 1
+  let enableSerial := if enabled then nextSerial else c.imeEnableSerial
+  return { c with imeEnabled := enabled, imeCommitSerial := nextSerial, imeEnableSerial := enableSerial, ime := {} }
 
 /-- Flush requests and block until the compositor sends events; `pumpEvents` then returns them. -/
 def waitEvents (c : WaylandClient) : IO Unit := do
@@ -727,6 +734,8 @@ def present (c : WaylandClient) (fb : ByteArray) : IO WaylandClient := do
   let _ ← marshalRequest surface 9 0 4 0 0 #[.int 0, .int 0, .int bw, .int bh]
   let c1 ← requestFrameCallback { c with lastViewportW := c.pendingW, lastViewportH := c.pendingH }
   let _ ← marshalRequest surface 6 0 4 0 0 #[]
+  if c1.window.fnFlush != 0 && c1.display != 0 then
+    let _ ← nativeCall c1.window.fnFlush c1.display.toUInt64
   let shm' := { shm with
     frontIsB := toB
     bufABusy := if !toB then true else shm.bufABusy
@@ -866,8 +875,12 @@ def stepWireEvent (c : WaylandClient) (ev : WlWireEvent) : IO (WaylandClient × 
       let da := match ev.arg? 1 with | some (WlWireArg.uint v) => v.toNat | _ => 0
       st := { st with ime := { st.ime with delBefore := db, delAfter := da } }
     else if ev.opcode == 5 then
+      let serialOk : Bool := match ev.arg? 0 with
+        | some (WlWireArg.uint serial) => decide ((serial - st.imeEnableSerial) < 0x80000000)
+        | _ => true
       let b := st.ime
-      out := out.push (.imeBatch b.delBefore b.delAfter b.commit b.preedit b.cursorBegin b.cursorEnd)
+      if serialOk then
+        out := out.push (.imeBatch b.delBefore b.delAfter b.commit b.preedit b.cursorBegin b.cursorEnd)
       st := { st with ime := {} }
   return (st, out)
 

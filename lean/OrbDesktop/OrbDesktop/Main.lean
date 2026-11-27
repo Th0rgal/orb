@@ -61,6 +61,8 @@ def parseDesktopArgs (args : List String) : DesktopCliConfig :=
     | [] => cfg
     | "--self-test" :: rest =>
       loop rest { cfg with selfTest := true }
+    | "--leanui" :: rest =>
+      loop rest cfg
     | "--headless-golden-all" :: dir :: rest =>
       loop rest { cfg with headlessGoldenAllDir := some dir }
     | "--headless-golden-all-prims" :: path :: rest =>
