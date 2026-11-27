@@ -692,6 +692,13 @@ def DesktopState.headerTitle (st : DesktopState) : String :=
   else if st.liveData && !st.hasLiveConnection then st.connectionIssue.title
   else if (st.screen == .controlEmpty || st.screen == .controlPopulated) && st.openMission.isNone && !st.draftProject.isEmpty then
     ((st.sidebarRows.find? (·.rowId == "project:" ++ st.draftProject)).map (·.title)).getD st.draftProject
+  else if !st.liveData && (st.screen == .missionTranscript || st.screen == .missionSplitDiff) then
+    match st.openMission with
+    | some "m:80" => "Mission 80 doing some work"
+    | some "m:60" => "Mission 60 doing some work"
+    | some "m:40" => "Mission 40 doing some work"
+    | some "m:20" => "Mission 20 doing some work"
+    | _ => (st.selectedCard.map (·.title)).getD st.screen.headerTitle
   else (st.selectedCard.map (·.title)).getD st.screen.headerTitle
 
 def MissionSummaryCard.isArchived (card : MissionSummaryCard) : Bool :=
@@ -742,7 +749,10 @@ def desktopImeSessionKey (st : DesktopState) : String :=
   let menuTag := match st.missionMenu with
     | none => "none"
     | some m => s!"{reprStr m.page}:{m.mission}:{m.trigger}"
-  s!"{reprStr st.screen}|{st.openMission.getD ""}|{st.cloudMission}|{st.draftProject}|{modalTag}|{menuTag}|{st.imeResetGen}"
+  let screenBucket := match st.screen with
+    | .controlEmpty | .controlPopulated | .newMissionDialog => "draft"
+    | s => reprStr s
+  s!"{screenBucket}|{st.openMission.getD ""}|{st.cloudMission}|{modalTag}|{menuTag}|{st.imeResetGen}"
 
 def resetSelection (st : DesktopState) (card : Option MissionSummaryCard) : DesktopState :=
   let cloud := card.filter fun c => st.screen == .missionTranscript && c.backend.startsWith "cloud_"
@@ -1086,21 +1096,28 @@ def transcriptDamageRect (scale120 : Nat) (viewport : Rect) (sidebarWidth := chr
   let bottom := viewport.bottom - ceilDev scale120 (Int.ofNat chromeComposerHeightSub)
   { x := viewport.x + x0, y := viewport.y + y0, w := viewport.w - x0, h := max 0 (bottom - (viewport.y + y0)) }
 
-/-- Filter and order Search Dialog items according to query, filter tab, project filter, and sort order. -/
+/-- Filter and order Search Dialog items according to query, filter tab, project filter, time filter, and sort order. -/
 def filterSearchItemsWithFilters (spec : SearchDialogSpec)
-    (filterTab projectFilter _timeFilter sortOrder : String) : List SearchItem :=
+    (filterTab projectFilter timeFilter sortOrder : String) : List SearchItem :=
   let base := filterSearchItems spec
   let byTab :=
     if filterTab == "All" then base
     else if filterTab == "Titles" then base.filter fun it => it.category == "Mission" || it.category == "Mission (Active)" || it.category == "Diff"
-    else if filterTab == "Tools" then base.filter fun it => it.category == "Compute" || it.category == "Action"
+    else if filterTab == "Tools" then base.filter fun it =>
+      it.category == "Compute" || it.category == "Action" || it.category == "Command" || it.category == "Navigation"
     else if filterTab == "User" then base.filter fun it => it.category == "Action" || it.category == "Mission"
     else if filterTab == "Assistant" then base.filter fun it => it.category != "Action"
     else base
   let byProj :=
     if projectFilter == "All projects" then byTab
     else byTab.filter fun it => containsSubstrCI it.subtitle projectFilter || containsSubstrCI it.title projectFilter
-  if sortOrder == "Newest" then byProj.reverse else byProj
+  let byTime :=
+    if timeFilter == "Any time" then byProj
+    else byProj.filter fun it =>
+      !containsSubstrCI it.subtitle "completed" &&
+      !containsSubstrCI it.subtitle "acknowledged" &&
+      !containsSubstrCI it.subtitle "archived"
+  if sortOrder == "Newest" then byTime.reverse else byTime
 
 /-- Build the search palette specification for the current state (live missions when connected,
     canonical fixture items otherwise). -/
@@ -1296,8 +1313,8 @@ def stepSearchModal (viewport : Rect) (st : DesktopState) (spec : SearchDialogSp
       let choices : List String :=
         if st.liveData then
           let slugs := (st.sidebarRows.filter (·.kind == "project")).map fun r => (r.rowId.drop 8).toString
-          "All projects" :: (if slugs.isEmpty then ["Project 1"] else slugs)
-        else ["All projects", "Project 1"]
+          "All projects" :: (if slugs.isEmpty then ["lean-ui"] else slugs)
+        else ["All projects", "lean-ui"]
       let idx := choices.idxOf st.searchProjectFilter
       let next := choices.getD ((idx + 1) % choices.length) "All projects"
       return ({ st with searchProjectFilter := next, modal := .searchPalette resetSpec }, some viewport)
@@ -1373,16 +1390,18 @@ private def stepDesktopInput (scale120 : Nat) (viewport : Rect) (st : DesktopSta
       else pushNavScreen { st with modal := .none } .controlEmpty
     | .activate 102 =>
       if st.screen == .settingsGeneral then { st with settingsSection := "Account" }
-      else pushNavScreen { st with modal := .none } .controlPopulated
+      else pushNavScreen { st with modal := .none } .inbox
     | .activate 103 => pushNavScreen { st with modal := .none } .settingsGeneral
     | .activate 104 => { st with draftProject := if st.draftProject == "Project 0" then "lean-ui" else "Project 0" }
-    | .activate 105 => pushNavScreen { st with modal := .none } .missionTranscript
+    | .activate 105 =>
+      let nav := pushNavScreen { st with modal := .none } .missionTranscript (some "m:0")
+      { nav with openMission := some "m:0" }
     | .activate 112 =>
       if st.screen == .settingsGeneral then { st with settingsSection := "Agents" }
       else pushNavScreen { st with modal := .none } .machinesFleet
     | .activate 111 =>
       if st.screen == .settingsGeneral then { st with settingsSection := "Models" }
-      else { st with sidePanelOpen := !st.sidePanelOpen }
+      else pushNavScreen { st with modal := .none } .cloud
     | .activate 113 =>
       if st.screen == .settingsGeneral then { st with settingsSection := "Security" }
       else pushNavScreen { st with modal := .none } .inference
@@ -1416,7 +1435,14 @@ private def stepDesktopInput (scale120 : Nat) (viewport : Rect) (st : DesktopSta
     | .activate 912 => { st with toasts := st.toasts.filter (·.dismissButtonId != some 912) }
     | .activate 913 => { st with toasts := st.toasts.filter (·.dismissButtonId != some 913) }
     | .activate id =>
-      if id >= 120 && id <= 123 then pushNavScreen { st with modal := .none } .missionTranscript
+      if id >= 120 && id <= 123 then
+        let mid := match id with
+          | 120 => "m:80"
+          | 121 => "m:60"
+          | 122 => "m:40"
+          | _ => "m:20"
+        let nav := pushNavScreen { st with modal := .none } .missionTranscript (some mid)
+        { nav with openMission := some mid }
       else if id >= 130 && id <= 149 then { st with draftProject := s!"Project {id - 130}" }
       else st
     | .key 0x1b _ .pressed | .key 0xff1b _ .pressed => { st with modal := .none }
@@ -1432,14 +1458,14 @@ private def stepDesktopInput (scale120 : Nat) (viewport : Rect) (st : DesktopSta
     | .activate 720 | .activate 721 | .activate 722 | .activate 723 | .activate 724 | .activate 738 | .activate 739
     | .activate 804 | .activate 805 | .activate 911 | .activate 912 | .activate 913 => true
     | .activate id => (id >= 120 && id <= 123) || (id >= 130 && id <= 149)
-    | .key 0x1b _ .pressed | .key 0xff1b _ .pressed => true
+    | .key 0x1b _ .pressed | .key 0xff1b _ .pressed => st.modal != .none || st.sidePanelOpen
     | _ => false
   if !actionChanged && composer == st.composer then return (st, none)
   else
     -- Only the transcript has a fixed bottom composer. Other screens can center
     -- the editor; without its layout bounds use the full viewport.
     let dmg := if composer != st.composer && st.screen == .missionTranscript then composerDamageRect scale120 viewport st.sidebarWidth else viewport
-    let next := if next.openMission.isSome && next.screen != .missionTranscript then
+    let next := if next.openMission.isSome && next.screen != .missionTranscript && next.screen != .missionSplitDiff then
       resetSelection next none else next
     return (next, Damage.add none dmg)
 
@@ -1831,7 +1857,17 @@ def menuFocusChange (before after : DesktopState) : Option Nat :=
 def desktopFocusChange (before after : DesktopState) (ev : Event) : Option Nat :=
   if before.voicePhase != .idle && before.voicePhase != after.voicePhase && after.voiceDraft then some 1
   else if !(before.modal matches .searchPalette _) && (after.modal matches .searchPalette _) then some 701
-  else if (match before.modal, after.modal with | .searchPalette b, .searchPalette a => !b.query.isEmpty && a.query.isEmpty | _, _ => false) then some 701
+  else if let .searchPalette a := after.modal then
+    let returnToSearchInput : Bool :=
+      (match before.modal with | .searchPalette b => !b.query.isEmpty && a.query.isEmpty | _ => false) ||
+      (match ev with
+        | .activate id =>
+          [searchClearId, searchTabAllId, searchTabUserId, searchTabAssistantId,
+           searchTabTitlesId, searchTabToolsId, searchProjectFilterId,
+           searchTimeFilterId, searchSortOrderId].contains id ||
+          a.items.any (·.widgetId == id)
+        | _ => false)
+    if returnToSearchInput then some a.inputWidgetId else none
   else if (before.modal matches .searchPalette _) && !(after.modal matches .searchPalette _) then
     if after.screen == .controlEmpty || after.screen == .controlPopulated || after.screen == .missionTranscript then some 1 else some 101
   else if let some target := menuFocusChange before after then some target
@@ -1897,7 +1933,9 @@ private def stepMissionMenu (st : DesktopState) (menu : MissionMenu) (ev : Event
       return update { menu with browsePath := row.value, first := 0, highlighted := 1, directoryRows := none,
                                 draft := { text := row.value, cursorOffset := row.value.length } }
     if menu.page == .draftDirectory && id == 716 && menu.draft.imePreeditText.isEmpty then
-      return ({ st with draftDirectory := menu.draft.text, missionMenu := none, voicePhase := .idle }, some viewport)
+      let dir := menu.draft.text.trimAscii.toString
+      if !dir.isEmpty && !dir.startsWith "/" then return (st, none)
+      return ({ st with draftDirectory := dir, missionMenu := none, voicePhase := .idle }, some viewport)
     if menu.page == .draftProject then
       return ({ st with draftProject := row.value, missionMenu := none, voicePhase := .idle }, some viewport)
     if menu.page == .settings then
@@ -2032,8 +2070,14 @@ def stepDesktopEvent (scale120 : Nat) (viewport : Rect) (st : DesktopState) (ev 
       let screen := if navId == 111 then ScreenId.cloud else if navId == 114 then .resources else if navId == 102 then .inbox else if navId == 113 then .inference else if navId == 112 then .machinesFleet else .controlEmpty
       let next := resetSelection (pushNavScreen { st.clearAllPreedit with fleetTopSub := 0, writeError := "", accountRoutePage := none } screen) none
       -- These pages share the New Agent draft. A mission follow-up belongs only to its transcript.
+      let sameDraftSession :=
+        navId == 101 && st.openMission.isNone &&
+        (st.screen == .controlEmpty || st.screen == .controlPopulated) &&
+        st.composer.imePreeditText.isEmpty
       let next := if st.openMission.isNone then
-          { next with composer := { st.composer with imePreeditText := "" } }
+          { next with
+            composer := { st.composer with imePreeditText := "" }
+            imeResetGen := if sameDraftSession then st.imeResetGen else next.imeResetGen }
         else { next with draftProject := "" }
       let next := if navId == 111 then next.openCloud "" else next
       let next := if navId == 114 then { next with resourceRows := none, resourceFailed := false, resourcePage := 0 } else next

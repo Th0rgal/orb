@@ -550,6 +550,25 @@ class WaylandTestCompositor:
                     raise TimeoutError(f"expected text_input_enabled={enabled}, got {self.text_input_enabled}")
                 self._cond.wait(rem)
 
+    def wait_text_input_commit(self, after_count: int, timeout: float = 5.0) -> int:
+        deadline = time.monotonic() + timeout
+        with self._lock:
+            while self.text_input_commit_count <= after_count or not self.text_input_enabled:
+                rem = deadline - time.monotonic()
+                if rem <= 0:
+                    raise TimeoutError(
+                        f"expected text_input_commit_count > {after_count} and enabled=True, "
+                        f"got count={self.text_input_commit_count} enabled={self.text_input_enabled}"
+                    )
+                self._cond.wait(rem)
+            return self.text_input_commit_count
+
+    def click_and_wait_text_input_cycle(self, x: float, y: float, timeout: float = 5.0) -> int:
+        with self._lock:
+            before = self.text_input_commit_count
+        self.pointer_click(x, y)
+        return self.wait_text_input_commit(before, timeout=timeout)
+
     def _ms(self) -> int:
         return int(time.monotonic() * 1000) & 0xFFFFFFFF
 
@@ -1570,8 +1589,10 @@ class WaylandU6SessionTest(unittest.TestCase):
                     hdr_pre_m = comp.region_hash(225, 0, 500, 35)
                     comp.key_tap("3", MOD_CTRL)
                     hdr_machines = comp.wait_region_change(225, 0, 500, 35, hdr_pre_m, timeout=5.0)
-                    # Click a machine row in live Machines fleet.
+                    # Click a machine row in live Machines fleet and verify visible selection change.
+                    machine_row0_pre = comp.region_hash(525, 35, 1165, 95)
                     comp.pointer_click(845, 65)
+                    comp.wait_region_change(525, 35, 1165, 95, machine_row0_pre, timeout=5.0)
 
                     comp.key_tap("6", MOD_CTRL)
                     _wait_until("GET /api/resources/overview?range=6h", lambda: count_req("GET", "/api/resources/overview?range=6h") >= 1)
@@ -1622,6 +1643,8 @@ class WaylandU6SessionTest(unittest.TestCase):
                 ("restore sidebar via header toggle (117)", lambda c: c.pointer_click(27, 17), True),
                 ("click sidebar Search (351)", lambda c: c.pointer_click(45, 17), True),
                 ("close Search via Escape", lambda c: c.key_tap("esc"), True),
+                ("click sidebar Inbox (102)", lambda c: c.pointer_click(109, 81), True),
+                ("click sidebar Cloud agent (111)", lambda c: c.pointer_click(109, 112), True),
                 ("click sidebar Machines (112)", lambda c: c.pointer_click(109, 143), True),
                 ("click sidebar Back (352)", lambda c: c.pointer_click(173, 17), True),
                 ("click sidebar Forward (353)", lambda c: c.pointer_click(200, 17), True),
@@ -1645,12 +1668,18 @@ class WaylandU6SessionTest(unittest.TestCase):
                 ("type text", lambda c: c.type_ascii("populated "), True),
                 ("ime commit", lambda c: c.ime_edit(commit="確認", preedit=""), True),
                 ("click send (2)", lambda c: c.pointer_click(1124, 489), True),
+                ("click sidebar Inbox (102)", lambda c: c.pointer_click(109, 81), True),
+                ("click sidebar Cloud agent (111)", lambda c: c.pointer_click(109, 112), True),
             ]),
             ("03_mission_transcript", 600, [
                 ("scroll transcript down (Orb.Scroll)", lambda c: c.pointer_scroll(740, 280, 600), True),
                 ("scroll transcript up (Orb.Scroll)", lambda c: c.pointer_scroll(740, 280, -300), True),
                 ("PageDown keyboard scroll", lambda c: c.key_tap("pgdn"), True),
                 ("PageUp keyboard scroll", lambda c: c.key_tap("pgup"), True),
+                ("click sidebar Project 0 (104)", lambda c: c.pointer_click(109, 273), True),
+                ("click sidebar Mission 80 (120)", lambda c: c.pointer_click(109, 303), True),
+                ("click sidebar Mission 60 (121)", lambda c: c.pointer_click(109, 333), True),
+                ("click sidebar Long mission (105)", lambda c: c.pointer_click(109, 423), True),
                 ("click under-row machine (720)", lambda c: c.pointer_click(556, 565), True),
                 ("click under-row backend (721)", lambda c: c.pointer_click(668, 565), True),
                 ("click under-row model (722)", lambda c: c.pointer_click(743, 565), True),
@@ -1720,13 +1749,15 @@ class WaylandU6SessionTest(unittest.TestCase):
             ]),
             ("07_search_dialog", 923, [
                 ("arrow down result", lambda c: c.key_tap("down"), True),
-                ("click Clear query (706)", lambda c: c.pointer_click(1107, 98), True),
+                ("click Clear query (706)", lambda c: c.click_and_wait_text_input_cycle(1107, 98), True),
                 ("type in search input (701)", lambda c: c.type_ascii("w"), True),
                 ("ime preedit in search", lambda c: c.ime_edit(preedit="検"), True),
                 ("return blocked during search preedit", lambda c: c.key_tap("return"), False),
                 ("ime clear preedit in search", lambda c: c.ime_edit(commit="", preedit=""), True),
-                ("click Clear query again (706)", lambda c: c.pointer_click(1107, 98), True),
+                ("click Clear query again (706)", lambda c: c.click_and_wait_text_input_cycle(1107, 98), True),
                 ("click User filter (732)", lambda c: c.pointer_click(362, 133), True),
+                ("type after filter click proves 701 kept focus", lambda c: c.type_ascii("m"), True),
+                ("backspace after filter click", lambda c: c.key_tap("backspace"), True),
                 ("click Assistant filter (733)", lambda c: c.pointer_click(419, 133), True),
                 ("click Titles filter (734)", lambda c: c.pointer_click(478, 133), True),
                 ("click Tools filter (735)", lambda c: c.pointer_click(526, 133), True),
@@ -1735,7 +1766,7 @@ class WaylandU6SessionTest(unittest.TestCase):
                 ("reset Project filter (741)", lambda c: c.pointer_click(957, 133), True),
                 ("click Time filter (742)", lambda c: c.pointer_click(1042, 133), True),
                 ("click Sort order (743)", lambda c: c.pointer_click(1122, 133), True),
-                ("click second result row (703)", lambda c: c.pointer_click(475, 244), True),
+                ("click second result row", lambda c: c.pointer_click(475, 244), True),
                 ("click inside preview pane stays open", lambda c: c.pointer_click(900, 300), False),
                 ("click Esc button (707) to close", lambda c: c.pointer_click(1144, 98), True),
                 ("post-Escape Tab moves focus", lambda c: c.key_tap("tab"), True),
@@ -1820,8 +1851,9 @@ class WaylandU6SessionTest(unittest.TestCase):
                     "Tab navigation must paint keyboard :focus-visible ring on sidebar toggle",
                 )
 
-                # Pointer click on Project pill transfers logical focus quietly (clears sidebar toggle's
-                # keyboard ring, leaves Project pill visually quiet with no harsh focusRing border).
+                # Pointer click on Project pill updates the selected project label ("Default" -> "default")
+                # and transfers logical focus quietly (clears sidebar toggle's keyboard ring, paints NO
+                # focusRing border around the Project pill).
                 comp.pointer_click(575, 390)
                 comp.wait_region_change(0, 0, 120, 40, sidebar_top_tabbed, timeout=5.0)
                 self.assertEqual(
@@ -1829,19 +1861,38 @@ class WaylandU6SessionTest(unittest.TestCase):
                     sidebar_top_init,
                     "pointer click must clear previous keyboard focusRing",
                 )
-                self.assertEqual(
-                    comp.region_hash(535, 370, 620, 410),
+                project_pill_pointer = comp.region_hash(535, 370, 620, 410)
+                self.assertNotEqual(
+                    project_pill_pointer,
                     project_pill_init,
-                    "pointer click on Project pill must stay visually quiet (no focusRing)",
+                    "clicking Project pill must visibly update its selected project label",
                 )
 
                 # Pressing Tab from the pointer-focused Project pill moves focus to the adjacent
-                # machine pill (`720`) AND turns :focus-visible back on.
+                # machine pill (`720`) AND turns :focus-visible back on. Project pill is now unfocused
+                # and must match its pointer-focused pixels identically (proving pointer click painted no focusRing).
+                comp.key_tap("tab")
+                machine_pill_tabbed = comp.wait_region_change(615, 370, 780, 410, machine_pill_init, timeout=5.0)
+                self.assertEqual(
+                    comp.region_hash(535, 370, 620, 410),
+                    project_pill_pointer,
+                    "pointer click on Project pill must stay visually quiet (no focusRing)",
+                )
+
+                # Pressing Shift+Tab back onto Project pill with keyboard :focus-visible MUST paint its focusRing.
+                comp.key_tap("tab", MOD_SHIFT)
+                project_pill_kbd = comp.wait_region_change(535, 370, 620, 410, project_pill_pointer, timeout=5.0)
+                self.assertNotEqual(
+                    project_pill_kbd,
+                    project_pill_pointer,
+                    "keyboard Shift+Tab onto Project pill must paint visible :focus-visible ring",
+                )
+
+                # Tab back onto machine pill (`720`), then pointer-click composer (`1`) to draw caret
+                # cleanly and clear the previous keyboard ring on the machine pill.
                 comp.key_tap("tab")
                 comp.wait_region_change(615, 370, 780, 410, machine_pill_init, timeout=5.0)
-
-                # Pointer click on composer (`1`) draws its vertical text caret cleanly even on click,
-                # and clears the previous keyboard ring on the machine pill.
+                self.assertEqual(comp.region_hash(615, 370, 780, 410), machine_pill_tabbed)
                 comp.pointer_click(845, 435)
                 comp.wait_region_change(535, 415, 1155, 515, composer_init, timeout=5.0)
                 self.assertEqual(

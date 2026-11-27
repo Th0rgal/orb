@@ -68,6 +68,11 @@ def buildNewAgentBody (st : DesktopState) (mainW bodyH : SubPx) : WidgetNode :=
   let dispText := if hasText then composedText else st.composer.placeholder
   let sendBgCol := pal.sendBg
 
+  let pickerLine (w : SubPx) (text : String) (clip : Bool) (col : Color := pal.textSecondary) : WidgetNode :=
+    let base := BoxStyle.row 0 |>.withFixedSize w (pxToSub 18)
+    let boxSt := if clip then { base with maxWidth := w, clip := true } else base
+    let txtSt : TextStyle := { (Theme.bodyText theme) with sizeSub := pxToSub 13, lineHeightSub := pxToSub 18, color := col, weight := 400 }
+    WidgetNode.text boxSt (pxToSub 18) [overlaySynthRun txtSt text]
   let projectLabel := if st.draftProject.isEmpty then "Default" else st.draftProject
   let machineLabel := if st.draftSettings.machine.isEmpty then "Core (agent-core)" else st.draftSettings.machine
   let folderLabel := if st.draftDirectory.isEmpty then "Folder" else st.draftDirectory
@@ -80,17 +85,17 @@ def buildNewAgentBody (st : DesktopState) (mainW bodyH : SubPx) : WidgetNode :=
         |>.withFixedSize colW (pxToSub 24))
        [ WidgetNode.focusable draftProjectPickerId <|
            WidgetNode.box (BoxStyle.row (pxToSub 4) |>.withAlign .center |>.withFixedSize (pxToSub 60) (pxToSub 24))
-             [screenTextLine theme (pxToSub 46) (pxToSub 18) (pxToSub 13) (pxToSub 18) pal.textSecondary projectLabel,
+             [pickerLine (pxToSub 46) projectLabel (!st.draftProject.isEmpty),
               chromeIcon "chevron-down" pal.textMuted 10]
         , WidgetNode.focusable 720 <|
            WidgetNode.box (BoxStyle.row (pxToSub 4) |>.withAlign .center |>.withFixedSize (pxToSub 150) (pxToSub 24))
              [chromeIcon "server" pal.textMuted 14,
-             screenTextLine theme (pxToSub 112) (pxToSub 18) (pxToSub 13) (pxToSub 18) pal.textSecondary machineLabel,
+             pickerLine (pxToSub 112) machineLabel (!st.draftSettings.machine.isEmpty),
              chromeIcon "chevron-down" pal.textMuted 10]
         , WidgetNode.focusable draftDirectoryPickerId <|
            WidgetNode.box (BoxStyle.row (pxToSub 4) |>.withAlign .center |>.withFixedSize (pxToSub 60) (pxToSub 24))
              [chromeIcon "folder" pal.textMuted 14,
-             screenTextLine theme (pxToSub 42) (pxToSub 18) (pxToSub 13) (pxToSub 18) pal.textSecondary folderLabel]
+             pickerLine (pxToSub 42) folderLabel (!st.draftDirectory.isEmpty)]
       ]
 
   let buttonStyle : BoxStyle :=
@@ -117,7 +122,7 @@ def buildNewAgentBody (st : DesktopState) (mainW bodyH : SubPx) : WidgetNode :=
        , WidgetNode.focusable 722 <|
            WidgetNode.box (BoxStyle.row (pxToSub 5) |>.withAlign .center
              |>.withPadding (Edges.xy (pxToSub 4) 0) |>.withFixedSize (pxToSub 518) (pxToSub 24))
-             [screenTextLine theme (pxToSub 151) (pxToSub 18) (pxToSub 13) (pxToSub 18) pal.textMuted modelLabel,
+             [pickerLine (pxToSub 151) modelLabel (!st.draftSettings.model.isEmpty) pal.textMuted,
               chromeIcon "chevron-down" pal.textMuted 12]
       , sendBtn
       ]
@@ -869,7 +874,8 @@ private def buildLiveInventory (st : DesktopState) (hover : Option WidgetId) (wi
            (screenTextLine theme settingsW (pxToSub 20) (pxToSub 13) (pxToSub 20) theme.palette.textSecondary "Settings ›")]
     else ((st.fleetMachines.drop first).take limit).mapIdx fun i m =>
       let detail := String.intercalate " · " ([m.roleLabel, m.cpuRamSpec].filter (!·.isEmpty))
-      let row := buildMachineRow theme colW rowH (if m.name.isEmpty then m.machineId else m.name) detail m.state true false
+      let rightLabel := if st.selectedMachineId == m.machineId then "Selected · " ++ m.state else m.state
+      let row := buildMachineRow theme colW rowH (if m.name.isEmpty then m.machineId else m.name) detail rightLabel true false
       inventoryTarget theme hover (liveMachineWidgetId (first + i)) colW rowH row
   let content := WidgetNode.box (BoxStyle.col 0 |>.withAlign .center)
     ([spacer first] ++ rows ++ [spacer (count - first - rows.length)])

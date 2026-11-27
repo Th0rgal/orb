@@ -301,7 +301,8 @@ def buildSidebarRowWidget (theme : Theme) (innerW : SubPx) (row : ChromeSidebarR
         (some row.widgetId)
 
 /-- Reference SolidJS sidebar rows for each `ScreenId` when rendering full frames. -/
-def referenceSidebarRows (scr : ScreenId) : List ChromeSidebarRow :=
+def referenceSidebarRows (scr : ScreenId) (activeMission : Option String := none)
+    (activeProject : String := "") : List ChromeSidebarRow :=
   if scr == .settingsGeneral then
     [ { widgetId := 101, rowId := "s:back", kind := "nav", title := "Back", status := "muted" }
     , { widgetId := 102, rowId := "s:account", kind := "nav", title := "Account", selected := true }
@@ -321,11 +322,11 @@ def referenceSidebarRows (scr : ScreenId) : List ChromeSidebarRow :=
     let isExpanded := scr == .missionTranscript || scr == .missionSplitDiff
     let navs : List ChromeSidebarRow :=
       [ { widgetId := 101, rowId := "nav:new", kind := "nav", title := "New Agent", shortcut := "⌘N", selected := isNewAgent }
-      , { widgetId := 102, rowId := "nav:inbox", kind := "nav", title := "Inbox", shortcut := "⌘I", badge := if isEmptyProjects then 0 else 92 }
-      , { widgetId := 111, rowId := "nav:cloud", kind := "nav", title := "Cloud agent", shortcut := "⌘2" }
+      , { widgetId := 102, rowId := "nav:inbox", kind := "nav", title := "Inbox", shortcut := "⌘I", badge := if isEmptyProjects then 0 else 92, selected := scr == .inbox }
+      , { widgetId := 111, rowId := "nav:cloud", kind := "nav", title := "Cloud agent", shortcut := "⌘2", selected := scr == .cloud }
       , { widgetId := 112, rowId := "nav:machines", kind := "nav", title := "Machines", shortcut := "⌘3", selected := isMachines }
-      , { widgetId := 113, rowId := "nav:inference", kind := "nav", title := "Inference", shortcut := "⌘4" }
-      , { widgetId := 114, rowId := "nav:resources", kind := "nav", title := "Resources", shortcut := "⌘6" }
+      , { widgetId := 113, rowId := "nav:inference", kind := "nav", title := "Inference", shortcut := "⌘4", selected := scr == .inference }
+      , { widgetId := 114, rowId := "nav:resources", kind := "nav", title := "Resources", shortcut := "⌘6", selected := scr == .resources }
       , { widgetId := 108, rowId := "section:projects", kind := "section", title := "Projects" }
       ]
     let tree : List ChromeSidebarRow :=
@@ -334,18 +335,18 @@ def referenceSidebarRows (scr : ScreenId) : List ChromeSidebarRow :=
         , { widgetId := 109, rowId := "section:archived", kind := "section", title := "Archived" }
         ]
       else if isExpanded then
-        [ { widgetId := 104, rowId := "proj:0", kind := "project", depth := 0, title := "Project 0" }
-        , { widgetId := 120, rowId := "m:80", kind := "mission", depth := 1, title := "Mission 80 doing some work", status := "completed" }
-        , { widgetId := 121, rowId := "m:60", kind := "mission", depth := 1, title := "Mission 60 doing some work", status := "completed" }
-        , { widgetId := 122, rowId := "m:40", kind := "mission", depth := 1, title := "Mission 40 doing some work", status := "completed" }
-        , { widgetId := 123, rowId := "m:20", kind := "mission", depth := 1, title := "Mission 20 doing some work", status := "completed" }
-        , { widgetId := 105, rowId := "m:0", kind := "mission", depth := 1, title := "Long mission", status := "running", selected := true }
+        [ { widgetId := 104, rowId := "proj:0", kind := "project", depth := 0, title := "Project 0", selected := activeProject == "Project 0" }
+        , { widgetId := 120, rowId := "m:80", kind := "mission", depth := 1, title := "Mission 80 doing some work", status := "completed", selected := activeMission == some "m:80" }
+        , { widgetId := 121, rowId := "m:60", kind := "mission", depth := 1, title := "Mission 60 doing some work", status := "completed", selected := activeMission == some "m:60" }
+        , { widgetId := 122, rowId := "m:40", kind := "mission", depth := 1, title := "Mission 40 doing some work", status := "completed", selected := activeMission == some "m:40" }
+        , { widgetId := 123, rowId := "m:20", kind := "mission", depth := 1, title := "Mission 20 doing some work", status := "completed", selected := activeMission == some "m:20" }
+        , { widgetId := 105, rowId := "m:0", kind := "mission", depth := 1, title := "Long mission", status := "running", selected := activeMission.isNone || activeMission == some "m:0" }
         ] ++ (List.range 14).map (fun k =>
           let idx := k + 1
-          { widgetId := 130 + idx, rowId := s!"proj:{idx}", kind := "project", depth := 0, title := s!"Project {idx}" })
+          { widgetId := 130 + idx, rowId := s!"proj:{idx}", kind := "project", depth := 0, title := s!"Project {idx}", selected := activeProject == s!"Project {idx}" })
       else
         (List.range 20).map (fun idx =>
-          { widgetId := 130 + idx, rowId := s!"proj:{idx}", kind := "project", depth := 0, title := s!"Project {idx}" })
+          { widgetId := 130 + idx, rowId := s!"proj:{idx}", kind := "project", depth := 0, title := s!"Project {idx}", selected := activeProject == s!"Project {idx}" })
     navs ++ tree ++ [{ widgetId := 103, rowId := "nav:settings", kind := "footer", title := "Settings" }]
 
 /-- Build the left sidebar (`aside.sidebar`, `--sb-w` wide with a `1 px` right border): an empty
@@ -362,7 +363,7 @@ def buildSidebarChrome (st : DesktopState) (availH : SubPx) (useReferenceTree : 
   let innerW := width - rightBorder
   let rowW := innerW - pxToSub 12
   let footH := pxToSub 45
-  let rowsSource := if embedded then st.sidebarRows else if useReferenceTree then referenceSidebarRows st.screen else st.visibleProjectRows
+  let rowsSource := if embedded then st.sidebarRows else if useReferenceTree then referenceSidebarRows st.screen st.openMission st.draftProject else st.visibleProjectRows
   let isNav (r : ChromeSidebarRow) : Bool := r.kind == "nav"
   let isFoot (r : ChromeSidebarRow) : Bool := r.kind == "footer"
   let navRows : List WidgetNode :=
@@ -404,10 +405,10 @@ def buildSidebarChrome (st : DesktopState) (availH : SubPx) (useReferenceTree : 
   let rosterH := availH - chromeHeaderHeightSub - footH
   let rosterStyle := BoxStyle.col 0
     |>.withPadding (Edges.trbl 0 (pxToSub 6) (pxToSub 12) (pxToSub 6))
-  let roster := if st.liveData then
-      WidgetNode.scrollClip (BoxStyle.col 0 |>.withFixedSize innerW rosterH)
-        { offsetY := st.rosterTopSub, showScrollbar := !embedded } (WidgetNode.box rosterStyle (navRows ++ treeRows)) (some rosterViewportId) (hitTestable := false)
-    else WidgetNode.box (rosterStyle.withFixedSize innerW rosterH) (navRows ++ treeRows)
+  let roster :=
+    WidgetNode.scrollClip (BoxStyle.col 0 |>.withFixedSize innerW rosterH)
+      { offsetY := st.rosterTopSub, showScrollbar := st.liveData && !embedded }
+      (WidgetNode.box rosterStyle (navRows ++ treeRows)) (some rosterViewportId) (hitTestable := false)
   let searchToolId := if embedded then 118 else sidebarSearchId
   let backToolId := if embedded then 119 else sidebarBackId
   let forwardToolId := if embedded then 120 else sidebarForwardId

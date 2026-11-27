@@ -106,24 +106,27 @@ private def verifyNineScreenControls : IO Unit := do
   -- Screen 02: controlPopulated
   assertHitTargets "02_control_populated" (DesktopState.forScreen .controlPopulated)
     [sidebarToggleId, sidebarSearchId, sidebarBackId, sidebarForwardId,
-     101, 102, 112, 113, 103,
+     101, 102, 111, 112, 113, 114, 130, 131, 103,
      draftProjectPickerId, 720, draftDirectoryPickerId, 1, 3, 722, 2]
 
   -- Screen 03: missionTranscript
   assertHitTargets "03_mission_transcript" (DesktopState.forScreen .missionTranscript)
     [sidebarToggleId, sidebarSearchId, sidebarBackId, sidebarForwardId,
      sidePanelDiffId, sidePanelFilesId, sidePanelChatId,
-     101, 102, 111, 112, 113, 114, 105, 103, 1, 3, 2, 720, 721, 722, 723, 724]
+     101, 102, 111, 112, 113, 114, 104, 120, 121, 122, 123, 105, 131, 103,
+     1, 3, 2, 720, 721, 722, 723, 724]
 
   -- Screen 04: missionSplitDiff
   assertHitTargets "04_mission_split_diff" (DesktopState.forScreen .missionSplitDiff)
     [sidebarToggleId, sidebarSearchId, sidebarBackId, sidebarForwardId,
      sidePanelDiffId, sidePanelFilesId, sidePanelChatId,
+     101, 102, 111, 112, 113, 114, 104, 120, 121, 122, 123, 105, 131, 103,
      1, 3, 2, 720, 721, 722, 723, 724, diffRefId, diffUnifiedId, diffSplitId, diffRefreshId, diffFileChipId]
 
   -- Screen 05: machinesFleet
   assertHitTargets "05_machines_fleet" (DesktopState.forScreen .machinesFleet)
-    [sidebarToggleId, sidebarSearchId, sidebarBackId, sidebarForwardId, 112, 103,
+    [sidebarToggleId, sidebarSearchId, sidebarBackId, sidebarForwardId,
+     101, 102, 111, 112, 113, 114, 130, 103,
      fleetLocalId, fleetCoreId, fleetPrimaryId, fleetLargeAId, fleetDefaultBId, fleetSoftwareId, fleetCopyKeyId]
 
   -- Screen 06: settingsGeneral
@@ -787,6 +790,97 @@ private def verifyWaylandImeSerialGuard : IO Unit := do
   let tx0 := DesktopState.forScreen .missionTranscript
   for (lbl, wid) in [("machine", 720), ("backend", 721), ("model", 722), ("effort", 723), ("perm", 724)] do
     assertVisualChange s!"03_under_{lbl}" tx0 wid false
+
+  -- Verify sidebar Inbox (102), Cloud agent (111), mission rows (120..123), project rows (104, 130, 131),
+  -- and live Machines rows (liveMachineWidgetId 0) all mutate state AND change rendered widget trees.
+  let cPop := DesktopState.forScreen .controlPopulated
+  assertVisualChange "02_inbox" cPop 102 false
+  assertVisualChange "02_cloud" cPop 111 false
+  assertVisualChange "02_proj130" cPop 130 false
+  assertVisualChange "01_cloud" c0 111 false
+  assertVisualChange "01_inbox" c0 102 false
+  for (lbl, wid) in [("inbox", 102), ("cloud", 111), ("proj0", 104), ("m80", 120), ("m60", 121), ("m40", 122), ("m20", 123), ("proj1", 131)] do
+    assertVisualChange s!"03_sidebar_{lbl}" tx0 wid false
+  assertVisualChange "05_proj130" (DesktopState.forScreen .machinesFleet) 130 false
+  let liveMachines : DesktopState := {
+    DesktopState.liveUnavailable with
+    screen := .machinesFleet
+    connectionBinding := "u6-live"
+    fleetMachines := defaultFleetMachines
+  }
+  assertVisualChange "live_machine_row0" liveMachines (liveMachineWidgetId 0) false
+
+  -- Ctrl+N while already on an idle New Agent draft keeps desktopImeSessionKey stable (does not drop IME),
+  -- whereas Ctrl+N from a mission transcript DOES change desktopImeSessionKey and drops stale IME.
+  let livePop : DesktopState := { baseDraft with screen := .controlPopulated }
+  let rtSameDraft : Runtime.RuntimeState DesktopState := {
+    app := livePop
+    focus := { owner := some 1 }
+    focusableOrder := [1, 2, 3]
+    lastImeOwner := some 1
+    lastImeContext := desktopImeSessionKey livePop
+  }
+  let rtAfterSameCtrlN := Runtime.applyEventBatch rtSameDraft
+    #[.key 0x6e 2 .pressed, .text "Hello ", .imeBatch 0 0 "日本語" "" 0 0]
+    (fun _ st ev => stepDesktopEvent 120 vpDev st ev) desktopFocusChange desktopFocusTraps desktopImeSessionKey
+    DesktopState.clearAllPreeditChecked
+  unless rtAfterSameCtrlN.app.composer.text == "Hello 日本語" do
+    throw <| IO.userError s!"Ctrl+N on idle New Agent draft dropped IME text: {repr rtAfterSameCtrlN.app.composer.text}"
+  let rtFromMission : Runtime.RuntimeState DesktopState := {
+    app := afterCreate
+    focus := { owner := some 1 }
+    focusableOrder := [1, 2, 3]
+    lastImeOwner := some 1
+    lastImeContext := desktopImeSessionKey afterCreate
+  }
+  let rtAfterCrossCtrlN := Runtime.applyEventBatch rtFromMission
+    #[.key 0x6e 2 .pressed, .imeBatch 0 0 "STALE_MISSION_IME" "" 0 0]
+    (fun _ st ev => stepDesktopEvent 120 vpDev st ev) desktopFocusChange desktopFocusTraps desktopImeSessionKey
+    DesktopState.clearAllPreeditChecked
+  unless rtAfterCrossCtrlN.app.composer.text.isEmpty do
+    throw <| IO.userError s!"Ctrl+N from mission failed to drop stale IME: {repr rtAfterCrossCtrlN.app.composer.text}"
+
+  -- Search modal filter/sort/clear clicks must restore keyboard focus to 701 AND filter Tools / Last 24h / lean-ui.
+  let rtSearchFilter : Runtime.RuntimeState DesktopState := {
+    app := searchSt0
+    focus := { owner := some 701, traps := desktopFocusTraps searchSt0 }
+    focusableOrder := [701, searchClearId, searchEscId, searchTabAllId, searchTabUserId, searchTabAssistantId,
+      searchTabTitlesId, searchTabToolsId, searchProjectFilterId, searchTimeFilterId, searchSortOrderId, 702, 703, 704, searchOpenId]
+  }
+  let rtAfterFilterClick := Runtime.applyEventBatch rtSearchFilter
+    #[.activate searchTabToolsId, .text "a"]
+    (fun _ st ev => stepDesktopEvent 120 vpDev st ev) desktopFocusChange desktopFocusTraps desktopImeSessionKey
+    DesktopState.clearAllPreeditChecked
+  unless rtAfterFilterClick.focus.owner == some 701 && rtAfterFilterClick.app.searchFilterTab == "Tools" &&
+      rtAfterFilterClick.app.searchBuffer.text.endsWith "a" do
+    throw <| IO.userError s!"Search filter click broke focus/typing: owner={repr rtAfterFilterClick.focus.owner} text={repr rtAfterFilterClick.app.searchBuffer.text}"
+  let emptyQuerySpec : Widgets.SearchDialogSpec := { defaultSearchDialogSpec with query := "" }
+  let toolsItems := filterSearchItemsWithFilters emptyQuerySpec "Tools" "All projects" "Any time" "Relevance"
+  let recentItems := filterSearchItemsWithFilters emptyQuerySpec "All" "All projects" "Last 24h" "Relevance"
+  let projItems := filterSearchItemsWithFilters emptyQuerySpec "All" "lean-ui" "Any time" "Relevance"
+  unless !toolsItems.isEmpty && recentItems.length < emptyQuerySpec.items.length && !projItems.isEmpty && projItems.length < emptyQuerySpec.items.length do
+    throw <| IO.userError s!"Search filters ineffective: tools={toolsItems.length} recent={recentItems.length} proj={projItems.length}"
+
+  -- Mid-batch focusChange (Ctrl+K + typing) must accept text immediately even before the next view rebuilds focusableOrder.
+  let rtMidBatch : Runtime.RuntimeState DesktopState := {
+    app := livePop
+    focus := { owner := some 1 }
+    focusableOrder := [1, 2, 3]  -- 701 not yet in focusableOrder
+  }
+  let rtOpenedAndTyped := Runtime.applyEventBatch rtMidBatch
+    #[.key 0x6b 2 .pressed, .text "z"]
+    (fun _ st ev => stepDesktopEvent 120 vpDev st ev) desktopFocusChange desktopFocusTraps desktopImeSessionKey
+    DesktopState.clearAllPreeditChecked
+  unless rtOpenedAndTyped.focus.owner == some 701 && rtOpenedAndTyped.pendingFocusTarget == some 701 &&
+      rtOpenedAndTyped.app.searchBuffer.text == "z" do
+    throw <| IO.userError s!"Mid-batch Ctrl+K + typing dropped text before next view: owner={repr rtOpenedAndTyped.focus.owner} text={repr rtOpenedAndTyped.app.searchBuffer.text}"
+
+  -- Non-live sidebar roster at 1470x600 must clip above Settings footer (y<=555) and exclude off-screen rows from focusableOrder.
+  let tx600Tree := buildDesktopScreen tx0 vpW (pxToSub 600)
+    { headerTitleRuns := [Widgets.overlaySynthRun (chromeTitleStyle tx0.theme) tx0.headerTitle] }
+  let (_, tx600Scene) := renderWidgetTree 120 vpW (pxToSub 600) tx0.initialFocusState tx0.theme tx600Tree
+  unless !tx600Scene.focusableOrder.contains 144 && tx600Scene.hitRegionsSub.all (fun (wid, r) => wid < 130 || wid > 149 || r.bottom <= pxToSub 555) do
+    throw <| IO.userError "1470x600 fixture sidebar failed to clip off-screen project rows above Settings footer"
 
 def main : IO UInt32 := do
   verifyOrbScrollEquivalence

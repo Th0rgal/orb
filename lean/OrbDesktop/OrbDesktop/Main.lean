@@ -464,6 +464,7 @@ def desktopReducer (rt : Runtime.RuntimeState DesktopState) :
     if let .key key mods state := ev then
       if state != .released && mods == 0 && (key == 0xff55 || key == 0xff56) &&
           st.missionMenu.isNone && st.modal == .none &&
+          st.composer.imePreeditText.isEmpty &&
           (st.screen == .missionTranscript || st.screen == .missionSplitDiff) then
         if let some r := regions.find? (·.id == transcriptViewportId) then
           let h := r.bounds.h.toNat

@@ -422,14 +422,15 @@ def buildComposerWidget (theme : Theme) (availW composerH : SubPx)
         [attachBtn, textNode, sendBtn]
   let metaStyle : TextStyle :=
     { (Theme.mutedText theme) with sizeSub := pxToSub 12, lineHeightSub := pxToSub 18, color := pal.textMuted }
-  let metaText (text : String) (width : SubPx) : WidgetNode :=
-    WidgetNode.text (BoxStyle.row 0 |>.withFixedSize width (pxToSub 18))
-      (pxToSub 18) [composerSynthRun metaStyle text]
-  let selector (id : WidgetId) (text : String) (width : Nat) : WidgetNode :=
+  let metaText (text : String) (width : SubPx) (clip : Bool := false) : WidgetNode :=
+    let base := BoxStyle.row 0 |>.withFixedSize width (pxToSub 18)
+    let st := if clip then { base with maxWidth := width, clip := true } else base
+    WidgetNode.text st (pxToSub 18) [composerSynthRun metaStyle text]
+  let selector (id : WidgetId) (text : String) (width : Nat) (clip : Bool := false) : WidgetNode :=
     WidgetNode.focusable id <|
       WidgetNode.box (BoxStyle.row (pxToSub 4) |>.withAlign .center
         |>.withFixedSize (pxToSub (width + 14)) (pxToSub 18))
-        [metaText text (pxToSub width), .mk none false false (BoxStyle.row 0 |>.withFixedSize (pxToSub 10) (pxToSub 10))
+        [metaText text (pxToSub width) clip, .mk none false false (BoxStyle.row 0 |>.withFixedSize (pxToSub 10) (pxToSub 10))
           (.vectorIcon WidgetNode.downChevronPaths pal.textMuted) []]
   let sep := metaText "·" (pxToSub 3)
   let (lblMachine, lblBackend, lblModel, lblEffort, lblPerm) :=
@@ -441,9 +442,11 @@ def buildComposerWidget (theme : Theme) (availW composerH : SubPx)
         |>.withPadding (Edges.trbl 0 (pxToSub 12) (pxToSub 2) (pxToSub 12))
         |>.withFixedSize colW (pxToSub 36))
       [ WidgetNode.box (BoxStyle.row 0 |>.withFixedSize (pxToSub 11) (pxToSub 13)) []
-      , selector 720 lblMachine 99, sep
-      , selector 721 lblBackend 66, sep, WidgetNode.focusable 722 (metaText lblModel (pxToSub 40)), sep
-      , selector 723 lblEffort 40, sep, selector 724 lblPerm 65 ]
+      , selector 720 lblMachine 99 (lblMachine != "selected machine"), sep
+      , selector 721 lblBackend 66 (lblBackend != "claudecode"), sep
+      , WidgetNode.focusable 722 (metaText lblModel (pxToSub 40) (lblModel != "Default")), sep
+      , selector 723 lblEffort 40 (lblEffort != "Default"), sep
+      , selector 724 lblPerm 65 (lblPerm != "Supervised") ]
   let chipBar : List WidgetNode :=
     if hasChips then
       [WidgetNode.box
