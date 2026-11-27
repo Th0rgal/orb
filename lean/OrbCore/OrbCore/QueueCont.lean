@@ -919,7 +919,7 @@ def actOnContinuation
       let admit := verifyWakeupContinuationAdmit phase 4 (ownerTerminalOfStatus status) (ownerBusyOfStatus status) armed runGen due nowEpoch
       if admit != 1 then return .error "continuation_cancel_race"
       let upd ← execParamQueryUnlocked st.missionsDb
-        "UPDATE mission_continuations SET phase=4,updated_at=?2 WHERE id=?1 AND phase=1;" #[contId, isoNow]
+        "UPDATE mission_continuations SET phase=4,error='revoked',updated_at=?2 WHERE id=?1 AND phase=1;" #[contId, isoNow]
       if let .error e := upd then return .error e
       let ch ← execParamQueryUnlocked st.missionsDb "SELECT changes();" #[]
       let .ok crs := ch | return .error "continuation_changes_failed"
@@ -977,7 +977,7 @@ def continuationJsonForMission (st : CoreStore) (missionId : String) : IO (Excep
       let srcJson := if source.isEmpty then "" else s!",\"source\":{jsonEscape source}"
       items := items.push (
         s!"\{\"id\":{jsonEscape (cell r 0)},\"state\":{jsonEscape (continuationApiState phase trigger)}," ++
-        s!"\"next_at\":{renderContinuationNextAtJson trigger due.toUInt64},\"trigger\":{jsonEscape trigger},\"reason\":{jsonEscape reason}{srcJson}{errJson}{recJson}}")
+        s!"\"next_at\":{renderContinuationNextAtJson trigger due.toUInt64},\"trigger\":{jsonEscape (renderContinuationApiTrigger trigger)},\"reason\":{jsonEscape reason}{srcJson}{errJson}{recJson}}")
     return .ok s!"\{\"count\":{rs.size - 1},\"items\":[{String.intercalate "," items.toList}]}"
 
 def bumpSupervision

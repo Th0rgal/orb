@@ -2542,14 +2542,15 @@ private def launchLocalCoreMissionTurn
       if gs.get? missionId == some nextGen then
         mgr.launchGenerations.set (gs.erase missionId)
       return (← mgr.stopEpochs.get).getD missionId 0 != launchEpoch
-    let isFencedErr := stopFenced || err == "launch_fenced" || err.endsWith ": launch_fenced"
-    if !isFencedErr then
-      discard <| appendMissionEvent st.store missionId "error" (renderCompact (.obj #[("content", .str err)])) ts
-    discard <| withImmediateTx st.store.missionsDb do
+    let updated ← withImmediateTx st.store.missionsDb do
       execParamQueryUnlocked st.store.missionsDb
         ("UPDATE missions SET status='interrupted', terminal_reason='launch_failed', state_revision=state_revision+1, updated_at=?3 " ++
-         "WHERE id=?1 AND status='active' AND run_generation=CAST(?2 AS INTEGER);")
+         "WHERE id=?1 AND status='active' AND run_generation=CAST(?2 AS INTEGER) RETURNING id;")
         #[missionId, s!"{nextGen}", ts]
+    let transitioned := match updated with | .ok rs => rs.size > 1 | .error _ => false
+    let isFencedErr := stopFenced || err == "launch_fenced" || err.endsWith ": launch_fenced"
+    if !isFencedErr && transitioned then
+      discard <| appendMissionEvent st.store missionId "error" (renderCompact (.obj #[("content", .str err)])) ts
     return .error err
   let setupRes : Except String OrbCore.RemoteDispatch.HarnessProxySetup ← try
     if proxied then

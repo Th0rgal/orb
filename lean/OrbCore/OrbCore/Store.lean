@@ -2266,6 +2266,10 @@ def renderContinuationNextAtJson (triggerKind : String) (dueEpoch : UInt64) : St
   if triggerKind == "job" || triggerKind == "durable_job_terminal" || dueEpoch == 0 then "null"
   else jsonEscape (formatEpochIso8601Utc dueEpoch)
 
+/-- Map stored continuation `trigger_kind` to the client UI wire contract (`"time" | "job" | "delivery"`). -/
+def renderContinuationApiTrigger (triggerKind : String) : String :=
+  if triggerKind == "durable_job_terminal" then "job" else triggerKind
+
 /-- Direct children executing, queued, waiting for background work, or holding an armed
     continuation, independent of the list response's filters and pagination. Uses parent alias `m`. -/
 def liveChildrenCountSql : String :=
@@ -2506,7 +2510,7 @@ def listMissionsJson
         let recJson := if crec.isEmpty then "" else s!",\"recurrence\":{jsonEscape crec}"
         let entry :=
           s!"\{\"id\":{jsonEscape cid},\"state\":{jsonEscape cstate}," ++
-          s!"\"next_at\":{renderContinuationNextAtJson ctrig cdue.toUInt64},\"trigger\":{jsonEscape ctrig},\"reason\":{jsonEscape creason}{srcJson}{errJson}{recJson}}"
+          s!"\"next_at\":{renderContinuationNextAtJson ctrig cdue.toUInt64},\"trigger\":{jsonEscape (renderContinuationApiTrigger ctrig)},\"reason\":{jsonEscape creason}{srcJson}{errJson}{recJson}}"
         m := m.insert mid (((m[mid]?).getD #[]).push entry)
     return m
   let outStr : String := Id.run do
