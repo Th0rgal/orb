@@ -331,9 +331,13 @@ def deleteProxyApiKey (dataRoot keyId : String) : IO Bool := do
 /-! ## SSE Broadcast Hub (`GET /api/control/stream`, `GET /api/control/missions/:id/stream`) -/
 
 structure SseQueuedEvent where
-  eventType  : String
-  missionId? : Option String
-  frame      : String
+  eventType             : String
+  missionId?            : Option String
+  frame                 : String
+  seq?                  : Option UInt64 := none
+  aclOwnerUid?          : Option String := none
+  aclSharedUids         : Array String := #[]
+  isDeletedPresentation : Bool := false
   deriving Repr, DecidableEq, Inhabited
 
 structure SseSubscriber where
@@ -345,10 +349,20 @@ structure SseSubscriber where
 
 structure BroadcastHub where
   mu : Std.Mutex (UInt64 × Array SseSubscriber)
+  bridgedRef : IO.Ref Bool
 
 def newBroadcastHub : IO BroadcastHub := do
   let mu ← Std.Mutex.new ((0 : UInt64), (#[] : Array SseSubscriber))
-  return { mu }
+  let bridgedRef ← IO.mkRef false
+  return { mu, bridgedRef }
+
+def markBroadcastHubBridged (hub : BroadcastHub) : IO Unit :=
+  hub.bridgedRef.set true
+
+def isBroadcastHubBridged (hub? : Option BroadcastHub) : IO Bool :=
+  match hub? with
+  | none => pure false
+  | some h => h.bridgedRef.get
 
 def formatSseFrame (eventType payloadJson : String) (seqId? : Option UInt64 := none) : String :=
   let idLine := match seqId? with | some n => s!"id: {n}\n" | none => ""
@@ -359,8 +373,13 @@ def formatSseFrame (eventType payloadJson : String) (seqId? : Option UInt64 := n
 def publishControlEvent
     (hub? : Option BroadcastHub)
     (eventType payloadJson : String)
-    (missionId? : Option String := none) : IO Unit := do
+    (missionId? : Option String := none)
+    (eventSeq? : Option UInt64 := none)
+    (aclOwnerUid? : Option String := none)
+    (aclSharedUids : Array String := #[])
+    (isDeletedPresentation : Bool := false) : IO Unit := do
   let some hub := hub? | return ()
+  let bridged ← hub.bridgedRef.get
   let subs ← hub.mu.atomically do
     let (seq, xs) ← get
     let nextSeq := seq + 1
@@ -368,8 +387,29 @@ def publishControlEvent
     return (nextSeq, xs)
   let safeType := ((eventType.splitOn "\n").headD "message").trimAscii.toString
   let cleanMid? := missionId?.map (·.trimAscii.toString) |>.filter (!·.isEmpty)
-  let frame := formatSseFrame safeType payloadJson (some subs.1)
-  let item : SseQueuedEvent := { eventType := safeType, missionId? := cleanMid?, frame := frame }
+  let cleanSeq? : Option UInt64 :=
+    match eventSeq? with
+    | some 0 => none
+    | some s => some s
+    | none => none
+  -- Never emit `id: 0`, and on a bridged SQLite-cursor stream never assign an ephemeral
+  -- in-memory hub counter as `id:` (which would corrupt `Last-Event-ID`).
+  let effId? : Option UInt64 :=
+    match cleanSeq? with
+    | some s => some s
+    | none =>
+      if safeType == "mission_presentation" || bridged then none
+      else some subs.1
+  let frame := formatSseFrame safeType payloadJson effId?
+  let item : SseQueuedEvent := {
+    eventType := safeType
+    missionId? := cleanMid?
+    frame := frame
+    seq? := cleanSeq?
+    aclOwnerUid? := aclOwnerUid?
+    aclSharedUids := aclSharedUids
+    isDeletedPresentation := isDeletedPresentation
+  }
   for sub in subs.2 do
     let matchesMission :=
       match sub.missionFilter?, cleanMid? with

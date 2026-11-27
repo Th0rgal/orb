@@ -270,6 +270,7 @@ allow = [
   "OrbNetLeaf.Crypto=OrbNetLeaf.Crypto.rawVerifyP256=orb_net_leaf_verify_p256",
   "OrbNetLeaf.Pty=OrbNetLeaf.Pty.rawOpenPty=orb_net_leaf_openpty",
   "OrbNetLeaf.Pty=OrbNetLeaf.Pty.rawPtyResize=orb_net_leaf_pty_resize",
+  "OrbNetLeaf.Pty=OrbNetLeaf.Pty.rawPtySpawn=orb_net_leaf_pty_spawn",
   "OrbNetLeaf.TlsHttp=OrbNetLeaf.TlsHttp.rawTlsOpen=orb_net_leaf_tls_open",
   "OrbNetLeaf.TlsHttp=OrbNetLeaf.TlsHttp.rawTlsOpenTunnel=orb_net_leaf_tls_open_tunnel",
   "OrbNetLeaf.TlsHttp=OrbNetLeaf.TlsHttp.rawTlsWrite=orb_net_leaf_tls_write",

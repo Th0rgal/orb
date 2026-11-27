@@ -469,6 +469,7 @@ structure TelemetryQueueState where
   failures   : UInt32 := 0
   retryAtSec : UInt64 := 0
   lastError? : Option String := none
+  flushing   : Bool := false
 
 structure TelemetrySink where
   mu : Std.Mutex TelemetryQueueState
@@ -776,10 +777,13 @@ def observeControlTurnFinished
   if let .ok cleanEv := sanitizeTelemetryEvent rawEv false effUid? effUname? then
     discard <| enqueueSanitizedEvent sink cleanEv none tsSec
 
-/-- Flush up to one batch (`200` events) from `sink` to `<hub_url>/v2/ns/<namespace>/ingest`. -/
+/-- Flush up to one batch (`200` events) from `sink` to `<hub_url>/v2/ns/<namespace>/ingest`.
+    Coalesces concurrent callers via `flushing : Bool` so two simultaneous ticks can never
+    double-send the same batch or double-drop newly enqueued events. -/
 def flushTelemetryOnce (sink : TelemetrySink) (nowEpochSec : UInt64) : IO (Except String Nat) := do
   let snap? ← sink.mu.atomically do
     let q ← get
+    if q.flushing then return none
     match q.target? with
     | none => return none
     | some tgt =>
@@ -792,51 +796,71 @@ def flushTelemetryOnce (sink : TelemetrySink) (nowEpochSec : UInt64) : IO (Excep
           if let some (_, txt) := q.blobs.find? (fun (k, _) => k == dg) then
             if !batchBlobs.any (fun (k, _) => k == dg) then
               batchBlobs := batchBlobs.push (dg, .str txt)
+      set { q with flushing := true }
       return some (tgt, batch, batchBlobs)
   let some (tgt, batch, batchBlobs) := snap?
     | return .ok 0
-  let ingestUrl := s!"{stripTrailingSlash tgt.url}/v2/ns/{tgt.ns}/ingest"
-  let payload := OrbBin.Json.renderCompact (JVal.obj #[
-    ("events", .arr batch),
-    ("blobs", .obj batchBlobs)
-  ])
-  let hdrs := #[
-    ("Authorization", s!"Bearer {tgt.token}"),
-    ("Content-Type", "application/json")
-  ]
-  let resp ← OrbBin.HttpClient.sendRequest "POST" ingestUrl hdrs payload.toUTF8 15000 1048576
-  sink.mu.atomically do
-    let q ← get
-    let dropBatch (st : TelemetryQueueState) : TelemetryQueueState :=
-      let remEvents := st.events.extract (Nat.min batch.size st.events.size) st.events.size
-      let sentDigests := batchBlobs.map Prod.fst
-      let remBlobs := st.blobs.filter (fun (k, _) => !sentDigests.contains k)
-      { st with events := remEvents, blobs := remBlobs }
-    match resp with
-    | .ok r =>
-      if 200 ≤ r.status && r.status < 300 then
-        let q' := dropBatch q
-        set { q' with failures := 0, retryAtSec := 0, lastError? := none }
-        return .ok batch.size
-      else
-        let retry := r.status ≥ 500 || r.status == 429 || r.status == 408
-        let msg := s!"hub returned {r.status}"
-        if retry then
-          let f := q.failures + 1
-          let shift := Nat.min f.toNat 5
-          let backoff := Nat.min (30 * (1 <<< shift)) 600
-          set { q with failures := f, retryAtSec := nowEpochSec + backoff.toUInt64, lastError? := some msg }
-        else
+  let clearFlushing : IO Unit :=
+    sink.mu.atomically do
+      let q ← get
+      set { q with flushing := false }
+  try
+    let ingestUrl := s!"{stripTrailingSlash tgt.url}/v2/ns/{tgt.ns}/ingest"
+    let payload := OrbBin.Json.renderCompact (JVal.obj #[
+      ("events", .arr batch),
+      ("blobs", .obj batchBlobs)
+    ])
+    let hdrs := #[
+      ("Authorization", s!"Bearer {tgt.token}"),
+      ("Content-Type", "application/json")
+    ]
+    let resp ← OrbBin.HttpClient.sendRequest "POST" ingestUrl hdrs payload.toUTF8 15000 1048576
+    sink.mu.atomically do
+      let q ← get
+      let dropBatch (st : TelemetryQueueState) : TelemetryQueueState :=
+        let remEvents := st.events.extract (Nat.min batch.size st.events.size) st.events.size
+        let sentDigests := batchBlobs.map Prod.fst
+        let remBlobs := st.blobs.filter (fun (k, _) => !sentDigests.contains k)
+        { st with events := remEvents, blobs := remBlobs }
+      match resp with
+      | .ok r =>
+        if 200 ≤ r.status && r.status < 300 then
           let q' := dropBatch q
-          set { q' with lastError? := some msg }
+          set { q' with failures := 0, retryAtSec := 0, lastError? := none, flushing := false }
+          return .ok batch.size
+        else
+          let retry := r.status ≥ 500 || r.status == 429 || r.status == 408
+          let msg := s!"hub returned {r.status}"
+          if retry then
+            let f := q.failures + 1
+            let shift := Nat.min f.toNat 5
+            let backoff := Nat.min (30 * (1 <<< shift)) 600
+            set { q with failures := f, retryAtSec := nowEpochSec + backoff.toUInt64, lastError? := some msg, flushing := false }
+          else
+            let q' := dropBatch q
+            set { q' with lastError? := some msg, flushing := false }
+          return .error msg
+      | .error _ =>
+        let f := q.failures + 1
+        let shift := Nat.min f.toNat 5
+        let backoff := Nat.min (30 * (1 <<< shift)) 600
+        let msg := "hub unreachable"
+        set { q with failures := f, retryAtSec := nowEpochSec + backoff.toUInt64, lastError? := some msg, flushing := false }
         return .error msg
-    | .error _ =>
-      let f := q.failures + 1
-      let shift := Nat.min f.toNat 5
-      let backoff := Nat.min (30 * (1 <<< shift)) 600
-      let msg := "hub unreachable"
-      set { q with failures := f, retryAtSec := nowEpochSec + backoff.toUInt64, lastError? := some msg }
-      return .error msg
+  catch e =>
+    clearFlushing
+    throw e
+
+/-- Drain up to `maxBatches` pending telemetry batches in one pass, stopping as soon as the
+    queue is empty, another flush is already in flight, or backoff is entered (`RUN-12`). -/
+def drainTelemetryBatches (sink : TelemetrySink) (nowEpochSec : UInt64) (maxBatches : Nat := 10) : IO Nat := do
+  let mut total : Nat := 0
+  for _ in [:maxBatches] do
+    match ← flushTelemetryOnce sink nowEpochSec with
+    | .ok 0 => break
+    | .ok n => total := total + n
+    | .error _ => break
+  return total
 
 /-! ### 4. Authenticated Speaker-Attributed Voice Relay (`POST /api/voice/transcribe`) -/
 

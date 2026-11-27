@@ -331,13 +331,28 @@ private def loadQueueRow
     IO (Except String (Option (Array String))) := do
   let rows ← execParamQueryUnlocked st.missionsDb
     ("SELECT message_id,mission_id,payload,COALESCE(phase,0),COALESCE(claimed_generation,0)," ++
-     "COALESCE(claim_boot_epoch,0),COALESCE(delivered_seq,0),COALESCE(edit_revision,0),state " ++
+     "COALESCE(claim_boot_epoch,0),COALESCE(delivered_seq,0),COALESCE(edit_revision,0),state," ++
+     "CASE WHEN json_valid(payload) AND json_extract(payload,'$.job_id') IS NOT NULL THEN 1 ELSE 0 END " ++
      "FROM remote_message_queue WHERE user_id=?1 AND message_id=?2;")
     #[userId, messageId]
   match rows with
   | .error e => return .error e
   | .ok rs =>
     if rs.size ≤ 1 then return .ok none else return .ok (some (rs[1]!))
+
+/-- Compute the effective queue phase, respecting legacy `state` strings and
+    job-bound rows (`payload.job_id IS NOT NULL`) so started/delivered/job-bound
+    rows can never be cancelled, edited, or double-claimed even if `phase` is `0`. -/
+private def effectiveQueuePhase (rawPhase : UInt8) (state : String) (hasJobId : Bool) : UInt8 :=
+  if rawPhase != 0 then rawPhase
+  else if hasJobId then 1
+  else
+    let st := state.trimAscii.toString.toLower
+    if st == "claimed" then 1
+    else if st == "delivered" then 2
+    else if st == "crash_tombstone" then 3
+    else if st == "cancelled" then 4
+    else 0
 
 def stepQueueItem
     (st : CoreStore) (userId messageId : String) (op : UInt8)
@@ -350,13 +365,14 @@ def stepQueueItem
     let some row := row? | return .ok .notFound
     let mid := cell row 1
     let payload := cell row 2
-    let phase := cellNat row 3 |>.toUInt8
+    let rawPhase := cellNat row 3 |>.toUInt8
     let claimedGen := cellNat row 4 |>.toUInt64
     let claimBoot := cellNat row 5 |>.toUInt64
     let delivered := cellNat row 6 |>.toUInt64
     let editRev := cellNat row 7 |>.toUInt32
     let state := cell row 8
-    let _ := state
+    let hasJobId := cellNat row 9 != 0
+    let phase := effectiveQueuePhase rawPhase state hasJobId
     let content := (queuePayloadContent? payload).getD ""
     let source := (queuePayloadSource? payload).getD ""
     let runGen := (runGeneration.toNat?.getD 0).toUInt64
@@ -409,7 +425,7 @@ def stepQueueItem
        "edit_revision=?7,state=?8,payload=CASE WHEN ?9='' THEN payload ELSE json_set(payload,'$.message.content',?9) END " ++
        "WHERE user_id=?1 AND message_id=?2 AND COALESCE(phase,0)=CAST(?10 AS INTEGER) AND COALESCE(edit_revision,0)=CAST(?11 AS INTEGER);")
       #[userId, messageId, s!"{nextPhase.toNat}", s!"{nextClaimed}", s!"{nextBoot}", s!"{nextSeq}",
-        s!"{nextEdit}", nextState, if op == 6 then nextContentStored else "", s!"{phase.toNat}", s!"{editRev}"]
+        s!"{nextEdit}", nextState, if op == 6 then nextContentStored else "", s!"{rawPhase.toNat}", s!"{editRev}"]
     if let .error e := upd then return .error e
     let ch ← execParamQueryUnlocked st.missionsDb "SELECT changes();" #[]
     let .ok crs := ch | return .error "queue_changes_failed"
@@ -432,7 +448,9 @@ def stepQueueItem
 
 def queueItemBlocksEdit (st : CoreStore) (userId messageId : String) : IO (Except String Bool) := do
   let rows ← execParamQuery st.missionsDb
-    "SELECT COALESCE(phase,0),state FROM remote_message_queue WHERE user_id=?1 AND message_id=?2;"
+    ("SELECT COALESCE(phase,0),state," ++
+     "CASE WHEN json_valid(payload) AND json_extract(payload,'$.job_id') IS NOT NULL THEN 1 ELSE 0 END " ++
+     "FROM remote_message_queue WHERE user_id=?1 AND message_id=?2;")
     #[userId, messageId]
   match rows with
   | .error e => return .error e
@@ -440,8 +458,64 @@ def queueItemBlocksEdit (st : CoreStore) (userId messageId : String) : IO (Excep
     if rs.size ≤ 1 then return .ok false
     let phase := cellNat (rs[1]!) 0
     let state := cell (rs[1]!) 1
-    return .ok (phase == 1 || phase == 2 || phase == 3 || phase == 4 ||
+    let hasJobId := cellNat (rs[1]!) 2 != 0
+    return .ok (hasJobId || phase == 1 || phase == 2 || phase == 3 || phase == 4 ||
       state == "claimed" || state == "delivered" || state == "crash_tombstone" || state == "cancelled")
+
+/-- Atomically cancel all eligible waiting (unclaimed, non-job-bound) queued rows
+    for `missionId` inside one `BEGIN IMMEDIATE` transaction (`FUP-01`). -/
+def cancelMissionWaitingQueue (st : CoreStore) (userId missionId nowAt : String) : IO (Except String Nat) :=
+  withImmediateTx st.missionsDb do
+    let qRows ← execParamQueryUnlocked st.missionsDb
+      ("SELECT message_id, COALESCE(payload,''), COALESCE(edit_revision,0) " ++
+       "FROM remote_message_queue WHERE user_id=?1 AND mission_id=?2 AND state='waiting' AND COALESCE(phase,0)=0 " ++
+       "AND (NOT json_valid(payload) OR json_extract(payload,'$.job_id') IS NULL) ORDER BY rowid ASC;")
+      #[userId, missionId]
+    let .ok rs := qRows | return .error "queue_read_failed"
+    let mut cancelled : Nat := 0
+    for i in [1:rs.size] do
+      let messageId := (cell rs[i]! 0).trimAscii.toString
+      if messageId.isEmpty then continue
+      let payload := cell rs[i]! 1
+      let editRev := cellNat rs[i]! 2
+      let content := (queuePayloadContent? payload).getD ""
+      let source := (queuePayloadSource? payload).getD ""
+      let upd ← execParamQueryUnlocked st.missionsDb
+        ("UPDATE remote_message_queue SET phase=4, state='cancelled' " ++
+         "WHERE user_id=?1 AND message_id=?2 AND state='waiting' AND COALESCE(phase,0)=0 " ++
+         "AND (NOT json_valid(payload) OR json_extract(payload,'$.job_id') IS NULL);")
+        #[userId, messageId]
+      if let .error e := upd then return .error e
+      let ch ← execParamQueryUnlocked st.missionsDb "SELECT changes();" #[]
+      let .ok crs := ch | return .error "queue_changes_failed"
+      if changesOf crs > 0 then
+        let rec ← execParamQueryUnlocked st.missionsDb
+          ("INSERT INTO queue_item_receipts(message_id,mission_id,phase,claimed_generation,claim_boot_epoch,delivered_seq,edit_revision,content,source,updated_at) " ++
+           "VALUES(?1,?2,4,0,0,0,?3,?4,?5,?6) " ++
+           "ON CONFLICT(message_id) DO UPDATE SET phase=4,updated_at=excluded.updated_at;")
+          #[messageId, missionId, s!"{editRev}", content, source, nowAt]
+        if let .error e := rec then return .error e
+        cancelled := cancelled + 1
+    return .ok cancelled
+
+/-- Release a claimed (`phase=1`) queue row back to `waiting` (`phase=0`) after a
+    definite pre-accept dispatch refusal (never after uncertain acceptance) so the
+    remote follow-up pump can retry without losing the message (`RUN-10`/`FUP-02`). -/
+def releaseClaimedQueueItem (st : CoreStore) (userId messageId nowAt : String) : IO (Except String Bool) :=
+  withImmediateTx st.missionsDb do
+    let upd ← execParamQueryUnlocked st.missionsDb
+      ("UPDATE remote_message_queue SET phase=0, state='waiting', claimed_generation=0, claim_boot_epoch=0 " ++
+       "WHERE user_id=?1 AND message_id=?2 AND COALESCE(phase,0)=1 AND state='claimed';")
+      #[userId, messageId]
+    if let .error e := upd then return .error e
+    let ch ← execParamQueryUnlocked st.missionsDb "SELECT changes();" #[]
+    let .ok crs := ch | return .error "queue_changes_failed"
+    if changesOf crs == 0 then return .ok false
+    let rec ← execParamQueryUnlocked st.missionsDb
+      "UPDATE queue_item_receipts SET phase=0, claimed_generation=0, claim_boot_epoch=0, updated_at=?2 WHERE message_id=?1 AND phase=1;"
+      #[messageId, nowAt]
+    if let .error e := rec then return .error e
+    return .ok true
 
 def parkRateLimit
     (st : CoreStore) (missionId : String) (notBefore nowEpoch : UInt64) (resumeIntent : UInt8)

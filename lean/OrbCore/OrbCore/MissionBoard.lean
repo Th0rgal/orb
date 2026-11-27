@@ -181,7 +181,7 @@ def settledActionReceipt (actionId toolName state : String) (resObj : JVal) (tar
     receipt id and authenticated scope; no board contents go to diagnostic output. -/
 def write (db : SqliteDb) (reader : Reader) (target text now : String)
     (base : Option String) (actionId scope retryKey tool : String)
-    (interruptBeforeCommit : Bool := false) : IO (Except String JVal) := do
+    (interruptBeforeCommit : Bool := false) (rejectConflict : Bool := false) : IO (Except String JVal) := do
   -- Tenant denial precedes writer and payload validation, including idempotent replay.
   let .ok owners ← query db "SELECT owner_user_id FROM missions WHERE id=?1;" #[target]
     | return .error "db_error"
@@ -194,10 +194,14 @@ def write (db : SqliteDb) (reader : Reader) (target text now : String)
       | return .error "db_error"
     if live.size ≤ 1 || live[1]![0]?.getD "" != reader.userId then return .error "mission_not_found"
     if !retryKey.isEmpty then
-      let .ok replay ← q "SELECT result,id,tool,owner FROM mission_board_actions WHERE scope=?1 AND retry_key=?2 AND state='succeeded';" #[scope, retryKey]
+      let .ok replay ← q "SELECT result,id,tool,owner,COALESCE(arguments,'{}') FROM mission_board_actions WHERE scope=?1 AND retry_key=?2 AND state='succeeded';" #[scope, retryKey]
         | return .error "db_error"
       if replay.size > 1 then
         let r := replay[1]!
+        let prevArg := r[4]?.getD "{}"
+        let curArg := renderCompact (.obj #[("target", .str target), ("text_sha256", .str (digest text))])
+        if rejectConflict && prevArg != "{}" && prevArg != curArg then
+          return .error "mcp_idempotency_conflict"
         return (OrbBin.Json.parse (r[0]?.getD "")).map fun payload =>
           settledActionReceipt (r[1]?.getD "") (r[2]?.getD "") "succeeded" payload (r[3]?.getD "")
     let .ok rows ← q "SELECT text,updated_at,updated_by_mission_id,text_sha256 FROM mission_board WHERE mission_id=?1;" #[target]
@@ -218,11 +222,12 @@ def write (db : SqliteDb) (reader : Reader) (target text now : String)
            "updated_by_mission_id=excluded.updated_by_mission_id,text_sha256=excluded.text_sha256;")
           #[target, text, now, digest text] then return .error e
     if interruptBeforeCommit then return .error "board_write_interrupted_before_commit"
+    let argDigest := renderCompact (.obj #[("target", .str target), ("text_sha256", .str (digest text))])
     if let .error e ← q
         ("INSERT INTO mission_board_actions(id,owner,scope,retry_key,tool,arguments,state,result,created_at,updated_at) " ++
-         "VALUES(?1,?2,?3,?4,?5,'{}','succeeded',?6,?7,?7);")
+         "VALUES(?1,?2,?3,?4,?5,?8,'succeeded',?6,?7,?7);")
         #[actionId, target, scope, if retryKey.isEmpty then "auto:" ++ actionId else retryKey,
-          tool, renderCompact result, now] then return .error e
+          tool, renderCompact result, now, argDigest] then return .error e
     return .ok (settledActionReceipt actionId tool "succeeded" result target)
 
 /-- Receipt lookup is called only after the gateway's existing receipt-scope check. -/

@@ -4,7 +4,7 @@
   Agent Software Inventory & Updates, Library Git/Skills, System/Hermes-Assistant, Mesh Status,
   FIDO Signing Hub, GitHub Device-Flow Integration, Inbox Digest (`schemaVersion: 7`),
   Mission Stats, Conversation Search/Context, Codex Speed, Client Computers/Local Origins/Client-Runs,
-  Queue `send-now`, and `/api/control/running` (`0 import Lean`, `0 sorryAx`).
+  and `/api/control/running` (`0 import Lean`, `0 sorryAx`).
 -/
 import Std.Sync.Mutex
 import LeanSys.Auth

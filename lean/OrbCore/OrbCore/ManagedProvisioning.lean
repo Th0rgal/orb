@@ -238,20 +238,26 @@ def spawnManagedWorker (mc : ManagedComputeStore) (fleet : ManagedFleetState)
       machine with requestKey := spec.idempotencyKey, image := spec.fromSnapshot, spentCents := quote
     } now userAdmission? with
     | .ok reserved => pure reserved
-    -- The two holding limits are named, so a refused caller knows which one it met.
+    -- Preserve specific holding/budget limits so callers know why admission refused.
     | .error e => return .error (if e == "provider_concurrency_limit_reached" ||
-        e == "managed_user_machine_limit_reached" then e else "managed_spawn_rejected")
+        e == "managed_user_machine_limit_reached" ||
+        e.startsWith "mission_budget_exceeded:" ||
+        e == "managed_mission_concurrency_limit_reached" ||
+        e == "managed_provider_mission_concurrency_limit_reached" ||
+        e == "managed_compute_vcpu_bandwidth_exceeded" ||
+        e == "managed_compute_cost_bandwidth_exceeded" then e else "managed_spawn_rejected")
   let started ← runtime.monotonicMs
   let created ← match ← provider.spawn spec with
     | .ok m => pure m
     | .error e =>
-      -- Definitive refusal can close the reservation; transport/5xx/malformed
-      -- responses are uncertain and must be reconciled using its stable name.
+      -- Definitive refusal can close the reservation and refund its cost ledger entry;
+      -- transport/5xx/malformed responses are uncertain and must be reconciled using its stable name.
       if e.status == 400 || e.status == 401 || e.status == 403 || e.status == 422 then
         discard <| applyVmLifecycle mc reserved.id {
           opCode := Orb.ManagedNode.VmOp.encode .destroy, ownerLive := 0, idleElapsed := 1,
           presentedBootEpoch := reserved.nodeBootEpoch, nowEpoch := (← runtime.nowEpoch)
         }
+        discard <| refundManagedCostReservation mc s!"create:{reserved.id}"
       return .error (e.code ++ ":" ++ reserved.id)
   let live := { reserved with providerId := created.providerId }
   if let .error _ ← bindManagedProviderId mc reserved.id created.providerId reserved.nodeBootEpoch then
