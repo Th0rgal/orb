@@ -1022,13 +1022,15 @@ private def samplesUnchanged (scene : Scene) (idx : Nat) (a b : Text.AtlasPageBu
             (a.atlas.width * 4).toUSize (w * 4).toUSize h.toUSize then return false
   return true
 
-/-- Render only a dirty rectangle, preserving pixels outside it and culling unchanged visual
-primitives. The scene remains authoritative: structural clip/layer commands are retained. -/
+/-- Render only changed rectangles, preserving pixels outside them and culling unchanged visual
+primitives. The scene remains authoritative: structural clip/layer commands are retained.
+When `forceFull` is `false`, even a conservative viewport-sized `dirty` hint is narrowed via
+`changedRects` so only changed nodes are repainted; `forceFull := true` bypasses diffing for
+forced full repaints (resize, scale change, or `--verify-repaint` reference passes). -/
 def renderFrameDamage (ctx : VulkanContext) (clearColor : Color) (atlas : Text.GlyphAtlasCache)
-    (dirty : Rect) (scene : Scene) : IO VulkanContext := do
-  let fullDamage := dirty.x ≤ 0 && dirty.y ≤ 0 && dirty.right ≥ (ctx.width : Int) && dirty.bottom ≥ (ctx.height : Int)
+    (_dirty : Rect) (scene : Scene) (forceFull : Bool := false) : IO VulkanContext := do
   let some prev := ctx.previousPaint | return ← renderFrame ctx clearColor atlas scene
-  if fullDamage || prev.width != ctx.width || prev.height != ctx.height || prev.clear != clearColor ||
+  if forceFull || prev.width != ctx.width || prev.height != ctx.height || prev.clear != clearColor ||
       ctx.framebuffer.size != ctx.width * ctx.height * 4 || hasGlobalEffect scene || hasGlobalEffect prev.scene then
     return ← renderFrame ctx clearColor atlas scene
   let vp : Rect := ⟨0,0,ctx.width,ctx.height⟩

@@ -90,3 +90,32 @@ lean_obj_res lean_ui_vk_read_rect(size_t src_ptr, size_t src_stride, size_t row_
   }
   return lean_io_result_mk_ok(out);
 }
+
+lean_obj_res lean_ui_present_argb_rect(size_t dst_ptr, size_t dst_cap, b_lean_obj_arg src,
+                                       size_t x, size_t y, size_t w, size_t h,
+                                       size_t stride_px, lean_obj_arg world) {
+  (void)world;
+  if (!w || !h) return lean_io_result_mk_ok(lean_box(0));
+  if (!dst_ptr) return vk_io_err("lean_ui_present_argb_rect: null destination pointer");
+  if (!stride_px || w > stride_px || x > stride_px - w)
+    return vk_io_err("lean_ui_present_argb_rect: invalid rect bounds");
+  size_t src_px = lean_sarray_size(src) / 4;
+  size_t dst_px = dst_cap / 4;
+  if (y > src_px / stride_px || h > src_px / stride_px - y ||
+      y > dst_px / stride_px || h > dst_px / stride_px - y)
+    return vk_io_err("lean_ui_present_argb_rect: out of framebuffer bounds");
+  const uint8_t *restrict sbase = lean_sarray_cptr(src);
+  uint8_t *restrict dbase = (uint8_t *)dst_ptr;
+  for (size_t row = 0; row < h; ++row) {
+    size_t off = ((y + row) * stride_px + x) * 4;
+    const uint8_t *restrict s = sbase + off;
+    uint8_t *restrict d = dbase + off;
+    for (size_t col = 0; col < w * 4; col += 4) {
+      d[col]     = s[col + 2];
+      d[col + 1] = s[col + 1];
+      d[col + 2] = s[col];
+      d[col + 3] = s[col + 3];
+    }
+  }
+  return lean_io_result_mk_ok(lean_box(0));
+}

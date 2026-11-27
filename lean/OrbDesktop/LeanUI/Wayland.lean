@@ -482,6 +482,9 @@ structure ShmBuffers where
   frontIsB : Bool := true
   bufABusy : Bool := false
   bufBBusy : Bool := false
+  /-- Unsynced damage accumulated against `bufA` / `bufB` while it was the off-screen buffer. -/
+  bufADirty : Option Rect := none
+  bufBDirty : Option Rect := none
   deriving Repr, Inhabited
 
 /-- Proxies and native entry points of an open window. All zero when headless. -/
@@ -711,13 +714,59 @@ private def allocShm (c : WaylandClient) (w h : Nat) : IO ShmBuffers := do
   let mk (offset : Nat) (tag : UInt64) : IO USize :=
     marshalRequest pool 0 c.ifaces.wlBuffer 1 0 tag
       #[.newId, .int offset, .int w, .int h, .int (w * 4), .uint wlShmFormatArgb8888]
-  return { fd, ptr := ptr.toUSize, bytes, pool, bufA := ← mk 0 tagShmBufferA, bufB := ← mk frame tagShmBufferB, w, h }
+  let full : Rect := { x := 0, y := 0, w := (w : Int), h := (h : Int) }
+  return { fd, ptr := ptr.toUSize, bytes, pool, bufA := ← mk 0 tagShmBufferA, bufB := ← mk frame tagShmBufferB, w, h,
+           bufADirty := some full, bufBDirty := some full }
 
-/-- Show the RGBA8 framebuffer `fb` (device size) in the window: copy it into the back buffer,
-attach it, scale it to the logical size through the viewport and commit. -/
-def present (c : WaylandClient) (fb : ByteArray) : IO WaylandClient := do
+@[inline] private def clipRect (a b : Rect) : Rect :=
+  let x0 := max a.x b.x
+  let y0 := max a.y b.y
+  let x1 := min a.right b.right
+  let y1 := min a.bottom b.bottom
+  if x1 ≤ x0 || y1 ≤ y0 then { x := 0, y := 0, w := 0, h := 0 }
+  else { x := x0, y := y0, w := x1 - x0, h := y1 - y0 }
+
+@[inline] private def joinRect (a b : Rect) : Rect :=
+  let x0 := min a.x b.x
+  let y0 := min a.y b.y
+  let x1 := max a.right b.right
+  let y1 := max a.bottom b.bottom
+  { x := x0, y := y0, w := x1 - x0, h := y1 - y0 }
+
+/-- Compute the back-buffer copy rectangle, compositor surface damage rectangle, and next
+double-buffer dirty state `(copyRect, surfaceDamage, nextBufADirty, nextBufBDirty)`. -/
+def computeShmDamageStep (vp : Rect) (toB : Bool) (bufADirty bufBDirty dirty? : Option Rect) :
+    Rect × Rect × Option Rect × Option Rect :=
+  let curDirty : Rect := match dirty? with
+    | some r => clipRect vp r
+    | none => vp
+  let targetDirty := if toB then bufBDirty else bufADirty
+  let otherDirty := if toB then bufADirty else bufBDirty
+  let copyRect : Rect := match targetDirty with
+    | none => curDirty
+    | some prev =>
+      let prevClamped := clipRect vp prev
+      if curDirty.isEmpty then prevClamped
+      else if prevClamped.isEmpty then curDirty
+      else clipRect vp (joinRect prevClamped curDirty)
+  let nextOther : Option Rect :=
+    if curDirty.isEmpty then otherDirty
+    else match otherDirty with
+      | none => some curDirty
+      | some prev =>
+        let prevClamped := clipRect vp prev
+        if prevClamped.isEmpty then some curDirty
+        else some (clipRect vp (joinRect prevClamped curDirty))
+  if toB then (copyRect, curDirty, nextOther, none)
+  else (copyRect, curDirty, none, nextOther)
+
+/-- Show the RGBA8 framebuffer `fb` (device size) in the window: copy only the dirty back-buffer
+rectangle into the `wl_shm` back buffer, attach it, scale it through the viewport, report only
+the frame's dirty rectangle via `wl_surface.damage_buffer`, and commit. -/
+def present (c : WaylandClient) (fb : ByteArray) (dirty? : Option Rect := none) : IO WaylandClient := do
   let (bw, bh) := c.deviceBufferSize
-  if fb.size != bw * bh * 4 then
+  let frameBytes := bw * bh * 4
+  if fb.size != frameBytes then
     throw (IO.userError s!"present: framebuffer has {fb.size} bytes, the window needs {bw}x{bh}")
   let shm ← if c.shm.w == bw && c.shm.h == bh then pure c.shm else do
     releaseShm c
@@ -726,12 +775,23 @@ def present (c : WaylandClient) (fb : ByteArray) : IO WaylandClient := do
     if !shm.frontIsB && !shm.bufBBusy then true
     else if shm.frontIsB && !shm.bufABusy then false
     else !shm.frontIsB
-  let (buf, offset) := if toB then (shm.bufB, bw * bh * 4) else (shm.bufA, 0)
-  FFI.presentArgb (shm.ptr + offset.toUSize) fb
+  let (buf, offset) := if toB then (shm.bufB, frameBytes) else (shm.bufA, 0)
+  let vp : Rect := { x := 0, y := 0, w := (bw : Int), h := (bh : Int) }
+  let (copyRect, surfaceDmg, nextADirty, nextBDirty) :=
+    computeShmDamageStep vp toB shm.bufADirty shm.bufBDirty dirty?
+  if !copyRect.isEmpty then
+    if copyRect == vp then
+      FFI.presentArgb (shm.ptr + offset.toUSize) fb
+    else
+      FFI.presentArgbRect (shm.ptr + offset.toUSize) frameBytes.toUSize fb
+        copyRect.x.toNat.toUSize copyRect.y.toNat.toUSize
+        copyRect.w.toNat.toUSize copyRect.h.toNat.toUSize bw.toUSize
   let surface := c.window.surface
   let _ ← marshalRequest surface 1 0 4 0 0 #[.obj buf, .int 0, .int 0]
   let _ ← marshalRequest c.window.viewport 2 0 1 0 0 #[.int c.pendingW, .int c.pendingH]
-  let _ ← marshalRequest surface 9 0 4 0 0 #[.int 0, .int 0, .int bw, .int bh]
+  if !surfaceDmg.isEmpty then
+    let _ ← marshalRequest surface 9 0 4 0 0
+      #[.int surfaceDmg.x.toNat, .int surfaceDmg.y.toNat, .int surfaceDmg.w.toNat, .int surfaceDmg.h.toNat]
   let c1 ← requestFrameCallback { c with lastViewportW := c.pendingW, lastViewportH := c.pendingH }
   let _ ← marshalRequest surface 6 0 4 0 0 #[]
   if c1.window.fnFlush != 0 && c1.display != 0 then
@@ -739,7 +799,9 @@ def present (c : WaylandClient) (fb : ByteArray) : IO WaylandClient := do
   let shm' := { shm with
     frontIsB := toB
     bufABusy := if !toB then true else shm.bufABusy
-    bufBBusy := if toB then true else shm.bufBBusy }
+    bufBBusy := if toB then true else shm.bufBBusy
+    bufADirty := nextADirty
+    bufBDirty := nextBDirty }
   return { c1 with shm := shm', configurePendingCommit := false }
 
 /-- Release the window buffers, pending frame callback, and disconnect from the compositor. -/

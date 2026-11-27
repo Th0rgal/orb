@@ -150,6 +150,10 @@ structure RuntimeState (σ : Type) where
   scrollOffsetSub : Nat := 0
   contentHeightSub : Nat := 64000
   damage : Damage := none
+  /-- Explicit full-repaint override (set by `markFullDamage`, resize, scale; cleared on render). -/
+  forceFullRepaint : Bool := false
+  /-- Monotonic per-runtime session identifier (never reused across `initRuntimeOn` calls). -/
+  sessionId : UInt64 := 0
   framesRendered : Nat := 0
   quiescentSkips : Nat := 0
   presentCount : Nat := 0
@@ -170,9 +174,9 @@ def viewportDeviceRect (rt : RuntimeState σ) : Rect :=
 @[inline] def markDirty (rt : RuntimeState σ) (rect : Rect) : RuntimeState σ :=
   { rt with damage := Damage.add rt.damage rect }
 
-/-- Mark the entire viewport dirty. -/
+/-- Mark the entire viewport dirty and force a full repaint (bypassing incremental scene diffing). -/
 @[inline] def markFullDamage (rt : RuntimeState σ) : RuntimeState σ :=
-  rt.markDirty rt.viewportDeviceRect
+  { rt.markDirty rt.viewportDeviceRect with forceFullRepaint := true }
 
 /-- Device-pixel rect for a hit-testable entity, falling back to `viewportDeviceRect`. -/
 def entityDeviceRect (rt : RuntimeState σ) (id : EntityId) : Rect :=
@@ -280,12 +284,13 @@ where
         { rt with
           wayland := wl'
           activeScrollbarDrag := none
+          forceFullRepaint := true
           damage := Damage.add rt.damage { x := 0, y := 0, w := (bw : Int), h := (bh : Int) } }
       | .scale s120 =>
         let sc := if s120 > 0 then s120 else 120
         let wl' := { rt.wayland with scale120 := sc }
         let (bw, bh) := wl'.deviceBufferSize
-        { rt with wayland := wl', damage := Damage.add rt.damage { x := 0, y := 0, w := (bw : Int), h := (bh : Int) } }
+        { rt with wayland := wl', forceFullRepaint := true, damage := Damage.add rt.damage { x := 0, y := 0, w := (bw : Int), h := (bh : Int) } }
       | .windowFocus f =>
         let dmg := focusBorderDamage rt.windowFocused f rt.viewportDeviceRect
         let d' := match dmg with | none => rt.damage | some r => Damage.add rt.damage r
@@ -524,6 +529,7 @@ def stepFrameWithRegions {σ : Type} (rt : RuntimeState σ)
           activeScrollbarDrag
           focusableOrder := focusOrder
           damage := none
+          forceFullRepaint := false
           framesRendered := st.framesRendered + 1
           presentCount := st.presentCount + 1
           lastFrameTotalNs := (frameT1 - frameT0).toUInt64
@@ -557,11 +563,12 @@ def stepFrameWithRegions {σ : Type} (rt : RuntimeState σ)
       activeScrollbarDrag
       focusableOrder := focusOrder
       damage := none
+      forceFullRepaint := false
       framesRendered := st.framesRendered + 1
       lastFrameTotalNs := (frameT1 - frameT0).toUInt64
     }
   let vk' ← match st.damage with
-    | some dirty => Vulkan.renderFrameDamage vk0 clearColor atlas' dirty scene
+    | some dirty => Vulkan.renderFrameDamage vk0 clearColor atlas' dirty scene st.forceFullRepaint
     | none => Vulkan.renderFrame vk0 clearColor atlas' scene
   let frameT1 ← IO.monoNanosNow
   return {
@@ -573,6 +580,7 @@ def stepFrameWithRegions {σ : Type} (rt : RuntimeState σ)
     activeScrollbarDrag
     focusableOrder := focusOrder
     damage := none
+    forceFullRepaint := false
     framesRendered := st.framesRendered + 1
     lastFrameTotalNs := (frameT1 - frameT0).toUInt64
   }
@@ -663,9 +671,12 @@ def buildCanaryScene (rt : RuntimeState Unit) :
       w := subScale compRect.w, h := subScale compRect.h }
   return (ac, bgClear, prims, [(1, compSubRect)], [1])
 
+initialize runtimeSessionCounter : IO.Ref UInt64 ← IO.mkRef 1
+
 /-- `RuntimeState` for the Wayland session `wl`, with the whole viewport damaged. -/
 def initRuntimeOn {σ : Type} (cfg : RuntimeConfig) (wl : Wayland.WaylandClient) (initialApp : σ) :
     IO (RuntimeState σ) := do
+  let sid ← runtimeSessionCounter.modifyGet fun n => (n, n + 1)
   let (bw, bh) := wl.deviceBufferSize
   let useCpuOnly := wl.headless || cfg.headless || cfg.headlessGolden.isSome
   let vk ←
@@ -694,6 +705,7 @@ def initRuntimeOn {σ : Type} (cfg : RuntimeConfig) (wl : Wayland.WaylandClient)
     focus := focus0
     windowFocused := true
     damage := initDmg
+    sessionId := sid
   }
 
 /-- Initialize `RuntimeState` from `RuntimeConfig`. -/
@@ -802,7 +814,10 @@ def runWindow {σ : Type} (rt0 : RuntimeState σ)
       let wl ← Wayland.syncTextFocus wl textOwner.isSome
       rt := { rt with wayland := wl, lastImeOwner := textOwner }
       if rt.framesRendered != rendered && rt.vulkan.backend == .cpuShm then
-        let wl ← Wayland.present rt.wayland rt.vulkan.framebuffer
+        let presentDirty : Option Rect :=
+          if rt.vulkan.lastDamagePixels == 0 then some ⟨0, 0, 0, 0⟩
+          else rt.vulkan.lastUploadedDirtyRect
+        let wl ← Wayland.present rt.wayland rt.vulkan.framebuffer presentDirty
         rt := { rt with wayland := wl, presentCount := rt.presentCount + 1 }
       else if rt.running then
         -- Anti-busy-spin rule: when redraw is deferred awaiting `wl_callback.done`, block on

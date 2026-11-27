@@ -155,8 +155,9 @@ jobs:
           lake env python3 -IB tests/test_cloud_destination.py -v
           lake env lean --run tests/InputU6Sweep.lean
           lake env lean --run tests/WindowEffects.lean
-          # The chrome geometry guards belong to no built target: elaborate them here.
+          # The chrome geometry and U7 stream-damage guards belong to no built target: elaborate them here.
           lake env lean OrbDesktop/Spec/ChromeGeometry.lean
+          lake env lean OrbDesktop/Spec/StreamDamage.lean
           # Window-effects self-test, with the GPU readback half required on lavapipe.
           VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json ORB_REQUIRE_WINDOW_EFFECTS_GPU=1 \
             "$PWD/../../target/native/orb-desktop-native" --self-test
@@ -230,6 +231,7 @@ jobs:
           python3 -I scripts/test_leanui_window_effects.py
           scripts/leanui_window_smoke.sh target/native/orb-desktop-native
           target/native/orb-desktop-native --verify-repaint --bench 20 --width 1470 --height 923
+          target/native/orb-desktop-native --verify-repaint --bench-long 60 --width 1470 --height 923
           ORB_LEANUI_TEST_BINARY="$PWD/target/native/orb-desktop-native" python3 -IB lean/OrbDesktop/tests/test_vulkan_fallback_and_parity.py -v
 
       - name: Run U7 native frame budget and stream damage benchmark
