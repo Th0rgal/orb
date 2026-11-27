@@ -207,7 +207,7 @@ function requeue(stored:QueuedLocalMessage,cut:'restart'|'connection'|'backgroun
  stored.state='queued';stored.autoResumed=true;stored.cut=cut;stored.resumes=(stored.resumes??0)+1;
  if(cut==='connection'||cut==='background')stored.retryAfter=Date.now()+connectionRetryDelayMs(stored.resumes);else delete stored.retryAfter;
  delete stored.error;delete stored.interrupted;
- delete stored.receipt;delete stored.result;delete stored.resultId;delete stored.resultStatus;delete stored.userSynced;delete stored.claimedAt;
+ delete stored.receipt;delete stored.result;delete stored.resultId;delete stored.resultStatus;delete stored.claimedAt;
 }
 const wake=()=>window.dispatchEvent(new Event(wakeEvent));
 const queueChannel=()=>{
@@ -415,7 +415,7 @@ export async function retryQueuedMessage(id:string){
  await update(key,id,stored=>{
   if(stored.state==='error'||(stored.state==='dispatching'&&stored.error)||(stored.state==='accepted'&&stored.interrupted)){
    stored.state='queued';delete stored.error;delete stored.interrupted;delete stored.retryAfter;
-   delete stored.receipt;delete stored.result;delete stored.resultId;delete stored.resultStatus;delete stored.userSynced;delete stored.claimedAt;
+   delete stored.receipt;delete stored.result;delete stored.resultId;delete stored.resultStatus;delete stored.claimedAt;
   }
  });
  wake();
