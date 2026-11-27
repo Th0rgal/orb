@@ -248,7 +248,7 @@ def missionsSchemaSql : String :=
   "CREATE TABLE IF NOT EXISTS deferred_message_batches (mission_id TEXT NOT NULL, batch_seq INTEGER NOT NULL, message_id TEXT NOT NULL, content TEXT NOT NULL, source TEXT NOT NULL DEFAULT '', unpacked INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL DEFAULT '', PRIMARY KEY(mission_id, batch_seq, message_id));" ++
   "CREATE UNIQUE INDEX IF NOT EXISTS deferred_message_batches_uuid ON deferred_message_batches(mission_id, message_id);" ++
   "CREATE TABLE IF NOT EXISTS queue_item_receipts (message_id TEXT PRIMARY KEY, mission_id TEXT NOT NULL, phase INTEGER NOT NULL DEFAULT 0, claimed_generation INTEGER NOT NULL DEFAULT 0, claim_boot_epoch INTEGER NOT NULL DEFAULT 0, delivered_seq INTEGER NOT NULL DEFAULT 0, edit_revision INTEGER NOT NULL DEFAULT 0, content TEXT NOT NULL DEFAULT '', source TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL DEFAULT '');" ++
-  "CREATE TABLE IF NOT EXISTS mission_continuations (id TEXT PRIMARY KEY, mission_id TEXT NOT NULL, run_generation INTEGER NOT NULL, phase INTEGER NOT NULL DEFAULT 1, due_epoch INTEGER NOT NULL DEFAULT 0, trigger_kind TEXT NOT NULL DEFAULT 'time', reason TEXT NOT NULL DEFAULT '', prompt TEXT NOT NULL DEFAULT '', request_id TEXT NOT NULL DEFAULT '', job_id TEXT NOT NULL DEFAULT '', source TEXT NOT NULL DEFAULT '', error TEXT NOT NULL DEFAULT '', recurrence TEXT NOT NULL DEFAULT '', stop_after_first INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL DEFAULT '', UNIQUE(mission_id, request_id));" ++
+  "CREATE TABLE IF NOT EXISTS mission_continuations (id TEXT PRIMARY KEY, mission_id TEXT NOT NULL, run_generation INTEGER NOT NULL, phase INTEGER NOT NULL DEFAULT 1, due_epoch INTEGER NOT NULL DEFAULT 0, trigger_kind TEXT NOT NULL DEFAULT 'time', reason TEXT NOT NULL DEFAULT '', prompt TEXT NOT NULL DEFAULT '', request_id TEXT NOT NULL DEFAULT '', job_id TEXT NOT NULL DEFAULT '', dispatch_job_id TEXT NOT NULL DEFAULT '', source TEXT NOT NULL DEFAULT '', error TEXT NOT NULL DEFAULT '', recurrence TEXT NOT NULL DEFAULT '', stop_after_first INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL DEFAULT '', UNIQUE(mission_id, request_id));" ++
   "CREATE TABLE IF NOT EXISTS mission_supervision (mission_id TEXT PRIMARY KEY, bg_wait_arms INTEGER NOT NULL DEFAULT 0, stall_consecutive_arms INTEGER NOT NULL DEFAULT 0, updated_at TEXT NOT NULL DEFAULT '');" ++
   "CREATE TABLE IF NOT EXISTS mac_tether_requests (id TEXT PRIMARY KEY, mission_id TEXT NOT NULL DEFAULT '', requester_label TEXT NOT NULL DEFAULT '', host_id TEXT NOT NULL DEFAULT '', is_managed_vm INTEGER NOT NULL DEFAULT 0, requested_scope TEXT NOT NULL DEFAULT 'sandbox_ssh', effective_scope TEXT NOT NULL DEFAULT '', effective_target TEXT NOT NULL DEFAULT 'sandbox', agent_ports_json TEXT NOT NULL DEFAULT '[]', mac_ports_json TEXT NOT NULL DEFAULT '[]', ttl_minutes INTEGER NOT NULL DEFAULT 60, session_scoped INTEGER NOT NULL DEFAULT 0, reason TEXT NOT NULL DEFAULT '', agent_wg_pubkey TEXT NOT NULL DEFAULT '', agent_kem_pubkey TEXT NOT NULL DEFAULT '', agent_sign_pubkey_hex TEXT NOT NULL DEFAULT '', agent_ssh_pubkey TEXT NOT NULL DEFAULT '', agent_direct_endpoint TEXT NOT NULL DEFAULT '', mac_wg_pubkey TEXT NOT NULL DEFAULT '', mac_kem_pubkey TEXT NOT NULL DEFAULT '', mac_direct_endpoint TEXT NOT NULL DEFAULT '', relay_endpoint TEXT NOT NULL DEFAULT '', sealed_psk_b64 TEXT NOT NULL DEFAULT '', overlay_ip TEXT NOT NULL DEFAULT '', lease_token TEXT NOT NULL DEFAULT '', state TEXT NOT NULL DEFAULT 'pending', deny_reason TEXT NOT NULL DEFAULT '', created_at INTEGER NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL DEFAULT 0, expires_at INTEGER NOT NULL DEFAULT 0, revoked_at INTEGER NOT NULL DEFAULT 0);" ++
   "CREATE INDEX IF NOT EXISTS idx_mac_tether_state ON mac_tether_requests(state, updated_at);" ++
@@ -2260,11 +2260,15 @@ def normalizeContinuationIso8601 (raw : String) (fallbackEpoch : UInt64 := 0) : 
   else
     formatEpochIso8601Utc fallbackEpoch
 
-/-- Format continuation `next_at` JSON field value (`null` when `trigger_kind == "job"` or `due == 0`,
+/-- Format continuation `next_at` JSON field value (`null` when job-triggered or `due == 0`,
     otherwise JSON-escaped ISO-8601 UTC `YYYY-MM-DDTHH:MM:SSZ`). -/
 def renderContinuationNextAtJson (triggerKind : String) (dueEpoch : UInt64) : String :=
-  if triggerKind == "job" || dueEpoch == 0 then "null"
+  if triggerKind == "job" || triggerKind == "durable_job_terminal" || dueEpoch == 0 then "null"
   else jsonEscape (formatEpochIso8601Utc dueEpoch)
+
+/-- Map stored continuation `trigger_kind` to the client UI wire contract (`"time" | "job" | "delivery"`). -/
+def renderContinuationApiTrigger (triggerKind : String) : String :=
+  if triggerKind == "durable_job_terminal" then "job" else triggerKind
 
 /-- Direct children executing, queued, waiting for background work, or holding an armed
     continuation, independent of the list response's filters and pagination. Uses parent alias `m`. -/
@@ -2506,7 +2510,7 @@ def listMissionsJson
         let recJson := if crec.isEmpty then "" else s!",\"recurrence\":{jsonEscape crec}"
         let entry :=
           s!"\{\"id\":{jsonEscape cid},\"state\":{jsonEscape cstate}," ++
-          s!"\"next_at\":{renderContinuationNextAtJson ctrig cdue.toUInt64},\"trigger\":{jsonEscape ctrig},\"reason\":{jsonEscape creason}{srcJson}{errJson}{recJson}}"
+          s!"\"next_at\":{renderContinuationNextAtJson ctrig cdue.toUInt64},\"trigger\":{jsonEscape (renderContinuationApiTrigger ctrig)},\"reason\":{jsonEscape creason}{srcJson}{errJson}{recJson}}"
         m := m.insert mid (((m[mid]?).getD #[]).push entry)
     return m
   let outStr : String := Id.run do
@@ -4523,12 +4527,22 @@ def resolveNativeAntigravityToken? (st : CoreStore) (token : String) (now : UInt
     let row ← rows[1]?
     return ⟨← row[0]?, ← row[1]?, ← row[2]?, ← row[3]?⟩
 
+def missionProxyTokenSha256 (rawTok : String) : String :=
+  let clean := rawTok.trimAscii.toString
+  if clean.isEmpty then "" else bytesToHexLower (sha256Bytes clean.toUTF8)
+
+def revokeMissionProxyTokenSha256 (st : CoreStore) (tokSha : String) : IO Unit := do
+  let clean := tokSha.trimAscii.toString
+  if !clean.isEmpty then
+    discard <| execParamQuery st.missionsDb
+      "UPDATE mission_proxy_tokens SET revoked=1 WHERE token_sha256=?1;" #[clean]
+
 def revokeSingleMissionProxyToken (st : CoreStore) (rawTok : String) : IO Unit := do
   let clean := rawTok.trimAscii.toString
-  if clean.startsWith "orb-mpt-v1_" || clean.startsWith "orb-agy-v1_" then
-    let tokSha := bytesToHexLower (sha256Bytes clean.toUTF8)
-    discard <| execParamQuery st.missionsDb
-      "UPDATE mission_proxy_tokens SET revoked=1 WHERE token_sha256=?1;" #[tokSha]
+  if clean.startsWith "sha256:" then
+    revokeMissionProxyTokenSha256 st (clean.drop 7).toString
+  else if clean.startsWith "orb-mpt-v1_" || clean.startsWith "orb-agy-v1_" then
+    revokeMissionProxyTokenSha256 st (missionProxyTokenSha256 clean)
 
 def revokeMissionProxyTokensForMission (st : CoreStore) (missionId : String) : IO Unit := do
   discard <| execParamQuery st.missionsDb

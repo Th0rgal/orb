@@ -738,11 +738,11 @@ it('does not re-append user_message when re-attaching a persisted userSynced acc
  stop = startLocalQueueWorker();
  await vi.advanceTimersByTimeAsync(100);
  expect(mocks.recover).toHaveBeenCalledWith('mission');
- // Must not re-append user_message for the already-synced attempt before recovery re-launches it.
- const firstAttemptAppends = mocks.append.mock.calls.filter(
-  (call: unknown[]) => call[1] === 'user' && call[3] === '00000000-0000-4000-8000-000000000080' && (call[4] as { run_id?: string } | undefined)?.run_id === 'run-1',
+ // Must not re-append user_message for the already-synced message on re-attach or auto-resume.
+ const userAppends = mocks.append.mock.calls.filter(
+  (call: unknown[]) => call[1] === 'user' && call[3] === '00000000-0000-4000-8000-000000000080',
  );
- expect(firstAttemptAppends).toHaveLength(0);
+ expect(userAppends).toHaveLength(0);
  // Recovery auto-resumes the lost turn once and settles cleanly.
  expect(mocks.launch).toHaveBeenCalledTimes(1);
  expect(queuedLocalMessages('mission')).toHaveLength(0);

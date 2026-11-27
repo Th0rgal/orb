@@ -21,30 +21,135 @@ private def sql (db : SqliteDb) (stmt : String) (params : Array String := #[]) :
 
 private def verifyLegacyMigration (store : CoreStore) (now : UInt64) : IO Unit := do
   let db := store.missionsDb
-  sql db ("CREATE TABLE automations(id TEXT PRIMARY KEY,mission_id TEXT,command_source_data TEXT, " ++
-    "trigger_type TEXT,trigger_data TEXT,stop_policy TEXT,active INTEGER);")
-  for (aid, kind, payload, policy) in #[
-      ("unknown", "future_trigger", "{\"job_id\":\"unrelated\"}", "never"),
-      ("cron", "cron", "{\"expression\":\"0 0 * * *\"}", "after_first_fire"),
-      ("policy", "interval", "{\"seconds\":300}", "consecutive_failures:2"),
-      ("bad-insert", "interval", "{\"seconds\":300}", "after_first_fire"),
-      ("bad-retire", "interval", "{\"seconds\":300}", "after_first_fire"),
-      ("valid", "interval", "{\"seconds\":300}", "after_first_fire")] do
-    sql db "INSERT INTO missions(id,title,status,backend,created_at,updated_at) VALUES(?1,'legacy','completed','claudecode','t0','t0');" #[s!"m-legacy-{aid}"]
-    sql db "INSERT INTO automations VALUES(?1,?2,'{\"content\":\"legacy intent\"}',?3,?4,?5,1);"
-      #[aid, s!"m-legacy-{aid}", kind, payload, policy]
+  sql db ("CREATE TABLE automations(id TEXT PRIMARY KEY,mission_id TEXT,command_source_type TEXT DEFAULT 'inline', " ++
+    "command_source_data TEXT,trigger_type TEXT,trigger_data TEXT,variables TEXT DEFAULT '{}',stop_policy TEXT, " ++
+    "fresh_session TEXT DEFAULT 'keep',driver TEXT DEFAULT 'scheduler',active INTEGER);")
+  sql db "CREATE TABLE mission_wakeup_fences(mission_id TEXT PRIMARY KEY, stopped_generation INTEGER NOT NULL);"
+  let unsupported : Array (String × String × String × String × String × String × String × String × String) := #[
+    ("unknown", "inline", "{\"content\":\"legacy intent\"}", "future_trigger", "{\"job_id\":\"unrelated\"}", "{}", "never", "keep", "scheduler"),
+    ("cron", "inline", "{\"content\":\"legacy intent\"}", "cron", "{\"expression\":\"0 0 * * *\"}", "{}", "after_first_fire", "keep", "scheduler"),
+    ("webhook", "inline", "{\"content\":\"legacy intent\"}", "webhook", "{\"path\":\"/hook\"}", "{}", "after_first_fire", "keep", "scheduler"),
+    ("agent-fin", "inline", "{\"content\":\"legacy intent\"}", "agent_finished", "{}", "{}", "after_first_fire", "keep", "scheduler"),
+    ("telegram", "inline", "{\"content\":\"legacy intent\"}", "telegram", "{\"chat_id\":1}", "{}", "after_first_fire", "keep", "scheduler"),
+    ("empty-trig", "inline", "{\"content\":\"legacy intent\"}", "", "{\"seconds\":300}", "{}", "after_first_fire", "keep", "scheduler"),
+    ("policy", "inline", "{\"content\":\"legacy intent\"}", "interval", "{\"seconds\":300}", "{}", "consecutive_failures:2", "keep", "scheduler"),
+    ("term-done", "inline", "{\"content\":\"legacy intent\"}", "interval", "{\"seconds\":300}", "{}", "when_mission_terminal", "keep", "scheduler"),
+    ("cmd-lib", "library", "{\"name\":\"nightly\"}", "interval", "{\"seconds\":300}", "{}", "after_first_fire", "keep", "scheduler"),
+    ("cmd-file", "local_file", "{\"path\":\"/tmp/run.md\"}", "interval", "{\"seconds\":300}", "{}", "after_first_fire", "keep", "scheduler"),
+    ("cmd-loop", "native_loop", "{\"harness\":\"codex\"}", "interval", "{\"seconds\":300}", "{}", "after_first_fire", "keep", "scheduler"),
+    ("cmd-obj", "inline", "{\"name\":\"not-inline-content\"}", "interval", "{\"seconds\":300}", "{}", "after_first_fire", "keep", "scheduler"),
+    ("cmd-badjson", "inline", "{\"content\":\"broken", "interval", "{\"seconds\":300}", "{}", "after_first_fire", "keep", "scheduler"),
+    ("cmd-empty", "inline", "", "interval", "{\"seconds\":300}", "{}", "after_first_fire", "keep", "scheduler"),
+    ("cmd-noninline-type", "inline", "{\"type\":\"library\",\"content\":\"sneaky\"}", "interval", "{\"seconds\":300}", "{}", "after_first_fire", "keep", "scheduler"),
+    ("drv-loop", "inline", "{\"content\":\"legacy intent\"}", "interval", "{\"seconds\":300}", "{}", "after_first_fire", "keep", "harness_loop"),
+    ("fresh-sw", "inline", "{\"content\":\"legacy intent\"}", "interval", "{\"seconds\":300}", "{}", "after_first_fire", "always", "scheduler"),
+    ("has-vars", "inline", "{\"content\":\"legacy intent\"}", "interval", "{\"seconds\":300}", "{\"env\":\"prod\"}", "after_first_fire", "keep", "scheduler"),
+    ("stale-wgen", "inline", "{\"content\":\"stale wakeup\"}", "interval", "{\"seconds\":300}", "{\"__wakeup_request_id\":\"req-stale\",\"__wakeup_run_generation\":\"1\",\"__wakeup_source\":\"mcp\"}", "after_first_fire", "keep", "scheduler"),
+    ("stale-gen0-local", "inline", "{\"content\":\"stale gen0 after local turn\"}", "interval", "{\"seconds\":300}", "{\"__wakeup_request_id\":\"req-stale-gen0\",\"__wakeup_run_generation\":\"0\",\"__wakeup_source\":\"mcp\"}", "after_first_fire", "keep", "scheduler"),
+    ("stale-runs-gen", "inline", "{\"content\":\"stale turn1\"}", "interval", "{\"seconds\":300}", "{\"__wakeup_request_id\":\"req-stale-runs\",\"__wakeup_run_generation\":\"1\",\"__wakeup_source\":\"mcp\"}", "after_first_fire", "keep", "scheduler"),
+    ("fenced-wgen", "inline", "{\"content\":\"fenced wakeup\"}", "interval", "{\"seconds\":300}", "{\"__wakeup_request_id\":\"req-fenced\",\"__wakeup_run_generation\":\"2\",\"__wakeup_source\":\"mcp\"}", "after_first_fire", "keep", "scheduler"),
+    ("local-client-var", "inline", "{\"content\":\"desktop local\"}", "interval", "{\"seconds\":300}", "{\"__wakeup_request_id\":\"req-local-var\",\"__wakeup_local\":\"true\",\"__wakeup_source\":\"orb-local\"}", "after_first_fire", "keep", "scheduler"),
+    ("local-client-num", "inline", "{\"content\":\"desktop local num\"}", "interval", "{\"seconds\":300}", "{\"__wakeup_request_id\":\"req-local-num\",\"__wakeup_local\":1,\"__wakeup_source\":\"durable-job-terminal\"}", "after_first_fire", "keep", "scheduler"),
+    ("fenced-untagged", "inline", "{\"content\":\"fenced untagged\"}", "interval", "{\"seconds\":300}", "{}", "after_first_fire", "keep", "scheduler"),
+    ("bad-json", "inline", "{\"content\":\"legacy intent\"}", "interval", "not-json", "{}", "after_first_fire", "keep", "scheduler"),
+    ("bad-at", "inline", "{\"content\":\"legacy intent\"}", "time", "{\"at\":\"not-a-date\",\"seconds\":300}", "{}", "after_first_fire", "keep", "scheduler"),
+    ("bad-insert", "inline", "{\"content\":\"legacy intent\"}", "interval", "{\"seconds\":300}", "{}", "after_first_fire", "keep", "scheduler"),
+    ("bad-retire", "inline", "{\"content\":\"legacy intent\"}", "interval", "{\"seconds\":300}", "{}", "after_first_fire", "keep", "scheduler")
+  ]
+  let supported : Array (String × String × String × String × String × String × String × String × String) := #[
+    ("valid", "inline", "{\"content\":\"legacy intent\"}", "interval", "{\"seconds\":300}", "{}", "after_first_fire", "keep", "scheduler"),
+    ("valid-recur", "inline", "{\"content\":\"recurring intent\"}", "interval", "{\"seconds\":300}", "{}", "never", "keep", "scheduler"),
+    ("valid-job", "inline", "{\"content\":\"job intent\"}", "durable_job_terminal", "{\"job_id\":\"job-leg-1\"}", "{}", "after_first_fire", "keep", "scheduler"),
+    ("valid-wakeup-meta", "inline", "{\"content\":\"meta wakeup\"}", "interval", "{\"seconds\":300}", "{\"__wakeup_request_id\":\"req-meta-1\",\"__wakeup_reason\":\"poll\",\"__wakeup_source\":\"mcp\",\"__wakeup_run_generation\":\"3\"}", "after_first_fire", "keep", "scheduler"),
+    ("valid-gen0", "inline", "{\"content\":\"pre-run wakeup\"}", "interval", "{\"seconds\":300}", "{\"__wakeup_request_id\":\"req-gen0\",\"__wakeup_run_generation\":\"0\",\"__wakeup_source\":\"mcp\"}", "after_first_fire", "keep", "scheduler")
+  ]
+  for (aid, cmdType, cmdData, kind, payload, vars, policy, fresh, drv) in unsupported ++ supported do
+    let mGen := if aid == "stale-wgen" || aid == "fenced-wgen" || aid == "stale-gen0-local" then "2" else if aid == "valid-gen0" then "0" else "1"
+    sql db "INSERT INTO missions(id,title,status,backend,run_generation,created_at,updated_at) VALUES(?1,'legacy','completed','claudecode',CAST(?2 AS INTEGER),'t0','t0');" #[s!"m-legacy-{aid}", mGen]
+    sql db "INSERT INTO automations VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,1);"
+      #[aid, s!"m-legacy-{aid}", cmdType, cmdData, kind, payload, vars, policy, fresh, drv]
+  -- Simulate upgraded legacy DB where `missions.run_generation` defaulted to 1 while `mission_runs` reached generation 3.
+  sql db "INSERT INTO mission_runs(id,mission_id,generation,execution_state,updated_at) VALUES('r-leg-meta','m-legacy-valid-wakeup-meta',3,'terminal','t0');"
+  sql db "INSERT INTO mission_runs(id,mission_id,generation,execution_state,updated_at) VALUES('r-leg-stale','m-legacy-stale-runs-gen',3,'terminal','t0');"
+  sql db "INSERT INTO mission_wakeup_fences(mission_id,stopped_generation) VALUES('m-legacy-fenced-wgen',2);"
+  sql db "INSERT INTO mission_wakeup_fences(mission_id,stopped_generation) VALUES('m-legacy-fenced-untagged',1);"
+  -- SQL NULL command_source_data, archived mission, client-placed mission, already-retired duplicate request_id,
+  -- revoked/UI-cancelled/fired-replacement continuations, and remote_goal_stopped mission.
+  sql db "INSERT INTO missions(id,title,status,backend,run_generation,created_at,updated_at) VALUES('m-legacy-cmd-null','legacy','completed','claudecode',1,'t0','t0');"
+  sql db "INSERT INTO automations(id,mission_id,command_source_type,command_source_data,trigger_type,trigger_data,variables,stop_policy,fresh_session,driver,active) VALUES('cmd-null','m-legacy-cmd-null','inline',NULL,'interval','{\"seconds\":300}','{}','after_first_fire','keep','scheduler',1);"
+  sql db "INSERT INTO missions(id,title,status,backend,run_generation,created_at,updated_at) VALUES('m-legacy-archived','legacy','acknowledged','claudecode',1,'t0','t0');"
+  sql db "INSERT INTO automations VALUES('archived','m-legacy-archived','inline','{\"content\":\"archived intent\"}','interval','{\"seconds\":300}','{}','after_first_fire','keep','scheduler',1);"
+  sql db "INSERT INTO missions(id,title,status,backend,placement_kind,run_generation,created_at,updated_at) VALUES('m-legacy-client','legacy','completed','claudecode','client',1,'t0','t0');"
+  sql db "INSERT INTO automations VALUES('client-place','m-legacy-client','inline','{\"content\":\"client intent\"}','interval','{\"seconds\":300}','{}','after_first_fire','keep','scheduler',1);"
+  sql db "INSERT INTO missions(id,title,status,backend,run_generation,created_at,updated_at) VALUES('m-legacy-dup-req','legacy','completed','claudecode',1,'t0','t0');"
+  sql db "INSERT INTO mission_continuations(id,mission_id,run_generation,phase,due_epoch,trigger_kind,reason,prompt,request_id,job_id,source,error,recurrence,stop_after_first,created_at,updated_at) VALUES('c-prior-dup','m-legacy-dup-req',1,4,100,'time','test','prior','req-dup-retired','','mcp','','',1,'t0','t0');"
+  sql db "INSERT INTO automations VALUES('dup-req','m-legacy-dup-req','inline','{\"content\":\"dup intent\"}','interval','{\"seconds\":300}','{\"__wakeup_request_id\":\"req-dup-retired\"}','after_first_fire','keep','scheduler',1);"
+  sql db "INSERT INTO missions(id,title,status,backend,run_generation,created_at,updated_at) VALUES('m-legacy-revoked','legacy','completed','claudecode',1,'t0','t0');"
+  sql db "INSERT INTO mission_continuations(id,mission_id,run_generation,phase,due_epoch,trigger_kind,reason,prompt,request_id,job_id,source,error,recurrence,stop_after_first,created_at,updated_at) VALUES('c-prior-rev','m-legacy-revoked',1,4,100,'time','test','revoked','req-rev','','mcp','revoked','',1,'t0','t0');"
+  sql db "INSERT INTO automations VALUES('revoked-src','m-legacy-revoked','inline','{\"content\":\"do not resurrect\"}','interval','{\"seconds\":300}','{}','after_first_fire','keep','scheduler',1);"
+  sql db "INSERT INTO missions(id,title,status,backend,run_generation,created_at,updated_at) VALUES('m-legacy-fired-rep','legacy','completed','claudecode',1,'t0','t0');"
+  sql db "INSERT INTO mission_continuations(id,mission_id,run_generation,phase,due_epoch,trigger_kind,reason,prompt,request_id,job_id,source,error,recurrence,stop_after_first,created_at,updated_at) VALUES('c-prior-fired','m-legacy-fired-rep',1,4,100,'time','test','fired','req-fired','','mcp','','',1,'t0','t0');"
+  sql db "INSERT INTO automations VALUES('fired-rep-src','m-legacy-fired-rep','inline','{\"content\":\"do not resurrect fired\"}','interval','{\"seconds\":300}','{}','after_first_fire','keep','scheduler',1);"
+  sql db "INSERT INTO missions(id,title,status,backend,run_generation,created_at,updated_at) VALUES('m-legacy-ui-cancel','legacy','awaiting_user','claudecode',1,'t0','t0');"
+  sql db "INSERT INTO mission_continuations(id,mission_id,run_generation,phase,due_epoch,trigger_kind,reason,prompt,request_id,job_id,source,error,recurrence,stop_after_first,created_at,updated_at) VALUES('c-ui-cancel','m-legacy-ui-cancel',1,1,CAST(?1 AS INTEGER),'time','test','armed','req-ui-cancel','','mcp','','',1,'t0','t0');" #[s!"{now + 600}"]
+  sql db "INSERT INTO automations VALUES('ui-cancel-src','m-legacy-ui-cancel','inline','{\"content\":\"do not resurrect cancelled\"}','interval','{\"seconds\":300}','{}','after_first_fire','keep','scheduler',1);"
+  sql db "INSERT INTO missions(id,title,status,terminal_reason,backend,run_generation,created_at,updated_at) VALUES('m-legacy-goal-stop','legacy','interrupted','remote_goal_stopped','claudecode',1,'t0','t0');"
+  sql db "INSERT INTO automations VALUES('goal-stop-src','m-legacy-goal-stop','inline','{\"content\":\"do not resurrect goal stop\"}','interval','{\"seconds\":300}','{}','after_first_fire','keep','scheduler',1);"
+  sql db "INSERT INTO missions(id,title,status,terminal_reason,backend,run_generation,created_at,updated_at) VALUES('m-legacy-tagged-stop','legacy','interrupted','hosted_stop','claudecode',1,'t0','t0');"
+  sql db "INSERT INTO automations VALUES('tagged-stop-src','m-legacy-tagged-stop','inline','{\"content\":\"do not resurrect tagged stop\"}','interval','{\"seconds\":300}','{\"__wakeup_request_id\":\"req-tagged-stop\",\"__wakeup_run_generation\":\"1\"}','after_first_fire','keep','scheduler',1);"
   sql db ("CREATE TRIGGER reject_legacy_insert BEFORE INSERT ON mission_continuations " ++
     "WHEN NEW.id='leg-auto-bad-insert' BEGIN SELECT RAISE(ABORT,'fixture insert failure'); END;")
   sql db ("CREATE TRIGGER reject_legacy_retirement BEFORE UPDATE ON automations " ++
     "WHEN OLD.id='bad-retire' BEGIN SELECT RAISE(IGNORE); END;")
-  check ((← migrateLegacyAutomations store now) == 1 && (← migrateLegacyAutomations store now) == 0)
-    "only the supported, fully written source migrates, once"
-  check ((← cellOf db "SELECT COUNT(*) FROM automations WHERE active=1 AND id<>'valid';" #[]) == "5")
-    "unsupported intent and both failed writes retain their active source"
-  check ((← cellOf db "SELECT COUNT(*) FROM missions WHERE id LIKE 'm-legacy-%' AND status='completed';" #[]) == "5")
-    "failed writes do not park the owning missions"
-  check ((← cellOf db "SELECT group_concat(id || ':' || prompt || ':' || stop_after_first) FROM mission_continuations WHERE source='legacy-automations-migration';" #[]) ==
-    "leg-auto-valid:legacy intent:1") "valid legacy after_first_fire stays one-shot"
+  let totalSkippedActive := unsupported.size + 8
+  check ((← migrateLegacyAutomations store now) == supported.size && (← migrateLegacyAutomations store now) == 0)
+    "only supported, fully written sources migrate, once"
+  let .ok (.ok _) ← actOnContinuation store "c-ui-cancel" "cancel" "t1" now
+    | throw (IO.userError "ui cancel continuation failed")
+  check ((← migrateLegacyAutomations store (now + 5)) == 0 &&
+    (← cellOf db "SELECT COUNT(*) FROM mission_continuations WHERE mission_id='m-legacy-ui-cancel' AND phase=1;" #[]) == "0")
+    "UI per-item cancel does not resurrect an unmigrated legacy automation"
+  check ((← cellOf db "SELECT COUNT(*) FROM automations WHERE active=1 AND id NOT IN ('valid','valid-recur','valid-job','valid-wakeup-meta','valid-gen0','dup-req');" #[]) == s!"{totalSkippedActive}")
+    "unsupported triggers, unsupported intent, archived/client missions, fenced/stale metadata, cancelled/revoked/fired rows, and failed writes retain their active source"
+  check ((← cellOf db "SELECT active FROM automations WHERE id='dup-req';" #[]) == "0" &&
+    (← cellOf db "SELECT status FROM missions WHERE id='m-legacy-dup-req';" #[]) == "completed")
+    "duplicate already-retired request_id retires legacy row without un-completing mission"
+  check ((← cellOf db "SELECT run_generation FROM missions WHERE id='m-legacy-valid-wakeup-meta';" #[]) == "3" &&
+    (← cellOf db "SELECT run_generation FROM missions WHERE id='m-legacy-valid-gen0';" #[]) == "1")
+    "migrating legacy wakeups syncs missions.run_generation from both MAX(mission_runs.generation) and stored 0"
+  check ((← cellOf db "SELECT COUNT(*) FROM missions WHERE id LIKE 'm-legacy-%' AND status='completed';" #[]) == s!"{unsupported.size + 5}")
+    "skipped rows, duplicate retirements, and failed writes do not park completed owning missions"
+  check ((← cellOf db "SELECT status FROM missions WHERE id='m-legacy-archived';" #[]) == "acknowledged")
+    "archived missions stay acknowledged during legacy migration"
+  check ((← cellOf db "SELECT group_concat(id || ':' || trigger_kind || ':' || prompt || ':' || stop_after_first || ':' || recurrence || ':' || request_id || ':' || run_generation, '|') FROM (SELECT * FROM mission_continuations WHERE source='legacy-automations-migration' ORDER BY id);" #[]) ==
+    "leg-auto-valid:time:legacy intent:1::legacy-automation:valid:1|leg-auto-valid-gen0:time:pre-run wakeup:1::req-gen0:1|leg-auto-valid-job:durable_job_terminal:job intent:1::legacy-automation:valid-job:1|leg-auto-valid-recur:time:recurring intent:0:interval:300:legacy-automation:valid-recur:1|leg-auto-valid-wakeup-meta:time:meta wakeup:1::req-meta-1:3")
+    "supported legacy one-shot, recurring, durable-job, and __wakeup_* automations preserve exact intent and run generation"
+  -- Verify a migrated gen=0 wakeup survives a scheduler tick without being killed as stale_run_generation.
+  let gen0Fired ← IO.mkRef false
+  let gen0Launch : MissionRecord → String → Option String → WakeupClaim → IO Bool := fun mr _ _ _ => do
+    if mr.id == "m-legacy-valid-gen0" then gen0Fired.set true
+    return true
+  discard <| tickContinuationScheduler store none none none (← newRemoteJobSupervisor) none "/tmp" (some gen0Launch) (some (now + 305))
+  check (← gen0Fired.get) "migrated gen=0 legacy wakeup fires on tick instead of being retired as stale_run_generation"
+  -- Single-column `command_source` legacy schema: non-inline `"type"` stays intact, inline migrates.
+  let singleRoot := s!"/tmp/orb-wakeup-singlecmd-{← newUuidV4}"
+  try
+    let .ok singleStore ← openCoreStore singleRoot | throw (IO.userError "single-cmd store open")
+    try
+      let sdb := singleStore.missionsDb
+      sql sdb "CREATE TABLE automations(id TEXT PRIMARY KEY,mission_id TEXT,command_source TEXT,trigger_type TEXT,trigger_data TEXT,stop_policy TEXT,active INTEGER);"
+      sql sdb "INSERT INTO missions(id,title,status,backend,created_at,updated_at) VALUES('m-sc-bad','legacy','completed','claudecode','t0','t0');"
+      sql sdb "INSERT INTO automations VALUES('sc-bad','m-sc-bad','{\"type\":\"library\",\"content\":\"do not flatten\"}','interval','{\"seconds\":300}','after_first_fire',1);"
+      sql sdb "INSERT INTO missions(id,title,status,backend,created_at,updated_at) VALUES('m-sc-ok','legacy','completed','claudecode','t0','t0');"
+      sql sdb "INSERT INTO automations VALUES('sc-ok','m-sc-ok','{\"type\":\"inline\",\"content\":\"inline ok\"}','interval','{\"seconds\":300}','after_first_fire',1);"
+      check ((← migrateLegacyAutomations singleStore now) == 1) "single-column command_source migrates only inline type"
+      check ((← cellOf sdb "SELECT active FROM automations WHERE id='sc-bad';" #[]) == "1" &&
+        (← cellOf sdb "SELECT status FROM missions WHERE id='m-sc-bad';" #[]) == "completed")
+        "single-column non-inline command_source leaves source and mission intact"
+    finally
+      closeCoreStore singleStore
+  finally
+    IO.FS.removeDirAll singleRoot
 
 private def verifyProductionLocalFailure (store : CoreStore) (sup : RemoteJobSupervisor)
     (root : String) (due : UInt64) : IO Unit := do
@@ -57,15 +162,18 @@ private def verifyProductionLocalFailure (store : CoreStore) (sup : RemoteJobSup
     { id := "c-real-local", missionId := "m-real-local", requestId := "real-local", prompt := "retry me",
       reason := "test", source := "mcp", triggerKind := "time", dueEpoch := due } (due - 1) "t0"
     | throw (IO.userError "production local continuation registration")
+  let warmMgr ← OrbBin.ClaudeControl.newWarmHarnessManager
   let app : CoreAppState := {
     cfg := { workingDir := root }, store, searchIdx? := none, managedRef := ← IO.mkRef {},
     chainsRef := ← IO.mkRef #[], proxyCooldownsRef := ← IO.mkRef #[], seqRef := ← IO.mkRef 0,
-    warmMgr? := some (← OrbBin.ClaudeControl.newWarmHarnessManager) }
+    warmMgr? := some warmMgr, remoteSup? := some sup }
   let tick := fun now => tickContinuationScheduler store none none none sup none root (some (launchLocalWakeup app)) (some now)
   let state := cellOf db ("SELECT c.phase||':'||c.run_generation||':'||c.error||':'||m.status||':'||m.run_generation " ++
     "FROM mission_continuations c JOIN missions m ON m.id=c.mission_id WHERE c.id='c-real-local';") #[]
   discard <| tick due
   check ((← state) == "1:2:launch_retry:1:interrupted:2") "real failed launch advances the generation and re-arms once"
+  check ((← warmMgr.launchGenerations.get).get? "m-real-local" == none)
+    "real failed launch clears its launch-generation slot"
   discard <| tick (due + 59)
   check ((← state) == "1:2:launch_retry:1:interrupted:2") "real retry respects its deadline"
   discard <| tick (due + 60)
@@ -73,6 +181,126 @@ private def verifyProductionLocalFailure (store : CoreStore) (sup : RemoteJobSup
   check ((← state) == "1:3:launch_retry:2:interrupted:3") "the real launcher retries once at the deadline"
   check ((← cellOf db "SELECT COUNT(*) FROM mission_events WHERE mission_id='m-real-local' AND event_type='user_message';" #[]) == "1")
     "real retries do not duplicate the wake-up prompt"
+  -- Replacing a re-armed wake-up clears its prior launch_retry count so the replacement
+  -- gets its own transcript entry and full bounded retry budget.
+  let repDue := due + 500
+  let .ok repId ← registerContinuation store
+    { id := "c-real-local-rep", missionId := "m-real-local", requestId := "real-local-rep", prompt := "fresh replacement",
+      reason := "test", source := "mcp", triggerKind := "time", dueEpoch := repDue } (due + 61) "t1"
+    | throw (IO.userError "production local continuation replacement")
+  check (repId == "c-real-local") "time replacement reuses the armed row"
+  check ((← cellOf db "SELECT error || ':' || dispatch_job_id FROM mission_continuations WHERE id='c-real-local';" #[]) == ":")
+    "replacing a failed wake-up clears prior retry state"
+  discard <| tick repDue
+  check ((← state) == "1:4:launch_retry:1:interrupted:4") "replaced wake-up starts from launch_retry:1 after generation advance"
+  check ((← cellOf db "SELECT COUNT(*) FROM mission_events WHERE mission_id='m-real-local' AND event_type='user_message';" #[]) == "2")
+    "replaced wake-up records its own user_message once"
+  -- Bounded retries through the real production launcher: never spin infinitely.
+  let mut t := repDue
+  for _ in [0:maxWakeupLaunchTries + 2] do
+    t := t + 1000
+    discard <| tick t
+  check ((← cellOf db "SELECT phase || ':' || error FROM mission_continuations WHERE id='c-real-local';" #[]) == "4:launch_failed")
+    "real production launcher bounds retries and retires as launch_failed"
+  check ((← cellOf db "SELECT status FROM missions WHERE id='m-real-local';" #[]) == "interrupted")
+    "exhausted production local failures never strand a ghost-active mission"
+  -- Proxied local failure: blocking `codex-home/<id>` with a regular file forces a pre-spawn
+  -- exception AFTER `mintMissionProxyToken`, verifying exception handling and token revocation.
+  let prevPort ← sup.boundPortRef.get
+  sup.boundPortRef.set 18080
+  try
+    sql db ("INSERT INTO missions(id,title,status,backend,run_generation,created_at,updated_at) " ++
+      "VALUES('m-real-proxy-fail','wakeup','awaiting_user','codex',1,'t0','t0');")
+    IO.FS.createDirAll s!"{store.rootDir}/core-turns/codex-home"
+    IO.FS.writeFile s!"{store.rootDir}/core-turns/codex-home/m-real-proxy-fail" "block-dir"
+    let .ok _ ← registerContinuation store
+      { id := "c-real-proxy-fail", missionId := "m-real-proxy-fail", requestId := "real-proxy-fail", prompt := "proxy fail",
+        reason := "test", source := "mcp", triggerKind := "time", dueEpoch := t + 10 } t "t0"
+      | throw (IO.userError "proxied local failure registration")
+    discard <| tick (t + 10)
+    check ((← cellOf db "SELECT c.phase||':'||c.run_generation||':'||c.error||':'||m.status||':'||m.run_generation FROM mission_continuations c JOIN missions m ON m.id=c.mission_id WHERE c.id='c-real-proxy-fail';" #[]) == "1:2:launch_retry:1:interrupted:2")
+      "proxied pre-spawn setup exception settles mission and re-arms once"
+    check ((← cellOf db "SELECT COUNT(*) FROM mission_proxy_tokens WHERE mission_id='m-real-proxy-fail' AND revoked=0;" #[]) == "0" &&
+      (← cellOf db "SELECT COUNT(*) FROM mission_proxy_tokens WHERE mission_id='m-real-proxy-fail' AND revoked=1;" #[]) == "1")
+      "proxied failed launch revokes its minted mission proxy token"
+  finally
+    sup.boundPortRef.set prevPort
+  -- Job-wakeup replacement updates legacy `trigger_kind='job'` to `'durable_job_terminal'`.
+  sql db ("INSERT INTO missions(id,title,status,backend,run_generation,created_at,updated_at) " ++
+    "VALUES('m-job-kind','wakeup','awaiting_user','claudecode',1,'t0','t0');")
+  let .ok _ ← registerContinuation store
+    { id := "c-job-kind", missionId := "m-job-kind", requestId := "job-kind-1", prompt := "old",
+      reason := "test", source := "mcp", triggerKind := "job", jobId := "job-kind-id", dueEpoch := t + 5000 } t "t0"
+    | throw (IO.userError "job-kind initial registration")
+  let .ok _ ← registerContinuation store
+    { id := "c-job-kind-2", missionId := "m-job-kind", requestId := "job-kind-2", prompt := "new",
+      reason := "test", source := "mcp", triggerKind := "durable_job_terminal", jobId := "job-kind-id", dueEpoch := t + 5000 } t "t1"
+    | throw (IO.userError "job-kind replacement registration")
+  check ((← cellOf db "SELECT trigger_kind || ':' || error FROM mission_continuations WHERE id='c-job-kind';" #[]) == "durable_job_terminal:")
+    "replacing a job wake-up updates trigger_kind to durable_job_terminal"
+  -- Production launcher with Stop race through `tickContinuationScheduler`.
+  sql db ("INSERT INTO missions(id,title,status,backend,run_generation,created_at,updated_at) " ++
+    "VALUES('m-real-stop','wakeup','awaiting_user',?1,1,'t0','t0');") #[s!"missing-cli-{← newUuidV4}"]
+  let .ok _ ← registerContinuation store
+    { id := "c-real-stop", missionId := "m-real-stop", requestId := "real-stop", prompt := "stopped before launch",
+      reason := "test", source := "mcp", triggerKind := "time", dueEpoch := t + 20 } t "t0"
+    | throw (IO.userError "production stop-race registration")
+  let stopBeforeProdLaunch : MissionRecord → String → Option String → WakeupClaim → IO Bool := fun mr prompt sid? claim => do
+    let .ok _ ← hostedStop store mr.id "t-stop" | throw (IO.userError "production stop-race hostedStop")
+    launchLocalWakeup app mr prompt sid? claim
+  discard <| tickContinuationScheduler store none none none sup none root (some stopBeforeProdLaunch) (some (t + 20))
+  check ((← cellOf db "SELECT status || ':' || terminal_reason FROM missions WHERE id='m-real-stop';" #[]) == "interrupted:hosted_stop" &&
+    (← cellOf db "SELECT phase || ':' || error FROM mission_continuations WHERE id='c-real-stop';" #[]) == "4:wakeup_claim_fenced" &&
+    (← cellOf db "SELECT COUNT(*) FROM mission_events WHERE mission_id='m-real-stop' AND event_type='error';" #[]) == "0")
+    "fenced production launch through scheduler preserves hosted_stop, retires claim fenced, and emits no spurious error"
+  -- Archived (acknowledged) mission wake-ups are retired as owner_terminal, never woken.
+  sql db ("INSERT INTO missions(id,title,status,backend,run_generation,created_at,updated_at) " ++
+    "VALUES('m-arch-wake','wakeup','acknowledged',?1,1,'t0','t0');") #[s!"missing-cli-{← newUuidV4}"]
+  sql db ("INSERT INTO mission_continuations(id,mission_id,run_generation,phase,due_epoch,trigger_kind,reason,prompt,request_id,job_id,source,error,recurrence,stop_after_first,created_at,updated_at) " ++
+    "VALUES('c-arch-wake','m-arch-wake',1,1,CAST(?1 AS INTEGER),'time','test','do not wake','c-arch-wake','','mcp','','',1,'t0','t0');") #[s!"{t + 20}"]
+  discard <| tick (t + 20)
+  check ((← cellOf db "SELECT status FROM missions WHERE id='m-arch-wake';" #[]) == "acknowledged" &&
+    (← cellOf db "SELECT phase || ':' || error FROM mission_continuations WHERE id='c-arch-wake';" #[]) == "4:owner_terminal")
+    "archived mission wake-ups are retired without waking or retry-spinning"
+  let archArm ← registerContinuation store
+    { id := "c-arch-arm", missionId := "m-arch-wake", requestId := "arch-arm", prompt := "no",
+      reason := "test", source := "mcp", triggerKind := "time", dueEpoch := t + 100 } t "t0"
+  check (match archArm with | .error "continuation_arm_rejected" => true | _ => false)
+    "registerContinuation refuses to arm a wake-up on an archived mission"
+  -- Client-placed missions must never be claimed or executed on the Core API host,
+  -- nor starve hosted wakeups behind the bounded 256-row scheduler page.
+  for ci in [0:260] do
+    let cmid := s!"m-client-wake-{ci}"
+    let ccid := s!"c-client-wake-{ci}"
+    sql db ("INSERT INTO missions(id,title,status,backend,placement_kind,run_generation,created_at,updated_at) " ++
+      "VALUES(?1,'wakeup','awaiting_user','claudecode','client',1,'t0','t0');") #[cmid]
+    sql db ("INSERT INTO mission_continuations(id,mission_id,run_generation,phase,due_epoch,trigger_kind,reason,prompt,request_id,job_id,source,error,recurrence,stop_after_first,created_at,updated_at) " ++
+      "VALUES(?1,?2,1,1,CAST(?3 AS INTEGER),'time','test','run on client',?1,'','mcp','','',1,'t0','t0');") #[ccid, cmid, s!"{t - 100}"]
+  sql db ("INSERT INTO missions(id,title,status,backend,placement_kind,run_generation,created_at,updated_at) " ++
+    "VALUES('m-hosted-unstarved','wakeup','awaiting_user','claudecode','managed',1,'t0','t0');")
+  let .ok _ ← registerContinuation store
+    { id := "c-hosted-unstarved", missionId := "m-hosted-unstarved", requestId := "hosted-unstarved", prompt := "hosted fires",
+      reason := "test", source := "mcp", triggerKind := "time", dueEpoch := t + 20 } t "t0"
+    | throw (IO.userError "hosted unstarved wake-up registration")
+  let hostedFired ← IO.mkRef false
+  let countHostedLaunch : MissionRecord → String → Option String → WakeupClaim → IO Bool := fun mr _ _ _ => do
+    if mr.id == "m-hosted-unstarved" then hostedFired.set true
+    return true
+  discard <| tickContinuationScheduler store none none none sup none root (some countHostedLaunch) (some (t + 20))
+  check (← hostedFired.get) "hosted wakeups are not starved behind >256 due client-placed continuations"
+  check ((← cellOf db "SELECT COUNT(*) FROM mission_continuations WHERE id LIKE 'c-client-wake-%' AND phase=1;" #[]) == "260")
+    "client-placed mission wake-ups are never claimed or executed on the Core host"
+  let hasSubstr := fun (s sub : String) => (s.splitOn sub).length > 1
+  -- Wire contract: job wake-ups serialize `"trigger":"job"` and `"next_at":null` in both endpoints.
+  check (renderContinuationNextAtJson "durable_job_terminal" (t + 86400) == "null" &&
+    renderContinuationApiTrigger "durable_job_terminal" == "job")
+    "durable_job_terminal continuations render next_at as null and wire trigger as job"
+  let .ok cJson ← continuationJsonForMission store "m-job-kind" | throw (IO.userError "continuationJsonForMission failed")
+  check (hasSubstr cJson "\"trigger\":\"job\"" && hasSubstr cJson "\"next_at\":null" && !hasSubstr cJson "durable_job_terminal")
+    "continuationJsonForMission preserves the client UI wire contract for durable_job_terminal"
+  let .ok listJson ← listMissionsJson store | throw (IO.userError "listMissionsJson failed")
+  check (hasSubstr listJson "\"id\":\"c-job-kind\"" && !hasSubstr listJson "\"trigger\":\"durable_job_terminal\"")
+    "listMissionsJson preserves the client UI wire contract for durable_job_terminal"
 
 def run : IO Unit := do
   let root := s!"/tmp/orb-wakeup-restart-{← newUuidV4}"

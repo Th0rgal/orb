@@ -39,7 +39,8 @@ def continuationsSchemaSql : String :=
   "phase INTEGER NOT NULL DEFAULT 1, due_epoch INTEGER NOT NULL DEFAULT 0, " ++
   "trigger_kind TEXT NOT NULL DEFAULT 'time', reason TEXT NOT NULL DEFAULT '', " ++
   "prompt TEXT NOT NULL DEFAULT '', request_id TEXT NOT NULL DEFAULT '', " ++
-  "job_id TEXT NOT NULL DEFAULT '', source TEXT NOT NULL DEFAULT '', " ++
+  "job_id TEXT NOT NULL DEFAULT '', dispatch_job_id TEXT NOT NULL DEFAULT '', " ++
+  "source TEXT NOT NULL DEFAULT '', " ++
   "error TEXT NOT NULL DEFAULT '', recurrence TEXT NOT NULL DEFAULT '', " ++
   "stop_after_first INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL DEFAULT '', " ++
   "updated_at TEXT NOT NULL DEFAULT '', UNIQUE(mission_id, request_id));"
@@ -55,6 +56,7 @@ def queueContSchemaSql : String :=
 def queueContAdditiveAlters : Array String := #[
   "ALTER TABLE missions ADD COLUMN not_before INTEGER NOT NULL DEFAULT 0;",
   "ALTER TABLE missions ADD COLUMN resume_intent INTEGER NOT NULL DEFAULT 0;",
+  "ALTER TABLE mission_continuations ADD COLUMN dispatch_job_id TEXT NOT NULL DEFAULT '';",
   "ALTER TABLE remote_message_queue ADD COLUMN phase INTEGER NOT NULL DEFAULT 0;",
   "ALTER TABLE remote_message_queue ADD COLUMN claimed_generation INTEGER NOT NULL DEFAULT 0;",
   "ALTER TABLE remote_message_queue ADD COLUMN claim_boot_epoch INTEGER NOT NULL DEFAULT 0;",
@@ -521,6 +523,9 @@ def registerContinuation
     if mrs.size ≤ 1 then return .error "mission_not_found"
     let status := cell (mrs[1]!) 0
     let runGen := cellNat (mrs[1]!) 1 |>.toUInt64
+    let effTrigger := if d.triggerKind == "job" then "durable_job_terminal" else d.triggerKind
+    if status == "acknowledged" then
+      return .error "continuation_arm_rejected"
     if let some callerGen := callerGeneration? then
       if callerGen != runGen then
         return .error "stale_run_generation"
@@ -535,7 +540,7 @@ def registerContinuation
       if prevGen != runGen || prevPhase == 4 || prevPhase == 3 then
         return .error "stale_run_generation"
       return .ok prevId
-    if d.triggerKind == "time" then
+    if effTrigger == "time" then
       let prior ← execParamQueryUnlocked st.missionsDb
         "SELECT id,phase,run_generation,due_epoch FROM mission_continuations WHERE mission_id=?1 AND trigger_kind='time' AND phase=1 ORDER BY id ASC;"
         #[d.missionId]
@@ -561,8 +566,8 @@ def registerContinuation
           let .ok rcrs := rch | return .error "continuation_changes_failed"
           if changesOf rcrs == 0 then return .error "continuation_replace_rejected"
         let upd ← execParamQueryUnlocked st.missionsDb
-          "UPDATE mission_continuations SET phase=1,run_generation=?2,due_epoch=?3,prompt=?4,reason=?5,source=?6,request_id=?7,updated_at=?8 WHERE id=?1 AND phase=1;"
-          #[prevId, s!"{runGen}", s!"{d.dueEpoch}", d.prompt, d.reason, d.source, d.requestId, isoNow]
+          "UPDATE mission_continuations SET phase=1,run_generation=?2,due_epoch=?3,prompt=?4,reason=?5,source=?6,request_id=?7,error='',dispatch_job_id='',recurrence=?9,stop_after_first=CAST(?10 AS INTEGER),updated_at=?8 WHERE id=?1 AND phase=1;"
+          #[prevId, s!"{runGen}", s!"{d.dueEpoch}", d.prompt, d.reason, d.source, d.requestId, isoNow, d.recurrence, if d.stopAfterFirst then "1" else "0"]
         if let .error e := upd then return .error e
         let ch ← execParamQueryUnlocked st.missionsDb "SELECT changes();" #[]
         let .ok crs := ch | return .error "continuation_changes_failed"
@@ -570,7 +575,7 @@ def registerContinuation
         return .ok prevId
     else if !d.jobId.isEmpty then
       let prior ← execParamQueryUnlocked st.missionsDb
-        "SELECT id,phase,run_generation FROM mission_continuations WHERE mission_id=?1 AND job_id=?2 AND phase=1 ORDER BY id ASC;"
+        "SELECT id,phase,run_generation FROM mission_continuations WHERE mission_id=?1 AND job_id=?2 AND phase=1 AND trigger_kind IN ('job','durable_job_terminal') ORDER BY id ASC;"
         #[d.missionId, d.jobId]
       let .ok prs := prior | return .error "continuation_job_prior_failed"
       if prs.size > 1 then
@@ -594,8 +599,8 @@ def registerContinuation
           let .ok rcrs := rch | return .error "continuation_changes_failed"
           if changesOf rcrs == 0 then return .error "continuation_replace_rejected"
         let upd ← execParamQueryUnlocked st.missionsDb
-          "UPDATE mission_continuations SET run_generation=?2,due_epoch=?3,prompt=?4,reason=?5,source=?6,request_id=?7,updated_at=?8 WHERE id=?1 AND phase=1;"
-          #[prevId, s!"{runGen}", s!"{d.dueEpoch}", d.prompt, d.reason, d.source, d.requestId, isoNow]
+          "UPDATE mission_continuations SET run_generation=?2,due_epoch=?3,prompt=?4,reason=?5,source=?6,request_id=?7,error='',dispatch_job_id='',recurrence=?9,stop_after_first=CAST(?10 AS INTEGER),trigger_kind=?11,updated_at=?8 WHERE id=?1 AND phase=1;"
+          #[prevId, s!"{runGen}", s!"{d.dueEpoch}", d.prompt, d.reason, d.source, d.requestId, isoNow, d.recurrence, if d.stopAfterFirst then "1" else "0", effTrigger]
         if let .error e := upd then return .error e
         let ch ← execParamQueryUnlocked st.missionsDb "SELECT changes();" #[]
         let .ok crs := ch | return .error "continuation_changes_failed"
@@ -609,7 +614,7 @@ def registerContinuation
     let ins ← execParamQueryUnlocked st.missionsDb
       ("INSERT INTO mission_continuations(id,mission_id,run_generation,phase,due_epoch,trigger_kind,reason,prompt,request_id,job_id,source,error,recurrence,stop_after_first,created_at,updated_at) " ++
        "VALUES(?1,?2,?3,1,?4,?5,?6,?7,?8,?9,?10,'',?11,?12,?13,?13);")
-      #[d.id, d.missionId, s!"{runGen}", s!"{d.dueEpoch}", d.triggerKind, d.reason, d.prompt, d.requestId,
+      #[d.id, d.missionId, s!"{runGen}", s!"{d.dueEpoch}", effTrigger, d.reason, d.prompt, d.requestId,
         d.jobId, d.source, d.recurrence, if d.stopAfterFirst then "1" else "0", isoNow]
     match ins with
     | .error e => return .error e
@@ -914,13 +919,14 @@ def actOnContinuation
       let admit := verifyWakeupContinuationAdmit phase 4 (ownerTerminalOfStatus status) (ownerBusyOfStatus status) armed runGen due nowEpoch
       if admit != 1 then return .error "continuation_cancel_race"
       let upd ← execParamQueryUnlocked st.missionsDb
-        "UPDATE mission_continuations SET phase=4,updated_at=?2 WHERE id=?1 AND phase=1;" #[contId, isoNow]
+        "UPDATE mission_continuations SET phase=4,error='revoked',updated_at=?2 WHERE id=?1 AND phase=1;" #[contId, isoNow]
       if let .error e := upd then return .error e
       let ch ← execParamQueryUnlocked st.missionsDb "SELECT changes();" #[]
       let .ok crs := ch | return .error "continuation_changes_failed"
       if changesOf crs == 0 then return .error "continuation_cancel_race"
       return .ok (.ok mid)
     else if action == "resume" then
+      if status == "acknowledged" then return .error "continuation_resume_rejected"
       if phase == 1 && armed < runGen then
         let supAdmit := verifyWakeupContinuationAdmit phase 3 (ownerTerminalOfStatus status) (ownerBusyOfStatus status) armed runGen due nowEpoch
         if supAdmit != 1 then return .error "continuation_resume_rejected"
@@ -971,7 +977,7 @@ def continuationJsonForMission (st : CoreStore) (missionId : String) : IO (Excep
       let srcJson := if source.isEmpty then "" else s!",\"source\":{jsonEscape source}"
       items := items.push (
         s!"\{\"id\":{jsonEscape (cell r 0)},\"state\":{jsonEscape (continuationApiState phase trigger)}," ++
-        s!"\"next_at\":{renderContinuationNextAtJson trigger due.toUInt64},\"trigger\":{jsonEscape trigger},\"reason\":{jsonEscape reason}{srcJson}{errJson}{recJson}}")
+        s!"\"next_at\":{renderContinuationNextAtJson trigger due.toUInt64},\"trigger\":{jsonEscape (renderContinuationApiTrigger trigger)},\"reason\":{jsonEscape reason}{srcJson}{errJson}{recJson}}")
     return .ok s!"\{\"count\":{rs.size - 1},\"items\":[{String.intercalate "," items.toList}]}"
 
 def bumpSupervision
@@ -1126,7 +1132,7 @@ def parseMcpWakeupPayload?
     return some {
       id := fallbackId, missionId := missionId, requestId := reqId,
       prompt := prompt, reason := reason, source := source,
-      triggerKind := "job", jobId := jobId, dueEpoch := nowEpoch + 86400
+      triggerKind := "durable_job_terminal", jobId := jobId, dueEpoch := nowEpoch + 86400
     }
   else
     let delay := (trig?.bind (·.fieldNat? "seconds")).getD 60

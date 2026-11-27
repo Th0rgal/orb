@@ -23,6 +23,7 @@ export type LocalQueueEntryBase={
  delegated?:boolean;
  scheduled?:boolean;
  resumes?:number;
+ userSynced?:boolean;
  lastSyncedText?:string;
 };
 export type LocalQueueQueuedEntry=LocalQueueEntryBase&{
@@ -43,7 +44,6 @@ export type LocalQueueDispatchingEntry=LocalQueueEntryBase&{
 export type LocalQueueAcceptedEntry=LocalQueueEntryBase&{
  kind:'accepted';
  receipt?:ClientRunReceipt;
- userSynced?:boolean;
  result?:PollLocal;
  resultStatus?:'interrupted'|'failed'|'awaiting_user';
  resultId?:ReturnType<typeof crypto.randomUUID>;
@@ -59,7 +59,6 @@ export type LocalQueueErrorEntry=LocalQueueEntryBase&{
  autoResumed?:boolean;
  cut?:'restart'|'connection'|'background';
  receipt?:ClientRunReceipt;
- userSynced?:boolean;
  result?:PollLocal;
  resultStatus?:'interrupted'|'failed'|'awaiting_user';
  resultId?:ReturnType<typeof crypto.randomUUID>;
@@ -85,6 +84,7 @@ export function toLocalQueueEntry(raw:LocalQueueEntry|QueuedLocalMessage):LocalQ
   ...(raw.delegated!==undefined?{delegated:raw.delegated}:{}),
   ...(raw.scheduled!==undefined?{scheduled:raw.scheduled}:{}),
   ...(raw.resumes!==undefined?{resumes:raw.resumes}:{}),
+  ...(legacy.userSynced!==undefined?{userSynced:legacy.userSynced}:{}),
   ...(raw.lastSyncedText!==undefined?{lastSyncedText:raw.lastSyncedText}:{}),
  };
  if(state==='dispatching'){
@@ -102,7 +102,6 @@ export function toLocalQueueEntry(raw:LocalQueueEntry|QueuedLocalMessage):LocalQ
    ...base,
    kind:'accepted',
    ...(legacy.receipt!==undefined?{receipt:legacy.receipt}:{}),
-   ...(legacy.userSynced!==undefined?{userSynced:legacy.userSynced}:{}),
    ...(legacy.result!==undefined?{result:legacy.result}:{}),
    ...(legacy.resultStatus!==undefined?{resultStatus:legacy.resultStatus}:{}),
    ...(legacy.resultId!==undefined?{resultId:legacy.resultId}:{}),
@@ -121,7 +120,6 @@ export function toLocalQueueEntry(raw:LocalQueueEntry|QueuedLocalMessage):LocalQ
    ...(legacy.autoResumed!==undefined?{autoResumed:legacy.autoResumed}:{}),
    ...(legacy.cut!==undefined?{cut:legacy.cut}:{}),
    ...(legacy.receipt!==undefined?{receipt:legacy.receipt}:{}),
-   ...(legacy.userSynced!==undefined?{userSynced:legacy.userSynced}:{}),
    ...(legacy.result!==undefined?{result:legacy.result}:{}),
    ...(legacy.resultStatus!==undefined?{resultStatus:legacy.resultStatus}:{}),
    ...(legacy.resultId!==undefined?{resultId:legacy.resultId}:{}),
@@ -207,7 +205,7 @@ function requeue(stored:QueuedLocalMessage,cut:'restart'|'connection'|'backgroun
  stored.state='queued';stored.autoResumed=true;stored.cut=cut;stored.resumes=(stored.resumes??0)+1;
  if(cut==='connection'||cut==='background')stored.retryAfter=Date.now()+connectionRetryDelayMs(stored.resumes);else delete stored.retryAfter;
  delete stored.error;delete stored.interrupted;
- delete stored.receipt;delete stored.result;delete stored.resultId;delete stored.resultStatus;delete stored.userSynced;delete stored.claimedAt;
+ delete stored.receipt;delete stored.result;delete stored.resultId;delete stored.resultStatus;delete stored.claimedAt;
 }
 const wake=()=>window.dispatchEvent(new Event(wakeEvent));
 const queueChannel=()=>{
@@ -415,7 +413,7 @@ export async function retryQueuedMessage(id:string){
  await update(key,id,stored=>{
   if(stored.state==='error'||(stored.state==='dispatching'&&stored.error)||(stored.state==='accepted'&&stored.interrupted)){
    stored.state='queued';delete stored.error;delete stored.interrupted;delete stored.retryAfter;
-   delete stored.receipt;delete stored.result;delete stored.resultId;delete stored.resultStatus;delete stored.userSynced;delete stored.claimedAt;
+   delete stored.receipt;delete stored.result;delete stored.resultId;delete stored.resultStatus;delete stored.claimedAt;
   }
  });
  wake();

@@ -8453,18 +8453,646 @@ theorem proxySseScan_done_terminates_without_delta
   simp only [h0, h2, hd, Bool.not_true, Bool.false_eq_true, ite_false, ite_true]
   cases inThink == 1 <;> decide
 
-/-! R30 stream recovery: the completed-tool-call fence dominates every retry,
-and provider-bound reasoning is stripped only when changing targets. -/
-theorem streamRecoveryStep_complete_tool_call_closes :
-    (streamRecoveryStep 1 1 0 2 1 1 1 &&& 0xFF) = 3 := by decide
+/-! R30 safe stream recovery: universal step invariants, `StickyFence`, and
+multi-step trace proofs guaranteeing:
+1. two attempts are never mixed in one stream,
+2. a tool call is never delivered twice, and
+3. retryable abort occurs only before any tool call completes or output commits,
+   with provider-bound reasoning stripped iff switching to the next chain target. -/
 
-theorem streamRecoveryStep_retry_has_no_complete_tool_call :
-    (streamRecoveryStep 1 0 0 2 1 1 1 &&& 0xFF) = 1 ∧
-    (streamRecoveryStep 1 0 1 1 0 1 1 &&& 0xFF) = 2 := by decide
+/-- When `cut == 0`, `streamRecoveryStep` keeps the current attempt (`0`). -/
+theorem streamRecoveryStep_no_cut
+    (committed : UInt8) (completeToolCalls retries maxRetries : UInt32)
+    (sameAvail nextAvail ctxFits : UInt8) :
+    streamRecoveryStep 0 committed completeToolCalls retries maxRetries
+      sameAvail nextAvail ctxFits = 0 := by
+  unfold streamRecoveryStep
+  have h0 : ((0 : UInt8) == 0) = true := by decide
+  simp only [h0, ite_true]
 
-theorem streamRecoveryStep_strip_only_on_next_target :
-    (streamRecoveryStep 1 0 1 1 0 1 1 &&& 256) != 0 ∧
-    (streamRecoveryStep 1 0 1 1 0 1 1 &&& 0xFF) = 2 := by decide
+/-- Ending (b): any cut after one or more complete tool calls always closes
+cleanly at the last complete tool call (`3`, strip bit clear), never retrying. -/
+theorem streamRecoveryStep_complete_tool_call_closes
+    (cut committed : UInt8) (completeToolCalls retries maxRetries : UInt32)
+    (sameAvail nextAvail ctxFits : UInt8)
+    (hcut : cut ≠ 0) (htools : completeToolCalls > 0) :
+    streamRecoveryStep cut committed completeToolCalls retries maxRetries
+      sameAvail nextAvail ctxFits = 3 := by
+  unfold streamRecoveryStep
+  have hcutb : (cut == 0) = false := beq_false_of_ne hcut
+  simp only [hcutb, Bool.false_eq_true, ite_false, htools, ite_true]
+
+/-- Sticky fence: once client-visible output is committed (`committed ≠ 0`),
+`streamRecoveryStep` never selects a retry (`1` or `2`). -/
+theorem streamRecoveryStep_committed_fence_forbids_retry
+    (cut committed : UInt8) (completeToolCalls retries maxRetries : UInt32)
+    (sameAvail nextAvail ctxFits : UInt8)
+    (hcomm : committed ≠ 0) :
+    (streamRecoveryStep cut committed completeToolCalls retries maxRetries
+      sameAvail nextAvail ctxFits &&& 0xFF) ≠ 1 ∧
+    (streamRecoveryStep cut committed completeToolCalls retries maxRetries
+      sameAvail nextAvail ctxFits &&& 0xFF) ≠ 2 := by
+  unfold streamRecoveryStep
+  have hcb : (committed != 0) = true := by
+    simp [bne_iff_ne, hcomm]
+  by_cases hc : cut == 0
+  · simp only [hc, ite_true]; decide
+  · simp only [hc, ite_false]
+    by_cases ht : completeToolCalls > 0
+    · simp only [ht, ite_true]; decide
+    · simp only [ht, ite_false, hcb, Bool.true_or, ite_true]; decide
+
+/-- Ending (a) safety: retryable abort (`1` same provider or `2` next target)
+can occur only on a cut, before any output commits, before any tool call
+completes, and strictly within the retry budget. -/
+theorem streamRecoveryStep_abort_only_before_complete_tool_call
+    (cut committed : UInt8) (completeToolCalls retries maxRetries : UInt32)
+    (sameAvail nextAvail ctxFits : UInt8)
+    (hretry :
+      (streamRecoveryStep cut committed completeToolCalls retries maxRetries
+        sameAvail nextAvail ctxFits &&& 0xFF) = 1 ∨
+      (streamRecoveryStep cut committed completeToolCalls retries maxRetries
+        sameAvail nextAvail ctxFits &&& 0xFF) = 2) :
+    cut ≠ 0 ∧ committed = 0 ∧ completeToolCalls = 0 ∧ retries < maxRetries := by
+  unfold streamRecoveryStep at hretry
+  by_cases hc : cut == 0
+  · simp only [hc, ite_true] at hretry
+    rcases hretry with h | h <;> exact absurd h (by decide)
+  · simp only [hc, ite_false] at hretry
+    by_cases ht : completeToolCalls > 0
+    · simp only [ht, ite_true] at hretry
+      rcases hretry with h | h <;> exact absurd h (by decide)
+    · simp only [ht, ite_false] at hretry
+      by_cases hcf : (committed != 0 || !decide (retries < maxRetries)) = true
+      · simp only [hcf, ite_true] at hretry
+        rcases hretry with h | h <;> exact absurd h (by decide)
+      · have hcutNe : cut ≠ 0 := by
+          intro heq; subst heq; exact hc (by decide)
+        have hcommEq : committed = 0 := by
+          by_cases hce : committed = 0
+          · exact hce
+          · have h1 : (committed != 0) = true := by simp [bne_iff_ne, hce]
+            exact absurd (by simp [h1]) hcf
+        have htoolsEq : completeToolCalls = 0 := by
+          apply UInt32.eq_of_toBitVec_eq
+          apply BitVec.eq_of_toNat_eq
+          have hle : completeToolCalls.toNat ≤ 0 := by
+            have hnot : ¬ (0 < completeToolCalls.toNat) := fun hlt => ht hlt
+            omega
+          simpa using Nat.eq_zero_of_le_zero hle
+        have hretLt : retries < maxRetries := by
+          by_cases hrl : retries < maxRetries
+          · exact hrl
+          · have h1 : (!decide (retries < maxRetries)) = true := by simp [hrl]
+            exact absurd (by simp [h1]) hcf
+        exact ⟨hcutNe, hcommEq, htoolsEq, hretLt⟩
+
+/-- Warm-cache priority: on a pre-commit, pre-tool-call cut within budget,
+an available same provider (`sameAvail = 1`) is retried first without stripping
+provider-bound reasoning (`out = 1`). -/
+theorem streamRecoveryStep_same_provider_first
+    (cut : UInt8) (retries maxRetries : UInt32)
+    (nextAvail ctxFits : UInt8)
+    (hcut : cut ≠ 0) (hret : retries < maxRetries) :
+    streamRecoveryStep cut 0 0 retries maxRetries 1 nextAvail ctxFits = 1 := by
+  unfold streamRecoveryStep
+  have hcutb : (cut == 0) = false := beq_false_of_ne hcut
+  have ht0 : ¬ ((0 : UInt32) > 0) := by decide
+  have hc0 : ((0 : UInt8) != 0) = false := by decide
+  have hs1 : ((1 : UInt8) == 1) = true := by decide
+  simp only [hcutb, Bool.false_eq_true, ite_false, ht0, hc0, hret, decide_true,
+    Bool.not_true, Bool.or_false, hs1, ite_true]
+
+/-- Provider-bound reasoning stripping (`bit 8 = 256`) is requested iff switching
+to the next chain target (`ending = 2`), which requires same-provider fallback
+exhaustion, an available next target, and a passing context-size check. -/
+theorem streamRecoveryStep_strip_iff_next_target
+    (cut committed : UInt8) (completeToolCalls retries maxRetries : UInt32)
+    (sameAvail nextAvail ctxFits : UInt8) :
+    ((streamRecoveryStep cut committed completeToolCalls retries maxRetries
+        sameAvail nextAvail ctxFits &&& 256) ≠ 0 ↔
+     (streamRecoveryStep cut committed completeToolCalls retries maxRetries
+        sameAvail nextAvail ctxFits &&& 0xFF) = 2) ∧
+    ((streamRecoveryStep cut committed completeToolCalls retries maxRetries
+        sameAvail nextAvail ctxFits &&& 0xFF) = 2 →
+      sameAvail ≠ 1 ∧ nextAvail = 1 ∧ ctxFits = 1) := by
+  unfold streamRecoveryStep
+  by_cases hc : cut == 0
+  · simp only [hc, ite_true]; exact ⟨by decide, fun h => absurd h (by decide)⟩
+  · simp only [hc, ite_false]
+    by_cases ht : completeToolCalls > 0
+    · simp only [ht, ite_true]; exact ⟨by decide, fun h => absurd h (by decide)⟩
+    · simp only [ht, ite_false]
+      by_cases hcf : (committed != 0 || !decide (retries < maxRetries)) = true
+      · simp only [hcf, ite_true]; exact ⟨by decide, fun h => absurd h (by decide)⟩
+      · simp only [hcf, ite_false]
+        by_cases hs : sameAvail == 1
+        · simp only [hs, ite_true]; exact ⟨by decide, fun h => absurd h (by decide)⟩
+        · simp only [hs, ite_false]
+          by_cases hn : (nextAvail == 1 && ctxFits == 1) = true
+          · simp only [hn, ite_true]
+            refine ⟨by decide, fun _ => ?_⟩
+            have hne : sameAvail ≠ 1 := fun heq => by subst heq; exact hs (by decide)
+            have hna : nextAvail = 1 := by
+              have h1 : (nextAvail == 1) = true := (Bool.and_eq_true _ _).mp hn |>.1
+              exact eq_of_beq h1
+            have hcf1 : ctxFits = 1 := by
+              have h2 : (ctxFits == 1) = true := (Bool.and_eq_true _ _).mp hn |>.2
+              exact eq_of_beq h2
+            exact ⟨hne, hna, hcf1⟩
+          · simp only [hn, ite_false]; exact ⟨by decide, fun h => absurd h (by decide)⟩
+
+/-- State of one client stream under R30 in-proxy recovery. -/
+structure StreamRecoveryState where
+  attemptId          : Nat
+  committed          : Bool
+  committedAttempt   : Option Nat
+  completeToolCalls  : UInt32
+  retries            : UInt32
+  maxRetries         : UInt32
+  closed             : Bool
+  emittedAttempts    : List Nat
+  deliveredToolCalls : List (Nat × Nat)
+  deriving Repr, DecidableEq
+
+def StreamRecoveryState.init (maxRetries : UInt32) : StreamRecoveryState :=
+  { attemptId := 0
+    committed := false
+    committedAttempt := none
+    completeToolCalls := 0
+    retries := 0
+    maxRetries := maxRetries
+    closed := false
+    emittedAttempts := []
+    deliveredToolCalls := [] }
+
+/-- Events observed on one upstream attempt in `recoverBufferedStream`.
+`cut sameAvail nextAvail ctxFits sameOpenOk` models an upstream cut, including
+the case (`sameOpenOk = false`) where reopening the same provider fails
+synchronously and `recoverBufferedStream` re-queries `streamRecoveryStep` with
+`sameAvail = 0` before switching to the next target. -/
+inductive StreamRecoveryEvent where
+  | emitVisible
+  | completeToolCall
+  | finishOk
+  | cut (sameAvail nextAvail ctxFits : UInt8) (sameOpenOk : Bool)
+  deriving Repr, DecidableEq
+
+/-- Enumerate buffered complete tool-call identities `(attemptId, 0..n-1)`. -/
+def toolCallIdsFor (attemptId n : Nat) : List (Nat × Nat) :=
+  (List.range n).map (fun i => (attemptId, i))
+
+theorem toolCallIdsFor_nodup (attemptId n : Nat) :
+    (toolCallIdsFor attemptId n).Nodup := by
+  unfold toolCallIdsFor
+  rw [List.Nodup, List.pairwise_map]
+  exact List.Pairwise.imp (fun hne h => hne (Prod.mk.inj h).2) List.nodup_range
+
+theorem toolCallIdsFor_attempt (attemptId n : Nat) (p : Nat × Nat)
+    (hp : p ∈ toolCallIdsFor attemptId n) : p.1 = attemptId := by
+  unfold toolCallIdsFor at hp
+  rcases List.mem_map.mp hp with ⟨i, _, rfl⟩
+  rfl
+
+/-- Pure R30 stream transition driven directly by `Orb.Kernel.streamRecoveryStep`.
+`deliveredToolCalls` accumulates (`++`) across steps rather than overwriting so
+any duplicate delivery across steps would violate `deliveredToolCalls.Nodup`. -/
+def stepStreamRecovery (s : StreamRecoveryState) (e : StreamRecoveryEvent) :
+    StreamRecoveryState :=
+  if s.closed then s
+  else
+    match e with
+    | .emitVisible =>
+      { s with
+        committed := true
+        committedAttempt := some (s.committedAttempt.getD s.attemptId)
+        emittedAttempts := s.attemptId :: s.emittedAttempts }
+    | .completeToolCall =>
+      let nextCalls :=
+        if s.completeToolCalls < 0xFFFFFFFF then s.completeToolCalls + 1
+        else s.completeToolCalls
+      { s with completeToolCalls := nextCalls }
+    | .finishOk =>
+      let delivered := toolCallIdsFor s.attemptId s.completeToolCalls.toNat
+      let didEmit := !delivered.isEmpty
+      { s with
+        committed := s.committed || didEmit
+        committedAttempt :=
+          if didEmit then some (s.committedAttempt.getD s.attemptId)
+          else s.committedAttempt
+        closed := true
+        emittedAttempts :=
+          if didEmit then s.attemptId :: s.emittedAttempts else s.emittedAttempts
+        deliveredToolCalls := s.deliveredToolCalls ++ delivered }
+    | .cut sameAvail nextAvail ctxFits sameOpenOk =>
+      let commBit : UInt8 := if s.committed then 1 else 0
+      let ending :=
+        streamRecoveryStep 1 commBit
+          s.completeToolCalls s.retries s.maxRetries sameAvail nextAvail ctxFits
+      let code := ending &&& 0xFF
+      if code == 3 then
+        let delivered := toolCallIdsFor s.attemptId s.completeToolCalls.toNat
+        { s with
+          committed := true
+          committedAttempt := some (s.committedAttempt.getD s.attemptId)
+          closed := true
+          emittedAttempts := s.attemptId :: s.emittedAttempts
+          deliveredToolCalls := s.deliveredToolCalls ++ delivered }
+      else if code == 1 then
+        if sameOpenOk then
+          { s with
+            attemptId := s.attemptId + 1
+            completeToolCalls := 0
+            retries := s.retries + 1 }
+        else
+          let ending2 :=
+            streamRecoveryStep 1 commBit
+              s.completeToolCalls s.retries s.maxRetries 0 nextAvail ctxFits
+          if (ending2 &&& 0xFF) == 2 && (ending2 &&& 256) != 0 then
+            { s with
+              attemptId := s.attemptId + 1
+              completeToolCalls := 0
+              retries := s.retries + 1 }
+          else
+            { s with
+              committed := true
+              committedAttempt := some (s.committedAttempt.getD s.attemptId)
+              closed := true
+              emittedAttempts := s.attemptId :: s.emittedAttempts }
+      else if code == 2 && (ending &&& 256) != 0 then
+        { s with
+          attemptId := s.attemptId + 1
+          completeToolCalls := 0
+          retries := s.retries + 1 }
+      else
+        { s with
+          committed := true
+          committedAttempt := some (s.committedAttempt.getD s.attemptId)
+          closed := true
+          emittedAttempts := s.attemptId :: s.emittedAttempts }
+
+def runStreamRecovery (s : StreamRecoveryState) (evs : List StreamRecoveryEvent) :
+    StreamRecoveryState :=
+  evs.foldl stepStreamRecovery s
+
+/-- Layer I `StickyFence` for R30 stream recovery: once client-visible output
+commits or the stream closes, every subsequent event preserves the fence and
+forbids pre-fence retryable abort. -/
+def streamRecoveryFence : StickyFence StreamRecoveryState StreamRecoveryEvent where
+  fenced s := s.committed || s.closed
+  preFenceAct s := !s.committed && !s.closed && s.completeToolCalls == 0
+  step := stepStreamRecovery
+  sticky := by
+    intro s e hf
+    unfold stepStreamRecovery
+    by_cases hcl : s.closed = true
+    · simp [hcl]
+    · have hclF : s.closed = false := Bool.eq_false_iff.mpr hcl
+      have hcomm : s.committed = true := by
+        cases hc : s.committed
+        · simp [hc, hclF] at hf
+        · rfl
+      simp only [hclF, Bool.false_eq_true, ite_false]
+      cases e with
+      | emitVisible => simp
+      | completeToolCall => simp [hcomm]
+      | finishOk => simp
+      | cut sameAvail nextAvail ctxFits sameOpenOk =>
+        dsimp only []
+        have hno := streamRecoveryStep_committed_fence_forbids_retry
+          1 1 s.completeToolCalls s.retries s.maxRetries sameAvail nextAvail ctxFits (by decide)
+        simp only [hcomm, ite_true]
+        split
+        · simp
+        · split
+          · next h1 => exact absurd (eq_of_beq h1) hno.1
+          · split
+            · next h2 =>
+              have h2a : ((streamRecoveryStep 1 1 s.completeToolCalls s.retries s.maxRetries
+                sameAvail nextAvail ctxFits &&& 0xFF) == 2) = true := (Bool.and_eq_true _ _).mp h2 |>.1
+              exact absurd (eq_of_beq h2a) hno.2
+            · simp
+  forbids_post := by
+    intro s e hf
+    have hsticky : (stepStreamRecovery s e).committed || (stepStreamRecovery s e).closed = true := by
+      unfold stepStreamRecovery
+      by_cases hcl : s.closed = true
+      · simp [hcl]
+      · have hclF : s.closed = false := Bool.eq_false_iff.mpr hcl
+        have hcomm : s.committed = true := by
+          cases hc : s.committed
+          · simp [hc, hclF] at hf
+          · rfl
+        simp only [hclF, Bool.false_eq_true, ite_false]
+        cases e with
+        | emitVisible => simp
+        | completeToolCall => simp [hcomm]
+        | finishOk => simp
+        | cut sameAvail nextAvail ctxFits sameOpenOk =>
+          dsimp only []
+          have hno := streamRecoveryStep_committed_fence_forbids_retry
+            1 1 s.completeToolCalls s.retries s.maxRetries sameAvail nextAvail ctxFits (by decide)
+          simp only [hcomm, ite_true]
+          split
+          · simp
+          · split
+            · next h1 => exact absurd (eq_of_beq h1) hno.1
+            · split
+              · next h2 =>
+                have h2a : ((streamRecoveryStep 1 1 s.completeToolCalls s.retries s.maxRetries
+                  sameAvail nextAvail ctxFits &&& 0xFF) == 2) = true := (Bool.and_eq_true _ _).mp h2 |>.1
+                exact absurd (eq_of_beq h2a) hno.2
+              · simp
+    cases hc' : (stepStreamRecovery s e).committed <;> cases hcl' : (stepStreamRecovery s e).closed
+    · simp [hc', hcl'] at hsticky
+    · simp
+    · simp
+    · simp
+
+/-- Inductive safety invariant for R30 stream recovery traces. -/
+def StreamRecoveryInv (s : StreamRecoveryState) : Prop :=
+  (∀ a ∈ s.emittedAttempts, s.committedAttempt = some a) ∧
+  (s.committed = true → s.committedAttempt = some s.attemptId) ∧
+  (s.committed = false → s.committedAttempt = none) ∧
+  (s.closed = false → s.deliveredToolCalls = []) ∧
+  (∀ p ∈ s.deliveredToolCalls, s.committedAttempt = some p.1) ∧
+  s.deliveredToolCalls.Nodup
+
+theorem streamRecoveryInv_init (maxRetries : UInt32) :
+    StreamRecoveryInv (StreamRecoveryState.init maxRetries) := by
+  refine ⟨?_, ?_, ?_, ?_, ?_, ?_⟩
+  · intro a ha; cases ha
+  · intro h; cases h
+  · intro _; rfl
+  · intro _; rfl
+  · intro p hp; cases hp
+  · exact List.nodup_nil
+
+theorem streamRecoveryInv_step (s : StreamRecoveryState) (e : StreamRecoveryEvent)
+    (hinv : StreamRecoveryInv s) :
+    StreamRecoveryInv (stepStreamRecovery s e) := by
+  rcases hinv with ⟨hEm, hCommSome, hUncommNone, hOpenEmpty, hDelAtt, hNodup⟩
+  unfold stepStreamRecovery
+  by_cases hcl : s.closed = true
+  · simp only [hcl, ite_true]
+    exact ⟨hEm, hCommSome, hUncommNone, hOpenEmpty, hDelAtt, hNodup⟩
+  · have hclF : s.closed = false := Bool.eq_false_iff.mpr hcl
+    simp only [hclF, Bool.false_eq_true, ite_false]
+    have hDelNil : s.deliveredToolCalls = [] := hOpenEmpty hclF
+    have hGetD : s.committedAttempt.getD s.attemptId = s.attemptId := by
+      cases hc : s.committed
+      · rw [hUncommNone hc]; rfl
+      · rw [hCommSome hc]; rfl
+    have hEmCons : ∀ a ∈ s.attemptId :: s.emittedAttempts,
+        some (s.committedAttempt.getD s.attemptId) = some a := by
+      intro a ha
+      simp only [List.mem_cons] at ha
+      rcases ha with rfl | hmem
+      · simp [hGetD]
+      · have hprev := hEm a hmem
+        cases hc : s.committed
+        · rw [hUncommNone hc] at hprev; cases hprev
+        · rw [hCommSome hc] at hprev
+          cases hprev
+          simp [hGetD]
+    cases e with
+    | emitVisible =>
+      dsimp only [StreamRecoveryInv]
+      refine ⟨hEmCons, (fun _ => by simp [hGetD]), (fun h => by cases h),
+        (fun _ => hDelNil), ?_, hNodup⟩
+      intro p hp
+      rw [hDelNil] at hp
+      cases hp
+    | completeToolCall =>
+      dsimp only [StreamRecoveryInv]
+      exact ⟨hEm, hCommSome, hUncommNone, (fun _ => hDelNil), hDelAtt, hNodup⟩
+    | finishOk =>
+      dsimp only [StreamRecoveryInv]
+      rw [hDelNil, List.nil_append]
+      cases hne : !(toolCallIdsFor s.attemptId s.completeToolCalls.toNat).isEmpty
+      · simp only [hne, Bool.false_eq_true, ite_false, Bool.or_false]
+        have hEmpty : toolCallIdsFor s.attemptId s.completeToolCalls.toNat = [] := by
+          cases hxs : toolCallIdsFor s.attemptId s.completeToolCalls.toNat
+          · rfl
+          · rw [hxs] at hne; simp at hne
+        refine ⟨hEm, hCommSome, hUncommNone, (fun h => by cases h), ?_,
+          toolCallIdsFor_nodup s.attemptId s.completeToolCalls.toNat⟩
+        intro p hp
+        rw [hEmpty] at hp
+        cases hp
+      · simp only [hne, ite_true, Bool.or_true]
+        refine ⟨hEmCons, (fun _ => by simp [hGetD]), (fun h => by cases h), (fun h => by cases h),
+          ?_, toolCallIdsFor_nodup s.attemptId s.completeToolCalls.toNat⟩
+        intro p hp
+        have hp1 := toolCallIdsFor_attempt s.attemptId s.completeToolCalls.toNat p hp
+        rw [hGetD, hp1]
+    | cut sameAvail nextAvail ctxFits sameOpenOk =>
+      dsimp only [StreamRecoveryInv]
+      by_cases h3 : ((streamRecoveryStep 1 (if s.committed then 1 else 0)
+          s.completeToolCalls s.retries s.maxRetries sameAvail nextAvail ctxFits &&& 0xFF) == 3) = true
+      · simp only [h3, ite_true]
+        rw [hDelNil, List.nil_append]
+        refine ⟨hEmCons, (fun _ => by simp [hGetD]), (fun h => by cases h), (fun h => by cases h),
+          ?_, toolCallIdsFor_nodup s.attemptId s.completeToolCalls.toNat⟩
+        intro p hp
+        have hp1 := toolCallIdsFor_attempt s.attemptId s.completeToolCalls.toNat p hp
+        rw [hGetD, hp1]
+      · simp only [h3, ite_false]
+        by_cases h1 : ((streamRecoveryStep 1 (if s.committed then 1 else 0)
+            s.completeToolCalls s.retries s.maxRetries sameAvail nextAvail ctxFits &&& 0xFF) == 1) = true
+        · simp only [h1, ite_true]
+          have hpre := streamRecoveryStep_abort_only_before_complete_tool_call
+            1 (if s.committed then 1 else 0) s.completeToolCalls s.retries s.maxRetries
+            sameAvail nextAvail ctxFits (Or.inl (eq_of_beq h1))
+          have hcommF : s.committed = false := by
+            cases hc : s.committed
+            · rfl
+            · have h10 := hpre.2.1; simp [hc] at h10
+          have hUncommAdv : StreamRecoveryInv
+              { s with attemptId := s.attemptId + 1, completeToolCalls := 0, retries := s.retries + 1 } := by
+            refine ⟨?_, ?_, ?_, (fun _ => hDelNil), hDelAtt, hNodup⟩
+            · intro a ha
+              have hprev := hEm a ha
+              rw [hUncommNone hcommF] at hprev
+              cases hprev
+            · intro hc; rw [hcommF] at hc; cases hc
+            · intro _; exact hUncommNone hcommF
+          cases sameOpenOk
+          · simp only [Bool.false_eq_true, ite_false]
+            by_cases h2b :
+                (((streamRecoveryStep 1 (if s.committed then 1 else 0)
+                    s.completeToolCalls s.retries s.maxRetries 0 nextAvail ctxFits &&& 0xFF) == 2) &&
+                 ((streamRecoveryStep 1 (if s.committed then 1 else 0)
+                    s.completeToolCalls s.retries s.maxRetries 0 nextAvail ctxFits &&& 256) != 0)) = true
+            · simp only [h2b, ite_true]
+              simpa [StreamRecoveryInv, hclF] using hUncommAdv
+            · simp only [h2b, Bool.false_eq_true, ite_false]
+              refine ⟨hEmCons, (fun _ => by simp [hGetD]), (fun h => by cases h),
+                (fun h => by cases h), ?_, hNodup⟩
+              intro p hp; rw [hDelNil] at hp; cases hp
+          · simp only [Bool.false_eq_true, ite_false, ite_true]
+            simpa [StreamRecoveryInv, hclF] using hUncommAdv
+        · simp only [h1, ite_false]
+          by_cases h2 :
+              (((streamRecoveryStep 1 (if s.committed then 1 else 0)
+                  s.completeToolCalls s.retries s.maxRetries sameAvail nextAvail ctxFits &&& 0xFF) == 2) &&
+               ((streamRecoveryStep 1 (if s.committed then 1 else 0)
+                  s.completeToolCalls s.retries s.maxRetries sameAvail nextAvail ctxFits &&& 256) != 0)) = true
+          · simp only [h2, ite_true]
+            have h2a : ((streamRecoveryStep 1 (if s.committed then 1 else 0)
+                s.completeToolCalls s.retries s.maxRetries sameAvail nextAvail ctxFits &&& 0xFF) == 2) = true :=
+              (Bool.and_eq_true _ _).mp h2 |>.1
+            have hpre := streamRecoveryStep_abort_only_before_complete_tool_call
+              1 (if s.committed then 1 else 0) s.completeToolCalls s.retries s.maxRetries
+              sameAvail nextAvail ctxFits (Or.inr (eq_of_beq h2a))
+            have hcommF : s.committed = false := by
+              cases hc : s.committed
+              · rfl
+              · have h10 := hpre.2.1; simp [hc] at h10
+            refine ⟨?_, ?_, ?_, (fun _ => hDelNil), hDelAtt, hNodup⟩
+            · intro a ha
+              have hprev := hEm a ha
+              rw [hUncommNone hcommF] at hprev
+              cases hprev
+            · intro hc; rw [hcommF] at hc; cases hc
+            · intro _; exact hUncommNone hcommF
+          · simp only [h2, ite_false]
+            refine ⟨hEmCons, (fun _ => by simp [hGetD]), (fun h => by cases h),
+              (fun h => by cases h), ?_, hNodup⟩
+            intro p hp; rw [hDelNil] at hp; cases hp
+
+theorem streamRecoveryInv_run (s : StreamRecoveryState) (evs : List StreamRecoveryEvent)
+    (hinv : StreamRecoveryInv s) :
+    StreamRecoveryInv (runStreamRecovery s evs) := by
+  induction evs generalizing s with
+  | nil => exact hinv
+  | cons e rest ih =>
+    exact ih (stepStreamRecovery s e) (streamRecoveryInv_step s e hinv)
+
+/-- R30 Proof Obligation 1: two upstream attempts are never mixed in one
+client stream across any sequence of emissions, tool calls, and cuts. -/
+theorem streamRecovery_never_mixes_attempts
+    (maxRetries : UInt32) (evs : List StreamRecoveryEvent) (a b : Nat)
+    (ha : a ∈ (runStreamRecovery (StreamRecoveryState.init maxRetries) evs).emittedAttempts)
+    (hb : b ∈ (runStreamRecovery (StreamRecoveryState.init maxRetries) evs).emittedAttempts) :
+    a = b := by
+  have hinv := streamRecoveryInv_run (StreamRecoveryState.init maxRetries) evs
+    (streamRecoveryInv_init maxRetries)
+  have h1 := hinv.1 a ha
+  have h2 := hinv.1 b hb
+  rw [h1] at h2
+  exact Option.some.inj h2
+
+/-- R30 Proof Obligation 2: with accumulating delivery history (`++`), a tool
+call is never delivered twice and every delivered tool call belongs to the same
+single committed attempt. -/
+theorem streamRecovery_tool_call_never_delivered_twice
+    (maxRetries : UInt32) (evs : List StreamRecoveryEvent) :
+    (runStreamRecovery (StreamRecoveryState.init maxRetries) evs).deliveredToolCalls.Nodup ∧
+    ∀ p q,
+      p ∈ (runStreamRecovery (StreamRecoveryState.init maxRetries) evs).deliveredToolCalls →
+      q ∈ (runStreamRecovery (StreamRecoveryState.init maxRetries) evs).deliveredToolCalls →
+      p.1 = q.1 := by
+  have hinv := streamRecoveryInv_run (StreamRecoveryState.init maxRetries) evs
+    (streamRecoveryInv_init maxRetries)
+  refine ⟨hinv.2.2.2.2.2, fun p q hp hq => ?_⟩
+  have h1 := hinv.2.2.2.2.1 p hp
+  have h2 := hinv.2.2.2.2.1 q hq
+  rw [h1] at h2
+  exact Option.some.inj h2
+
+/-- R30 Proof Obligation 3: retryable abort (advancing to another upstream
+attempt) happens only before output commits, before the stream closes, and
+before any tool call completes. -/
+theorem streamRecovery_retry_only_before_complete_tool_call
+    (s : StreamRecoveryState) (e : StreamRecoveryEvent)
+    (hadv : (stepStreamRecovery s e).attemptId ≠ s.attemptId) :
+    s.committed = false ∧ s.closed = false ∧ s.completeToolCalls = 0 := by
+  unfold stepStreamRecovery at hadv
+  by_cases hcl : s.closed = true
+  · simp only [hcl, ite_true] at hadv; exact absurd rfl hadv
+  · have hclF : s.closed = false := Bool.eq_false_iff.mpr hcl
+    simp only [hclF, Bool.false_eq_true, ite_false] at hadv
+    cases e with
+    | emitVisible => exact absurd rfl hadv
+    | completeToolCall => exact absurd rfl hadv
+    | finishOk => exact absurd rfl hadv
+    | cut sameAvail nextAvail ctxFits sameOpenOk =>
+      dsimp only [] at hadv
+      by_cases h3 : ((streamRecoveryStep 1 (if s.committed then 1 else 0)
+          s.completeToolCalls s.retries s.maxRetries sameAvail nextAvail ctxFits &&& 0xFF) == 3) = true
+      · simp only [h3, ite_true] at hadv; exact absurd rfl hadv
+      · simp only [h3, ite_false] at hadv
+        by_cases h1 : ((streamRecoveryStep 1 (if s.committed then 1 else 0)
+            s.completeToolCalls s.retries s.maxRetries sameAvail nextAvail ctxFits &&& 0xFF) == 1) = true
+        · have hpre := streamRecoveryStep_abort_only_before_complete_tool_call
+            1 (if s.committed then 1 else 0) s.completeToolCalls s.retries s.maxRetries
+            sameAvail nextAvail ctxFits (Or.inl (eq_of_beq h1))
+          have hcommF : s.committed = false := by
+            cases hc : s.committed
+            · rfl
+            · have h10 := hpre.2.1; simp [hc] at h10
+          exact ⟨hcommF, hclF, hpre.2.2.1⟩
+        · simp only [h1, ite_false] at hadv
+          by_cases h2 :
+              (((streamRecoveryStep 1 (if s.committed then 1 else 0)
+                  s.completeToolCalls s.retries s.maxRetries sameAvail nextAvail ctxFits &&& 0xFF) == 2) &&
+               ((streamRecoveryStep 1 (if s.committed then 1 else 0)
+                  s.completeToolCalls s.retries s.maxRetries sameAvail nextAvail ctxFits &&& 256) != 0)) = true
+          · have h2a : ((streamRecoveryStep 1 (if s.committed then 1 else 0)
+                s.completeToolCalls s.retries s.maxRetries sameAvail nextAvail ctxFits &&& 0xFF) == 2) = true :=
+              (Bool.and_eq_true _ _).mp h2 |>.1
+            have hpre := streamRecoveryStep_abort_only_before_complete_tool_call
+              1 (if s.committed then 1 else 0) s.completeToolCalls s.retries s.maxRetries
+              sameAvail nextAvail ctxFits (Or.inr (eq_of_beq h2a))
+            have hcommF : s.committed = false := by
+              cases hc : s.committed
+              · rfl
+              · have h10 := hpre.2.1; simp [hc] at h10
+            exact ⟨hcommF, hclF, hpre.2.2.1⟩
+          · simp only [h2, ite_false] at hadv; exact absurd rfl hadv
+
+/-- Two-sided mutant: forgetting `closed := true` on clean tool-call close (`code == 3`)
+permits re-delivery of the same tool call `(0, 0)` on a subsequent `.finishOk`, violating
+`deliveredToolCalls.Nodup` (non-vacuity check on Obligation 2). -/
+def stepStreamRecoveryMutantNoClose (s : StreamRecoveryState) (e : StreamRecoveryEvent) :
+    StreamRecoveryState :=
+  match e with
+  | .cut sameAvail nextAvail ctxFits _ =>
+    if !s.closed &&
+        ((streamRecoveryStep 1 (if s.committed then 1 else 0)
+          s.completeToolCalls s.retries s.maxRetries sameAvail nextAvail ctxFits &&& 0xFF) == 3) then
+      let delivered := toolCallIdsFor s.attemptId s.completeToolCalls.toNat
+      { s with
+        committed := true
+        committedAttempt := some (s.committedAttempt.getD s.attemptId)
+        emittedAttempts := s.attemptId :: s.emittedAttempts
+        deliveredToolCalls := s.deliveredToolCalls ++ delivered }
+    else stepStreamRecovery s e
+  | _ => stepStreamRecovery s e
+
+theorem streamRecovery_mutant_noClose_duplicates_tool_call :
+    let st := [StreamRecoveryEvent.completeToolCall, .cut 1 1 1 true, .finishOk].foldl
+      stepStreamRecoveryMutantNoClose (StreamRecoveryState.init 2)
+    st.deliveredToolCalls = [(0, 0), (0, 0)] ∧ ¬ st.deliveredToolCalls.Nodup := by
+  decide
+
+/-- Reachability witness for both R30 endings:
+(a) pre-commit cut retries same provider (and handles synchronous same-provider reopen failure
+    by re-querying the kernel to switch to the next target) and finishes cleanly;
+(b) post-tool-call cut closes cleanly at the last complete tool call without retrying. -/
+theorem streamRecovery_both_endings_reachable :
+    let traceA := runStreamRecovery (StreamRecoveryState.init 2)
+      [.cut 1 1 1 true, .cut 0 1 1 true, .emitVisible, .finishOk]
+    let traceAFallback := runStreamRecovery (StreamRecoveryState.init 2)
+      [.cut 1 1 1 false, .emitVisible, .finishOk]
+    let traceB := runStreamRecovery (StreamRecoveryState.init 2)
+      [.emitVisible, .completeToolCall, .completeToolCall, .cut 1 1 1 true]
+    traceA.attemptId = 2 ∧ traceA.closed = true ∧ traceA.emittedAttempts = [2] ∧
+    traceAFallback.attemptId = 1 ∧ traceAFallback.closed = true ∧ traceAFallback.emittedAttempts = [1] ∧
+    traceB.attemptId = 0 ∧ traceB.closed = true ∧
+      traceB.deliveredToolCalls = [(0, 0), (0, 1)] := by
+  decide
 
 /-- Cancellation or hash collision in `streamRepetitionStep` fails open to
     `Inconclusive` (`lo32 = 2`) and preserves `prevCount`. -/

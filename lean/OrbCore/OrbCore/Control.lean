@@ -2461,6 +2461,7 @@ private def launchLocalCoreMissionTurn
     | .ok d => pure d
     | .error e => return .error s!"invalid_working_directory:{e}"
   let some mission ← getMission? st.store missionId | return .error "mission_not_found"
+  if mission.placementKind == "client" then return .error "client_mission_uses_local_runner"
   let prelude ← remoteInstallPrelude st.cfg.workingDir
     (if mission.project.isEmpty then none else some mission.project) harness st.store.rootDir
     mission.ownerUserId st.bootstrapAdminId
@@ -2490,7 +2491,7 @@ private def launchLocalCoreMissionTurn
         ("UPDATE mission_continuations SET run_generation=CAST(?5 AS INTEGER) " ++
          "WHERE id=?1 AND request_id=?2 AND phase=2 AND mission_id=?3 AND run_generation=CAST(?4 AS INTEGER) " ++
          "AND EXISTS(SELECT 1 FROM missions WHERE id=?3 AND run_generation=CAST(?4 AS INTEGER) " ++
-         "AND status NOT IN ('active','pending','waiting_background','completed','failed','cancelled','not_feasible')) RETURNING id;")
+         "AND status NOT IN ('active','pending','waiting_background','completed','failed','cancelled','not_feasible','acknowledged')) RETURNING id;")
         #[claim.id, claim.requestId, missionId, s!"{claim.generation}", s!"{nextGen}"]
         | return .error "wakeup_claim_write_failed"
       if rows.size ≤ 1 then return .error "wakeup_claim_fenced"
@@ -2529,18 +2530,33 @@ private def launchLocalCoreMissionTurn
     | some sup => sup.boundPortRef.get
     | none => pure (0 : UInt16)
   let proxied := boundPort != 0 && (normHarness == "opencode" || normHarness == "claudecode" || normHarness == "codex")
+  let mintedProxyTokRef ← IO.mkRef (none : Option String)
   let failLaunch : String → IO (Except String String) := fun err => do
-    -- Nothing was started: the mission must not keep showing `active`, and the reason must be visible.
-    discard <| appendMissionEvent st.store missionId "error" (renderCompact (.obj #[("content", .str err)])) ts
-    discard <| execParamQuery st.store.missionsDb
-      ("UPDATE missions SET status='interrupted', terminal_reason='launch_failed', state_revision=state_revision+1, updated_at=?3 " ++
-       "WHERE id=?1 AND status='active' AND run_generation=CAST(?2 AS INTEGER);")
-      #[missionId, s!"{nextGen}", ts]
+    -- Nothing was started: release the launch-generation slot, revoke any minted
+    -- proxy token, and settle the mission out of `active` so it never ghosts.
+    if let some tok ← mintedProxyTokRef.get then
+      revokeSingleMissionProxyToken st.store tok
+      mintedProxyTokRef.set none
+    let stopFenced ← mgr.registration.atomically do
+      let gs ← mgr.launchGenerations.get
+      if gs.get? missionId == some nextGen then
+        mgr.launchGenerations.set (gs.erase missionId)
+      return (← mgr.stopEpochs.get).getD missionId 0 != launchEpoch
+    let updated ← withImmediateTx st.store.missionsDb do
+      execParamQueryUnlocked st.store.missionsDb
+        ("UPDATE missions SET status='interrupted', terminal_reason='launch_failed', state_revision=state_revision+1, updated_at=?3 " ++
+         "WHERE id=?1 AND status='active' AND run_generation=CAST(?2 AS INTEGER) RETURNING id;")
+        #[missionId, s!"{nextGen}", ts]
+    let transitioned := match updated with | .ok rs => rs.size > 1 | .error _ => false
+    let isFencedErr := stopFenced || err == "launch_fenced" || err.endsWith ": launch_fenced"
+    if !isFencedErr && transitioned then
+      discard <| appendMissionEvent st.store missionId "error" (renderCompact (.obj #[("content", .str err)])) ts
     return .error err
-  let setup ←
+  let setupRes : Except String OrbCore.RemoteDispatch.HarnessProxySetup ← try
     if proxied then
       match ← mintMissionProxyToken st.store missionId mission.ownerUserId (nowSec + 86400) with
       | .ok tok =>
+        mintedProxyTokRef.set (some tok)
         -- Reach Core where it listens: loopback for wildcard binds, else the bound address.
         let h := st.cfg.host.trimAscii.toString
         let host :=
@@ -2559,10 +2575,15 @@ private def launchLocalCoreMissionTurn
             IO.FS.createDirAll codexHome
             pure #[("CODEX_HOME", codexHome)]
           else pure #[]
-        pure { s with env := s.env ++ hostEnv }
-      | .error e => return ← failLaunch s!"failed to mint mission proxy token: {e}"
+        pure (.ok { s with env := s.env ++ hostEnv })
+      | .error e => pure (.error s!"failed to mint mission proxy token: {e}")
     else
-      pure ({ model := model? } : OrbCore.RemoteDispatch.HarnessProxySetup)
+      pure (.ok ({ model := model? } : OrbCore.RemoteDispatch.HarnessProxySetup))
+  catch e =>
+    pure (.error s!"local harness setup failed: {e}")
+  let setup ← match setupRes with
+    | .ok s => pure s
+    | .error err => return ← failLaunch err
   match ← OrbBin.ClaudeControl.startHarnessTurn
       mgr missionId normHarness binOverride safeCwd prompt nextGen setup.model effort? sessionId? parsedPerm wtArg #[] cbs (some safeRoot)
       setup.env setup.args (do return (← mgr.stopEpochs.get).getD missionId 0 == launchEpoch &&
@@ -2579,7 +2600,7 @@ private def launchLocalCoreMissionTurn
 def launchLocalWakeup (st : CoreAppState) (mr : MissionRecord) (prompt : String)
     (sid? : Option String) (claim : WakeupClaim) : IO Bool := do
   return (← launchLocalCoreMissionTurn st mr.id mr.backend mr.workingDirectory prompt mr.modelOverride
-    mr.modelEffort "bypassPermissions" sid? "local" false (some claim)).isOk
+    mr.modelEffort "bypassPermissions" sid? "local" false (some claim) (some claim.generation)).isOk
 
 private inductive ManagedTargetFailure where
   | preflight (response : Nat × String)

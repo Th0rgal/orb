@@ -1405,9 +1405,30 @@ export function NativeMissionView(p: { id: string; active?: boolean; launch?:Lau
     const projected: StreamItem[] = [];
     if (outbox.length || drafts.length) {
       const known = new Set<string | undefined>();
-      for (const i of canonical) if (i.kind === 'user') known.add(i.messageId);
-      for(const row of outbox){if(!known.has(row.id)){known.add(row.id);projected.push({kind:'user',key:`user:${row.id}`,messageId:row.id,text:row.text});}}
-      for(const draft of drafts){if((!draft.waiting||draft.failed||sendError())&&!known.has(draft.id)){known.add(draft.id);projected.push({kind:'user',key:`user:${draft.id}`,messageId:draft.id,text:draft.text,images:draft.images});}}
+      let lastCanonicalUserNorm = "";
+      for (const i of canonical) {
+        if (i.kind === 'user') {
+          known.add(i.messageId);
+          if (!i.queued) lastCanonicalUserNorm = normalizeFollowupPrompt(i.text);
+        }
+      }
+      const projectedTexts = new Set<string>();
+      for (const row of outbox) {
+        const norm = normalizeFollowupPrompt(row.text);
+        if (!known.has(row.id) && (!norm || (norm !== lastCanonicalUserNorm && !projectedTexts.has(norm)))) {
+          known.add(row.id);
+          if (norm) projectedTexts.add(norm);
+          projected.push({kind:'user',key:`user:${row.id}`,messageId:row.id,text:row.text});
+        }
+      }
+      for (const draft of drafts) {
+        const norm = normalizeFollowupPrompt(draft.text);
+        if ((!draft.waiting||draft.failed||sendError())&&!known.has(draft.id) && (!norm || (norm !== lastCanonicalUserNorm && !projectedTexts.has(norm)))) {
+          known.add(draft.id);
+          if (norm) projectedTexts.add(norm);
+          projected.push({kind:'user',key:`user:${draft.id}`,messageId:draft.id,text:draft.text,images:draft.images});
+        }
+      }
     }
     return mergeProjectedViewItems({
       canonical,
