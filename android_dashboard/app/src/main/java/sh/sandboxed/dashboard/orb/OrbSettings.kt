@@ -189,22 +189,29 @@ fun OrbSettingsSheet(
         }
     }
 
-    ModalBottomSheet(
-        onDismissRequest = onDismiss,
-        sheetState = sheetState,
-        containerColor = OrbStyle.background,
-        contentColor = Color.White,
-        dragHandle = null
-    ) {
-        val sheetView = LocalView.current
-        BackHandler(enabled = route != OrbSettingsRoute.Root) {
-            back()
+    var localSideSystemReachable by remember { mutableStateOf(false) }
+    val localSideSystemUrl = "http://127.0.0.1:3000"
+    LaunchedEffect(Unit) {
+        val ok = withContext(Dispatchers.IO) {
+            runCatching {
+                val client = okhttp3.OkHttpClient.Builder()
+                    .connectTimeout(400, java.util.concurrent.TimeUnit.MILLISECONDS)
+                    .readTimeout(400, java.util.concurrent.TimeUnit.MILLISECONDS)
+                    .build()
+                val req = okhttp3.Request.Builder().url("$localSideSystemUrl/api/health").get().build()
+                client.newCall(req).execute().use { it.isSuccessful }
+            }.getOrDefault(false)
         }
-        SideEffect {
-            (sheetView.parent as? DialogWindowProvider)?.window?.let { win ->
-                WindowCompat.getInsetsController(win, sheetView).isAppearanceLightStatusBars = false
-                WindowCompat.getInsetsController(win, sheetView).isAppearanceLightNavigationBars = false
-            }
+        localSideSystemReachable = ok
+    }
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(OrbStyle.background)
+    ) {
+        BackHandler(enabled = true) {
+            if (route != OrbSettingsRoute.Root) back() else onDismiss()
         }
         TrackPage("settings", UsageTelemetry.Surface.Sheet)
         TrackPage(
@@ -217,9 +224,9 @@ fun OrbSettingsSheet(
         )
         Box(
             modifier = Modifier
-                .fillMaxWidth()
-                .fillMaxHeight(0.92f)
+                .fillMaxSize()
                 .background(OrbStyle.background)
+                .padding(top = 36.dp, bottom = 16.dp)
         ) {
             when (route) {
                 OrbSettingsRoute.Root -> {
@@ -252,6 +259,20 @@ fun OrbSettingsSheet(
                                     .clip(CircleShape)
                                     .orbPressClickable { onDismiss() }
                                     .padding(horizontal = 10.dp, vertical = 6.dp)
+                            )
+                        }
+
+                        OrbSettingsGroup {
+                            val onLocal = baseURL.trim().trimEnd('/') == localSideSystemUrl
+                            OrbSettingsRow(
+                                icon = sectionIcon(OrbSettingsSection.Account),
+                                title = if (localSideSystemReachable) "Local SideSystem (Ready)" else "Local SideSystem",
+                                subtitle = if (onLocal) "Connected to 127.0.0.1:3000 · Tap to switch" else "127.0.0.1:3000 · Tap to open Server settings",
+                                attention = onLocal,
+                                onClick = {
+                                    section = OrbSettingsSection.Account
+                                    route = OrbSettingsRoute.Backend
+                                }
                             )
                         }
 
@@ -544,6 +565,8 @@ fun OrbSetupView(
     var noticeMessage by remember { mutableStateOf<String?>(null) }
     var isConnecting by remember { mutableStateOf(false) }
     var errorMessage by remember { mutableStateOf<String?>(null) }
+    var localSideSystemReachable by remember { mutableStateOf(false) }
+    val localSideSystemUrl = "http://127.0.0.1:3000"
     val context = LocalContext.current
     LaunchedEffect(context) { OrbProviderDirectoryHint.ensureLoaded(context) }
     val showDirectoryHints by OrbProviderDirectoryHint.enabled.collectAsState()
@@ -551,6 +574,16 @@ fun OrbSetupView(
     val currentUser by core.currentUserFlow.collectAsState()
     val bgSyncState by OrbBackgroundSyncMonitor.stateFlow.collectAsState()
     val isConnectedSession = onBack != null && core.isConfigured && (!signedInToken.isNullOrEmpty() || authMode == "disabled")
+
+    LaunchedEffect(Unit) {
+        val ok = withContext(Dispatchers.IO) {
+            runCatching {
+                val req = okhttp3.Request.Builder().url("$localSideSystemUrl/api/health").get().build()
+                core.httpClient.newCall(req).execute().use { resp -> resp.isSuccessful }
+            }.getOrDefault(false)
+        }
+        localSideSystemReachable = ok
+    }
 
     LaunchedEffect(urlInput) {
         val cleanBase = urlInput.trim().trimEnd('/')
@@ -709,6 +742,51 @@ fun OrbSetupView(
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
                     modifier = Modifier.fillMaxWidth()
                 )
+            }
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                val onLocal = urlInput.trim().trimEnd('/') == localSideSystemUrl
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(if (onLocal) OrbStyle.success.copy(alpha = 0.18f) else OrbStyle.surface)
+                        .border(
+                            1.dp,
+                            if (onLocal) OrbStyle.success else OrbStyle.border,
+                            RoundedCornerShape(8.dp)
+                        )
+                        .orbPressClickable {
+                            urlInput = localSideSystemUrl
+                            passwordInput = ""
+                        }
+                        .padding(horizontal = 10.dp, vertical = 6.dp)
+                ) {
+                    Text(
+                        text = if (localSideSystemReachable) "Local SideSystem (Ready)" else "Local SideSystem",
+                        color = Color.White,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Medium
+                    )
+                }
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(if (!onLocal) OrbStyle.surface else OrbStyle.surface)
+                        .border(1.dp, if (!onLocal) Color.White else OrbStyle.border, RoundedCornerShape(8.dp))
+                        .orbPressClickable {
+                            urlInput = "https://agent-backend.thomas.md"
+                        }
+                        .padding(horizontal = 10.dp, vertical = 6.dp)
+                ) {
+                    Text(
+                        text = "Cloud Backend",
+                        color = if (!onLocal) Color.White else OrbStyle.textMuted,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Medium
+                    )
+                }
             }
         }
 

@@ -470,18 +470,19 @@ private def remoteOpenCodeConfigJson (modelKey proxyBaseUrl : String) : String :
   ]
   renderCompact (.obj #[
     ("$schema", .str "https://opencode.ai/config.json"),
+    ("update", .str "disable"),
     ("permission", .obj #[
       ("*", .str "allow"),
       ("external_directory", .obj #[("*", .str "allow")]),
       ("doom_loop", .str "allow"),
       ("read", .obj #[("*", .str "allow")])
     ]),
-    ("provider", .obj #[
+    ("providers", .obj #[
       ("builtin", .obj #[
-        ("npm", .str "@ai-sdk/openai-compatible"),
+        ("package", .str "@opencode/ai/providers/openai-compatible"),
         ("name", .str "Builtin"),
         ("models", .obj #[(modelKey, modelEntry)]),
-        ("options", .obj #[
+        ("settings", .obj #[
           ("baseURL", .str s!"{proxyBaseUrl}/v1"),
           ("apiKey", .str "{env:SANDBOXED_PROXY_API_KEY}"),
           ("timeout", .nat 900000)
