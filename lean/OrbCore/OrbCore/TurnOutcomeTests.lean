@@ -466,7 +466,8 @@ private def verifyRemoteWakeupRecovery (store : CoreStore) (sup : RemoteJobSuper
   let attached ← IO.ofExcept probe.get
   if found then
     check (attached == 1 && (← state) == "4:" && (← jobs) == "1" &&
-      (← cellOf db "SELECT placement_job_id FROM missions WHERE id=?1;" #[mid]) == jid)
+      (← cellOf db "SELECT placement_job_id FROM missions WHERE id=?1;" #[mid]) == jid &&
+      (← cellOf store.projectsDb "SELECT state FROM remote_jobs WHERE job_id=?1;" #[jid]) == "running")
       "reconciliation adopts acceptance and retires the original occurrence"
     check ((← tick (due + 600)) == 0 && (← jobs) == "1") "accepted wake-up never creates a second job"
   else
@@ -486,6 +487,152 @@ private def verifyRemoteWakeupRecovery (store : CoreStore) (sup : RemoteJobSuper
     discard <| hostedStop store mid "t-stop"
   check ((← cellOf db "SELECT COUNT(*) FROM mission_events WHERE mission_id=?1 AND event_type='user_message';" #[mid]) == "1")
     "remote retries record the wake-up prompt once"
+
+private def verifyRemoteWakeupHttp503AndStopFence (store : CoreStore) (sup : RemoteJobSupervisor)
+    (fd : LeanSys.Posix.Fd) (root mid : String) : IO Unit := do
+  let db := store.missionsDb
+  let cid := s!"c-{mid}"
+  let due ← nowEpoch
+  let .ok _ ← registerContinuation store
+    { id := cid, missionId := mid, requestId := cid, prompt := "uncertain 503 then stop", reason := "test",
+      source := "mcp", triggerKind := "time", dueEpoch := due } (due - 1) "t0"
+    | throw (IO.userError "remote 503 wake-up registration")
+  let tick := fun t => tickContinuationScheduler store none none none sup none root none (some t)
+  let reconcile := fun now => reconcileUncertainRemoteSubmissions store none none none sup root false (some now)
+  let launch ← IO.asTask (tick due)
+  let posted ← IO.mkRef ""
+  withMockNodeRequest fd fun conn req => do
+    let .ok body := OrbBin.Json.parseBytes req.bodySlice.toByteArray | throw (IO.userError "remote 503 POST body")
+    let jid := (body.fieldStr? "job_id").getD ""
+    check (req.method == "POST" && req.path == "/jobs" && !jid.isEmpty) "503 fixture submits remote wake-up"
+    posted.set jid
+    mockNodeReply conn "503 Service Unavailable" "upstream proxy timeout"
+  let jid ← posted.get
+  check ((← IO.ofExcept launch.get) == 0 &&
+    (← cellOf db "SELECT phase || ':' || dispatch_job_id FROM mission_continuations WHERE id=?1;" #[cid]) == s!"2:{jid}" &&
+    (← cellOf db "SELECT state FROM remote_node_jobs WHERE job_id=?1;" #[jid]) == "uncertain")
+    "HTTP 503 leaves the original job bound and uncertain instead of blindly retrying"
+  check ((← tick (due + 600)) == 0 && (← cellOf db "SELECT COUNT(*) FROM remote_node_jobs WHERE mission_id=?1;" #[mid]) == "1")
+    "HTTP 503 uncertain claim blocks duplicate submissions before reconciliation"
+  -- Operator stops the mission before reconciliation learns the node had accepted the job.
+  let .ok _ ← hostedStop store mid "t-stop" | throw (IO.userError "stop during uncertain remote wake-up")
+  let probe ← IO.asTask (reconcile (due + 61))
+  withMockNodeRequest fd fun conn req => do
+    check (req.method == "GET" && req.path == s!"/jobs/{jid}") "fenced reconciliation probes the original job"
+    mockNodeReply conn "200 OK" s!"\{\"job_id\":\"{jid}\",\"state\":\"running\"}"
+  withMockNodeRequest fd fun conn req => do
+    check (req.method == "POST" && req.path == s!"/jobs/{jid}/cancel") "fenced accepted job is cancelled on the node"
+    mockNodeReply conn "200 OK" "{}"
+  check ((← IO.ofExcept probe.get) == 0 &&
+    (← cellOf db "SELECT state FROM remote_node_jobs WHERE job_id=?1;" #[jid]) == "cancelled" &&
+    (← cellOf db "SELECT COUNT(*) FROM mission_proxy_tokens WHERE mission_id=?1 AND revoked=0;" #[mid]) == "0" &&
+    (← cellOf db "SELECT phase || ':' || error FROM mission_continuations WHERE id=?1;" #[cid]) == "4:wakeup_claim_fenced" &&
+    (← cellOf db "SELECT status || ':' || terminal_reason FROM missions WHERE id=?1;" #[mid]) == "interrupted:hosted_stop")
+    "Stop-fenced uncertain remote wake-up cancels the original job, revokes proxy token, and retires as wakeup_claim_fenced"
+
+private def verifyRemoteWakeupDirectStopAndStartupFence (store : CoreStore) (sup : RemoteJobSupervisor)
+    (fd : LeanSys.Posix.Fd) (root mid : String) : IO Unit := do
+  let db := store.missionsDb
+  let cid := s!"c-{mid}"
+  let due ← nowEpoch
+  let .ok _ ← registerContinuation store
+    { id := cid, missionId := mid, requestId := cid, prompt := "direct 200 stop race", reason := "test",
+      source := "mcp", triggerKind := "time", dueEpoch := due } (due - 1) "t0"
+    | throw (IO.userError "direct stop-race wake-up registration")
+  let tick := fun t => tickContinuationScheduler store none none none sup none root none (some t)
+  let launch ← IO.asTask (tick due)
+  let posted ← IO.mkRef ""
+  withMockNodeRequest fd fun conn req => do
+    let .ok body := OrbBin.Json.parseBytes req.bodySlice.toByteArray | throw (IO.userError "direct stop POST body")
+    let jid := (body.fieldStr? "job_id").getD ""
+    check (req.method == "POST" && req.path == "/jobs" && !jid.isEmpty) "direct stop fixture submits remote wake-up"
+    posted.set jid
+    -- Stop commits while POST /jobs is in flight, before the node replies 200 OK.
+    let .ok _ ← hostedStop store mid "t-stop" | throw (IO.userError "direct stop during POST")
+    mockNodeReply conn "200 OK" s!"\{\"job_id\":\"{jid}\",\"state\":\"queued\"}"
+  let jid ← posted.get
+  withMockNodeRequest fd fun conn req => do
+    check (req.method == "POST" && req.path == s!"/jobs/{jid}/cancel") "direct Stop-fenced 200 cancels the original job"
+    mockNodeReply conn "200 OK" "{}"
+  check ((← IO.ofExcept launch.get) == 0 &&
+    (← cellOf db "SELECT state FROM remote_node_jobs WHERE job_id=?1;" #[jid]) == "cancelled" &&
+    (← cellOf store.projectsDb "SELECT COUNT(*) FROM remote_jobs WHERE job_id=?1 AND state='running';" #[jid]) == "0" &&
+    (← cellOf db "SELECT COUNT(*) FROM mission_proxy_tokens WHERE mission_id=?1 AND revoked=0;" #[mid]) == "0" &&
+    (← cellOf db "SELECT COUNT(*) FROM mission_events WHERE mission_id=?1 AND event_type='error';" #[mid]) == "0" &&
+    (← cellOf db "SELECT phase || ':' || error FROM mission_continuations WHERE id=?1;" #[cid]) == "4:wakeup_claim_fenced" &&
+    (← cellOf db "SELECT status || ':' || terminal_reason FROM missions WHERE id=?1;" #[mid]) == "interrupted:hosted_stop")
+    "direct Stop-fenced remote wake-up cancels job, leaves no running projectsDb row, revokes proxy token, emits no spurious error, and retires fenced"
+  -- Simulate Core crashing mid-POST (`state='submitting'`): startup fence moves it to `uncertain`
+  -- and startup reconciliation probes the original job before allowing retry.
+  let midCrash := s!"{mid}-crash"
+  let cidCrash := s!"c-{midCrash}"
+  let jidCrash := "job-wake-crash-submitting"
+  let .ok _ ← execParamQuery db
+    ("INSERT INTO missions(id,title,status,backend,placement_kind,tags,run_generation,created_at,updated_at) " ++
+     "VALUES(?1,'turn','awaiting_user','opencode','managed','[\"remote-node:mockwakeup\"]',1,'t0','t0');") #[midCrash]
+    | throw (IO.userError "crash wake-up mission insert")
+  let .ok _ ← execParamQuery db
+    ("INSERT INTO mission_continuations(id,mission_id,run_generation,phase,due_epoch,trigger_kind,reason,prompt,request_id,job_id,dispatch_job_id,source,error,recurrence,stop_after_first,created_at,updated_at) " ++
+     "VALUES(?1,?2,1,2,CAST(?3 AS INTEGER),'time','test','crash recovery',?1,'',?4,'mcp','','',1,'t0','t0');")
+    #[cidCrash, midCrash, s!"{due}", jidCrash]
+    | throw (IO.userError "crash wake-up continuation insert")
+  let .ok crashTok ← mintMissionProxyToken store midCrash "" (due + 86400)
+    | throw (IO.userError "crash wake-up proxy token mint")
+  let crashTokSha := missionProxyTokenSha256 crashTok
+  let payloadMeta := renderCompact (.obj #[
+    ("backend", .str "opencode"), ("wakeup_claim", .str cidCrash), ("wakeup_request", .str cidCrash),
+    ("wakeup_generation", .num "1"), ("wakeup_lease_expires", JVal.uint64 (due + 900)),
+    ("proxy_token_sha256", .str crashTokSha)])
+  let .ok _ ← execParamQuery db
+    "INSERT INTO remote_node_jobs(job_id,mission_id,node_id,state,payload_json,created_at,updated_at) VALUES(?1,?2,'mockwakeup','submitting',?3,'t0','t0');"
+    #[jidCrash, midCrash, payloadMeta]
+    | throw (IO.userError "crash wake-up job insert")
+  let .ok () ← fenceInterruptedRemoteSubmissions store | throw (IO.userError "startup fence failed")
+  check ((← cellOf db "SELECT state FROM remote_node_jobs WHERE job_id=?1;" #[jidCrash]) == "uncertain")
+    "startup fence transitions crashed submitting remote wake-up to uncertain"
+  let startupProbe ← IO.asTask (reconcileUncertainRemoteSubmissions store none none none sup root true (some (due + 950)))
+  withMockNodeRequest fd fun conn req => do
+    check (req.method == "GET" && req.path == s!"/jobs/{jidCrash}") "startup reconciliation probes the crashed original job"
+    mockNodeReply conn "404 Not Found" "job not found"
+  check ((← IO.ofExcept startupProbe.get) == 0 &&
+    (← cellOf db "SELECT state FROM remote_node_jobs WHERE job_id=?1;" #[jidCrash]) == "failed" &&
+    (← cellOf db "SELECT COUNT(*) FROM mission_proxy_tokens WHERE mission_id=?1 AND revoked=0;" #[midCrash]) == "0" &&
+    (← cellOf db "SELECT phase || ':' || error || ':' || dispatch_job_id FROM mission_continuations WHERE id=?1;" #[cidCrash]) == "1:launch_retry:1:")
+    "startup reconciliation re-arms a crashed remote wake-up once and revokes its proxy token after authoritative absence past lease expiry"
+  -- A wake-up launched on an `interrupted:remote_goal_stopped` mission carries both `wakeup_*`
+  -- and `completed_goal_*` metadata; authoritative 404 past lease expiry must still settle and re-arm the wake-up.
+  let midGoalWake := s!"{mid}-goal-wake"
+  let cidGoalWake := s!"c-{midGoalWake}"
+  let jidGoalWake := "job-wake-goal-stopped-404"
+  let .ok _ ← execParamQuery db
+    ("INSERT INTO missions(id,title,status,terminal_reason,backend,placement_kind,tags,run_generation,created_at,updated_at) " ++
+     "VALUES(?1,'turn','interrupted','remote_goal_stopped','opencode','managed','[\"remote-node:mockwakeup\"]',1,'t0','t0');") #[midGoalWake]
+    | throw (IO.userError "goal-stopped wake-up mission insert")
+  let .ok _ ← execParamQuery db
+    ("INSERT INTO mission_continuations(id,mission_id,run_generation,phase,due_epoch,trigger_kind,reason,prompt,request_id,job_id,dispatch_job_id,source,error,recurrence,stop_after_first,created_at,updated_at) " ++
+     "VALUES(?1,?2,1,2,CAST(?3 AS INTEGER),'time','test','goal stopped wakeup',?1,'',?4,'mcp','','',1,'t0','t0');")
+    #[cidGoalWake, midGoalWake, s!"{due}", jidGoalWake]
+    | throw (IO.userError "goal-stopped wake-up continuation insert")
+  let .ok gwTok ← mintMissionProxyToken store midGoalWake "" (due + 86400)
+    | throw (IO.userError "goal-stopped wake-up proxy token mint")
+  let gwMeta := renderCompact (.obj #[
+    ("backend", .str "opencode"), ("wakeup_claim", .str cidGoalWake), ("wakeup_request", .str cidGoalWake),
+    ("wakeup_generation", .num "1"), ("wakeup_lease_expires", JVal.uint64 (due + 900)),
+    ("completed_goal_generation", .num "1"), ("completed_goal_lease_expires", JVal.uint64 (due + 900)),
+    ("proxy_token_sha256", .str (missionProxyTokenSha256 gwTok))])
+  let .ok _ ← execParamQuery db
+    "INSERT INTO remote_node_jobs(job_id,mission_id,node_id,state,payload_json,created_at,updated_at) VALUES(?1,?2,'mockwakeup','uncertain',?3,'t0','t0');"
+    #[jidGoalWake, midGoalWake, gwMeta]
+    | throw (IO.userError "goal-stopped wake-up job insert")
+  let gwProbe ← IO.asTask (reconcileUncertainRemoteSubmissions store none none none sup root false (some (due + 950)))
+  withMockNodeRequest fd fun conn req => do
+    check (req.method == "GET" && req.path == s!"/jobs/{jidGoalWake}") "reconciliation probes goal-stopped remote wake-up job"
+    mockNodeReply conn "404 Not Found" "job not found"
+  check ((← IO.ofExcept gwProbe.get) == 0 &&
+    (← cellOf db "SELECT state FROM remote_node_jobs WHERE job_id=?1;" #[jidGoalWake]) == "failed" &&
+    (← cellOf db "SELECT COUNT(*) FROM mission_proxy_tokens WHERE mission_id=?1 AND revoked=0;" #[midGoalWake]) == "0" &&
+    (← cellOf db "SELECT phase || ':' || error || ':' || dispatch_job_id FROM mission_continuations WHERE id=?1;" #[cidGoalWake]) == "1:launch_retry:1:")
+    "reconciliation of a wake-up on an interrupted:remote_goal_stopped mission settles and re-arms the claim instead of stranding phase=2"
 
 def r24_lost_reply_is_uncertain_not_rejected : IO Unit := do
   let receipt := JVal.obj #[
@@ -1325,7 +1472,21 @@ def run : IO Unit := do
             | throw (IO.userError "remote wake-up mock node listen failed")
           try
             setenvVar "SANDBOXED_REMOTE_NODES" s!"mockwakeup=http://127.0.0.1:{wakePort}|TURN_OUTCOME_MOCK_TOK"
-            -- The found case starts a poller, so run it last on this listener.
+            -- Run non-poller cases before the found case, which starts a background poller on this listener.
+            let .ok stopStore ← openCoreStore s!"{root}/m-remote-wakeup-503-stop" | throw (IO.userError "remote 503 fixture store")
+            try
+              let .ok _ ← execParamQuery stopStore.missionsDb
+                ("INSERT INTO missions(id,title,status,backend,placement_kind,tags,created_at,updated_at) " ++
+                 "VALUES('m-remote-wakeup-503-stop','turn','awaiting_user','opencode','managed','[\"remote-node:mockwakeup\"]','t0','t0');") #[]
+                | throw (IO.userError "remote 503 fixture mission")
+              verifyRemoteWakeupHttp503AndStopFence stopStore sup wakeFd root "m-remote-wakeup-503-stop"
+              let .ok _ ← execParamQuery stopStore.missionsDb
+                ("INSERT INTO missions(id,title,status,backend,placement_kind,tags,created_at,updated_at) " ++
+                 "VALUES('m-remote-wakeup-direct-stop','turn','awaiting_user','opencode','managed','[\"remote-node:mockwakeup\"]','t0','t0');") #[]
+                | throw (IO.userError "remote direct-stop fixture mission")
+              verifyRemoteWakeupDirectStopAndStartupFence stopStore sup wakeFd root "m-remote-wakeup-direct-stop"
+            finally
+              closeCoreStore stopStore
             for (mid, found) in #[("m-remote-wakeup-missing", false), ("m-remote-wakeup-found", true)] do
               let .ok wakeStore ← openCoreStore s!"{root}/{mid}" | throw (IO.userError "remote wake-up fixture store")
               try
