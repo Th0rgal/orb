@@ -1241,7 +1241,7 @@ private def settleWakeupClaimUnlocked (store : CoreStore) (claim : WakeupClaim)
   let ownerGen := cellNat r 5
   let status := cell r 6
   let replaced := cellNat r 7 != 0
-  let canRetry := generation == ownerGen && !replaced && ownerTerminalOfStatus status == 0 && ownerBusyOfStatus status == 0
+  let canRetry := generation == ownerGen && !replaced && status != "acknowledged" && ownerTerminalOfStatus status == 0 && ownerBusyOfStatus status == 0
   if !accepted && canRetry && (recurring || tries + 1 < maxWakeupLaunchTries) then
     let delay := if recurring then 60 else Nat.min 900 (60 * 2 ^ (Nat.min tries 4))
     return (← query ("UPDATE mission_continuations SET phase=1, dispatch_job_id='', due_epoch=CAST(?4 AS INTEGER), error=?5, updated_at=?6 WHERE " ++ fence ++ ";")
@@ -1250,7 +1250,7 @@ private def settleWakeupClaimUnlocked (store : CoreStore) (claim : WakeupClaim)
   if let .error e ← query ("UPDATE mission_continuations SET phase=4, error=?4, updated_at=?5 WHERE " ++ fence ++ ";")
     (args ++ #[outcome, iso]) then return .error e
   let acceptedGen := if jobId.isEmpty then generation else nextGen.toNat
-  if accepted && recurring && !replaced && ownerTerminalOfStatus status == 0 && ownerGen == acceptedGen then
+  if accepted && recurring && !replaced && status != "acknowledged" && ownerTerminalOfStatus status == 0 && ownerGen == acceptedGen then
     let nextId ← newUuidV4
     let interval := Nat.max 60 (((recurrence.drop 9).toString.toNat?).getD 300)
     return (← query
@@ -1265,7 +1265,7 @@ private def remoteWakeupOwned (store : CoreStore) (mid jid : String) (claim : Wa
     ("SELECT 1 FROM mission_continuations c JOIN missions m ON m.id=c.mission_id " ++
      "WHERE m.id=?1 AND c.id=?2 AND c.request_id=?3 AND c.phase=2 AND c.dispatch_job_id=?4 " ++
      "AND c.run_generation=CAST(?5 AS INTEGER) AND m.run_generation=c.run_generation " ++
-     "AND m.status NOT IN ('active','pending','waiting_background','cancelled','failed','completed','not_feasible');")
+     "AND m.status NOT IN ('active','pending','waiting_background','cancelled','failed','completed','not_feasible','acknowledged');")
     #[mid, claim.id, claim.requestId, jid, s!"{claim.generation}"]
   return rows.map (·.size > 1)
 
@@ -2501,12 +2501,6 @@ partial def submitRemoteMissionTurn
       if !prep.proxyToken.isEmpty then revokeSingleMissionProxyToken store prep.proxyToken
       return .error s!"remote_node_rejected_{status}:{respTxt}"
     let nowIso := formatEpochIso8601Utc nowSec
-    discard <| execParamQuery store.projectsDb
-      ("INSERT INTO remote_jobs(job_id,mission_id,node_id,kind,state,started_at,accepted_at,heartbeat_at,updated_at) " ++
-       "VALUES(?1,?2,?3,'mission','running',?4,?4,?4,?4) " ++
-       "ON CONFLICT(job_id) DO UPDATE SET state='running', node_id=excluded.node_id, heartbeat_at=excluded.updated_at, updated_at=excluded.updated_at;")
-      #[jobId, spec.missionId, effTarget, nowIso]
-
     let runId ← newUuidV4
     let txRes ← withImmediateTx store.missionsDb do
       if let some (cid, expected) := spec.goalDispatch? then
@@ -2547,11 +2541,16 @@ partial def submitRemoteMissionTurn
           | .error _ => "uncertain"
         discard <| withImmediateTx store.missionsDb do
           if let .error e ← execParamQueryUnlocked store.missionsDb
-              "UPDATE remote_node_jobs SET state=?2 WHERE job_id=?1;" #[jobId, state] then return .error e
+              "UPDATE remote_node_jobs SET state=?2, updated_at=?3 WHERE job_id=?1;" #[jobId, state, nowIso] then return .error e
           if state == "cancelled" then
             if let some claim := spec.wakeupClaim? then
               return ← settleWakeupClaimUnlocked store claim jobId false 0 nowSec (fenced := true)
           return .ok ()
+        if state == "cancelled" then
+          discard <| execParamQuery store.projectsDb
+            "UPDATE remote_jobs SET state='cancelled', heartbeat_at=?2, finished_at=COALESCE(finished_at,?2), updated_at=?2 WHERE job_id=?1;"
+            #[jobId, nowIso]
+          if !prep.proxyToken.isEmpty then revokeSingleMissionProxyToken store prep.proxyToken
         return .error dbErr
       -- The node accepted the work but Core could not activate its owner row.
       -- Preserve the accepted identity as uncertain and do not start a second
@@ -2560,6 +2559,11 @@ partial def submitRemoteMissionTurn
         "UPDATE remote_node_jobs SET state='uncertain', updated_at=?2 WHERE job_id=?1;"
         #[jobId, nowIso]
       return .error s!"remote_accept_persist_failed:{dbErr}"
+    discard <| execParamQuery store.projectsDb
+      ("INSERT INTO remote_jobs(job_id,mission_id,node_id,kind,state,started_at,accepted_at,heartbeat_at,updated_at) " ++
+       "VALUES(?1,?2,?3,'mission','running',?4,?4,?4,?4) " ++
+       "ON CONFLICT(job_id) DO UPDATE SET state='running', node_id=excluded.node_id, heartbeat_at=excluded.updated_at, updated_at=excluded.updated_at;")
+      #[jobId, spec.missionId, effTarget, nowIso]
     emitMissionEventAndBroadcast store broadcastHub? spec.missionId "mission_status_changed"
       (renderCompact (.obj #[("status", .str "active"), ("job_id", .str jobId), ("remote_node_id", .str effTarget)])) nowIso
     if let some tSink := sup.telemetrySink? then
@@ -2718,13 +2722,19 @@ def reconcileUncertainRemoteSubmissions
                   "UPDATE remote_node_jobs SET state='cancelled', updated_at=?2 WHERE job_id=?1 AND state='uncertain';" #[jid, nowIso] then return .error e
                 if let some claim := wakeup? then return ← settleWakeupClaimUnlocked store claim jid false 0 nowSec (fenced := true)
                 return .ok ()
+              discard <| execParamQuery store.projectsDb
+                "UPDATE remote_jobs SET state='cancelled', heartbeat_at=?2, finished_at=COALESCE(finished_at,?2), updated_at=?2 WHERE job_id=?1;"
+                #[jid, nowIso]
         | .error "remote_goal_dispatch_fenced" =>
           if let .ok pending ← execParamQuery store.missionsDb
               "SELECT 1 FROM remote_node_jobs WHERE job_id=?1 AND state IN ('submitting','uncertain');" #[jid] then
             if pending.size > 1 then
               if let .ok (code, _, _, _, _) ← callRemoteNodeHttpOpt relayHub? mc? node "POST" s!"/jobs/{jid}/cancel" (some (.obj #[])) #[] 8000 then
                 if 200 ≤ code && code < 300 then
-                  discard <| execParamQuery store.missionsDb "UPDATE remote_node_jobs SET state='cancelled' WHERE job_id=?1 AND state IN ('submitting','uncertain');" #[jid]
+                  discard <| execParamQuery store.missionsDb "UPDATE remote_node_jobs SET state='cancelled', updated_at=?2 WHERE job_id=?1 AND state IN ('submitting','uncertain');" #[jid, nowIso]
+                  discard <| execParamQuery store.projectsDb
+                    "UPDATE remote_jobs SET state='cancelled', heartbeat_at=?2, finished_at=COALESCE(finished_at,?2), updated_at=?2 WHERE job_id=?1;"
+                    #[jid, nowIso]
         | .error _ =>
           -- The accepted job is still owned by Core; keep it probeable rather
           -- than leaving a `running` job without a local owner row.
@@ -2898,10 +2908,10 @@ def migrateLegacyAutomations (store : CoreStore) (nowSec : UInt64) : IO Nat := d
       colNames := colNames.push nm
   let hasSplitCmd := colNames.contains "command_source_data"
   let hasJsonCmd := colNames.contains "command_source"
+  if !hasSplitCmd && !hasJsonCmd then return 0
   let cmdExpr :=
     if hasSplitCmd then "COALESCE(command_source_data,'')"
-    else if hasJsonCmd then "COALESCE(command_source,'')"
-    else "''"
+    else "COALESCE(command_source,'')"
   let cmdTypeExpr := if colNames.contains "command_source_type" then "lower(trim(COALESCE(command_source_type,'')))" else "''"
   let driverExpr := if colNames.contains "driver" then "lower(trim(COALESCE(driver,'')))" else "''"
   let freshSessExpr := if colNames.contains "fresh_session" then "lower(trim(COALESCE(fresh_session,'')))" else "''"
@@ -2913,6 +2923,9 @@ def migrateLegacyAutomations (store : CoreStore) (nowSec : UInt64) : IO Nat := d
   let lastTrigExpr := if colNames.contains "last_triggered_at" then "COALESCE(last_triggered_at,'')" else "''"
   let createdExpr := if colNames.contains "created_at" then "COALESCE(created_at,'')" else "''"
   let stopPolExpr := if colNames.contains "stop_policy" then "COALESCE(stop_policy,'')" else "''"
+  let fenceTblChk ← execParamQuery store.missionsDb
+    "SELECT name FROM sqlite_master WHERE type='table' AND name='mission_wakeup_fences';" #[]
+  let hasFencesTable : Bool := match fenceTblChk with | .ok rows => decide (rows.size > 1) | .error _ => false
 
   let selSql :=
     s!"SELECT id, mission_id, {cmdExpr}, {trigTypeExpr}, {trigDataExpr}, {createdExpr}, {lastTrigExpr}, {stopPolExpr}, " ++
@@ -2941,24 +2954,50 @@ def migrateLegacyAutomations (store : CoreStore) (nowSec : UInt64) : IO Nat := d
     if !(stopFirst || #["", "never", "when_mission_terminal"].contains stopPol) then continue
     -- Preserve non-inline command sources, non-scheduler drivers, session-switching policies,
     -- and templated variable maps intact rather than flattening them into literal prompts.
+    -- Internal `__wakeup_*` control metadata written by legacy `schedule_wakeup` /
+    -- `schedule_job_wakeup` is supported and honored below.
     if !cmdType.isEmpty && cmdType != "inline" then continue
     if !driver.isEmpty && driver != "scheduler" then continue
     if !freshSess.isEmpty && freshSess != "keep" then continue
-    let varsSupported :=
-      if rawVars.isEmpty then true
+    let varsFields? : Option (Array (String × JVal)) :=
+      if rawVars.isEmpty then some #[]
       else match OrbBin.Json.parse rawVars with
-        | .ok (.obj fields) => fields.isEmpty
-        | _ => false
-    if !varsSupported then continue
+        | .ok (.obj fields) =>
+          if fields.all (fun (k, _) => k.startsWith "__wakeup_") then some fields else none
+        | _ => none
+    let some varsFields := varsFields? | continue
+    let varsJv : JVal := .obj varsFields
+    let hasWakeupGenKey := varsFields.any (fun (k, _) => k == "__wakeup_run_generation")
+    let wakeupGen? : Option Nat :=
+      (varsJv.fieldNat? "__wakeup_run_generation")
+        |>.orElse (fun _ => (varsJv.fieldStr? "__wakeup_run_generation").bind (·.trimAscii.toString.toNat?))
+    if hasWakeupGenKey && (wakeupGen?.map (· == 0)).getD true then continue
+    let hasWakeupDueKey := varsFields.any (fun (k, _) => k == "__wakeup_due_at")
+    let wakeupDueAt? : Option UInt64 :=
+      (varsJv.fieldStr? "__wakeup_due_at").bind parseIso8601EpochU64?
+    if hasWakeupDueKey && wakeupDueAt?.isNone then continue
+    let wakeupReqId? :=
+      (varsJv.fieldStr? "__wakeup_request_id").map (·.trimAscii.toString) |>.filter (!·.isEmpty)
+    let wakeupReason? :=
+      (varsJv.fieldStr? "__wakeup_reason").map (·.trimAscii.toString) |>.filter (!·.isEmpty)
+    -- Require valid JSON command payloads (never accept malformed JSON, NULL/empty, or
+    -- single-column `command_source` JSON with a non-inline `"type"`).
+    if rawCmd.isEmpty then continue
     let prompt? : Option String :=
       match OrbBin.Json.parse rawCmd with
       | .ok (.obj fields) =>
         let obj := JVal.obj fields
-        ((obj.fieldStr? "content").orElse (fun _ => obj.fieldStr? "prompt"))
-          |>.filter (!·.trimAscii.toString.isEmpty)
+        let inlineTypeOk :=
+          match obj.field? "type" with
+          | none => true
+          | some (.str t) => t.trimAscii.toString.toLower == "inline"
+          | some _ => false
+        if !inlineTypeOk then none
+        else
+          ((obj.fieldStr? "content").orElse (fun _ => obj.fieldStr? "prompt"))
+            |>.filter (!·.trimAscii.toString.isEmpty)
       | .ok (.str s) => if s.trimAscii.toString.isEmpty then none else some s
-      | .ok _ => none
-      | .error _ => if rawCmd.isEmpty then some "Continue." else some rawCmd
+      | _ => none
     let some prompt := prompt? | continue
     let trigFields? : Option (Array (String × JVal)) :=
       match OrbBin.Json.parse rawTrig with
@@ -2977,9 +3016,19 @@ def migrateLegacyAutomations (store : CoreStore) (nowSec : UInt64) : IO Nat := d
           let mStatus := cell mrs[1]! 0
           let mRunGen := Nat.max 1 (cellNat mrs[1]! 1)
           if mStatus == "cancelled" || mStatus == "failed" || mStatus == "not_feasible" ||
+              mStatus == "acknowledged" ||
               (mStatus == "completed" && stopPol == "when_mission_terminal") then
             return .ok false
           else
+            if let some wGen := wakeupGen? then
+              if wGen != mRunGen then return .ok false
+              if hasFencesTable then
+                match ← query "SELECT COALESCE(stopped_generation,0) FROM mission_wakeup_fences WHERE mission_id=?1 LIMIT 1;" #[mid] with
+                | .error e => return .error e
+                | .ok fRows =>
+                  if fRows.size > 1 && cellNat fRows[1]! 0 ≥ wGen then
+                    return .ok false
+                  else pure ()
             let baseEpoch :=
               (if !lastTrig.isEmpty then parseIso8601EpochU64? lastTrig else none)
                 |>.orElse (fun _ => if !createdAt.isEmpty then parseIso8601EpochU64? createdAt else none)
@@ -3000,12 +3049,12 @@ def migrateLegacyAutomations (store : CoreStore) (nowSec : UInt64) : IO Nat := d
             if hasCronKey || (hasAtKey && explicitAt?.isNone) ||
                 (isJobTrig && jobId.isEmpty) || (!isJobTrig && !jobId.isEmpty) ||
                 (trigType == "interval" && (secs < 60 || hasAtKey)) ||
-                (trigType == "time" && explicitAt?.isNone && secs == 0) then
+                (trigType == "time" && explicitAt?.isNone && wakeupDueAt?.isNone && secs == 0) then
               return .ok false
             let effTrigKind := if isJobTrig then "durable_job_terminal" else "time"
             let dueEpoch :=
               if isJobTrig then nowSec + 86400
-              else match explicitAt? with
+              else match explicitAt?.orElse (fun _ => wakeupDueAt?) with
                 | some ep => ep
                 | none => baseEpoch + secs
             let isRecurring :=
@@ -3014,14 +3063,15 @@ def migrateLegacyAutomations (store : CoreStore) (nowSec : UInt64) : IO Nat := d
             let recurrenceStr := if isRecurring then s!"interval:{Nat.max 60 secs.toNat}" else ""
             let stopFirstInt := if isRecurring then "0" else "1"
             let cid := s!"leg-auto-{aid}"
-            let reqId := s!"legacy-automation:{aid}"
+            let reqId := wakeupReqId?.getD s!"legacy-automation:{aid}"
+            let effReason := wakeupReason?.getD "legacy_automation"
             let .ok inserted ← query
                ("INSERT INTO mission_continuations(id,mission_id,run_generation,phase,due_epoch,trigger_kind,reason,prompt,request_id,job_id,source,error,recurrence,stop_after_first,created_at,updated_at) " ++
-                "SELECT ?1,?2,CAST(?3 AS INTEGER),1,CAST(?4 AS INTEGER),?5,'legacy_automation',?6,?7,?8,'legacy-automations-migration','',?9,CAST(?10 AS INTEGER),?11,?11 " ++
+                "SELECT ?1,?2,CAST(?3 AS INTEGER),1,CAST(?4 AS INTEGER),?5,?13,?6,?7,?8,'legacy-automations-migration','',?9,CAST(?10 AS INTEGER),?11,?11 " ++
                 "WHERE EXISTS(SELECT 1 FROM automations WHERE id=?12 AND active=1) AND NOT EXISTS(" ++
                 "SELECT 1 FROM mission_continuations WHERE mission_id=?2 AND phase IN (1,2) AND trigger_kind=?5 " ++
                 "AND (?5='time' OR job_id=?8)) RETURNING id;")
-               #[cid, mid, s!"{mRunGen}", s!"{dueEpoch}", effTrigKind, prompt, reqId, jobId, recurrenceStr, stopFirstInt, nowIso, aid]
+               #[cid, mid, s!"{mRunGen}", s!"{dueEpoch}", effTrigKind, prompt, reqId, jobId, recurrenceStr, stopFirstInt, nowIso, aid, effReason]
               | return .error "legacy_automation_insert_failed"
             if inserted.size ≤ 1 then return .ok false
             if mStatus == "completed" then
@@ -3101,7 +3151,7 @@ def tickContinuationScheduler
           if jr2.size > 1 then jobDue := true
     if jobDue then
       if let some mr ← getMission? store mid then
-        if mr.status == "cancelled" || mr.status == "failed" || mr.status == "not_feasible" then
+        if mr.status == "cancelled" || mr.status == "failed" || mr.status == "not_feasible" || mr.status == "acknowledged" then
           discard <| execParamQuery store.missionsDb
             "UPDATE mission_continuations SET phase=4, error='owner_terminal', updated_at=?2 WHERE id=?1 AND phase=1 AND request_id=?3 AND run_generation=CAST(?4 AS INTEGER);"
             #[cid, nowIso, requestId, s!"{cGen}"]
@@ -3187,8 +3237,16 @@ def tickContinuationScheduler
                   launchedOk := true
                   fired := fired + 1
                 else
-                  emitMissionEventAndBroadcast store broadcastHub? mid "error"
-                    (renderCompact (.obj #[("message", .str "Wakeup launch failed")])) nowIso
+                  let mut stoppedOrArchived := false
+                  if let .ok sRows ← execParamQuery store.missionsDb
+                      "SELECT COALESCE(status,''), COALESCE(terminal_reason,'') FROM missions WHERE id=?1 LIMIT 1;" #[mid] then
+                    if sRows.size > 1 then
+                      let curSt := (cell sRows[1]! 0).trimAscii.toString
+                      let curTr := (cell sRows[1]! 1).trimAscii.toString
+                      stoppedOrArchived := curTr == "hosted_stop" || curSt == "acknowledged"
+                  if !stoppedOrArchived then
+                    emitMissionEventAndBroadcast store broadcastHub? mid "error"
+                      (renderCompact (.obj #[("message", .str "Wakeup launch failed")])) nowIso
               else
                 let _ := warmMgr?
                 pure ()

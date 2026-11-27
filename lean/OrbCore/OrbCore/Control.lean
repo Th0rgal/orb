@@ -2490,7 +2490,7 @@ private def launchLocalCoreMissionTurn
         ("UPDATE mission_continuations SET run_generation=CAST(?5 AS INTEGER) " ++
          "WHERE id=?1 AND request_id=?2 AND phase=2 AND mission_id=?3 AND run_generation=CAST(?4 AS INTEGER) " ++
          "AND EXISTS(SELECT 1 FROM missions WHERE id=?3 AND run_generation=CAST(?4 AS INTEGER) " ++
-         "AND status NOT IN ('active','pending','waiting_background','completed','failed','cancelled','not_feasible')) RETURNING id;")
+         "AND status NOT IN ('active','pending','waiting_background','completed','failed','cancelled','not_feasible','acknowledged')) RETURNING id;")
         #[claim.id, claim.requestId, missionId, s!"{claim.generation}", s!"{nextGen}"]
         | return .error "wakeup_claim_write_failed"
       if rows.size ≤ 1 then return .error "wakeup_claim_fenced"
@@ -2540,12 +2540,14 @@ private def launchLocalCoreMissionTurn
       let gs ← mgr.launchGenerations.get
       if gs.get? missionId == some nextGen then
         mgr.launchGenerations.set (gs.erase missionId)
-    if err != "launch_fenced" then
+    let isFencedErr := err == "launch_fenced" || err == "acp_launch_failed_or_fenced" || err.endsWith ": launch_fenced"
+    if !isFencedErr then
       discard <| appendMissionEvent st.store missionId "error" (renderCompact (.obj #[("content", .str err)])) ts
-    discard <| execParamQuery st.store.missionsDb
-      ("UPDATE missions SET status='interrupted', terminal_reason='launch_failed', state_revision=state_revision+1, updated_at=?3 " ++
-       "WHERE id=?1 AND status='active' AND run_generation=CAST(?2 AS INTEGER);")
-      #[missionId, s!"{nextGen}", ts]
+    discard <| withImmediateTx st.store.missionsDb do
+      execParamQueryUnlocked st.store.missionsDb
+        ("UPDATE missions SET status='interrupted', terminal_reason='launch_failed', state_revision=state_revision+1, updated_at=?3 " ++
+         "WHERE id=?1 AND status='active' AND run_generation=CAST(?2 AS INTEGER);")
+        #[missionId, s!"{nextGen}", ts]
     return .error err
   let setupRes : Except String OrbCore.RemoteDispatch.HarnessProxySetup ← try
     if proxied then

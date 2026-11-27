@@ -56,6 +56,7 @@ def queueContSchemaSql : String :=
 def queueContAdditiveAlters : Array String := #[
   "ALTER TABLE missions ADD COLUMN not_before INTEGER NOT NULL DEFAULT 0;",
   "ALTER TABLE missions ADD COLUMN resume_intent INTEGER NOT NULL DEFAULT 0;",
+  "ALTER TABLE mission_continuations ADD COLUMN dispatch_job_id TEXT NOT NULL DEFAULT '';",
   "ALTER TABLE remote_message_queue ADD COLUMN phase INTEGER NOT NULL DEFAULT 0;",
   "ALTER TABLE remote_message_queue ADD COLUMN claimed_generation INTEGER NOT NULL DEFAULT 0;",
   "ALTER TABLE remote_message_queue ADD COLUMN claim_boot_epoch INTEGER NOT NULL DEFAULT 0;",
@@ -595,8 +596,8 @@ def registerContinuation
           let .ok rcrs := rch | return .error "continuation_changes_failed"
           if changesOf rcrs == 0 then return .error "continuation_replace_rejected"
         let upd ← execParamQueryUnlocked st.missionsDb
-          "UPDATE mission_continuations SET run_generation=?2,due_epoch=?3,prompt=?4,reason=?5,source=?6,request_id=?7,error='',dispatch_job_id='',recurrence=?9,stop_after_first=CAST(?10 AS INTEGER),updated_at=?8 WHERE id=?1 AND phase=1;"
-          #[prevId, s!"{runGen}", s!"{d.dueEpoch}", d.prompt, d.reason, d.source, d.requestId, isoNow, d.recurrence, if d.stopAfterFirst then "1" else "0"]
+          "UPDATE mission_continuations SET run_generation=?2,due_epoch=?3,prompt=?4,reason=?5,source=?6,request_id=?7,error='',dispatch_job_id='',recurrence=?9,stop_after_first=CAST(?10 AS INTEGER),trigger_kind=?11,updated_at=?8 WHERE id=?1 AND phase=1;"
+          #[prevId, s!"{runGen}", s!"{d.dueEpoch}", d.prompt, d.reason, d.source, d.requestId, isoNow, d.recurrence, if d.stopAfterFirst then "1" else "0", d.triggerKind]
         if let .error e := upd then return .error e
         let ch ← execParamQueryUnlocked st.missionsDb "SELECT changes();" #[]
         let .ok crs := ch | return .error "continuation_changes_failed"
