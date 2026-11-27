@@ -554,6 +554,40 @@ private def verifyRemoteWakeupDirectStopAndStartupFence (store : CoreStore) (sup
     (← cellOf db "SELECT COUNT(*) FROM mission_proxy_tokens WHERE mission_id=?1 AND revoked=0;" #[midCrash]) == "0" &&
     (← cellOf db "SELECT phase || ':' || error || ':' || dispatch_job_id FROM mission_continuations WHERE id=?1;" #[cidCrash]) == "1:launch_retry:1:")
     "startup reconciliation re-arms a crashed remote wake-up once and revokes its proxy token after authoritative absence past lease expiry"
+  -- A wake-up launched on an `interrupted:remote_goal_stopped` mission carries both `wakeup_*`
+  -- and `completed_goal_*` metadata; authoritative 404 past lease expiry must still settle and re-arm the wake-up.
+  let midGoalWake := s!"{mid}-goal-wake"
+  let cidGoalWake := s!"c-{midGoalWake}"
+  let jidGoalWake := "job-wake-goal-stopped-404"
+  let .ok _ ← execParamQuery db
+    ("INSERT INTO missions(id,title,status,terminal_reason,backend,placement_kind,tags,run_generation,created_at,updated_at) " ++
+     "VALUES(?1,'turn','interrupted','remote_goal_stopped','opencode','managed','[\"remote-node:mockwakeup\"]',1,'t0','t0');") #[midGoalWake]
+    | throw (IO.userError "goal-stopped wake-up mission insert")
+  let .ok _ ← execParamQuery db
+    ("INSERT INTO mission_continuations(id,mission_id,run_generation,phase,due_epoch,trigger_kind,reason,prompt,request_id,job_id,dispatch_job_id,source,error,recurrence,stop_after_first,created_at,updated_at) " ++
+     "VALUES(?1,?2,1,2,CAST(?3 AS INTEGER),'time','test','goal stopped wakeup',?1,'',?4,'mcp','','',1,'t0','t0');")
+    #[cidGoalWake, midGoalWake, s!"{due}", jidGoalWake]
+    | throw (IO.userError "goal-stopped wake-up continuation insert")
+  let .ok gwTok ← mintMissionProxyToken store midGoalWake "" (due + 86400)
+    | throw (IO.userError "goal-stopped wake-up proxy token mint")
+  let gwMeta := renderCompact (.obj #[
+    ("backend", .str "opencode"), ("wakeup_claim", .str cidGoalWake), ("wakeup_request", .str cidGoalWake),
+    ("wakeup_generation", .num "1"), ("wakeup_lease_expires", JVal.uint64 (due + 900)),
+    ("completed_goal_generation", .num "1"), ("completed_goal_lease_expires", JVal.uint64 (due + 900)),
+    ("proxy_token_sha256", .str (missionProxyTokenSha256 gwTok))])
+  let .ok _ ← execParamQuery db
+    "INSERT INTO remote_node_jobs(job_id,mission_id,node_id,state,payload_json,created_at,updated_at) VALUES(?1,?2,'mockwakeup','uncertain',?3,'t0','t0');"
+    #[jidGoalWake, midGoalWake, gwMeta]
+    | throw (IO.userError "goal-stopped wake-up job insert")
+  let gwProbe ← IO.asTask (reconcileUncertainRemoteSubmissions store none none none sup root false (some (due + 950)))
+  withMockNodeRequest fd fun conn req => do
+    check (req.method == "GET" && req.path == s!"/jobs/{jidGoalWake}") "reconciliation probes goal-stopped remote wake-up job"
+    mockNodeReply conn "404 Not Found" "job not found"
+  check ((← IO.ofExcept gwProbe.get) == 0 &&
+    (← cellOf db "SELECT state FROM remote_node_jobs WHERE job_id=?1;" #[jidGoalWake]) == "failed" &&
+    (← cellOf db "SELECT COUNT(*) FROM mission_proxy_tokens WHERE mission_id=?1 AND revoked=0;" #[midGoalWake]) == "0" &&
+    (← cellOf db "SELECT phase || ':' || error || ':' || dispatch_job_id FROM mission_continuations WHERE id=?1;" #[cidGoalWake]) == "1:launch_retry:1:")
+    "reconciliation of a wake-up on an interrupted:remote_goal_stopped mission settles and re-arms the claim instead of stranding phase=2"
 
 def r24_lost_reply_is_uncertain_not_rejected : IO Unit := do
   let receipt := JVal.obj #[

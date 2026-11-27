@@ -45,6 +45,7 @@ private def verifyLegacyMigration (store : CoreStore) (now : UInt64) : IO Unit :
     ("fresh-sw", "inline", "{\"content\":\"legacy intent\"}", "interval", "{\"seconds\":300}", "{}", "after_first_fire", "always", "scheduler"),
     ("has-vars", "inline", "{\"content\":\"legacy intent\"}", "interval", "{\"seconds\":300}", "{\"env\":\"prod\"}", "after_first_fire", "keep", "scheduler"),
     ("stale-wgen", "inline", "{\"content\":\"stale wakeup\"}", "interval", "{\"seconds\":300}", "{\"__wakeup_request_id\":\"req-stale\",\"__wakeup_run_generation\":\"1\",\"__wakeup_source\":\"mcp\"}", "after_first_fire", "keep", "scheduler"),
+    ("stale-gen0-local", "inline", "{\"content\":\"stale gen0 after local turn\"}", "interval", "{\"seconds\":300}", "{\"__wakeup_request_id\":\"req-stale-gen0\",\"__wakeup_run_generation\":\"0\",\"__wakeup_source\":\"mcp\"}", "after_first_fire", "keep", "scheduler"),
     ("stale-runs-gen", "inline", "{\"content\":\"stale turn1\"}", "interval", "{\"seconds\":300}", "{\"__wakeup_request_id\":\"req-stale-runs\",\"__wakeup_run_generation\":\"1\",\"__wakeup_source\":\"mcp\"}", "after_first_fire", "keep", "scheduler"),
     ("fenced-wgen", "inline", "{\"content\":\"fenced wakeup\"}", "interval", "{\"seconds\":300}", "{\"__wakeup_request_id\":\"req-fenced\",\"__wakeup_run_generation\":\"2\",\"__wakeup_source\":\"mcp\"}", "after_first_fire", "keep", "scheduler"),
     ("local-client-var", "inline", "{\"content\":\"desktop local\"}", "interval", "{\"seconds\":300}", "{\"__wakeup_request_id\":\"req-local-var\",\"__wakeup_local\":\"true\",\"__wakeup_source\":\"orb-local\"}", "after_first_fire", "keep", "scheduler"),
@@ -63,7 +64,7 @@ private def verifyLegacyMigration (store : CoreStore) (now : UInt64) : IO Unit :
     ("valid-gen0", "inline", "{\"content\":\"pre-run wakeup\"}", "interval", "{\"seconds\":300}", "{\"__wakeup_request_id\":\"req-gen0\",\"__wakeup_run_generation\":\"0\",\"__wakeup_source\":\"mcp\"}", "after_first_fire", "keep", "scheduler")
   ]
   for (aid, cmdType, cmdData, kind, payload, vars, policy, fresh, drv) in unsupported ++ supported do
-    let mGen := if aid == "stale-wgen" || aid == "fenced-wgen" then "2" else if aid == "valid-gen0" then "0" else "1"
+    let mGen := if aid == "stale-wgen" || aid == "fenced-wgen" || aid == "stale-gen0-local" then "2" else if aid == "valid-gen0" then "0" else "1"
     sql db "INSERT INTO missions(id,title,status,backend,run_generation,created_at,updated_at) VALUES(?1,'legacy','completed','claudecode',CAST(?2 AS INTEGER),'t0','t0');" #[s!"m-legacy-{aid}", mGen]
     sql db "INSERT INTO automations VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,1);"
       #[aid, s!"m-legacy-{aid}", cmdType, cmdData, kind, payload, vars, policy, fresh, drv]
@@ -94,11 +95,13 @@ private def verifyLegacyMigration (store : CoreStore) (now : UInt64) : IO Unit :
   sql db "INSERT INTO automations VALUES('ui-cancel-src','m-legacy-ui-cancel','inline','{\"content\":\"do not resurrect cancelled\"}','interval','{\"seconds\":300}','{}','after_first_fire','keep','scheduler',1);"
   sql db "INSERT INTO missions(id,title,status,terminal_reason,backend,run_generation,created_at,updated_at) VALUES('m-legacy-goal-stop','legacy','interrupted','remote_goal_stopped','claudecode',1,'t0','t0');"
   sql db "INSERT INTO automations VALUES('goal-stop-src','m-legacy-goal-stop','inline','{\"content\":\"do not resurrect goal stop\"}','interval','{\"seconds\":300}','{}','after_first_fire','keep','scheduler',1);"
+  sql db "INSERT INTO missions(id,title,status,terminal_reason,backend,run_generation,created_at,updated_at) VALUES('m-legacy-tagged-stop','legacy','interrupted','hosted_stop','claudecode',1,'t0','t0');"
+  sql db "INSERT INTO automations VALUES('tagged-stop-src','m-legacy-tagged-stop','inline','{\"content\":\"do not resurrect tagged stop\"}','interval','{\"seconds\":300}','{\"__wakeup_request_id\":\"req-tagged-stop\",\"__wakeup_run_generation\":\"1\"}','after_first_fire','keep','scheduler',1);"
   sql db ("CREATE TRIGGER reject_legacy_insert BEFORE INSERT ON mission_continuations " ++
     "WHEN NEW.id='leg-auto-bad-insert' BEGIN SELECT RAISE(ABORT,'fixture insert failure'); END;")
   sql db ("CREATE TRIGGER reject_legacy_retirement BEFORE UPDATE ON automations " ++
     "WHEN OLD.id='bad-retire' BEGIN SELECT RAISE(IGNORE); END;")
-  let totalSkippedActive := unsupported.size + 7
+  let totalSkippedActive := unsupported.size + 8
   check ((← migrateLegacyAutomations store now) == supported.size && (← migrateLegacyAutomations store now) == 0)
     "only supported, fully written sources migrate, once"
   let .ok (.ok _) ← actOnContinuation store "c-ui-cancel" "cancel" "t1" now

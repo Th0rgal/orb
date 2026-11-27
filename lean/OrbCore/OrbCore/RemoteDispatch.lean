@@ -1094,9 +1094,9 @@ private def prepareRemoteHarnessCommand
         | return .error "antigravity_account_model_unavailable"
       let .ok url := parseUrl apiBase | return .error "native_core_url_unavailable"
       unless url.isHttps do return .error "native_core_tls_required"
+      if spec.goalDispatch?.isSome && !holder.remote then return .error "native_workspace_goal_unavailable"
       let .ok bearer ← mintNativeAntigravityToken store spec.missionId spec.ownerUserId jobId account model (nowSec + 86400) (some effNodeId)
         | return .error "native_grant_unavailable"
-      if spec.goalDispatch?.isSome && !holder.remote then return .error "native_workspace_goal_unavailable"
       let worker := include_str "antigravity_workspace_turn.py"
       let readTimeout := NativeSharedWorkspace.turnReadTimeoutSecs spec.goalDispatch?.isSome
       let options := #[jobId, spec.ownerUserId, effNodeId, resumeSid?.getD "", toString readTimeout]
@@ -2369,6 +2369,7 @@ partial def submitRemoteMissionTurn
   -- before the POST, after every local validation has passed.
   let ownerUser? ← if spec.ownerUserId.isEmpty then pure none else getUserById? store spec.ownerUserId
   unless spec.ownerUserId.isEmpty || (ownerUser?.map (fun u => !u.disabled)).getD false do
+    revokeSingleMissionProxyToken store prep.proxyToken
     return .error "remote_owner_unavailable"
   let callerRole :=
     match ownerUser? with
@@ -2638,14 +2639,6 @@ def reconcileUncertainRemoteSubmissions
     | .error _ => pure ()
     | .ok (status, response, view?, _, _) =>
       if status == 404 then
-        if completedGoal then
-          if (metaJv.fieldUInt64? "completed_goal_lease_expires").any (fun exp => nowSec > exp + 30) &&
-              response.trimAscii.toString == "job not found" then
-            let settled ← execParamQuery store.missionsDb
-              "UPDATE remote_node_jobs SET state='failed',updated_at=?2 WHERE job_id=?1 AND state='uncertain' RETURNING job_id;" #[jid, nowIso]
-            if let .ok changed := settled then
-              if changed.size > 1 then revokeMissionProxyTokenSha256 store proxyTokSha
-          continue
         if let some claim := wakeup? then
           -- A GET can overtake a delayed POST. Negative evidence is usable
           -- only after the original submission's lease can no longer admit it.
@@ -2662,6 +2655,14 @@ def reconcileUncertainRemoteSubmissions
               | .error e => return .error e
             if let .ok true := settled then
               revokeMissionProxyTokenSha256 store proxyTokSha
+          continue
+        if completedGoal then
+          if (metaJv.fieldUInt64? "completed_goal_lease_expires").any (fun exp => nowSec > exp + 30) &&
+              response.trimAscii.toString == "job not found" then
+            let settled ← execParamQuery store.missionsDb
+              "UPDATE remote_node_jobs SET state='failed',updated_at=?2 WHERE job_id=?1 AND state='uncertain' RETURNING job_id;" #[jid, nowIso]
+            if let .ok changed := settled then
+              if changed.size > 1 then revokeMissionProxyTokenSha256 store proxyTokSha
           continue
         if let some gen := goalGen? then
           let settled ← withImmediateTx store.missionsDb do
@@ -2732,26 +2733,42 @@ def reconcileUncertainRemoteSubmissions
         | .error "remote_wakeup_dispatch_fenced" =>
           if let .ok (code, _, _, _, _) ← callRemoteNodeHttpOpt relayHub? mc? node "POST" s!"/jobs/{jid}/cancel" (some (.obj #[])) #[] 8000 then
             if 200 ≤ code && code < 300 then
-              discard <| withImmediateTx store.missionsDb do
-                if let .error e ← execParamQueryUnlocked store.missionsDb
-                  "UPDATE remote_node_jobs SET state='cancelled', updated_at=?2 WHERE job_id=?1 AND state='uncertain';" #[jid, nowIso] then return .error e
-                if let some claim := wakeup? then return ← settleWakeupClaimUnlocked store claim jid false 0 nowSec (fenced := true)
-                return .ok ()
-              discard <| execParamQuery store.projectsDb
-                "UPDATE remote_jobs SET state='cancelled', heartbeat_at=?2, finished_at=COALESCE(finished_at,?2), updated_at=?2 WHERE job_id=?1;"
-                #[jid, nowIso]
-              revokeMissionProxyTokenSha256 store proxyTokSha
+              let cancelled ← withImmediateTx store.missionsDb do
+                let .ok changed ← execParamQueryUnlocked store.missionsDb
+                  "UPDATE remote_node_jobs SET state='cancelled', updated_at=?2 WHERE job_id=?1 AND state='uncertain' RETURNING job_id;" #[jid, nowIso]
+                  | return .error "remote_wakeup_cancel_write_failed"
+                if changed.size ≤ 1 then return .ok false
+                if let some claim := wakeup? then
+                  match ← settleWakeupClaimUnlocked store claim jid false 0 nowSec (fenced := true) with
+                  | .ok () => return .ok true
+                  | .error e => return .error e
+                return .ok true
+              if let .ok true := cancelled then
+                discard <| execParamQuery store.projectsDb
+                  "UPDATE remote_jobs SET state='cancelled', heartbeat_at=?2, finished_at=COALESCE(finished_at,?2), updated_at=?2 WHERE job_id=?1;"
+                  #[jid, nowIso]
+                revokeMissionProxyTokenSha256 store proxyTokSha
         | .error "remote_goal_dispatch_fenced" =>
           if let .ok pending ← execParamQuery store.missionsDb
               "SELECT 1 FROM remote_node_jobs WHERE job_id=?1 AND state IN ('submitting','uncertain');" #[jid] then
             if pending.size > 1 then
               if let .ok (code, _, _, _, _) ← callRemoteNodeHttpOpt relayHub? mc? node "POST" s!"/jobs/{jid}/cancel" (some (.obj #[])) #[] 8000 then
                 if 200 ≤ code && code < 300 then
-                  discard <| execParamQuery store.missionsDb "UPDATE remote_node_jobs SET state='cancelled', updated_at=?2 WHERE job_id=?1 AND state IN ('submitting','uncertain');" #[jid, nowIso]
-                  discard <| execParamQuery store.projectsDb
-                    "UPDATE remote_jobs SET state='cancelled', heartbeat_at=?2, finished_at=COALESCE(finished_at,?2), updated_at=?2 WHERE job_id=?1;"
-                    #[jid, nowIso]
-                  revokeMissionProxyTokenSha256 store proxyTokSha
+                  let cancelled ← withImmediateTx store.missionsDb do
+                    let .ok changed ← execParamQueryUnlocked store.missionsDb
+                      "UPDATE remote_node_jobs SET state='cancelled', updated_at=?2 WHERE job_id=?1 AND state IN ('submitting','uncertain') RETURNING job_id;" #[jid, nowIso]
+                      | return .error "remote_goal_cancel_write_failed"
+                    if changed.size ≤ 1 then return .ok false
+                    if let some claim := wakeup? then
+                      match ← settleWakeupClaimUnlocked store claim jid false 0 nowSec (fenced := true) with
+                      | .ok () => return .ok true
+                      | .error e => return .error e
+                    return .ok true
+                  if let .ok true := cancelled then
+                    discard <| execParamQuery store.projectsDb
+                      "UPDATE remote_jobs SET state='cancelled', heartbeat_at=?2, finished_at=COALESCE(finished_at,?2), updated_at=?2 WHERE job_id=?1;"
+                      #[jid, nowIso]
+                    revokeMissionProxyTokenSha256 store proxyTokSha
         | .error _ =>
           -- The accepted job is still owned by Core; keep it probeable rather
           -- than leaving a `running` job without a local owner row.
@@ -3049,13 +3066,13 @@ def migrateLegacyAutomations (store : CoreStore) (nowSec : UInt64) : IO Nat := d
           if mStatus == "cancelled" || mStatus == "failed" || mStatus == "not_feasible" ||
               mStatus == "acknowledged" || mPlacement == "client" ||
               (mStatus == "completed" && stopPol == "when_mission_terminal") ||
-              (mStatus == "interrupted" && (mTermReason == "hosted_stop" || mTermReason == "remote_goal_stopped") && wakeupGen?.isNone) then
+              (mStatus == "interrupted" && (mTermReason == "hosted_stop" || mTermReason == "remote_goal_stopped")) then
             return .ok false
           else
             if let some wGen := wakeupGen? then
               let genMatches :=
                 if maxRunsGen > 0 then wGen == effRunGen
-                else wGen == 0 || wGen == mRunGen
+                else (wGen == 0 && rawMRunGen ≤ 1) || wGen == mRunGen
               if !genMatches then return .ok false
             if hasFencesTable then
               let fenceGen := match wakeupGen? with
