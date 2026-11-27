@@ -1085,12 +1085,21 @@ private def managedBudgetWindowStartSec (resetPeriod : String) (nowEpoch : UInt6
 
 /-- Compute subtree reservation spend (cents) and carved child pool total (deci-milli-USD)
     for `poolId` inside a held `st.db` transaction (`FLT-08`).
+    When `excludeSubtreeRoot?` is provided, that mission and its entire descendant subtree are
+    excluded from both `budgetedDescendants` and `uncarved` so re-saving or lowering a carved
+    child's budget never double-counts the child's own spend against its parent pool.
     Returns `(uncarvedSpendCents, carvedChildrenBudgetDm, carvedChildrenOverrunDm, totalSubtreeSpendCents)`. -/
 private def queryMissionPoolUsageTx (st : ManagedComputeStore) (poolId ownerUserId resetPeriod : String)
-    (nowEpoch : UInt64) (excludeCarvedChild? : Option String := none) :
+    (nowEpoch : UInt64) (excludeSubtreeRoot? : Option String := none) :
     IO (Except String (UInt64 × UInt64 × UInt64 × UInt64)) := do
   let .ok subtree ← managedMissionSubtree st poolId ownerUserId
     | return .error "managed_mission_lineage_read_failed"
+  let excludedSubtree : Array String ← match excludeSubtreeRoot? with
+    | none => pure #[]
+    | some exclRoot =>
+      match ← managedMissionSubtree st exclRoot ownerUserId with
+      | .ok es => pure es
+      | .error _ => return .error "managed_mission_lineage_read_failed"
   let winStart := managedBudgetWindowStartSec resetPeriod nowEpoch
   let ph := String.intercalate "," (List.replicate subtree.size "?")
   -- Load explicit dollar budgets for all strict descendants in this subtree
@@ -1102,7 +1111,7 @@ private def queryMissionPoolUsageTx (st : ManagedComputeStore) (poolId ownerUser
   for i in [1:descBudgets.size] do
     let dMid := (cell descBudgets[i]! 0).trimAscii.toString
     let rawB := (cell descBudgets[i]! 1).trimAscii.toString
-    if dMid != poolId && excludeCarvedChild? != some dMid then
+    if dMid != poolId && !excludedSubtree.contains dMid then
       if let some dm := rawB.toNat? then
         budgetedDescendants := budgetedDescendants.push (dMid, dm.toUInt64)
   -- Identify top-level carved children (those whose nearest budgeted ancestor is `poolId`)
@@ -1143,8 +1152,8 @@ private def queryMissionPoolUsageTx (st : ManagedComputeStore) (poolId ownerUser
       (subtree ++ subtree ++ #[s!"{winStart}"])
     | return .error "managed_mission_budget_read_failed"
   let totalSpendCents := if totalRows.size > 1 then cellU64 totalRows[1]! 0 else 0
-  -- Uncarved missions owned by `poolId` itself (not inside any carved child subtree)
-  let uncarved := subtree.filter (fun m => !carvedMissions.contains m)
+  -- Uncarved missions owned by `poolId` itself (not inside any carved child subtree or excluded subtree)
+  let uncarved := subtree.filter (fun m => !carvedMissions.contains m && !excludedSubtree.contains m)
   let uncarvedSpendCents ←
     if uncarved.isEmpty then pure 0
     else
@@ -1346,13 +1355,31 @@ def refundManagedCostReservation (st : ManagedComputeStore) (reservationId : Str
         #[s!"{cents}"]
     return .ok ()
 
-/-- Validate that carving `requestedBudgetDm` for `missionId` fits inside its nearest
-    budgeted ancestor pool's remaining headroom (`FLT-08`). -/
-def validateMissionBudgetCarve (st : ManagedComputeStore) (missionId ownerUserId : String)
-    (requestedBudgetDm : UInt64) (nowEpoch : UInt64) : IO (Except String Unit) :=
-  withImmediateTx st.db do
-    let .ok lineage ← managedMissionLineage st missionId ownerUserId
-      | return .error "managed_mission_lineage_read_failed"
+/-- Validate a budget change (set, edit, lower, or clear/un-carve) inside an already-held
+    `withImmediateTx st.db` transaction (`FLT-08`).
+    Enforces:
+    1. Setting/lowering `missionId`'s own cap must cover `missionId`'s own committed spend +
+       carved grandchild pools (`mission_budget_below_committed`).
+    2. Carving/editing `missionId`'s cap must fit inside its nearest budgeted ancestor pool's
+       remaining headroom WITHOUT double-counting `missionId`'s own subtree spend.
+    3. Clearing (`none`, un-carving) `missionId`'s cap must fit `missionId`'s own uncarved spend +
+       carved grandchild pools into its nearest budgeted ancestor pool. -/
+private def validateMissionBudgetChangeTx (st : ManagedComputeStore) (missionId ownerUserId : String)
+    (nextBudgetDm? : Option UInt64) (nextResetPeriod : String) (nowEpoch : UInt64) : IO (Except String Unit) := do
+  let .ok lineage ← managedMissionLineage st missionId ownerUserId
+    | return .error "managed_mission_lineage_read_failed"
+  let effSelfRp := if nextResetPeriod.trimAscii.toString.isEmpty then "total" else nextResetPeriod
+  match nextBudgetDm? with
+  | some requestedBudgetDm =>
+    -- 1. Floor check against missionId's own spend + carved grandchildren
+    let .ok (selfUncarvedCents, selfCarvedDm, selfOverrunDm, selfTotalCents) ←
+      queryMissionPoolUsageTx st missionId ownerUserId effSelfRp nowEpoch none
+      | return .error "managed_mission_budget_read_failed"
+    let selfCommittedDm := selfUncarvedCents * 100 + selfCarvedDm + selfOverrunDm
+    let selfFloorDm := max selfCommittedDm (selfTotalCents * 100)
+    if requestedBudgetDm < selfFloorDm then
+      return .error s!"mission_budget_below_committed:{missionId}"
+    -- 2. Ancestor headroom check excluding missionId's entire subtree (no self-spend double-counting)
     for anc in lineage do
       if anc == missionId then continue
       let .ok bRows ← execParamQueryUnlocked st.db
@@ -1365,11 +1392,46 @@ def validateMissionBudgetCarve (st : ManagedComputeStore) (missionId ownerUserId
           let .ok (uncarvedCents, otherCarvedDm, otherOverrunDm, _) ←
             queryMissionPoolUsageTx st anc ownerUserId rp nowEpoch (some missionId)
             | return .error "managed_mission_budget_read_failed"
+          let .ok (_, _, _, selfSpendInAncWindowCents) ←
+            queryMissionPoolUsageTx st missionId ownerUserId rp nowEpoch none
+            | return .error "managed_mission_budget_read_failed"
           let usedWithoutSelf := uncarvedCents * 100 + otherCarvedDm + otherOverrunDm
-          if usedWithoutSelf + requestedBudgetDm > ancCapDm.toUInt64 then
+          let effSelfCommitment := max requestedBudgetDm (selfSpendInAncWindowCents * 100)
+          if usedWithoutSelf + effSelfCommitment > ancCapDm.toUInt64 then
             return .error s!"mission_budget_carve_exceeds_parent:{anc}"
           break
     return .ok ()
+  | none =>
+    -- 3. Un-carving: verify merging missionId's uncarved spend + carved grandchildren fits into nearest budgeted ancestor
+    for anc in lineage do
+      if anc == missionId then continue
+      let .ok bRows ← execParamQueryUnlocked st.db
+          "SELECT COALESCE(budget_deci_milli_usd,-1), COALESCE(reset_period,'total') FROM mission_budgets WHERE mission_id=?1 AND budget_deci_milli_usd IS NOT NULL AND CAST(budget_deci_milli_usd AS TEXT)<>'';"
+          #[anc]
+        | return .error "managed_mission_budget_read_failed"
+      if bRows.size > 1 then
+        if let some ancCapDm := (cell bRows[1]! 0).trimAscii.toString.toNat? then
+          let rp := (cell bRows[1]! 1).trimAscii.toString
+          let .ok (otherUncarvedCents, otherCarvedDm, otherOverrunDm, _) ←
+            queryMissionPoolUsageTx st anc ownerUserId rp nowEpoch (some missionId)
+            | return .error "managed_mission_budget_read_failed"
+          let .ok (selfUncarvedCents, selfCarvedDm, selfOverrunDm, _) ←
+            queryMissionPoolUsageTx st missionId ownerUserId rp nowEpoch none
+            | return .error "managed_mission_budget_read_failed"
+          let mergedUsed :=
+            (otherUncarvedCents + selfUncarvedCents) * 100 +
+            otherCarvedDm + otherOverrunDm + selfCarvedDm + selfOverrunDm
+          if mergedUsed > ancCapDm.toUInt64 then
+            return .error s!"mission_budget_uncarve_exceeds_parent:{anc}"
+          break
+    return .ok ()
+
+/-- Validate that carving `requestedBudgetDm` for `missionId` fits inside its nearest
+    budgeted ancestor pool's remaining headroom and covers its own committed spend (`FLT-08`). -/
+def validateMissionBudgetCarve (st : ManagedComputeStore) (missionId ownerUserId : String)
+    (requestedBudgetDm : UInt64) (nowEpoch : UInt64) (resetPeriod : String := "total") : IO (Except String Unit) :=
+  withImmediateTx st.db do
+    validateMissionBudgetChangeTx st missionId ownerUserId (some requestedBudgetDm) resetPeriod nowEpoch
 
 private def extensionFromRow (r : Array String) : ManagedExtensionIntent := {
   id := cell r 0, machineId := cell r 1, bootEpoch := cellU64 r 2, providerId := cell r 3,
@@ -2446,9 +2508,9 @@ def getMissionBudgetConfig (st : ManagedComputeStore) (missionId : String) : IO 
   | .error _ =>
     return { missionId := missionId }
 
-def saveMissionBudgetConfig (st : ManagedComputeStore) (cfg : MissionBudgetConfig) : IO (Except String Unit) := do
+private def saveMissionBudgetConfigUnlocked (st : ManagedComputeStore) (cfg : MissionBudgetConfig) : IO (Except String Unit) := do
   if cfg.budgetDeciMilliUsd?.isNone && cfg.vmLimitsJson.isEmpty && cfg.bandwidthLimitsJson.isEmpty then
-    match ← execParamQuery st.db "DELETE FROM mission_budgets WHERE mission_id=?1;" #[cfg.missionId] with
+    match ← execParamQueryUnlocked st.db "DELETE FROM mission_budgets WHERE mission_id=?1;" #[cfg.missionId] with
     | .error e => return .error e
     | .ok _ => return .ok ()
   else
@@ -2459,9 +2521,23 @@ def saveMissionBudgetConfig (st : ManagedComputeStore) (cfg : MissionBudgetConfi
       "vm_limits_json=excluded.vm_limits_json,bandwidth_limits_json=excluded.bandwidth_limits_json,updated_at=excluded.updated_at;"
     let bParam := match cfg.budgetDeciMilliUsd? with | some dm => s!"{dm}" | none => ""
     let rp := if cfg.budgetDeciMilliUsd?.isSome && isValidBudgetResetPeriod cfg.resetPeriod then cfg.resetPeriod else "total"
-    match ← execParamQuery st.db sql #[cfg.missionId, bParam, rp, cfg.vmLimitsJson, cfg.bandwidthLimitsJson, s!"{cfg.updatedAt}"] with
+    match ← execParamQueryUnlocked st.db sql #[cfg.missionId, bParam, rp, cfg.vmLimitsJson, cfg.bandwidthLimitsJson, s!"{cfg.updatedAt}"] with
     | .error e => return .error e
     | .ok _ => return .ok ()
+
+def saveMissionBudgetConfig (st : ManagedComputeStore) (cfg : MissionBudgetConfig) : IO (Except String Unit) :=
+  withImmediateTx st.db (saveMissionBudgetConfigUnlocked st cfg)
+
+/-- Atomically validate budget carve/floor/un-carve constraints and persist `cfg` in a single
+    `BEGIN IMMEDIATE` transaction so concurrent child carves or VM spawns cannot over-commit
+    the parent pool (`FLT-08`). -/
+def saveMissionBudgetConfigWithCarveCheck (st : ManagedComputeStore) (cfg : MissionBudgetConfig)
+    (ownerUserId : String) (nowEpoch : UInt64) (validateBudgetField : Bool := true) : IO (Except String Unit) :=
+  withImmediateTx st.db do
+    if validateBudgetField then
+      if let .error e ← validateMissionBudgetChangeTx st cfg.missionId ownerUserId cfg.budgetDeciMilliUsd? cfg.resetPeriod nowEpoch then
+        return .error e
+    saveMissionBudgetConfigUnlocked st cfg
 
 def renderMissionBudgetJson
     (fleet : ManagedFleetState)

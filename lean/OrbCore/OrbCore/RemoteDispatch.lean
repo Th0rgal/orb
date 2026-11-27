@@ -1137,10 +1137,10 @@ private structure RemoteStreamAcc where
   outputTokens?    : Option UInt64 := none
   cacheReadTokens? : Option UInt64 := none
 
-private def emitMissionEventAndBroadcast
+private def emitMissionEventAndBroadcastSeq
     (store : CoreStore)
     (broadcastHub? : Option BroadcastHub)
-    (missionId evType payloadJson nowIso : String) : IO Unit := do
+    (missionId evType payloadJson nowIso : String) : IO UInt64 := do
   if evType == "error" then
     let msg := ((OrbBin.Json.parse payloadJson).toOption.bind (·.fieldStr? "message") |>.getD "").trimAscii.toString
     if !msg.isEmpty then
@@ -1149,13 +1149,21 @@ private def emitMissionEventAndBroadcast
         if let some r := rows[1]? then
           if cell r 0 == "error" then
             let prevMsg := (((OrbBin.Json.parse (cell r 1)).toOption.bind (·.fieldStr? "message")).getD (cell r 2)).trimAscii.toString
-            if prevMsg == msg then return
+            if prevMsg == msg then return 0
   match ← appendMissionEvent store missionId evType payloadJson nowIso with
   | .ok seq =>
     if !(← isBroadcastHubBridged broadcastHub?) then
       publishControlEvent broadcastHub? evType payloadJson (some missionId) (some seq)
+    return seq
   | .error _ =>
     publishControlEvent broadcastHub? evType payloadJson (some missionId)
+    return 0
+
+private def emitMissionEventAndBroadcast
+    (store : CoreStore)
+    (broadcastHub? : Option BroadcastHub)
+    (missionId evType payloadJson nowIso : String) : IO Unit :=
+  discard <| emitMissionEventAndBroadcastSeq store broadcastHub? missionId evType payloadJson nowIso
 
 private def resumableGoalSession (backend sid : String) : Bool :=
   match RemoteGoal.normalizeHarness backend with
@@ -2282,15 +2290,18 @@ partial def spawnRemoteJobPoller
                 releasePolledJob sup jobId
                 let mut effNextPrompt := nextPrompt
                 let mut nextGoalDispatch? : Option (String × UInt64) := none
+                let prevGoalMode := mr.goalMode
+                let prevGoalObjective := mr.goalObjective
+                let mut goalActivatedObj? : Option String := none
+                let mut effGen := curRunGen
                 if let some rawGoalObj := OrbCore.Cyber.parseGoalPrefix? nextPrompt then
                   let (cleanObj, skillSuffix) := splitSkillDirective rawGoalObj
                   if !cleanObj.isEmpty && RemoteGoal.supportsHarness mr.backend then
                     if let .ok (some nextGen) ← activateRemoteGoalOnMission store missionId cleanObj nowIso true then
-                      emitMissionEventAndBroadcast store broadcastHub? missionId "goal_status"
-                        (renderCompact (.obj #[("status", .str "active"), ("objective", .str cleanObj),
-                          ("iteration", .num "0"), ("reason", .str "remote_goal_started")])) nowIso
                       effNextPrompt := remoteGoalPrompt cleanObj ++ skillSuffix
                       nextGoalDispatch? := some ("", nextGen)
+                      goalActivatedObj? := some cleanObj
+                      effGen := nextGen
                 let followSpec : RemoteTurnSpec := {
                   missionId        := missionId
                   targetNodeId     := effNodeId
@@ -2310,19 +2321,35 @@ partial def spawnRemoteJobPoller
                 }
                 match ← submitRemoteMissionTurn store mc? relayHub? broadcastHub? sup coreWorkDir followSpec nowSec with
                 | .ok _ =>
-                  discard <| stepQueueItem store qUid nextMsgId 1 s!"{curRunGen}" s!"{store.bootEpoch}" "1" nowIso
+                  if let some cleanObj := goalActivatedObj? then
+                    emitMissionEventAndBroadcast store broadcastHub? missionId "goal_status"
+                      (renderCompact (.obj #[("status", .str "active"), ("objective", .str cleanObj),
+                        ("iteration", .num "0"), ("reason", .str "remote_goal_started")])) nowIso
                   -- Carry the queue message id: clients retire the queued card of this exact
                   -- message when its delivered `user_message` (same `id`) lands in the transcript.
-                  emitMissionEventAndBroadcast store broadcastHub? missionId "user_message"
+                  let evSeq ← emitMissionEventAndBroadcastSeq store broadcastHub? missionId "user_message"
                     (renderCompact (.obj #[("type", .str "user_message"), ("id", .str nextMsgId), ("content", .str nextPrompt), ("source", .str "queue")])) nowIso
+                  let seqStr := if evSeq > 0 then s!"{evSeq}" else "1"
+                  discard <| stepQueueItem store qUid nextMsgId 1 s!"{effGen}" s!"{store.bootEpoch}" seqStr nowIso
                 | .error dispErr =>
                   if dispErr.startsWith "remote_dispatch_uncertain:" || dispErr.startsWith "remote_accept_persist_failed:" then
-                    discard <| stepQueueItem store qUid nextMsgId 3 s!"{curRunGen}" s!"{store.bootEpoch}" "1" nowIso 1 0
+                    if let some cleanObj := goalActivatedObj? then
+                      emitMissionEventAndBroadcast store broadcastHub? missionId "goal_status"
+                        (renderCompact (.obj #[("status", .str "active"), ("objective", .str cleanObj),
+                          ("iteration", .num "0"), ("reason", .str "remote_goal_started")])) nowIso
+                    discard <| stepQueueItem store qUid nextMsgId 3 s!"{effGen}" s!"{store.bootEpoch}" "1" nowIso 1 0
                   else
+                    if goalActivatedObj?.isSome then
+                      discard <| execParamQuery store.missionsDb
+                        ("UPDATE missions SET goal_mode=CAST(?2 AS INTEGER), goal_objective=?3, status='awaiting_user', " ++
+                         "terminal_reason='queue_dispatch_retry', state_revision=state_revision+1, updated_at=?4 " ++
+                         "WHERE id=?1 AND run_generation=CAST(?5 AS INTEGER);")
+                        #[missionId, if prevGoalMode then "1" else "0", prevGoalObjective, nowIso, s!"{effGen}"]
+                    else
+                      discard <| execParamQuery store.missionsDb
+                        "UPDATE missions SET status='awaiting_user', terminal_reason='queue_dispatch_retry', state_revision=state_revision+1, updated_at=?2 WHERE id=?1 AND run_generation=CAST(?3 AS INTEGER) AND status IN ('active','pending');"
+                        #[missionId, nowIso, s!"{effGen}"]
                     discard <| releaseClaimedQueueItem store qUid nextMsgId nowIso
-                    discard <| execParamQuery store.missionsDb
-                      "UPDATE missions SET status='awaiting_user', terminal_reason='queue_dispatch_retry', state_revision=state_revision+1, updated_at=?2 WHERE id=?1 AND run_generation=CAST(?3 AS INTEGER) AND status IN ('active','pending');"
-                      #[missionId, nowIso, s!"{capturedGen}"]
                   emitMissionEventAndBroadcast store broadcastHub? missionId "error"
                     (renderCompact (.obj #[("message", .str s!"Queued follow-up dispatch deferred: {dispErr}")])) nowIso
                 return ()
@@ -3065,15 +3092,18 @@ def tickRemoteFollowupPump
         if !sid.isEmpty then sid? := some sid
     let mut effNextPrompt := nextPrompt
     let mut nextGoalDispatch? : Option (String × UInt64) := none
+    let prevGoalMode := mr.goalMode
+    let prevGoalObjective := mr.goalObjective
+    let mut goalActivatedObj? : Option String := none
+    let mut effGen := gen
     if let some rawGoalObj := OrbCore.Cyber.parseGoalPrefix? nextPrompt then
       let (cleanObj, skillSuffix) := splitSkillDirective rawGoalObj
       if !cleanObj.isEmpty && RemoteGoal.supportsHarness mr.backend then
         if let .ok (some nextGen) ← activateRemoteGoalOnMission store mid cleanObj nowIso true then
-          emitMissionEventAndBroadcast store broadcastHub? mid "goal_status"
-            (renderCompact (.obj #[("status", .str "active"), ("objective", .str cleanObj),
-              ("iteration", .num "0"), ("reason", .str "remote_goal_started")])) nowIso
           effNextPrompt := remoteGoalPrompt cleanObj ++ skillSuffix
           nextGoalDispatch? := some ("", nextGen)
+          goalActivatedObj? := some cleanObj
+          effGen := nextGen
     let spec : RemoteTurnSpec := {
       missionId := mid, targetNodeId := effNode, backend := mr.backend
       modelOverride := mr.modelOverride, modelEffort := mr.modelEffort
@@ -3085,14 +3115,29 @@ def tickRemoteFollowupPump
     }
     match ← submitRemoteMissionTurn store mc? relayHub? broadcastHub? sup coreWorkDir spec nowSec with
     | .ok _ =>
-      discard <| stepQueueItem store qUid nextMsgId 1 s!"{gen}" s!"{store.bootEpoch}" "1" nowIso
-      emitMissionEventAndBroadcast store broadcastHub? mid "user_message"
+      if let some cleanObj := goalActivatedObj? then
+        emitMissionEventAndBroadcast store broadcastHub? mid "goal_status"
+          (renderCompact (.obj #[("status", .str "active"), ("objective", .str cleanObj),
+            ("iteration", .num "0"), ("reason", .str "remote_goal_started")])) nowIso
+      let evSeq ← emitMissionEventAndBroadcastSeq store broadcastHub? mid "user_message"
         (renderCompact (.obj #[("type", .str "user_message"), ("id", .str nextMsgId), ("content", .str nextPrompt), ("source", .str "queue")])) nowIso
+      let seqStr := if evSeq > 0 then s!"{evSeq}" else "1"
+      discard <| stepQueueItem store qUid nextMsgId 1 s!"{effGen}" s!"{store.bootEpoch}" seqStr nowIso
       pumped := pumped + 1
     | .error e =>
       if e.startsWith "remote_dispatch_uncertain:" || e.startsWith "remote_accept_persist_failed:" then
-        discard <| stepQueueItem store qUid nextMsgId 3 s!"{gen}" s!"{store.bootEpoch}" "1" nowIso 1 0
+        if let some cleanObj := goalActivatedObj? then
+          emitMissionEventAndBroadcast store broadcastHub? mid "goal_status"
+            (renderCompact (.obj #[("status", .str "active"), ("objective", .str cleanObj),
+              ("iteration", .num "0"), ("reason", .str "remote_goal_started")])) nowIso
+        discard <| stepQueueItem store qUid nextMsgId 3 s!"{effGen}" s!"{store.bootEpoch}" "1" nowIso 1 0
       else
+        if goalActivatedObj?.isSome then
+          discard <| execParamQuery store.missionsDb
+            ("UPDATE missions SET goal_mode=CAST(?2 AS INTEGER), goal_objective=?3, status='awaiting_user', " ++
+             "terminal_reason='queue_dispatch_retry', state_revision=state_revision+1, updated_at=?4 " ++
+             "WHERE id=?1 AND run_generation=CAST(?5 AS INTEGER);")
+            #[mid, if prevGoalMode then "1" else "0", prevGoalObjective, nowIso, s!"{effGen}"]
         discard <| releaseClaimedQueueItem store qUid nextMsgId nowIso
       emitMissionEventAndBroadcast store broadcastHub? mid "error"
         (renderCompact (.obj #[("message", .str s!"Queued follow-up dispatch will be retried: {e}")])) nowIso
@@ -3346,20 +3391,34 @@ def tickContinuationScheduler
   let nowIso := formatEpochIso8601Utc nowSec
   discard <| migrateLegacyAutomations store nowSec
   ensureDurableJobsTableLocal store
-  -- Collect any terminal durable job IDs from `projectsDb.remote_jobs` so job-wakeups
-  -- whose terminal state exists only in `projectsDb` are still selected as candidates (`RUN-11`).
+  -- Query ONLY job IDs actively watched by armed `durable_job_terminal` continuations
+  -- against `projectsDb.remote_jobs` (chunked), so arbitrary numbers of historical terminal
+  -- rows in `projectsDb.remote_jobs` can never starve `schedule_job_wakeup` (`RUN-11`).
+  let mut armedJobIds : Array String := #[]
+  if let .ok ajRows ← execParamQuery store.missionsDb
+      "SELECT DISTINCT job_id FROM mission_continuations WHERE phase=1 AND trigger_kind IN ('durable_job_terminal','job') AND COALESCE(job_id,'')<>'';" #[] then
+    for i in [1:ajRows.size] do
+      let jid := (cell ajRows[i]! 0).trimAscii.toString
+      if !jid.isEmpty then armedJobIds := armedJobIds.push jid
   let mut projTerminalJobIds : Array String := #[]
-  if let .ok pjRows ← execParamQuery store.projectsDb
-      "SELECT job_id FROM remote_jobs WHERE state IN ('succeeded','failed','cancelled','lost','terminal','completed','aborted') LIMIT 512;" #[] then
-    for i in [1:pjRows.size] do
-      let jid := (cell pjRows[i]! 0).trimAscii.toString
-      if !jid.isEmpty then projTerminalJobIds := projTerminalJobIds.push jid
+  let chunkSz : Nat := 200
+  let mut off : Nat := 0
+  while off < armedJobIds.size do
+    let slice := armedJobIds.extract off (min (off + chunkSz) armedJobIds.size)
+    let ph := String.intercalate "," (List.replicate slice.size "?")
+    if let .ok pjRows ← execParamQuery store.projectsDb
+        s!"SELECT job_id FROM remote_jobs WHERE job_id IN ({ph}) AND state IN ('succeeded','failed','cancelled','lost','terminal','completed','aborted');" slice then
+      for i in [1:pjRows.size] do
+        let jid := (cell pjRows[i]! 0).trimAscii.toString
+        if !jid.isEmpty && !projTerminalJobIds.contains jid then
+          projTerminalJobIds := projTerminalJobIds.push jid
+    off := off + chunkSz
   let projTermClause :=
     if projTerminalJobIds.isEmpty then "0=1"
     else
       let ph := String.intercalate "," (List.replicate projTerminalJobIds.size "?")
       s!"c.job_id IN ({ph})"
-  -- Fairness is part of the query, not an accident of row order. Busy active owners
+  -- Fairness is part of the query, not an accident of row order. Busy or paused/blocked owners
   -- whose generation still matches stay armed without consuming page slots, so even
   -- hundreds of blocked owners or non-terminal durable jobs cannot starve idle work (`RUN-11`).
   let dueRes ← execParamQuery store.missionsDb
@@ -3369,7 +3428,7 @@ def tickContinuationScheduler
      "WHERE (c.phase = 1 AND (COALESCE(m.placement_kind,'') <> 'client' " ++
      "OR COALESCE(m.status,'') IN ('cancelled','failed','not_feasible','acknowledged') " ++
      "OR COALESCE(m.run_generation,1) <> COALESCE(c.run_generation,1)) " ++
-     "AND NOT (COALESCE(m.status,'') IN ('active','pending','waiting_background') AND COALESCE(m.run_generation,1)=COALESCE(c.run_generation,1)) " ++
+     "AND NOT (COALESCE(m.status,'') IN ('active','pending','waiting_background','paused','blocked','waiting_rate_limit') AND COALESCE(m.run_generation,1)=COALESCE(c.run_generation,1)) " ++
      "AND NOT EXISTS(SELECT 1 FROM remote_node_jobs j WHERE j.mission_id=c.mission_id " ++
      "AND j.state IN ('submitting','uncertain') AND " ++ fencedSubmissionSql "j.payload_json" ++ ") AND (" ++
      "  (c.trigger_kind = 'time' AND c.due_epoch <= CAST(? AS INTEGER)) OR " ++

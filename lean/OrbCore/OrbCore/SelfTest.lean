@@ -270,7 +270,8 @@ private def runManagedMcpProviderContractTests (root : String) : IO Unit := do
       let extOn ← extCall "extend_managed_machine"
         (.obj #[("machine_id", .str defaultId), ("ttl_minutes", .nat 5), ("idempotency_key", .str "leanci-ext-on")])
       check (leanciSupportsExtendOf catOff == some false &&
-        ((OrbBin.Json.renderCompact extOff).splitOn "managed_provider_extend_unsupported").length == 2 &&
+        extOff.fieldBool? "ok" == some false &&
+        ((OrbBin.Json.renderCompact extOff).splitOn "managed_provider_extend_unsupported").length >= 2 &&
         leanciSupportsExtendOf catOn == some true &&
         extOn.fieldBool? "ok" == some true && (← extCalls.get) == 1)
         s!"lean.ci supports_extend and extend_managed_machine follow provider.supportsExtend: off={OrbBin.Json.renderCompact extOff} on={OrbBin.Json.renderCompact extOn}"

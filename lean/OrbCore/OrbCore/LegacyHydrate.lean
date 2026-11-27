@@ -331,10 +331,12 @@ def deleteProxyApiKey (dataRoot keyId : String) : IO Bool := do
 /-! ## SSE Broadcast Hub (`GET /api/control/stream`, `GET /api/control/missions/:id/stream`) -/
 
 structure SseQueuedEvent where
-  eventType  : String
-  missionId? : Option String
-  frame      : String
-  seq?       : Option UInt64 := none
+  eventType     : String
+  missionId?    : Option String
+  frame         : String
+  seq?          : Option UInt64 := none
+  aclOwnerUid?  : Option String := none
+  aclSharedUids : Array String := #[]
   deriving Repr, DecidableEq, Inhabited
 
 structure SseSubscriber where
@@ -371,8 +373,11 @@ def publishControlEvent
     (hub? : Option BroadcastHub)
     (eventType payloadJson : String)
     (missionId? : Option String := none)
-    (eventSeq? : Option UInt64 := none) : IO Unit := do
+    (eventSeq? : Option UInt64 := none)
+    (aclOwnerUid? : Option String := none)
+    (aclSharedUids : Array String := #[]) : IO Unit := do
   let some hub := hub? | return ()
+  let bridged ← hub.bridgedRef.get
   let subs ← hub.mu.atomically do
     let (seq, xs) ← get
     let nextSeq := seq + 1
@@ -380,9 +385,28 @@ def publishControlEvent
     return (nextSeq, xs)
   let safeType := ((eventType.splitOn "\n").headD "message").trimAscii.toString
   let cleanMid? := missionId?.map (·.trimAscii.toString) |>.filter (!·.isEmpty)
-  let effId := eventSeq?.getD subs.1
-  let frame := formatSseFrame safeType payloadJson (some effId)
-  let item : SseQueuedEvent := { eventType := safeType, missionId? := cleanMid?, frame := frame, seq? := eventSeq? }
+  let cleanSeq? : Option UInt64 :=
+    match eventSeq? with
+    | some 0 => none
+    | some s => some s
+    | none => none
+  -- Never emit `id: 0`, and on a bridged SQLite-cursor stream never assign an ephemeral
+  -- in-memory hub counter as `id:` (which would corrupt `Last-Event-ID`).
+  let effId? : Option UInt64 :=
+    match cleanSeq? with
+    | some s => some s
+    | none =>
+      if safeType == "mission_presentation" || bridged then none
+      else some subs.1
+  let frame := formatSseFrame safeType payloadJson effId?
+  let item : SseQueuedEvent := {
+    eventType := safeType
+    missionId? := cleanMid?
+    frame := frame
+    seq? := cleanSeq?
+    aclOwnerUid? := aclOwnerUid?
+    aclSharedUids := aclSharedUids
+  }
   for sub in subs.2 do
     let matchesMission :=
       match sub.missionFilter?, cleanMid? with

@@ -184,10 +184,13 @@ def lineageMissionBudget (root : String) : IO Unit := do
     missionSql core.missionsDb "child" "active" "managed" 1
     missionSql core.missionsDb "child-b" "active" "managed" 1
     missionSql core.missionsDb "child-carve" "active" "managed" 1
+    missionSql core.missionsDb "grandchild-carve" "active" "managed" 1
     missionSql core.missionsDb "zero-m" "active" "managed" 1
     missionSql core.missionsDb "daily-m" "active" "managed" 1
     discard <| require (← execParamQuery core.missionsDb
       "UPDATE missions SET parent_mission_id='parent' WHERE id IN ('child','child-b','child-carve');" #[])
+    discard <| require (← execParamQuery core.missionsDb
+      "UPDATE missions SET parent_mission_id='child-carve' WHERE id='grandchild-carve';" #[])
     let .ok mc ← openManagedComputeStore s!"{root}/managed.db" (some core.missionsDb)
       | throw (IO.userError "r18 liveness: open managed store")
     try
@@ -221,15 +224,38 @@ def lineageMissionBudget (root : String) : IO Unit := do
       | .error e => check (e == "mission_budget_exceeded:parent") s!"second child blocked by cumulative parent pool (got {e})"
 
       -- 3. Carving validation: carving $0.04 (400 dm) when only $0.02 (200 dm) remains fails
-      match ← validateMissionBudgetCarve mc "child-carve" "" 400 1700000003 with
+      match ← saveMissionBudgetConfigWithCarveCheck mc {
+        missionId := "child-carve", budgetDeciMilliUsd? := some 400 } "" 1700000003 with
       | .ok () => throw (IO.userError "r18 liveness: over-carved child budget succeeded")
       | .error e => check (e.startsWith "mission_budget_carve_exceeds_parent:parent") s!"over-carving rejected (got {e})"
-      -- Carving $0.02 (200 dm) succeeds and leaves parent 0 available
-      discard <| require (← validateMissionBudgetCarve mc "child-carve" "" 200 1700000003)
-      discard <| require (← saveMissionBudgetConfig mc {
-        missionId := "child-carve", budgetDeciMilliUsd? := some 200 })
+      -- Atomic carve of $0.02 (200 dm) succeeds and leaves parent 0 available
+      discard <| require (← saveMissionBudgetConfigWithCarveCheck mc {
+        missionId := "child-carve", budgetDeciMilliUsd? := some 200 } "" 1700000003)
 
-      -- 4. Lineage-aware budget JSON rendering (`mode: "inherited"`, real `carved_usd`, real `available_usd`)
+      -- 3b. Post-spend child budget re-save / reduction must NOT double-count self-spend,
+      -- and must enforce the floor of own spend + carved grandchildren (`FLT-08`).
+      let vmCarve : ManagedMachine :=
+        { id := "vm-carve", sandboxName := "orb-managed-vm-carve", size := "small",
+          ownerMission := "child-carve", ttlMinutes := 60, spentCents := 1 }
+      discard <| require (← provisionManagedMachine mc fleet vmCarve 1700000003)
+      -- Re-saving child-carve at $0.02 after $0.01 spend must succeed (no self-spend double counting)
+      discard <| require (← saveMissionBudgetConfigWithCarveCheck mc {
+        missionId := "child-carve", budgetDeciMilliUsd? := some 200 } "" 1700000003)
+      -- Lowering child-carve below its $0.01 spend ($0.005 = 50 dm) must fail with floor error
+      match ← saveMissionBudgetConfigWithCarveCheck mc {
+        missionId := "child-carve", budgetDeciMilliUsd? := some 50 } "" 1700000003 with
+      | .ok () => throw (IO.userError "r18 liveness: lowering budget below own spend succeeded")
+      | .error e => check (e.startsWith "mission_budget_below_committed:child-carve") s!"floor rejected (got {e})"
+      -- Grandchild carves the remaining $0.01 (100 dm) from child-carve
+      discard <| require (← saveMissionBudgetConfigWithCarveCheck mc {
+        missionId := "grandchild-carve", budgetDeciMilliUsd? := some 100 } "" 1700000003)
+      -- Lowering child-carve below own spend ($0.01) + grandchild carve ($0.01) = $0.02 fails
+      match ← saveMissionBudgetConfigWithCarveCheck mc {
+        missionId := "child-carve", budgetDeciMilliUsd? := some 150 } "" 1700000003 with
+      | .ok () => throw (IO.userError "r18 liveness: lowering budget below grandchild carve succeeded")
+      | .error e => check (e.startsWith "mission_budget_below_committed:child-carve") s!"grandchild floor rejected (got {e})"
+
+      -- 4. Lineage-aware budget JSON rendering + MCP `get_budget` (`mode: "inherited"`, real `carved_usd`, real `available_usd`)
       let childCfg ← getMissionBudgetConfig mc "child"
       let childJson ← renderMissionBudgetJsonWithStore mc fleet childCfg "" 1700000004
       check (childJson.contains "\"mode\":\"inherited\"") s!"uncarved child renders mode=inherited: {childJson}"
@@ -238,6 +264,17 @@ def lineageMissionBudget (root : String) : IO Unit := do
       let parentJson ← renderMissionBudgetJsonWithStore mc fleet parentCfg "" 1700000004
       check (parentJson.contains "\"carved_usd\":0.02") s!"parent renders real carved_usd=0.02: {parentJson}"
       check (parentJson.contains "\"available_usd\":0.0") s!"parent renders available_usd=0.0: {parentJson}"
+      let mcpOp : McpSessionClaims := {
+        sessionId := "00000000-0000-4000-8000-000000000000", missionId := "", role := "operator", project := "", expiresAt := 1700009999
+      }
+      let mcpChildBud ← OrbCore.McpGateway.dispatchMcpToolCall core (some mc) none none fleet root mcpOp
+        "get_budget" (.obj #[("mission_id", .str "child")]) 1700000004 none none "" true
+      check (mcpChildBud.contains "\"mode\":\"inherited\"" && mcpChildBud.contains "\"pool_id\":\"parent\"")
+        s!"FLT-08 MCP get_budget must use lineage-aware store renderer (got {mcpChildBud})"
+      let mcpParentBud ← OrbCore.McpGateway.dispatchMcpToolCall core (some mc) none none fleet root mcpOp
+        "get_budget" (.obj #[("mission_id", .str "parent")]) 1700000004 none none "" true
+      check (mcpParentBud.contains "\"carved_usd\":0.02")
+        s!"FLT-08 MCP get_budget parent must report real carved_usd=0.02 (got {mcpParentBud})"
 
       -- 5. Refund releases reservation cleanly
       discard <| require (← refundManagedCostReservation mc "create:vm-a")
@@ -517,13 +554,38 @@ def testRemoteFaultsAndFollowupPump (root : String) : IO Unit := do
     check (d1 == 0) "RUN-10 pump reports 0 delivered on definite 400 refusal"
     let qPhaseAfter400 ← queryCell store.missionsDb "SELECT phase FROM remote_message_queue WHERE message_id='q-run10-1';"
     check (qPhaseAfter400 == "0") s!"RUN-10 rolled back claimed row to phase=0 on definite refusal (got {qPhaseAfter400})"
-    -- Recovery: 200 OK delivers follow-up cleanly
+    -- Recovery: 200 OK delivers follow-up cleanly and records real user_message seq
+    let nowIso := formatEpochIso8601Utc nowSec
+    discard <| require (← appendMissionEvent store "m-run10" "assistant_message" "{\"content\":\"prior\"}" nowIso)
+    discard <| require (← appendMissionEvent store "m-run10" "assistant_message" "{\"content\":\"prior-2\"}" nowIso)
     postModeRef.set "200"
     pollModeRef.set "succeeded"
     let d2 ← tickRemoteFollowupPump store none (some rHub) (some bHub) remSup workDir (nowSec + 2)
     check (d2 == 1) s!"RUN-10 pump delivered waiting follow-up to idle remote mission (got {d2})"
     let qPhaseAfter200 ← queryCell store.missionsDb "SELECT phase FROM remote_message_queue WHERE message_id='q-run10-1';"
-    check (qPhaseAfter200 == "2") s!"RUN-10 marked delivered follow-up phase=2 (got {qPhaseAfter200})"
+    let qDelivSeq ← queryCell store.missionsDb "SELECT delivered_seq FROM remote_message_queue WHERE message_id='q-run10-1';"
+    let maxEvSeq ← queryCell store.missionsDb "SELECT COALESCE(MAX(seq),0) FROM mission_events WHERE mission_id='m-run10' AND event_type='user_message';"
+    check (qPhaseAfter200 == "2" && qDelivSeq == maxEvSeq && qDelivSeq != "1")
+      s!"RUN-10 marked delivered follow-up phase=2 with real user_message seq (phase={qPhaseAfter200} delivSeq={qDelivSeq} maxEvSeq={maxEvSeq})"
+    IO.sleep 150
+
+    -- RUN-10 / FUP-02: Queued `/goal` follow-up must roll back `goal_mode=0` on definite 400 rejection
+    missionSql store.missionsDb "m-run10-goal" "awaiting_user" "remote" 1
+    discard <| require (← execParamQuery store.missionsDb
+      "UPDATE missions SET tags='[\"remote-node:mockr18\"]', backend='codex', goal_mode=0, goal_objective='' WHERE id='m-run10-goal';" #[])
+    discard <| require (← enqueueStructuredFollowup store "core" "q-run10-goal" "m-run10-goal" "/goal ship liveness" "rest" nowIso)
+    postModeRef.set "400"
+    let dg1 ← tickRemoteFollowupPump store none (some rHub) (some bHub) remSup workDir (nowSec + 3)
+    check (dg1 == 0) "RUN-10 /goal pump reports 0 on 400"
+    let gModeAfter400 ← queryCell store.missionsDb "SELECT COALESCE(goal_mode,0) FROM missions WHERE id='m-run10-goal';"
+    let gQPhaseAfter400 ← queryCell store.missionsDb "SELECT phase FROM remote_message_queue WHERE message_id='q-run10-goal';"
+    check (gModeAfter400 == "0" && gQPhaseAfter400 == "0")
+      s!"RUN-10 /goal definite 400 rolled back goal_mode and queue claim (goal_mode={gModeAfter400} phase={gQPhaseAfter400})"
+    postModeRef.set "200"
+    let dg2 ← tickRemoteFollowupPump store none (some rHub) (some bHub) remSup workDir (nowSec + 4)
+    check (dg2 == 1) s!"RUN-10 /goal pump delivered after recovery (got {dg2})"
+    let gModeAfter200 ← queryCell store.missionsDb "SELECT COALESCE(goal_mode,0) FROM missions WHERE id='m-run10-goal';"
+    check (gModeAfter200 == "1") s!"RUN-10 /goal activated goal_mode=1 on accepted dispatch (got {gModeAfter200})"
     IO.sleep 150
   finally
     closeCoreStore store
@@ -553,9 +615,10 @@ def testLocalSupervisionAndScopes (root : String) : IO Unit := do
     IO.FS.writeFile sleeperPath "#!/bin/sh\nsleep 30\n"
     discard <| IO.Process.output { cmd := "/bin/chmod", args := #["+x", sleeperPath] }
 
-    -- 1. RUN-02: Live-but-silent process past stuck threshold is terminated and marked local_harness_stuck
+    -- 1. RUN-02: Live-but-silent process past stuck threshold is terminated, marked local_harness_stuck, and proxy token revoked
     missionSql store.missionsDb "m-stuck" "active" "local" 1
     addRun store.missionsDb "r-stuck" "m-stuck" "1" "running"
+    discard <| require (← mintMissionProxyToken store "m-stuck" "" (nowSec + 86400))
     let .ok _ ← startHarnessTurn mgr "m-stuck" "codex" sleeperPath workDir "hang" 1 none none none .bypassPermissions "local"
       | throw (IO.userError "r18 liveness: startHarnessTurn stuck failed")
     touchRunProgress mgr "m-stuck" (nowSec - 120)
@@ -566,14 +629,17 @@ def testLocalSupervisionAndScopes (root : String) : IO Unit := do
     let supCnt ← tickLocalHarnessSupervisor app nowIso (some nowSec) (some 30)
     check (supCnt == 1) s!"RUN-02 stuck supervisor caught silent live run (got {supCnt})"
     let stuckReason ← queryCell store.missionsDb "SELECT terminal_reason FROM missions WHERE id='m-stuck';"
-    check (stuckReason == "local_harness_stuck") s!"RUN-02 set local_harness_stuck (got {stuckReason})"
+    let stuckTokLive ← count store.missionsDb "SELECT COUNT(*) FROM mission_proxy_tokens WHERE mission_id='m-stuck' AND revoked=0;"
+    check (stuckReason == "local_harness_stuck" && stuckTokLive == 0)
+      s!"RUN-02 set local_harness_stuck and revoked proxy token (reason={stuckReason} liveToks={stuckTokLive})"
     IO.sleep 100
     let stuckObs ← OrbCore.HarnessSessionRegistry.observeProcStat stuckPid.toInt.toNat.toUInt32
     check (stuckObs.procMissing != 0 || stuckObs.isZombieOrDeadState != 0) "RUN-02 terminated stuck process"
 
-    -- 2. RUN-01: drainLocalHarnessRunsOnShutdown stops real active local process and writes core_shutdown receipt
+    -- 2. RUN-01: drainLocalHarnessRunsOnShutdown stops real active local process, revokes proxy token, and writes core_shutdown receipt
     missionSql store.missionsDb "m-drain" "active" "local" 1
     addRun store.missionsDb "r-drain" "m-drain" "1" "running"
+    discard <| require (← mintMissionProxyToken store "m-drain" "" (nowSec + 86400))
     let .ok _ ← startHarnessTurn mgr "m-drain" "codex" sleeperPath workDir "shutdown" 1 none none none .bypassPermissions "local"
       | throw (IO.userError "r18 liveness: startHarnessTurn drain failed")
     let drainPid? ← mgr.mu.atomically do
@@ -584,12 +650,14 @@ def testLocalSupervisionAndScopes (root : String) : IO Unit := do
     check (drained == 1) s!"RUN-01 shutdown drained active local run (got {drained})"
     let drainReason ← queryCell store.missionsDb "SELECT terminal_reason FROM missions WHERE id='m-drain';"
     let drainRec ← count store.missionsDb "SELECT COUNT(*) FROM mission_events WHERE mission_id='m-drain' AND event_type='recovery_receipt';"
-    check (drainReason == "core_shutdown" && drainRec == 1) s!"RUN-01 recorded core_shutdown + receipt (reason={drainReason} rec={drainRec})"
+    let drainTokLive ← count store.missionsDb "SELECT COUNT(*) FROM mission_proxy_tokens WHERE mission_id='m-drain' AND revoked=0;"
+    check (drainReason == "core_shutdown" && drainRec == 1 && drainTokLive == 0)
+      s!"RUN-01 recorded core_shutdown + receipt + revoked token (reason={drainReason} rec={drainRec} toks={drainTokLive})"
     IO.sleep 100
     let drainObs ← OrbCore.HarnessSessionRegistry.observeProcStat drainPid.toInt.toNat.toUInt32
     check (drainObs.procMissing != 0 || drainObs.isZombieOrDeadState != 0) "RUN-01 terminated drained local process"
 
-    -- 3. RUN-02: tickBackgroundShellWatcher wakes same-boot waiting_background on terminal job
+    -- 3. RUN-02: tickBackgroundShellWatcher wakes same-boot waiting_background on terminal job and arms resume continuation
     missionSql store.missionsDb "m-bg" "waiting_background" "managed" 1
     discard <| require (← execParamQuery store.missionsDb
       "UPDATE missions SET node_boot_epoch=CAST(?1 AS INTEGER), placement_job_id='bg-job-1' WHERE id='m-bg';" #[s!"{store.bootEpoch}"])
@@ -603,14 +671,21 @@ def testLocalSupervisionAndScopes (root : String) : IO Unit := do
     check (bgWoken == 1) s!"RUN-02 background watcher woke waiting_background mission (got {bgWoken})"
     let bgSt ← queryCell store.missionsDb "SELECT status FROM missions WHERE id='m-bg';"
     let bgEv ← count store.missionsDb "SELECT COUNT(*) FROM mission_events WHERE mission_id='m-bg' AND event_type='background_task_completed';"
-    check (bgSt == "awaiting_user" && bgEv == 1) s!"RUN-02 background mission settled to awaiting_user with event (st={bgSt} ev={bgEv})"
+    let bgCont ← count store.missionsDb "SELECT COUNT(*) FROM mission_continuations WHERE mission_id='m-bg' AND phase=1 AND source='bg-watcher';"
+    check (bgSt == "awaiting_user" && bgEv == 1 && bgCont == 1)
+      s!"RUN-02 background mission settled to awaiting_user with event + armed continuation (st={bgSt} ev={bgEv} cont={bgCont})"
 
-    -- 4. RUN-03: reapOrphanedCoreScopes reaps terminal/missing/zombie scopes and spares active local & orb-node-* scopes
+    -- 4. RUN-03: parseActiveEnterMonoToEpoch + reapOrphanedCoreScopes reaps terminal/missing/zombie-aged scopes
+    -- and spares fresh active local & orb-node-* scopes
+    let parsedStart := parseActiveEnterMonoToEpoch "3600000000\n" 50400 nowSec -- 50400 - 3600 = 46800s (13h) old
+    check (parsedStart == nowSec - 46800) s!"RUN-03 parseActiveEnterMonoToEpoch computed exact age (got {parsedStart})"
     missionSql store.missionsDb "m-sc-active" "active" "local" 1
+    missionSql store.missionsDb "m-sc-zombie" "active" "local" 1
     missionSql store.missionsDb "m-sc-done" "completed" "local" 1
     let stoppedRef ← IO.mkRef (#[] : Array String)
     let fakeScopes : IO (Array CoreScopeEntry) := pure #[
       { unitName := "orb-mission-m-sc-active.scope", missionId := "m-sc-active", startedSec := nowSec - 60, isNodeScope := false },
+      { unitName := "orb-mission-m-sc-zombie.scope", missionId := "m-sc-zombie", startedSec := parsedStart, isNodeScope := false },
       { unitName := "orb-mission-m-sc-done.scope", missionId := "m-sc-done", startedSec := nowSec - 60, isNodeScope := false },
       { unitName := "orb-mission-m-sc-ghost.scope", missionId := "m-sc-ghost", startedSec := nowSec - 60, isNodeScope := false },
       { unitName := "orb-node-job-99.scope", missionId := "m-sc-done", startedSec := nowSec - 99999, isNodeScope := true }
@@ -618,9 +693,10 @@ def testLocalSupervisionAndScopes (root : String) : IO Unit := do
     let fakeStop (u : String) : IO Bool := do stoppedRef.modify (·.push u); return true
     let scReaped ← reapOrphanedCoreScopes app nowSec (some fakeScopes) (some fakeStop)
     let stopped ← stoppedRef.get
-    check (scReaped == 2 && stopped.contains "orb-mission-m-sc-done.scope" && stopped.contains "orb-mission-m-sc-ghost.scope" &&
+    check (scReaped == 3 && stopped.contains "orb-mission-m-sc-done.scope" && stopped.contains "orb-mission-m-sc-ghost.scope" &&
+           stopped.contains "orb-mission-m-sc-zombie.scope" &&
            !stopped.contains "orb-mission-m-sc-active.scope" && !stopped.contains "orb-node-job-99.scope")
-      s!"RUN-03 scope reaper stopped only orphaned Core scopes (stopped={stopped})"
+      s!"RUN-03 scope reaper stopped orphaned + zombie-aged Core scopes only (stopped={stopped})"
   finally
     closeCoreStore store
     discard <| (IO.FS.removeDirAll workDir).toBaseIO
@@ -698,7 +774,26 @@ def testLiveSseAndWebSocketTransports (root : String) : IO Unit := do
         s!"RUN-05 context stream missed live change frame: {cChgStr}"
     finally discard <| closeFd ctxFd
 
-    -- 4. RUN-06: Live PTY WebSocket on /api/console/ws survives >2.1s idle and executes command
+    -- 3b. RUN-05: emitMissionPresentationNotice (__presentation__) must translate to sanitized
+    -- `event: mission_presentation` (NO `id: 0`, NO `owner_uid`/`shared_uids`, NO `__presentation__`)
+    -- on BOTH unfiltered `/api/control/stream` and `?profile=presentation`.
+    let .ok presFd ← tcpConnect "127.0.0.1" port | throw (IO.userError "RUN-05 connect presentation SSE failed")
+    try
+      let presReq := s!"GET /api/control/stream?profile=presentation HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nAuthorization: Bearer {jwt}\r\nAccept: text/event-stream\r\n\r\n".toUTF8
+      discard <| writeAll presFd presReq false
+      discard <| readUntilMs presFd 1500 fun b => ((String.fromUTF8? b).getD "").contains "event:"
+      emitMissionPresentationNotice store "m-sse" "mission_updated" adminId #["secret-peer-uid"] ""
+      let pBuf ← readUntilMs presFd 2000 fun b => ((String.fromUTF8? b).getD "").contains "mission_presentation"
+      let pStr := (String.fromUTF8? pBuf).getD ""
+      check (pStr.contains "event: mission_presentation" && pStr.contains "\"mission_id\":\"m-sse\"" &&
+             !pStr.contains "__presentation__" && !pStr.contains "id: 0" &&
+             !pStr.contains "owner_uid" && !pStr.contains "shared_uids" && !pStr.contains "secret-peer-uid")
+        s!"RUN-05 presentation SSE leaked internal ACL or id:0 or dropped mission_presentation: {pStr}"
+    finally discard <| closeFd presFd
+
+    -- 4. RUN-06: Live PTY WebSocket on /api/console/ws speaks TerminalSocket wire protocol
+    -- (`{"t":"r",...}` / `{"t":"i",...}`, raw UTF-8 PTY output with NO JSON greeting/wrapper,
+    -- ignores unknown JSON control objects, and survives >2.1s idle).
     let .ok wsFd ← tcpConnect "127.0.0.1" port | throw (IO.userError "RUN-06 connect PTY WS failed")
     try
       let wsReq :=
@@ -711,16 +806,21 @@ def testLiveSseAndWebSocketTransports (root : String) : IO Unit := do
       check (hsHead.contains "101 Switching Protocols") s!"RUN-06 PTY WS did not upgrade 101: {hsHead}"
       -- Sleep >2.1s idle to prove the legacy 64-step / ~1.9s cap is gone
       IO.sleep 2200
-      let cmdFrame := encodeClientWsText "{\"type\":\"input\",\"data\":\"echo R18_PTY_LIVE_OK\\n\"}".toUTF8
-      discard <| writeAll wsFd cmdFrame false
+      discard <| writeAll wsFd (encodeClientWsText "{\"t\":\"r\",\"c\":100,\"r\":30}".toUTF8) false
+      discard <| writeAll wsFd (encodeClientWsText "{\"t\":\"noop\",\"ignored\":true}".toUTF8) false
+      discard <| writeAll wsFd (encodeClientWsText "{\"t\":\"i\",\"d\":\"echo R18_PTY_LIVE_OK\\n\"}".toUTF8) false
       let mut rx := hsBuf.extract hsEnd hsBuf.size
       let mut sawOutput := false
+      let mut sawJsonWrapper := false
+      let mut sawLeakedNoop := false
       let deadline := (← IO.monoMsNow) + 3000
       while (← IO.monoMsNow) < deadline && !sawOutput do
         match decodeFramePrefix rx false with
         | .ok (some (frm, consumed)) =>
           rx := rx.extract consumed rx.size
           let txt := (String.fromUTF8? frm.payload).getD ""
+          if txt.contains "\"type\":\"ready\"" || txt.contains "\"type\":\"output\"" then sawJsonWrapper := true
+          if txt.contains "\"t\":\"noop\"" then sawLeakedNoop := true
           if txt.contains "R18_PTY_LIVE_OK" then sawOutput := true
         | _ =>
           match ← pollReadable wsFd 50 with
@@ -729,19 +829,41 @@ def testLiveSseAndWebSocketTransports (root : String) : IO Unit := do
             let chunk ← readStreamChunk wsFd 16384
             if chunk.isEmpty then break
             rx := rx ++ chunk
-      check sawOutput "RUN-06 PTY WS survived >2.1s idle and executed real shell echo"
+      check (sawOutput && !sawJsonWrapper && !sawLeakedNoop)
+        s!"RUN-06 PTY WS must speak raw TerminalSocket protocol (ok={sawOutput} wrapper={sawJsonWrapper} noop={sawLeakedNoop})"
       discard <| writeAll wsFd encodeClientWsClose false
     finally discard <| closeFd wsFd
 
-    -- 5. RUN-06: Live /api/monitoring/ws streams live metrics frames
+    -- 4b. RUN-06: /api/workspaces/:id/shell validates workspace existence (404) & container type (501) BEFORE 101
+    discard <| require (← execParamQuery store.missionsDb
+      "INSERT INTO workspaces(id,name,kind,path,owner_user_id) VALUES('ws-cont','cont','container','/tmp',?1);" #[adminId])
+    let (wsMissSt, _) ← sendRest app jwt "GET" "/api/workspaces/no-such-ws/shell" ""
+    check (wsMissSt == 404) s!"RUN-06 missing workspace shell expected 404 (got {wsMissSt})"
+    let (wsContSt, _) ← sendRest app jwt "GET" "/api/workspaces/ws-cont/shell" ""
+    check (wsContSt == 501) s!"RUN-06 container workspace shell expected 501 (got {wsContSt})"
+
+    -- 5. RUN-06: /api/monitoring/ws requires admin (403 for member), negotiates `sandboxed` subprotocol,
+    -- emits Machines.tsx schema (`cpu_percent`, `memory_used`, `memory_total`, `timestamp_ms`), and honors pause/resume.
+    let nowAuth ← coreEpochSec
+    discard <| require (← execParamQuery store.missionsDb
+      "INSERT OR REPLACE INTO users(id,username,role,password_hash,session_epoch,disabled,created_at,updated_at) VALUES('u-mem-mon','memmon','member','x',1,0,?1,?1);"
+      #[s!"{nowAuth}"])
+    let memJwt := mintSessionTokenV2 "r18-liveness-jwt-secret-0123456789abcdef" "u-mem-mon" "member" 1 (nowAuth + 3600)
+    let (monMemSt, _) ← sendRest app memJwt "GET" "/api/monitoring/ws" "" (some nowAuth)
+    check (monMemSt == 403) s!"RUN-06 /api/monitoring/ws must reject non-admin member with 403 (got {monMemSt})"
+
     let .ok monFd ← tcpConnect "127.0.0.1" port | throw (IO.userError "RUN-06 connect monitoring WS failed")
     try
       let monReq :=
         (s!"GET /api/monitoring/ws?interval_ms=150 HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nAuthorization: Bearer {jwt}\r\n" ++
+         "Sec-WebSocket-Protocol: sandboxed\r\n" ++
          "Upgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n").toUTF8
       discard <| writeAll monFd monReq false
       let hsBuf ← readUntilMs monFd 2000 fun b => (findHeaderEnd b).isSome
       let hsEnd := (findHeaderEnd hsBuf).getD 0
+      let hsHead := (String.fromUTF8? (hsBuf.extract 0 hsEnd)).getD ""
+      check (hsHead.contains "101 Switching Protocols" && hsHead.contains "Sec-WebSocket-Protocol: sandboxed")
+        s!"RUN-06 monitoring WS failed sandboxed subprotocol negotiation: {hsHead}"
       let mut rx := hsBuf.extract hsEnd hsBuf.size
       let mut metricFrames : Nat := 0
       let deadline := (← IO.monoMsNow) + 2000
@@ -750,8 +872,10 @@ def testLiveSseAndWebSocketTransports (root : String) : IO Unit := do
         | .ok (some (frm, consumed)) =>
           rx := rx.extract consumed rx.size
           let txt := (String.fromUTF8? frm.payload).getD ""
-          if txt.contains "\"type\":\"metrics\"" && txt.contains "\"load_1m\"" then
-            metricFrames := metricFrames + 1
+          if let .ok jv := OrbBin.Json.parse txt then
+            if (jv.field? "cpu_percent").isSome && (jv.field? "memory_used").isSome &&
+               (jv.field? "memory_total").isSome && (jv.fieldUInt64? "timestamp_ms").isSome then
+              metricFrames := metricFrames + 1
         | _ =>
           match ← pollReadable monFd 50 with
           | .error _ => pure ()
@@ -759,7 +883,9 @@ def testLiveSseAndWebSocketTransports (root : String) : IO Unit := do
             let chunk ← readStreamChunk monFd 16384
             if chunk.isEmpty then break
             rx := rx ++ chunk
-      check (metricFrames >= 2) s!"RUN-06 monitoring WS streamed live metrics frames (got {metricFrames})"
+      check (metricFrames >= 2) s!"RUN-06 monitoring WS streamed Machines.tsx host metrics frames (got {metricFrames})"
+      -- Pause + resume coalesced frames
+      discard <| writeAll monFd (encodeClientWsText "{\"t\":\"pause\"}".toUTF8 ++ encodeClientWsText "{\"t\":\"resume\"}".toUTF8) false
       discard <| writeAll monFd encodeClientWsClose false
     finally discard <| closeFd monFd
 
@@ -787,8 +913,10 @@ def testContinuationsAndTelemetry (root : String) : IO Unit := do
     let remSup ← newRemoteJobSupervisor "r18-liveness-jwt-secret-0123456789abcdef" false
     let nowSec : UInt64 := 1795002000
 
-    -- === RUN-11: 40 busy-owner due rows + 40 future-due non-terminal job rows must not starve idle owner ===
+    -- === RUN-11: 40 busy-owner + 40 paused-owner due rows + 40 future-due non-terminal job rows
+    -- + >512 historical terminal rows in projectsDb.remote_jobs must not starve idle owner or job wakeup ===
     missionSql store.missionsDb "m-busy" "active" "local" 1
+    missionSql store.missionsDb "m-paused" "paused" "local" 1
     missionSql store.missionsDb "m-idle" "awaiting_user" "local" 1
     missionSql store.missionsDb "m-projjob" "awaiting_user" "local" 1
     for i in [:40] do
@@ -796,24 +924,32 @@ def testContinuationsAndTelemetry (root : String) : IO Unit := do
         ("INSERT INTO mission_continuations(id,mission_id,run_generation,phase,due_epoch,trigger_kind,reason,prompt,request_id,job_id,source,created_at,updated_at) " ++
          "VALUES(?1,'m-busy',1,1,CAST(?2 AS INTEGER),'time','test','busy',?1,'','mcp','2026-11-26T00:00:00Z','2026-11-26T00:00:00Z');")
         #[s!"c-busy-{i}", s!"{nowSec - 100 + i.toUInt64}"])
+      discard <| require (← execParamQuery store.missionsDb
+        ("INSERT INTO mission_continuations(id,mission_id,run_generation,phase,due_epoch,trigger_kind,reason,prompt,request_id,job_id,source,created_at,updated_at) " ++
+         "VALUES(?1,'m-paused',1,1,CAST(?2 AS INTEGER),'time','test','paused',?1,'','mcp','2026-11-26T00:00:00Z','2026-11-26T00:00:00Z');")
+        #[s!"c-paused-{i}", s!"{nowSec - 100 + i.toUInt64}"])
     for i in [:40] do
       discard <| require (← execParamQuery store.missionsDb
         ("INSERT INTO mission_continuations(id,mission_id,run_generation,phase,due_epoch,trigger_kind,reason,prompt,request_id,job_id,source,created_at,updated_at) " ++
          "VALUES(?1,'m-idle',1,1,CAST(?2 AS INTEGER),'durable_job_terminal','test','waitjob',?1,?3,'mcp','2026-11-26T00:00:00Z','2026-11-26T00:00:00Z');")
         #[s!"c-fut-{i}", s!"{nowSec + 9999}", s!"job-still-running-{i}"])
-    -- Continuation #81 on idle owner is due now
+    -- Continuation on idle owner is due now
     discard <| require (← execParamQuery store.missionsDb
       ("INSERT INTO mission_continuations(id,mission_id,run_generation,phase,due_epoch,trigger_kind,reason,prompt,request_id,job_id,source,created_at,updated_at) " ++
        "VALUES('c-idle-ok','m-idle',1,1,CAST(?1 AS INTEGER),'time','test','wake idle','c-idle-ok','','mcp','2026-11-26T00:00:00Z','2026-11-26T00:00:00Z');")
       #[s!"{nowSec - 1}"])
-    -- Job-wakeup whose terminal job exists ONLY in projectsDb.remote_jobs
+    -- Populate 520 historical terminal rows in projectsDb.remote_jobs BEFORE the watched 521st job
     discard <| require (← execParamQuery store.projectsDb
       ("CREATE TABLE IF NOT EXISTS remote_jobs (job_id TEXT PRIMARY KEY, state TEXT NOT NULL DEFAULT 'queued');") #[])
-    discard <| require (← execParamQuery store.projectsDb
-      "INSERT OR REPLACE INTO remote_jobs(job_id,state) VALUES('pjob-done-1','succeeded');" #[])
+    discard <| require (← withImmediateTx store.projectsDb do
+      for i in [:520] do
+        discard <| execParamQueryUnlocked store.projectsDb
+          "INSERT OR REPLACE INTO remote_jobs(job_id,state) VALUES(?1,'succeeded');" #[s!"hist-job-{i}"]
+      execParamQueryUnlocked store.projectsDb
+        "INSERT OR REPLACE INTO remote_jobs(job_id,state) VALUES('pjob-done-521','succeeded');" #[])
     discard <| require (← execParamQuery store.missionsDb
       ("INSERT INTO mission_continuations(id,mission_id,run_generation,phase,due_epoch,trigger_kind,reason,prompt,request_id,job_id,source,created_at,updated_at) " ++
-       "VALUES('c-pjob','m-projjob',1,1,CAST(?1 AS INTEGER),'durable_job_terminal','test','wake projjob','c-pjob','pjob-done-1','mcp','2026-11-26T00:00:00Z','2026-11-26T00:00:00Z');")
+       "VALUES('c-pjob','m-projjob',1,1,CAST(?1 AS INTEGER),'durable_job_terminal','test','wake projjob','c-pjob','pjob-done-521','mcp','2026-11-26T00:00:00Z','2026-11-26T00:00:00Z');")
       #[s!"{nowSec + 9999}"])
 
     let firedRef ← IO.mkRef (#[] : Array String)
@@ -918,10 +1054,16 @@ def testMcpAndQueueContracts (root : String) : IO Unit := do
     }
     let mcpCall (c : McpSessionClaims) (tool : String) (args : JVal) (withSup : Bool := false)
         (askCb? : Option (String → String → String → IO (Except String String)) := none)
-        (ansCb? : Option (String → String → JVal → IO (Except String Bool)) := none) : IO JVal := do
+        (ansCb? : Option (String → String → String → JVal → IO (Except String (Option String))) := none) : IO JVal := do
       let raw ← OrbCore.McpGateway.dispatchMcpToolCall store none none (some bHub) {} workDir c tool args nowSec
         (remoteSup? := if withSup then some remSup else none) (askSide? := askCb?) (answerQuestion? := ansCb?)
       let .ok jv := OrbBin.Json.parse raw | throw (IO.userError s!"r18 liveness: MCP JSON parse failed for {tool}: {raw}")
+      return jv
+    let mcpHttpCall (tok : String) (tool : String) (args : JVal) : IO JVal := do
+      let body := renderCompact (.obj #[("name", .str tool), ("arguments", args)])
+      let (stCode, respBody) ← sendRest app tok "POST" "/api/mcp/call" body (some nowSec)
+      check (stCode == 200) s!"POST /api/mcp/call ({tool}) expected 200 (got {stCode}: {respBody})"
+      let .ok jv := OrbBin.Json.parse respBody | throw (IO.userError s!"r18 liveness: HTTP MCP JSON parse failed for {tool}: {respBody}")
       return jv
 
     -- === MCP-03: Canonical fingerprint replays reordered keys and rejects changed value ===
@@ -971,7 +1113,40 @@ def testMcpAndQueueContracts (root : String) : IO Unit := do
     check ((b2.fieldOrNull "error").fieldStr? "code" == some "conflict")
       s!"MCP-03 write_mission_board conflicting key rejected: {renderCompact b2}"
 
-    -- === MCP-07: answer_mission_question wire translation (`string[][]` -> `{question: answer}`) + omitted tool_call_id ===
+    -- MCP-03: In-flight concurrent duplicate (`state='accepted'`) must return non-terminal `action_in_progress`
+    -- with `accepted: "unknown"`, NEVER `ok: true` with `result: {}`!
+    let inFlightArgs : JVal := .obj #[("project", .str "p-mcp03"), ("slug", .str "p-mcp03"), ("status", .str "active"), ("idempotency_key", .str "k-inflight-1")]
+    let inFlightFp := renderCanonical inFlightArgs
+    let inFlightScope := "s-op::update_project_status"
+    discard <| require (← execParamQuery store.projectsDb
+      ("INSERT INTO mcp_actions_v1(id,owner,scope,retry_key,fingerprint,principal,tool,arguments,state,result,created_at,updated_at) " ++
+       "VALUES('act-inflight-1','',?1,'k-inflight-1',?2,'operator::','update_project_status',?2,'accepted','{}',?3,?3);")
+      #[inFlightScope, inFlightFp, nowIso])
+    let dupInFlight ← mcpCall opClaims "update_project_status" inFlightArgs
+    check (dupInFlight.fieldBool? "ok" == some false &&
+           (dupInFlight.fieldOrNull "error").fieldStr? "code" == some "action_in_progress" &&
+           (dupInFlight.fieldOrNull "error").fieldStr? "accepted" == some "unknown")
+      s!"MCP-03 in-flight duplicate must return action_in_progress/unknown (got {renderCompact dupInFlight})"
+
+    -- MCP-03: Newly wired mutating tool `update_mission_settings` persists receipt with target `owner`, replays identically, conflicts on change
+    let ms1 ← mcpHttpCall jwt "update_mission_settings" (.obj #[
+      ("mission_id", .str "m-board-c"), ("model_effort", .str "high"), ("idempotency_key", .str "k-ms-1")
+    ])
+    check (ms1.fieldBool? "ok" == some true) s!"MCP-03 update_mission_settings ok: {renderCompact ms1}"
+    let msOwner ← queryCell store.projectsDb "SELECT owner FROM mcp_actions_v1 WHERE retry_key='k-ms-1' LIMIT 1;"
+    check (msOwner == "m-board-c") s!"MCP-03 update_mission_settings bound target owner (got {msOwner})"
+    let ms2 ← mcpHttpCall jwt "update_mission_settings" (.obj #[
+      ("idempotency_key", .str "k-ms-1"), ("model_effort", .str "high"), ("mission_id", .str "m-board-c")
+    ])
+    check (ms2.fieldBool? "ok" == some true && (ms2.fieldOrNull "result").fieldStr? "action_id" == (ms1.fieldOrNull "result").fieldStr? "action_id")
+      s!"MCP-03 update_mission_settings replayed identically"
+    let ms3 ← mcpHttpCall jwt "update_mission_settings" (.obj #[
+      ("mission_id", .str "m-board-c"), ("model_effort", .str "low"), ("idempotency_key", .str "k-ms-1")
+    ])
+    check ((ms3.fieldOrNull "error").fieldStr? "code" == some "conflict")
+      s!"MCP-03 update_mission_settings conflict rejected: {renderCompact ms3}"
+
+    -- === MCP-07: Real end-to-end `POST /api/mcp/call` `answer_mission_question` through `Control.lean` ===
     missionSql store.missionsDb "m-qna" "active" "local" 1
     discard <| require (← execParamQuery store.missionsDb "UPDATE missions SET owner_user_id=?1 WHERE id='m-qna';" #[adminId])
     let capturedStdin := s!"{workDir}/claude_stdin.log"
@@ -992,25 +1167,13 @@ def testMcpAndQueueContracts (root : String) : IO Unit := do
       IO.sleep 30
     check hasPending "MCP-07 mock warm claude surfaced pending AskUserQuestion"
 
-    let answerRouter : String → String → JVal → IO (Except String Bool) := fun mid cid answersJv => do
-      let pending ← pendingControlRequestsFor mgr mid
-      let target? :=
-        if cid.isEmpty then
-          if pending.size == 1 then some pending[0]! else none
-        else
-          pending.find? (fun p => p.requestId == cid)
-      let some req := target? | return .ok false
-      let ok ← respondToControlRequest mgr mid req.requestId (.obj #[("answers", answersJv)])
-      if ok then
-        discard <| appendMissionEvent store mid "tool_result"
-          (renderCompact (.obj #[("tool_call_id", .str req.requestId), ("name", .str "AskUserQuestion"), ("answers", answersJv)])) nowIso
-      return .ok ok
-
-    -- Structured string[][] + omitted tool_call_id
-    let ansOk ← mcpCall opClaims "answer_mission_question" (.obj #[
+    -- 1. Structured string[][] + omitted tool_call_id through REAL `POST /api/mcp/call`
+    let ansOk ← mcpHttpCall jwt "answer_mission_question" (.obj #[
       ("mission_id", .str "m-qna"), ("answers", .arr #[.arr #[.str "Option B"]]), ("idempotency_key", .str "k-ans-1")
-    ]) false none (some answerRouter)
-    check (ansOk.fieldBool? "ok" == some true) s!"MCP-07 answer_mission_question succeeded: {renderCompact ansOk}"
+    ])
+    let resolvedTid := ((ansOk.fieldOrNull "result").fieldStr? "tool_call_id").getD ""
+    check (ansOk.fieldBool? "ok" == some true && resolvedTid == "req-qna-1")
+      s!"MCP-07 real /api/mcp/call auto-selected and recorded tool_call_id=req-qna-1 (got {renderCompact ansOk})"
     let mut wireWritten := ""
     for _ in [:40] do
       if (← System.FilePath.pathExists capturedStdin) then
@@ -1021,18 +1184,63 @@ def testMcpAndQueueContracts (root : String) : IO Unit := do
       s!"MCP-07 translated string[][] to Claude question-keyed map (got {wireWritten})"
     let trCnt ← count store.missionsDb "SELECT COUNT(*) FROM mission_events WHERE mission_id='m-qna' AND event_type='tool_result';"
     check (trCnt >= 1) "MCP-07 persisted tool_result event"
-    -- 0 pending -> failed (not uncertain), scalar answers -> invalid_arguments
-    let ansMiss ← mcpCall opClaims "answer_mission_question" (.obj #[
+    -- 0 pending on local mission -> failed/not_found (not uncertain), scalar answers -> invalid_arguments
+    let ansMiss ← mcpHttpCall jwt "answer_mission_question" (.obj #[
       ("mission_id", .str "m-qna"), ("answers", .arr #[.arr #[.str "Late"]]), ("idempotency_key", .str "k-ans-miss")
-    ]) false none (some answerRouter)
+    ])
     check ((ansMiss.fieldOrNull "error").fieldStr? "code" == some "not_found") "MCP-07 missing question returns not_found"
     let missState ← queryCell store.projectsDb "SELECT state FROM mcp_actions_v1 WHERE retry_key='k-ans-miss' LIMIT 1;"
-    check (missState == "failed") s!"MCP-07 missing question settled failed (got {missState})"
-    let ansBad ← mcpCall opClaims "answer_mission_question" (.obj #[
+    let missOwner ← queryCell store.projectsDb "SELECT owner FROM mcp_actions_v1 WHERE retry_key='k-ans-miss' LIMIT 1;"
+    check (missState == "failed" && missOwner == "m-qna")
+      s!"MCP-07 missing question settled failed with target owner m-qna (state={missState} owner={missOwner})"
+    let ansBad ← mcpHttpCall jwt "answer_mission_question" (.obj #[
       ("mission_id", .str "m-qna"), ("answers", .str "scalar"), ("idempotency_key", .str "k-ans-bad")
-    ]) false none (some answerRouter)
+    ])
     check ((ansBad.fieldOrNull "error").fieldStr? "code" == some "invalid_arguments") "MCP-07 scalar answers rejected"
     stopHarnessRun mgr "m-qna"
+
+    -- 2. Real `NativeGoalApproval` ticket via SCOPED MCP session token + `[["reject"]]` + omitted `tool_call_id`
+    missionSql store.missionsDb "m-nga" "active" "remote" 1
+    discard <| require (← execParamQuery store.missionsDb
+      "UPDATE missions SET owner_user_id=?1, goal_mode=1, placement_job_id='job-nga-1', tags='[\"remote-node:node-a\"]' WHERE id='m-nga';" #[adminId])
+    discard <| require (← execParamQuery store.missionsDb
+      ("CREATE TABLE IF NOT EXISTS remote_node_jobs (job_id TEXT PRIMARY KEY, mission_id TEXT NOT NULL DEFAULT '', " ++
+       "node_id TEXT NOT NULL DEFAULT '', state TEXT NOT NULL DEFAULT 'queued', payload_json TEXT NOT NULL DEFAULT '{}', " ++
+       "created_at TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL DEFAULT '');") #[])
+    discard <| require (← execParamQuery store.missionsDb
+      "INSERT OR REPLACE INTO remote_node_jobs(job_id,mission_id,node_id,state,payload_json,created_at,updated_at) VALUES('job-nga-1','m-nga','node-a','running','{}',?1,?1);" #[nowIso])
+    let ngaTicket := OrbCore.NativeGoalApproval.ticketPrefix ++ "r18-ticket-1"
+    discard <| require (← execParamQuery store.missionsDb
+      "INSERT INTO native_goal_approvals(id,mission,owner,job,input_digest,expires,decision) VALUES(?1,'m-nga',?2,'job-nga-1','dig',CAST(?3 AS INTEGER),'pending');"
+      #[ngaTicket, adminId, s!"{nowSec + 120}"])
+    -- Mint a scoped MCP session token (so `mcpCaller? == none` in Control.lean, testing scoped ownerUid!)
+    let (sessSt, sessBody) ← sendRest app jwt "POST" "/api/mcp/session"
+      "{\"mission_id\":\"m-nga\",\"role\":\"operator\"}" (some nowSec)
+    check (sessSt == 200) s!"MCP-07 mint scoped MCP session failed ({sessSt}: {sessBody})"
+    let scopedTok := ((OrbBin.Json.parse sessBody).toOption.bind (·.fieldStr? "token")).getD ""
+    check (!scopedTok.isEmpty) "MCP-07 scoped MCP token non-empty"
+    -- Unrecognized action must be rejected (never silently defaulted to accept!)
+    let ngaBogus ← mcpHttpCall scopedTok "answer_mission_question" (.obj #[
+      ("mission_id", .str "m-nga"), ("answers", .arr #[.arr #[.str "maybe"]]), ("idempotency_key", .str "k-nga-bad")
+    ])
+    check ((ngaBogus.fieldOrNull "error").fieldStr? "code" == some "invalid_arguments")
+      s!"MCP-07 unrecognized NativeGoalApproval action must fail invalid_arguments (got {renderCompact ngaBogus})"
+    let decStillPending ← queryCell store.missionsDb "SELECT decision FROM native_goal_approvals WHERE id=?1;" #[ngaTicket]
+    check (decStillPending == "pending") s!"MCP-07 bogus action left ticket pending (got {decStillPending})"
+    -- Schema-standard `[["reject"]]` with omitted `tool_call_id` must DECLINE the ticket and record resolved `tool_call_id`!
+    let ngaRej ← mcpHttpCall scopedTok "answer_mission_question" (.obj #[
+      ("mission_id", .str "m-nga"), ("answers", .arr #[.arr #[.str "reject"]]), ("idempotency_key", .str "k-nga-rej")
+    ])
+    let ngaTid := ((ngaRej.fieldOrNull "result").fieldStr? "tool_call_id").getD ""
+    let decAfterRej ← queryCell store.missionsDb "SELECT decision FROM native_goal_approvals WHERE id=?1;" #[ngaTicket]
+    check (ngaRej.fieldBool? "ok" == some true && ngaTid == ngaTicket && decAfterRej == "declined")
+      s!"MCP-07 [['reject']] declined NativeGoalApproval via scoped MCP session (resp={renderCompact ngaRej} dec={decAfterRej})"
+    -- Remote mission with 0 pending approval/local questions returns `unsupported`
+    let ngaUnsup ← mcpHttpCall scopedTok "answer_mission_question" (.obj #[
+      ("mission_id", .str "m-nga"), ("answers", .arr #[.arr #[.str "ok"]]), ("idempotency_key", .str "k-nga-unsup")
+    ])
+    check ((ngaUnsup.fieldOrNull "error").fieldStr? "code" == some "unsupported")
+      s!"MCP-07 remote mission with no pending local/approval channel returns unsupported (got {renderCompact ngaUnsup})"
 
     -- ask_mission: accepts null thread_id, rejects non-empty thread_id
     let fakeAsk : String → String → String → IO (Except String String) := fun _ _ _ =>
