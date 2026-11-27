@@ -1112,11 +1112,17 @@ def runAllTests : IO UInt32 := do
     (OrbBin.ClaudeControl.joinHarnessText "antigravity" "" none finalEvent).1 "answer"
   assertEq "Antigravity usage comes from the final event" finalEvent.inputTokens? (some 3)
   let toolStep := fun phase => agEvent (renderCompact (.obj #[("event", .str "step_update"), ("step_update",
-    .obj #[("conversation_id", .str sid), ("step_index", .nat 2), ("tool_name", .str "write_file"), ("state", .str phase)])]))
+    .obj #[("conversation_id", .str sid), ("step_index", .nat 2), ("tool_name", .str "write_file"), ("state", .str phase),
+      ("tool_info", .obj #[("name", .str "write_file"), ("parameters", .obj #[("Path", .str "/tmp/demo.lean")]), ("output", .str "wrote 42 bytes")])])]))
   let began := (toolStep "ACTIVE").activity?
   let ended := (toolStep "DONE").activity?
   assertEq "Antigravity tool event retains its step id" (began.map (·.id)) (some s!"agy-{sid}-2")
-  assertEq "Antigravity tool end settles the same card" (ended.map (fun t => (t.id, t.done))) (some (s!"agy-{sid}-2", true))
+  assertEq "Antigravity tool event captures detail and args" (began.map (fun t => (t.detail?, t.args?.isSome))) (some (some "/tmp/demo.lean", true))
+  assertEq "Antigravity tool end settles the same card with result" (ended.map (fun t => (t.id, t.done, t.result?))) (some (s!"agy-{sid}-2", true, some "wrote 42 bytes"))
+  let endedJv := ended.map (·.toJVal)
+  assertEq "Antigravity tool JVal emits standard tool_call_id and tool_name"
+    (endedJv.map (fun j => (j.fieldStr? "tool_call_id", j.fieldStr? "tool_name", j.fieldStr? "result")))
+    (some (some s!"agy-{sid}-2", some "write_file", some "wrote 42 bytes"))
   let failure := agEvent "{\"event\":\"result\",\"result\":{\"status\":\"ERROR\",\"error\":\"fixture refusal\"}}"
   assertEq "Antigravity redacts unrecognized terminal errors" failure.errorMsg? (some "Antigravity turn failed")
   assertEq "Antigravity diagnostics are not displayed as assistant text" (agEvent "diagnostic").textDelta ""

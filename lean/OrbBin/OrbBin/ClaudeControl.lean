@@ -303,6 +303,8 @@ structure LocalActivityItem where
   detail?        : Option String := none
   /-- Why a failed tool call failed (harness error text, bounded); `none` otherwise. -/
   error?         : Option String := none
+  args?          : Option JVal := none
+  result?        : Option String := none
   status         : String := "running"
   startedAt      : UInt64 := 0
   updatedAt      : UInt64 := 0
@@ -313,6 +315,8 @@ structure LocalActivityItem where
 def LocalActivityItem.toJVal (a : LocalActivityItem) : JVal := Id.run do
   let mut fields : Array (String × JVal) := #[
     ("id", .str a.id),
+    ("tool_call_id", .str (a.toolUseId?.getD a.id)),
+    ("tool_name", .str a.label),
     ("label", .str a.label),
     ("done", .bool a.done),
     ("failed", .bool a.failed),
@@ -325,6 +329,8 @@ def LocalActivityItem.toJVal (a : LocalActivityItem) : JVal := Id.run do
   if let some tid := a.toolUseId? then fields := fields.push ("tool_use_id", .str tid)
   if let some det := a.detail? then fields := fields.push ("detail", .str det)
   if let some err := a.error? then fields := fields.push ("error", .str err)
+  if let some args := a.args? then fields := fields.push ("args", args)
+  if let some res := a.result? then fields := fields.push ("result", .str res)
   if let some fin := a.finishedAt? then fields := fields.push ("finished_at", .nat fin.toNat)
   if let some tok := a.thinkingTokens? then fields := fields.push ("thinking_tokens", .nat tok.toNat)
   return .obj fields
@@ -1699,8 +1705,24 @@ def parseOneShotHarnessEvent (harness : String) (rawLine : String) : OneShotLine
         let state := (step.fieldStr? "state").getD ""
         let failed := state == "ERROR" || state == "FAILED"
         let done_ := failed || state == "DONE"
+        let toolInfo := step.fieldOrNull "tool_info"
+        let rawParams? := (toolInfo.field? "parameters").filter (!·.isNull)
+        let args? := rawParams?.map fun v =>
+          let s := renderCompact v
+          if s.length ≤ 4096 then v else .str ((s.take 4096).toString ++ "…")
+        let detail? : Option String :=
+          rawParams?.bind fun p =>
+            ["CommandLine", "command", "Path", "path", "AbsolutePath", "ToolName", "toolSummary", "Query", "query", "SearchPath"]
+              |>.findSome? (fun k => (p.fieldStr? k).filter (!·.trimAscii.toString.isEmpty))
+              |>.map (fun s => ((s.trimAscii.toString.take 240).toString))
+        let rawOut? :=
+          ((toolInfo.fieldStr? "output").orElse (fun _ => toolInfo.fieldStr? "error"))
+            |>.filter (!·.isEmpty)
+            |>.map (fun s => if s.length ≤ 4096 then s else (s.take 4096).toString ++ "…")
         return { activity? := some {
           id := s!"agy-{(step.fieldStr? "conversation_id").getD ""}-{index}", label := tool, kind := "tool",
+          detail? := detail?, error? := if failed then rawOut? else none,
+          args? := args?, result? := if done_ then rawOut? else none,
           done := done_, failed, status := if failed then "failed" else if done_ then "completed" else "running" } }
       return {}
     | some "result" =>
