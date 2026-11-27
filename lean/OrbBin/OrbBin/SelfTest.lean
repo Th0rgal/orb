@@ -1859,12 +1859,14 @@ def runAllTests : IO UInt32 := do
   assertEq "sanitizeSpoolId? rejects slashes" (sanitizeSpoolId? "a/b") none
 
   let spoolDir := tmpDir / "local-runs-spool"
+  let gateFile := tmpDir / "reattach_live_gate"
   let mockAgyLive := tmpDir / "mock_agy_live.sh"
   IO.FS.writeFile mockAgyLive (
     "#!/bin/sh\n" ++
     "printf '{\"type\":\"init\",\"session_id\":\"sess-reattach-1\"}\\n'\n" ++
     "printf '{\"type\":\"message\",\"role\":\"assistant\",\"content\":\"part1 \",\"delta\":true}\\n'\n" ++
-    "sleep 0.6\n" ++
+    "i=0\n" ++
+    s!"while [ ! -f \"{gateFile.toString}\" ] && [ \"$i\" -lt 300 ]; do sleep 0.05; i=$((i+1)); done\n" ++
     "printf '{\"type\":\"message\",\"role\":\"assistant\",\"content\":\"part2\",\"delta\":true}\\n'\n" ++
     "printf '{\"type\":\"result\",\"status\":\"success\"}\\n'\n"
   )
@@ -1877,7 +1879,7 @@ def runAllTests : IO UInt32 := do
 
   -- Wait until part1 is flushed to the spool and manifest is written.
   let mut waitedLive := 0
-  while waitedLive < 3000 do
+  while waitedLive < 5000 do
     let manifestExists ← (spoolDir / "m-reattach-live.json").pathExists
     if manifestExists then
       if let some st ← getRunState? mgr1 "m-reattach-live" then
@@ -1885,18 +1887,21 @@ def runAllTests : IO UInt32 := do
     IO.sleep 25
     waitedLive := waitedLive + 25
 
-  -- Simulate orb-locald restart while child is still alive: create a fresh WarmHarnessManager on the same spoolDir.
+  -- Simulate orb-locald restart while child is still alive (blocked on gateFile).
   let mgr2 ← newWarmHarnessManager (some spoolDir)
   let finishedRef ← IO.mkRef false
   ensurePersistedRunsReattached mgr2 (fun _ => { onTurnFinished := fun _ => finishedRef.set true })
   let st2Init := (← getRunState? mgr2 "m-reattach-live").get!
-  assertEq "Reattached manager sees live run as not done" st2Init.done false
+  assertEq s!"Reattached manager sees live run as not done (exit={repr st2Init.exitCode?} err={repr st2Init.error?})" st2Init.done false
   assertEq "Reattached manager restores session_id from spool" st2Init.sessionId? (some "sess-reattach-1")
   assertEq "Reattached manager replays initial text from spool" st2Init.text "part1 "
 
+  -- Release the child so it emits part2 and exits 0.
+  IO.FS.writeFile gateFile "go\n"
+
   -- Wait for reattached tailer to observe completion and part2.
   let mut waitedDone := 0
-  while waitedDone < 4000 do
+  while waitedDone < 5000 do
     if let some st ← getRunState? mgr2 "m-reattach-live" then
       if st.done then break
     IO.sleep 25
