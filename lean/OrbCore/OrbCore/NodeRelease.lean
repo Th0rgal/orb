@@ -64,25 +64,8 @@ private def candidateBinaryPaths (name arch : String) : IO (Array String) := do
     ]
   return cands
 
-/-- Resolve the first existing, non-empty release binary matching `arch` (ELF `e_machine` check
-    on Linux unless `ORB_NODE_RELEASE_SKIP_ELF_CHECK=1`). -/
-def resolveReleaseBinaryBytes? (name arch : String) : IO (Option (String × ByteArray × String)) := do
-  if !allowedReleaseBinaryName name then return none
-  let skipElf := ((← IO.getEnv "ORB_NODE_RELEASE_SKIP_ELF_CHECK").getD "") == "1"
-  let normArch := OrbNode.AutoUpdate.normalizeArch arch
-  let cands ← candidateBinaryPaths name normArch
-  for p in cands do
-    let fp := System.FilePath.mk p
-    if ← fp.pathExists then
-      if let .ok bytes ← (IO.FS.readBinFile fp).toBaseIO then
-        if !bytes.isEmpty then
-          let archOk := skipElf || System.Platform.isOSX || OrbNode.AutoUpdate.verifyLinuxElfArch bytes normArch
-          if archOk then
-            let sha := bytesToHexLower (sha256Bytes bytes)
-            return some (p, bytes, sha)
-  return none
-
-/-- Cached `(path, sha256, sizeBytes)` metadata for a release binary without re-hashing unchanged files. -/
+/-- Cached `(path, sha256, sizeBytes)` metadata for a release binary without loading large binaries
+    into RAM (reads only 20-byte ELF header + native `sha256sum` cached by `(size, mtime)`). -/
 def resolveReleaseBinaryPathMeta? (name arch : String) : IO (Option (String × String × UInt64)) := do
   if !allowedReleaseBinaryName name then return none
   let skipElf := ((← IO.getEnv "ORB_NODE_RELEASE_SKIP_ELF_CHECK").getD "") == "1"
@@ -99,15 +82,25 @@ def resolveReleaseBinaryPathMeta? (name arch : String) : IO (Option (String × S
           if let some (sz, mt, hex) := cached? then
             if sz == md.byteSize && mt == md.modified then
               return some (p, hex, md.byteSize)
-          if let .ok bytes ← (IO.FS.readBinFile fp).toBaseIO then
-            if !bytes.isEmpty then
-              let archOk := skipElf || System.Platform.isOSX || OrbNode.AutoUpdate.verifyLinuxElfArch bytes normArch
-              if archOk then
-                let sha := bytesToHexLower (sha256Bytes bytes)
-                releaseBinaryShaCache.atomically do
-                  modify (·.insert key (md.byteSize, md.modified, sha))
-                return some (p, sha, bytes.size.toUInt64)
+          let archOk ←
+            if skipElf || System.Platform.isOSX then pure true
+            else OrbNode.AutoUpdate.verifyLinuxElfArchFile p normArch
+          if archOk then
+            if let some sha ← OrbNode.AutoUpdate.sha256FileFast p then
+              releaseBinaryShaCache.atomically do
+                modify (·.insert key (md.byteSize, md.modified, sha))
+              return some (p, sha, md.byteSize)
   return none
+
+/-- Resolve the first existing, non-empty release binary matching `arch` (ELF `e_machine` check
+    on Linux unless `ORB_NODE_RELEASE_SKIP_ELF_CHECK=1`). -/
+def resolveReleaseBinaryBytes? (name arch : String) : IO (Option (String × ByteArray × String)) := do
+  let some (p, sha, _) ← resolveReleaseBinaryPathMeta? name arch | return none
+  match ← (IO.FS.readBinFile p).toBaseIO with
+  | .ok bytes =>
+    if bytes.isEmpty then return none
+    return some (p, bytes, sha)
+  | .error _ => return none
 
 /-- Cached `(sha256, sizeBytes)` metadata for a release binary without re-hashing unchanged files. -/
 def resolveReleaseBinaryMeta? (name arch : String) : IO (Option (String × UInt64)) := do

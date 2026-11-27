@@ -394,6 +394,32 @@ def cliVersionsToJson (vers : Array (String × String)) : JVal :=
 
 /-! ### Atomic Binary Swap & Rollback -/
 
+/-- Fast SHA-256 hex digest of a file on disk using native `sha256sum` / `shasum -a 256`,
+    falling back to pure-Lean `sha256Bytes` when external hash utilities are absent. -/
+def sha256FileFast (path : String) : IO (Option String) := do
+  let tryCmd (cmd : String) (args : Array String) : IO (Option String) := do
+    match ← (IO.Process.output { cmd := cmd, args := args }).toBaseIO with
+    | .ok out =>
+      if out.exitCode == 0 then
+        let tok := ((out.stdout.trimAscii.toString.splitOn " ").head?.getD "").trimAscii.toString.toLower
+        if isValidSha256Hex tok then return some tok
+      return none
+    | .error _ => return none
+  if let some h ← tryCmd "sha256sum" #[path] then return some h
+  if let some h ← tryCmd "shasum" #["-a", "256", path] then return some h
+  match ← (IO.FS.readBinFile path).toBaseIO with
+  | .ok bytes => return some (bytesToHexLower (sha256Bytes bytes))
+  | .error _ => return none
+
+/-- Read only the first 20 bytes of `path` to check Linux ELF architecture without loading large binaries into RAM. -/
+def verifyLinuxElfArchFile (path expectedArch : String) : IO Bool := do
+  try
+    let h ← IO.FS.Handle.mk path .read
+    let hdr ← h.read 20
+    return verifyLinuxElfArch hdr expectedArch
+  catch _ =>
+    return false
+
 private def canWriteDir (dir : System.FilePath) : IO Bool := do
   let nonce ← newUuidV4
   let probe := dir / s!".orb-write-probe-{nonce}"
@@ -660,12 +686,21 @@ def syncCliBundleIfDrifted
         hdrs := hdrs.push ("Authorization", s!"Bearer {nodeToken}")
         if let some mid := machineId? then
           if !mid.isEmpty then hdrs := hdrs.push ("x-orb-machine-id", mid)
-      match ← sendRequestFollowingRedirects "GET" dlUrl hdrs ByteArray.empty 60000 (128 * 1024 * 1024) 5 with
+      match ← sendRequestFollowingRedirects "GET" dlUrl hdrs ByteArray.empty 180000 (512 * 1024 * 1024) 5 with
       | .error e => return .error s!"cli {spec.name} download failed: {e}"
       | .ok resp =>
         if resp.status < 200 || resp.status ≥ 300 then
           return .error s!"cli {spec.name} download HTTP {resp.status}"
-        let gotSha := bytesToHexLower (sha256Bytes resp.body)
+        let gotSha ←
+          if resp.body.size ≤ 16 * 1024 * 1024 then
+            pure (bytesToHexLower (sha256Bytes resp.body))
+          else
+            let tmpHash := (System.FilePath.mk stateDir / s!".cli-hash-{← newUuidV4}.tmp").toString
+            discard <| (IO.FS.createDirAll (System.FilePath.mk stateDir)).toBaseIO
+            discard <| (IO.FS.writeBinFile tmpHash resp.body).toBaseIO
+            let h? ← sha256FileFast tmpHash
+            discard <| (IO.FS.removeFile tmpHash).toBaseIO
+            pure (h?.getD "")
         if gotSha != spec.sha256.toLower then
           return .error s!"cli {spec.name} sha256 mismatch: expected {spec.sha256}, got {gotSha}"
         match ← installDownloadedHarness toolsRoot toolsBin spec resp.body with
