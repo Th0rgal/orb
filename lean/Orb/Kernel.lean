@@ -2934,15 +2934,23 @@ def proxySseScanStep
 
 /-!
   R30 safe stream recovery.  The low byte is the ending selected for a cut:
-  `0` keeps the current attempt, `1` retries the same provider, `2` retries a
-  later chain target, `3` closes at the last complete tool call, and `4` fails.
-  Bit 8 requests removal of provider-bound reasoning when the retry changes
-  targets.  A completed tool call is a hard fence: it can only close cleanly,
-  never retry, so two upstream attempts cannot be mixed in one client stream.
+  `0` keeps the current attempt, `1` retries the same provider (warm cache),
+  `2` retries a later chain target after a context-size check, `3` closes
+  cleanly at the end of the last complete tool call, and `4` fails.
+  Bit 8 (`256`) requests stripping provider-bound reasoning (OpenAI encrypted
+  reasoning, Anthropic signed thinking) when switching targets (`ending == 2`).
+  Two sticky fences govern safety:
+  - A completed tool call (`completeToolCalls > 0`) can only close cleanly (`3`),
+    never retry (`1` or `2`), so a tool call is never delivered twice.
+  - Once client-visible output is committed (`committed != 0`) with no complete
+    tool call, retry is forbidden (`4`), so two attempts are never mixed in one
+    client stream.
+  - Retryable abort (`1` or `2`) requires `cut != 0`, `committed == 0`,
+    `completeToolCalls == 0`, and `retries < maxRetries`.
 -/
 @[inline]
 def streamRecoveryStep
-    (cut : UInt8)
+    (cut committed : UInt8)
     (completeToolCalls : UInt32)
     (retries maxRetries : UInt32)
     (sameProviderAvailable nextTargetAvailable contextFits : UInt8) : UInt32 :=
@@ -2950,7 +2958,9 @@ def streamRecoveryStep
     0
   else if completeToolCalls > 0 then
     3
-  else if sameProviderAvailable == 1 && retries < maxRetries then
+  else if committed != 0 || !(retries < maxRetries) then
+    4
+  else if sameProviderAvailable == 1 then
     1
   else if nextTargetAvailable == 1 && contextFits == 1 then
     2 ||| 256

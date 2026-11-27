@@ -1534,9 +1534,14 @@ private def jsonEventCommitsVisibleOutput (jv : JVal) : Bool :=
     !((jv.fieldStr? "delta").getD "").isEmpty
   openAiCommit || geminiCommit || anthropicCommit || responsesCommit
 
+private def isCompleteToolArgsJson (raw : String) : Bool :=
+  match OrbBin.Json.parse raw with
+  | .ok (.obj _) => true
+  | _ => false
+
 private def completeToolCallBoundary? (body : ByteArray) : Option Nat := Id.run do
   let mut lastBoundary : Option Nat := none
-  let mut openAiArgs : Array (Nat × String) := #[]
+  let mut openAiCalls : Array (Nat × Bool × String) := #[]
   let mut anthropicToolBlocks : Array (Nat × String × Bool × Bool) := #[]
   let mut responsesTools : Array (String × Bool) := #[]
   let mut geminiCalls : Nat := 0
@@ -1555,18 +1560,24 @@ private def completeToolCallBoundary? (body : ByteArray) : Option Nat := Id.run 
         let calls := ((choice.fieldOrNull "delta").fieldArr? "tool_calls").getD #[]
         for call in calls do
           let index := (call.fieldNat? "index").getD 0
-          let previous := (openAiArgs.find? (fun (i, _) => i == index)).map Prod.snd |>.getD ""
-          let fragment := ((call.fieldOrNull "function").fieldStr? "arguments").getD ""
+          let (prevHasName, previous) :=
+            match openAiCalls.find? (fun x => x.1 == index) with
+            | some (_, hn, args) => (hn, args)
+            | none => (false, "")
+          let fnObj := call.fieldOrNull "function"
+          let fragName := (fnObj.fieldStr? "name").getD ""
+          let hasName := prevHasName || !fragName.trimAscii.toString.isEmpty
+          let fragment := (fnObj.fieldStr? "arguments").getD ""
           let combined := previous ++ fragment
-          openAiArgs := openAiArgs.filter (fun (i, _) => i != index)
-          openAiArgs := openAiArgs.push (index, combined)
+          openAiCalls := openAiCalls.filter (fun x => x.1 != index)
+          openAiCalls := openAiCalls.push (index, hasName, combined)
           updatedCall := true
       let candidates := (jv.fieldArr? "candidates").getD #[]
       for candidate in candidates do
         let parts := ((candidate.fieldOrNull "content").fieldArr? "parts").getD #[]
         for part in parts do
           if let some functionCall := part.field? "functionCall" then
-            if functionCall.asObj?.isSome then
+            if functionCall.asObj?.isSome && !((functionCall.fieldStr? "name").getD "").trimAscii.toString.isEmpty then
               geminiCalls := geminiCalls + 1
               updatedCall := true
       if jv.fieldStr? "type" == some "content_block_start" then
@@ -1622,41 +1633,77 @@ private def completeToolCallBoundary? (body : ByteArray) : Option Nat := Id.run 
               ((item.fieldStr? "call_id").filter (!·.isEmpty)).orElse
                 (fun _ => (item.fieldStr? "id").filter (!·.isEmpty)) |>.getD "idx:0"
           let args := (item.fieldStr? "arguments").getD ""
-          if (OrbBin.Json.parse args).isOk then
+          if isCompleteToolArgsJson args then
             responsesTools := responsesTools.filter (fun (k, _) => k != key)
             responsesTools := responsesTools.push (key, true)
             updatedCall := true
     if updatedCall then
-      let hasAny := !openAiArgs.isEmpty || !anthropicToolBlocks.isEmpty || !responsesTools.isEmpty || geminiCalls > 0
+      let hasAny := !openAiCalls.isEmpty || !anthropicToolBlocks.isEmpty || !responsesTools.isEmpty || geminiCalls > 0
       let allComplete :=
-        openAiArgs.all (fun (_, a) => (OrbBin.Json.parse a).isOk) &&
-        anthropicToolBlocks.all (fun (_, b, _, stopped) => stopped && (OrbBin.Json.parse b).isOk) &&
+        openAiCalls.all (fun (_, hasName, a) => hasName && isCompleteToolArgsJson a) &&
+        anthropicToolBlocks.all (fun (_, b, _, stopped) => stopped && isCompleteToolArgsJson b) &&
         responsesTools.all (fun (_, done) => done)
       if hasAny && allComplete then
         lastBoundary := some e
   return lastBoundary
 
-private partial def stripProviderReasoningContent : JVal → JVal
+private def isProviderReasoningBlock (jv : JVal) : Bool :=
+  match jv with
+  | .obj _ =>
+    let typ := jv.fieldStr? "type"
+    typ == some "reasoning" || typ == some "thinking" || typ == some "redacted_thinking" ||
+    jv.fieldBool? "thought" == some true
+  | _ => false
+
+private def isProviderReasoningField (k : String) : Bool :=
+  k == "reasoning_content" || k == "reasoning_details" || k == "encrypted_content" ||
+  k == "reasoning_opaque" || k == "thought_signature" || k == "thoughtSignature"
+
+private partial def stripProviderReasoningPart : JVal → JVal
   | .arr xs => .arr (xs.filterMap fun x =>
-      match x with
-      | .obj fields =>
-        let typ := (JVal.obj fields).fieldStr? "type"
-        if typ == some "reasoning" || typ == some "thinking" || typ == some "redacted_thinking" then none
-        else some (stripProviderReasoningContent x)
-      | _ => some (stripProviderReasoningContent x))
-  | .obj fields => .obj (fields.map fun (k, v) => (k, stripProviderReasoningContent v))
-  | other => other
-
-private partial def stripProviderReasoningJVal : JVal → JVal
-  | .arr xs => .arr (xs.map stripProviderReasoningJVal)
-  | .obj fields => .obj (fields.map fun (k, v) =>
-      if k == "messages" || k == "input" || k == "content" then
-        (k, stripProviderReasoningContent v)
+      if isProviderReasoningBlock x then none
+      else some (stripProviderReasoningPart x))
+  | .obj fields => .obj (fields.filterMap fun (k, v) =>
+      if isProviderReasoningField k then none
+      else if k == "content" || k == "parts" || k == "tool_calls" || k == "extra_content" || k == "google" then
+        some (k, stripProviderReasoningPart v)
       else
-        (k, v))
+        some (k, v))
   | other => other
 
-private def stripProviderBoundReasoning (body : ByteArray) : ByteArray :=
+private def stripProviderReasoningMessage (msg : JVal) : Option JVal :=
+  if isProviderReasoningBlock msg then none
+  else match msg with
+    | .obj fields =>
+      some (.obj (fields.filterMap fun (k, v) =>
+        if isProviderReasoningField k || k == "reasoning" then none
+        else if k == "content" || k == "parts" || k == "tool_calls" || k == "extra_content" || k == "google" then
+          some (k, stripProviderReasoningPart v)
+        else
+          some (k, v)))
+    | other => some other
+
+private def stripProviderReasoningJVal : JVal → JVal
+  | .obj fields => .obj (fields.filterMap fun (k, v) =>
+      if k == "messages" || k == "input" || k == "contents" then
+        match v with
+        | .arr xs => some (k, .arr (xs.filterMap stripProviderReasoningMessage))
+        | _ => some (k, stripProviderReasoningPart v)
+      else if k == "include" then
+        match v with
+        | .arr xs =>
+          let kept := xs.filter fun item => item.asStr? != some "reasoning.encrypted_content"
+          some (k, .arr kept)
+        | _ => some (k, v)
+      else
+        some (k, v))
+  | other => other
+
+/-- Strip provider-bound reasoning (OpenAI encrypted reasoning items/include, Anthropic signed
+    `thinking` / `redacted_thinking` blocks, Chat `reasoning_content` / `reasoning_details`,
+    and Gemini `thought` / `thoughtSignature`) before switching to another chain target,
+    without modifying tool-call `arguments` or `tool_use.input` payloads. -/
+def stripProviderBoundReasoning (body : ByteArray) : ByteArray :=
   match String.fromUTF8? body with
   | some raw => match OrbBin.Json.parse raw with
     | .ok jv => (renderCompact (stripProviderReasoningJVal jv)).toUTF8
@@ -2023,8 +2070,10 @@ def recoverBufferedStream
     (bodyTimedOutRef? : Option (IO.Ref Bool))
     (emit : BodyEmit)
     (initiallyCommitted : Bool := false)
-    (maxCopyBytes : Nat := maxStreamCopyBytes) : IO (ByteArray × Bool) := do
-  let mut remaining := 2
+    (maxCopyBytes : Nat := maxStreamCopyBytes)
+    (probeRecovery? : Option (IO (Bool × Bool × Bool)) := none)
+    (maxRetries : Nat := 2) : IO (ByteArray × Bool) := do
+  let mut retriesUsed : Nat := 0
   let mut pump := initial
   let mut result : Option (ByteArray × Bool) := none
   let tailCap := Nat.min 65536 (maxCopyBytes / 2)
@@ -2144,7 +2193,7 @@ def recoverBufferedStream
     let bufferRef ← IO.mkRef ByteArray.empty
     let modeRef : IO.Ref (Option Bool) ← IO.mkRef none
     let downstreamOpenRef ← IO.mkRef true
-    let firstAttempt := remaining == 2
+    let firstAttempt := retriesUsed == 0
     let pumpResult ← try
       pump (fun piece => do
         if !(← downstreamOpenRef.get) then
@@ -2233,11 +2282,17 @@ def recoverBufferedStream
       result := some (← readEmittedCopy, true)
     else
       let completeCalls : UInt32 := if (completeToolCallBoundary? buffered).isSome then 1 else 0
+      let commBit : UInt8 := if committed then 1 else 0
+      let (sameAvail, nextAvail, ctxFits) ← match probeRecovery? with
+        | some probe => probe
+        | none => pure (retriesUsed == 0, retriesUsed < maxRetries, true)
       let ending := Orb.Kernel.streamRecoveryStep
-        1 completeCalls (2 - remaining).toUInt32 2
-        (if remaining > 1 then 1 else 0)
-        (if remaining > 0 then 1 else 0) 1
-      if (ending &&& 0xFF) == 3 then
+        1 commBit completeCalls retriesUsed.toUInt32 maxRetries.toUInt32
+        (if sameAvail then 1 else 0)
+        (if nextAvail then 1 else 0)
+        (if ctxFits then 1 else 0)
+      let code := ending &&& 0xFF
+      if code == 3 then
         let some boundary := completeToolCallBoundary? buffered
           | result := some (← readEmittedCopy, false); continue
         let clean := synthesizeToolCallClose contentType emitted (buffered.extract 0 boundary)
@@ -2245,21 +2300,42 @@ def recoverBufferedStream
         if let some ref := bodyTimedOutRef? then
           ref.set false
         result := some (← readEmittedCopy, true)
-      else if committed || (ending &&& 0xFF) == 4 then
-        discard <| recordEmit buffered
-        result := some (← readEmittedCopy, false)
-      else
-        if remaining == 0 then
-          discard <| recordEmit buffered
-          result := some (← readEmittedCopy, false)
-        else
-          match ← retry (2 - remaining) with
-          | some nextPump =>
-            remaining := remaining - 1
-            pump := nextPump
-          | none =>
+      else if code == 1 then
+        match ← retry 0 with
+        | some nextPump =>
+          retriesUsed := retriesUsed + 1
+          pump := nextPump
+        | none =>
+          -- Same provider could not reopen; re-query the kernel with same-provider exhausted
+          -- so any switch to the next chain target still passes context-size and strip gates.
+          let (_, nextAvail2, ctxFits2) ← match probeRecovery? with
+            | some probe => probe
+            | none => pure (false, retriesUsed < maxRetries, true)
+          let ending2 := Orb.Kernel.streamRecoveryStep
+            1 commBit completeCalls retriesUsed.toUInt32 maxRetries.toUInt32
+            0 (if nextAvail2 then 1 else 0) (if ctxFits2 then 1 else 0)
+          if (ending2 &&& 0xFF) == 2 && (ending2 &&& 256) != 0 then
+            match ← retry 1 with
+            | some nextPump =>
+              retriesUsed := retriesUsed + 1
+              pump := nextPump
+            | none =>
+              discard <| recordEmit buffered
+              result := some (← readEmittedCopy, false)
+          else
             discard <| recordEmit buffered
             result := some (← readEmittedCopy, false)
+      else if code == 2 && (ending &&& 256) != 0 then
+        match ← retry 1 with
+        | some nextPump =>
+          retriesUsed := retriesUsed + 1
+          pump := nextPump
+        | none =>
+          discard <| recordEmit buffered
+          result := some (← readEmittedCopy, false)
+      else
+        discard <| recordEmit buffered
+        result := some (← readEmittedCopy, false)
   return result.get!
 
 /-- Resolve the chosen credential on each transport open, including a stream retry. -/
@@ -2651,8 +2727,14 @@ def forwardProxyChain
                 pure (some rawPump)
               else
                 let nextFallbackIdxRef ← IO.mkRef (idx + 1)
-                let openRecoveryTarget (retryTarget : ProviderTarget) (retryBody : ByteArray) :
-                    IO (Option BodyPump) := do
+                let sameProviderTriedRef ← IO.mkRef false
+                let strippedBody := stripProviderBoundReasoning body
+                let targetFitsContext (candidate : ProviderTarget) (candidateBody : ByteArray) : Bool :=
+                  let (_, _, _, _, _, wireBody) := upstreamRequest candidate relPath extraHeaders candidateBody
+                  let estimatedTokens := (wireBody.size + 3) / 4
+                  estimatedTokens ≤ candidate.contextLimit.toNat
+                let openRecoveryTarget (retryTarget : ProviderTarget) (retryBody : ByteArray)
+                    (checkContext : Bool) : IO (Option BodyPump) := do
                   let admitted ← match effPacing? with
                     | none => pure true
                     | some tracker => do
@@ -2664,13 +2746,16 @@ def forwardProxyChain
                     let (retryTls, retryHost, retryPort, retryPath, retryHdrs, retryWireBody) :=
                       upstreamRequest retryTarget relPath extraHeaders retryBody
                     let estimatedTokens := (retryWireBody.size + 3) / 4
-                    if estimatedTokens.toUInt32 > retryTarget.contextLimit then
+                    if checkContext && estimatedTokens > retryTarget.contextLimit.toNat then
                       if let some tracker := effPacing? then
                         releaseTargetSlot tracker retryTarget
                       pure none
                     else
+                      let retryStartMs ← IO.monoMsNow
+                      let retryHeadDeadlineMs? : Option Nat :=
+                        some (retryStartMs + effStreamLimits.preHeadBudgetMs)
                       match ← openAccountRequest resolveTransport retryTarget true retryTls method retryHost
-                        retryPort retryPath retryHdrs retryWireBody effStreamLimits streamHeadDeadlineMs? bodyTimedOutRef? with
+                        retryPort retryPath retryHdrs retryWireBody effStreamLimits retryHeadDeadlineMs? bodyTimedOutRef? with
                       | .ok (retryResp, some p) =>
                         if let some ref := bodyTimedOutRef? then
                           ref.set false
@@ -2694,10 +2779,22 @@ def forwardProxyChain
                         if let some tracker := effPacing? then
                           releaseTargetSlot tracker retryTarget
                         pure none
+                let probeRecovery : IO (Bool × Bool × Bool) := do
+                  if isCommitted then
+                    return (false, false, false)
+                  let sameAvail := !(← sameProviderTriedRef.get)
+                  let nextIdx ← nextFallbackIdxRef.get
+                  let mut hasNext := false
+                  let mut anyFits := false
+                  for k in [nextIdx:targets.size] do
+                    hasNext := true
+                    if targetFitsContext targets[k]! strippedBody then
+                      anyFits := true
+                      break
+                  return (sameAvail, hasNext, anyFits)
                 let openNextFallback : IO (Option BodyPump) := do
                   if isCommitted then
                     return none
-                  let stripped := stripProviderBoundReasoning body
                   let mut opened : Option BodyPump := none
                   while opened.isNone do
                     let nextIdx ← nextFallbackIdxRef.get
@@ -2705,18 +2802,19 @@ def forwardProxyChain
                     | none => break
                     | some nextTarget =>
                       nextFallbackIdxRef.set (nextIdx + 1)
-                      opened ← openRecoveryTarget nextTarget stripped
+                      opened ← openRecoveryTarget nextTarget strippedBody (checkContext := true)
                   return opened
-                let reopen (retryNo : Nat) : IO (Option BodyPump) := do
+                let reopen (retryMode : Nat) : IO (Option BodyPump) := do
                   if isCommitted then
                     return none
-                  if retryNo == 0 then
-                    match ← openRecoveryTarget tgt body with
-                    | some p => pure (some p)
-                    | none => openNextFallback
+                  if retryMode == 0 then
+                    sameProviderTriedRef.set true
+                    openRecoveryTarget tgt body (checkContext := false)
                   else
                     openNextFallback
-                pure (some fun emit => recoverBufferedStream ctype rawPump releaseSlotOnce reopen bodyTimedOutRef? emit (initiallyCommitted := isCommitted))
+                pure (some fun emit => recoverBufferedStream ctype rawPump releaseSlotOnce reopen
+                  bodyTimedOutRef? emit (initiallyCommitted := isCommitted)
+                  (probeRecovery? := some probeRecovery))
           return {
             status := resp.status
             contentType := ctype

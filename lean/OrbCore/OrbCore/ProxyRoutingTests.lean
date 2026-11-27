@@ -44,6 +44,7 @@ def runStreaming : IO Unit := do
   runPreCommitTimeoutClassification
   runPinnedStreamNoFailover
   runLargeIncrementalStreamBeyondCap
+  runR30ContextSizeAndReasoningStrip
 where
  runRelayCut (withTool : Bool) : IO Unit := do
   -- The test client alone releases the upstream. A buffered relay cannot
@@ -940,6 +941,180 @@ where
   check (ptOk && ptCopy.size ≤ 512 && (String.fromUTF8? ptCopy).isSome &&
       ptClass == "ok" && ptUsage.input == 12 && ptUsage.output == 99)
     s!"raw passthrough crossing headCap mid-UTF8/mid-line must keep valid UTF-8, ok status, and usage: ok={ptOk} size={ptCopy.size} validUtf8={(String.fromUTF8? ptCopy).isSome} class={ptClass} usage={repr ptUsage}"
+
+ runR30ContextSizeAndReasoningStrip : IO Unit := do
+  -- (1) `stripProviderBoundReasoning` strips OpenAI encrypted reasoning, Anthropic signed/redacted
+  --     thinking, Chat reasoning fields, and Gemini thoughts/signatures while keeping tool inputs intact.
+  let respBody :=
+    "{\"model\":\"gpt-6\",\"include\":[\"reasoning.encrypted_content\",\"other.field\"]," ++
+    "\"input\":[{\"type\":\"reasoning\",\"encrypted_content\":\"enc-blob-1\",\"summary\":[{\"text\":\"s\"}]}," ++
+    "{\"role\":\"user\",\"content\":\"hello\"}]}"
+  let respStripped := (String.fromUTF8? (stripProviderBoundReasoning respBody.toUTF8)).getD ""
+  check ((respStripped.splitOn "enc-blob-1").length == 1 &&
+         (respStripped.splitOn "reasoning.encrypted_content").length == 1 &&
+         (respStripped.splitOn "other.field").length > 1 &&
+         (respStripped.splitOn "hello").length > 1)
+    s!"R30 responses reasoning strip failed: {respStripped}"
+
+  let anthBody :=
+    "{\"model\":\"claude-opus\",\"messages\":[{\"role\":\"assistant\",\"content\":[" ++
+    "{\"type\":\"thinking\",\"thinking\":\"priv-thought\",\"signature\":\"anth-sig-99\"}," ++
+    "{\"type\":\"redacted_thinking\",\"data\":\"redacted-blob\"}," ++
+    "{\"type\":\"text\",\"text\":\"visible-msg\"}," ++
+    "{\"type\":\"tool_use\",\"id\":\"tu_1\",\"name\":\"inspect\",\"input\":{\"type\":\"thinking\",\"keep\":\"tool-arg\"}}]}]}"
+  let anthStripped := (String.fromUTF8? (stripProviderBoundReasoning anthBody.toUTF8)).getD ""
+  check ((anthStripped.splitOn "priv-thought").length == 1 &&
+         (anthStripped.splitOn "anth-sig-99").length == 1 &&
+         (anthStripped.splitOn "redacted-blob").length == 1 &&
+         (anthStripped.splitOn "visible-msg").length > 1 &&
+         (anthStripped.splitOn "tool-arg").length > 1)
+    s!"R30 anthropic reasoning strip must strip thinking/signatures but preserve tool_use.input: {anthStripped}"
+
+  let chatGemBody :=
+    "{\"model\":\"m\",\"messages\":[{\"role\":\"assistant\",\"reasoning_content\":\"rc-1\"," ++
+    "\"encrypted_content\":\"ec-1\",\"reasoning_details\":[{\"x\":1}],\"content\":\"hi\"," ++
+    "\"tool_calls\":[{\"id\":\"c1\",\"function\":{\"name\":\"bash\",\"arguments\":\"{\\\"cmd\\\":\\\"ls\\\"}\"}," ++
+    "\"extra_content\":{\"google\":{\"thought_signature\":\"gsig-1\"}}}]}]," ++
+    "\"contents\":[{\"role\":\"model\",\"parts\":[{\"thought\":true,\"text\":\"gem-secret\"},{\"text\":\"gem-ok\",\"thoughtSignature\":\"gsig-2\"}]}]}"
+  let chatGemStripped := (String.fromUTF8? (stripProviderBoundReasoning chatGemBody.toUTF8)).getD ""
+  check ((chatGemStripped.splitOn "rc-1").length == 1 &&
+         (chatGemStripped.splitOn "ec-1").length == 1 &&
+         (chatGemStripped.splitOn "reasoning_details").length == 1 &&
+         (chatGemStripped.splitOn "gsig-1").length == 1 &&
+         (chatGemStripped.splitOn "gem-secret").length == 1 &&
+         (chatGemStripped.splitOn "gsig-2").length == 1 &&
+         (chatGemStripped.splitOn "gem-ok").length > 1 &&
+         (chatGemStripped.splitOn "\\\"cmd\\\":\\\"ls\\\"").length > 1)
+    s!"R30 chat/gemini reasoning strip failed: {chatGemStripped}"
+
+  -- (2) Same-provider warm-cache retry keeps provider-bound reasoning intact AND succeeds even
+  --     when attempt 1 cut AFTER `preHeadBudgetMs` elapsed (fresh retry head deadline).
+  let .ok (wLfd, wPort) ← tcpListen "127.0.0.1" 0 4 | throw (IO.userError "R30 warm-cache: listen failed")
+  let wHits ← IO.mkRef (0 : Nat)
+  let wRetryReq ← IO.mkRef ""
+  let wOk := "data: {\"choices\":[{\"delta\":{\"content\":\"warm-recovered\"}}]}\n\ndata: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"
+  let wUp ← IO.asTask (prio := .dedicated) do
+    if let .ok cfd1 ← tcpAcceptPoll wLfd 5000 then
+      wHits.modify (· + 1)
+      discard <| pollReadable cfd1 2000
+      discard <| readStreamChunk cfd1 65536
+      discard <| writeAll cfd1 ("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n").toUTF8 false
+      IO.sleep 120
+      let roleOnly := "data: {\"choices\":[{\"delta\":{\"role\":\"assistant\"}}]}\n\n"
+      discard <| writeAll cfd1 (encodeHttpChunk roleOnly.toUTF8) false
+      discard <| closeFd cfd1
+    if let .ok cfd2 ← tcpAcceptPoll wLfd 5000 then
+      wHits.modify (· + 1)
+      discard <| pollReadable cfd2 2000
+      let req2 ← readStreamChunk cfd2 65536
+      wRetryReq.set ((String.fromUTF8? req2).getD "")
+      discard <| writeAll cfd2 (("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n").toUTF8 ++
+        encodeHttpChunk wOk.toUTF8 ++ encodeHttpChunk ByteArray.empty) false
+      discard <| closeFd cfd2
+    discard <| closeFd wLfd
+  let wChain : RoutingChain := {
+    id := "r30-warm", name := "r30-warm",
+    targets := #[{ accountId := "w1", provider := "anthropic", baseUrl := s!"http://127.0.0.1:{wPort}", apiKey := "k", modelId := "m1", contextLimit := 8 }]
+  }
+  let wReqBody := "{\"model\":\"r30-warm\",\"stream\":true,\"messages\":[{\"role\":\"assistant\",\"content\":[{\"type\":\"thinking\",\"thinking\":\"keep-on-same\",\"signature\":\"sig-same\"},{\"type\":\"text\",\"text\":\"hi\"}]}]}"
+  let wOut ← forwardProxyChain wChain "POST" "/v1/chat/completions" #[] wReqBody.toUTF8
+    (streamLimits? := some { idleMs := 5000, totalMs := 10000, preHeadBudgetMs := 80 })
+  let some wPump := wOut.stream? | throw (IO.userError "R30 warm-cache: missing pump")
+  let (wCopy, wComplete) ← wPump (fun _ => pure true)
+  IO.ofExcept wUp.get
+  let wReq2Text ← wRetryReq.get
+  check (wComplete && wCopy == wOk.toUTF8 && (← wHits.get) == 2 &&
+      (wReq2Text.splitOn "sig-same").length > 1)
+    s!"R30 same-provider retry must keep reasoning and use fresh head deadline: complete={wComplete} hits={← wHits.get} req2={wReq2Text}"
+
+  -- (3) Context-size check on cross-target switch: skips undersized `t2` without opening a socket
+  --     to `t2`, switches to fitting `t3` with OpenAI encrypted reasoning stripped.
+  let .ok (cLfd1, cPort1) ← tcpListen "127.0.0.1" 0 4 | throw (IO.userError "R30 ctx: listen1 failed")
+  let .ok (cLfd2, cPort2) ← tcpListen "127.0.0.1" 0 4 | throw (IO.userError "R30 ctx: listen2 failed")
+  let .ok (cLfd3, cPort3) ← tcpListen "127.0.0.1" 0 4 | throw (IO.userError "R30 ctx: listen3 failed")
+  let cHits1 ← IO.mkRef (0 : Nat)
+  let cHits2 ← IO.mkRef (0 : Nat)
+  let cHits3 ← IO.mkRef (0 : Nat)
+  let cReq3Ref ← IO.mkRef ""
+  let cUp1 ← IO.asTask (prio := .dedicated) do
+    for _ in [0:2] do
+      if let .ok cfd ← tcpAcceptPoll cLfd1 5000 then
+        cHits1.modify (· + 1)
+        discard <| pollReadable cfd 2000
+        discard <| readStreamChunk cfd 65536
+        -- Non-object JSON argument (`"123"`) must NOT trigger clean tool-call close.
+        let badTool := "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"bad_1\",\"function\":{\"name\":\"bash\",\"arguments\":\"123\"}}]}}]}\n\n"
+        discard <| writeAll cfd (("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n").toUTF8 ++
+          encodeHttpChunk badTool.toUTF8) false
+        discard <| closeFd cfd
+    discard <| closeFd cLfd1
+  let cUp2 ← IO.asTask (prio := .dedicated) do
+    if let .ok cfd ← tcpAcceptPoll cLfd2 5000 then
+      discard <| pollReadable cfd 1000
+      unless (← readStreamChunk cfd 65536).isEmpty do
+        cHits2.modify (· + 1)
+      discard <| closeFd cfd
+    discard <| closeFd cLfd2
+  let cOk3 := "data: {\"choices\":[{\"delta\":{\"content\":\"from-t3-fit\"}}]}\n\ndata: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"
+  let cUp3 ← IO.asTask (prio := .dedicated) do
+    if let .ok cfd ← tcpAcceptPoll cLfd3 5000 then
+      cHits3.modify (· + 1)
+      discard <| pollReadable cfd 2000
+      let raw ← readStreamChunk cfd 65536
+      cReq3Ref.set ((String.fromUTF8? raw).getD "")
+      discard <| writeAll cfd (("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n").toUTF8 ++
+        encodeHttpChunk cOk3.toUTF8 ++ encodeHttpChunk ByteArray.empty) false
+      discard <| closeFd cfd
+    discard <| closeFd cLfd3
+  let ctxChain : RoutingChain := {
+    id := "r30-ctx", name := "r30-ctx",
+    targets := #[
+      { accountId := "ctx-t1", provider := "openai", baseUrl := s!"http://127.0.0.1:{cPort1}", apiKey := "k1", modelId := "m1", contextLimit := 128000 },
+      { accountId := "ctx-t2-small", provider := "anthropic", baseUrl := s!"http://127.0.0.1:{cPort2}", apiKey := "k2", modelId := "m2", contextLimit := 10 },
+      { accountId := "ctx-t3-fit", provider := "anthropic", baseUrl := s!"http://127.0.0.1:{cPort3}", apiKey := "k3", modelId := "m3", contextLimit := 128000 }
+    ]
+  }
+  let ctxReqBody :=
+    "{\"model\":\"r30-ctx\",\"stream\":true,\"include\":[\"reasoning.encrypted_content\"]," ++
+    "\"input\":[{\"type\":\"reasoning\",\"encrypted_content\":\"oai-enc-77\"},{\"role\":\"user\",\"content\":\"01234567890123456789012345678901234567890123456789\"}]}"
+  let cOut ← forwardProxyChain ctxChain "POST" "/v1/chat/completions" #[] ctxReqBody.toUTF8
+  let some cPump := cOut.stream? | throw (IO.userError "R30 ctx: missing pump")
+  let (cCopy, cComplete) ← cPump (fun _ => pure true)
+  if let .ok wake ← tcpConnect "127.0.0.1" cPort2 then discard <| closeFd wake
+  IO.ofExcept cUp1.get
+  IO.ofExcept cUp2.get
+  IO.ofExcept cUp3.get
+  let cReq3Text ← cReq3Ref.get
+  check (cComplete && cCopy == cOk3.toUTF8 &&
+      (← cHits1.get) == 2 && (← cHits2.get) == 0 && (← cHits3.get) == 1 &&
+      (cReq3Text.splitOn "oai-enc-77").length == 1 &&
+      (cReq3Text.splitOn "reasoning.encrypted_content").length == 1)
+    s!"R30 context-size gate must skip undersized t2 without hitting it and strip encrypted reasoning for t3: complete={cComplete} hits=({← cHits1.get},{← cHits2.get},{← cHits3.get}) req3={cReq3Text}"
+
+  -- (4) `[DONE]data: {"error":...}` arriving AFTER a complete tool call closes cleanly at the
+  --     complete tool call boundary and drops the concatenated error frame.
+  let tcOk := "data: {\"id\":\"chatcmpl-tc-err\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"tool_calls\":[{\"index\":0,\"id\":\"call_clean_1\",\"type\":\"function\",\"function\":{\"name\":\"bash\",\"arguments\":\"{\\\"command\\\":\\\"ls\\\"}\"}}]},\"finish_reason\":null}]}\n\n"
+  let tcErr := "data: [DONE]data: {\"error\":{\"message\":\"upstream stream reset\",\"type\":\"server_error\"}}\n\n"
+  let tcFinish := "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\ndata: [DONE]\n\n"
+  let .ok (teLfd, tePort) ← tcpListen "127.0.0.1" 0 4 | throw (IO.userError "R30 tc+err: listen failed")
+  let teUp ← IO.asTask (prio := .dedicated) do
+    if let .ok cfd ← tcpAcceptPoll teLfd 5000 then
+      discard <| pollReadable cfd 2000
+      discard <| readStreamChunk cfd 65536
+      discard <| writeAll cfd (("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n").toUTF8 ++
+        encodeHttpChunk (tcOk ++ tcErr).toUTF8 ++ encodeHttpChunk ByteArray.empty) false
+      discard <| closeFd cfd
+    discard <| closeFd teLfd
+  let teChain : RoutingChain := {
+    id := "r30-tc-err", name := "r30-tc-err",
+    targets := #[{ accountId := "te-1", provider := "openai", baseUrl := s!"http://127.0.0.1:{tePort}", apiKey := "k", modelId := "m" }]
+  }
+  let teOut ← forwardProxyChain teChain "POST" "/v1/chat/completions" #[] "{\"model\":\"r30-tc-err\",\"stream\":true}".toUTF8
+  let some tePump := teOut.stream? | throw (IO.userError "R30 tc+err: missing pump")
+  let (teCopy, teComplete) ← tePump (fun _ => pure true)
+  IO.ofExcept teUp.get
+  check (teComplete && teCopy == (tcOk ++ tcFinish).toUTF8)
+    s!"R30 complete tool call followed by [DONE]error must close cleanly and drop error tail: complete={teComplete} body={String.fromUTF8? teCopy}"
 
 def runStreamingPumpContracts : IO Unit := do
   let failures ← IO.mkRef (#[] : Array String)
