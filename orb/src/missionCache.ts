@@ -314,8 +314,13 @@ function flushPersistScope(scope: string) {
   } = pending.snapshot;
   const startIdx = typeof diskStartIdx === "number" && diskStartIdx > 0 ? diskStartIdx : 0;
   const persistedHasOlder = startIdx > 0 ? serverHasOlder : restSnap.hasOlder;
+  const prunedLiveTail =
+    restSnap.liveTail?.length && restSnap.stream?.length
+      ? heldAfterHistory(restSnap.stream, restSnap.liveTail)
+      : restSnap.liveTail;
   const digested = buildSettledDigestSnapshot({
     ...restSnap,
+    liveTail: prunedLiveTail?.length ? prunedLiveTail : undefined,
     hasOlder: persistedHasOlder,
   });
   const hasSettled = Array.isArray(digested.settledItems) && digested.settledItems.length > 0;
@@ -496,6 +501,20 @@ export function hydrateTranscriptFromDisk(
       if (!peekReadyTranscript(id)) {
         const session = sessionFor(id);
         const startIdx = sliced && sliced.startIdx > 0 ? sliced.startIdx : 0;
+        // On a tail-sliced disk read (`startIdx > 0`), `persisted.stream` omits events `0..startIdx-1`,
+        // so any persisted `liveTail` receipts from earlier turns cannot be deduplicated against them
+        // and would re-append stale user messages below the final assistant reply. Drop `liveTail`
+        // when tail-sliced (any genuinely pending turns arrive via `/open` queue + `since_seq`), and
+        // prune against the full stream when `startIdx === 0`.
+        const hydratedLiveTail =
+          startIdx > 0
+            ? undefined
+            : persisted.liveTail?.length
+              ? (() => {
+                  const kept = heldAfterHistory(persisted.stream ?? [], persisted.liveTail);
+                  return kept.length ? kept : undefined;
+                })()
+              : undefined;
         let rebuiltItems: StreamItem[];
         const prebuiltBase =
           startIdx === 0 && Array.isArray(persisted.settledItems) && persisted.settledItems.length > 0
@@ -509,19 +528,20 @@ export function hydrateTranscriptFromDisk(
               : undefined;
         if (prebuiltBase) {
           const boundBase = rehydrateTranscript(prebuiltBase, session);
-          const tail = [...(persisted.openTailEvents ?? []), ...(persisted.liveTail ?? [])];
+          const tail = [...(persisted.openTailEvents ?? []), ...(hydratedLiveTail ?? [])];
           rebuiltItems = tail.length > 0
             ? applyStreamEvents(boundBase, tail, session)
             : boundBase;
         } else {
           rebuiltItems = buildTranscript(
-            [...(persisted.stream ?? []), ...(persisted.liveTail ?? [])],
+            [...(persisted.stream ?? []), ...(hydratedLiveTail ?? [])],
             session,
           );
         }
         const origHasOlder = persisted.serverHasOlder ?? persisted.hasOlder;
         const hydrated: TranscriptSnap = {
           ...persisted,
+          liveTail: hydratedLiveTail,
           items: rebuiltItems,
           ...(startIdx > 0
             ? {
@@ -625,7 +645,11 @@ export function applyLiveEventsToTranscriptCache(
     ? mergeStreamBySequence(prev?.stream ?? [], sequenced)
     : (prev?.stream ?? []);
   const priorTail = prev?.liveTail ?? [];
-  const combinedTail = unsequenced.length ? [...priorTail, ...unsequenced] : priorTail;
+  const rawTail = unsequenced.length ? [...priorTail, ...unsequenced] : priorTail;
+  const combinedTail =
+    (sequenced.length > 0 || unsequenced.length > 0) && rawTail.length > 0 && stream.length > 0
+      ? heldAfterHistory(stream, rawTail)
+      : rawTail;
   const liveTail = combinedTail.length > 256 ? combinedTail.slice(-256) : combinedTail;
   const prevEst = prev?.estimatedBytes ?? 0;
   const deltaBytes = estimateStreamEventsBytes(evs) * 2;

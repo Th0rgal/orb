@@ -1334,7 +1334,11 @@ export function heldAfterHistory(history: StreamEvent[], held: StreamEvent[]): S
     if(event.type === 'user_message' && event.data.queued !== true && delivered.has(String(event.data.id ?? event.eventId))) finalizedThrough=index;
   });
   return held.filter((event,index) => {
-    if (event.type === 'user_message') return true;
+    if (event.type === 'user_message') {
+      const id = event.eventId ?? event.data.id;
+      if (id != null && delivered.has(String(id))) return false;
+      return true;
+    }
     const key=identity(event);
     if(key && known.has(key)) return false;
     const bubble=String(event.data.bubble_id ?? 'text_delta_latest');
