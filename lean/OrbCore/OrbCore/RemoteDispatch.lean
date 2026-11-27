@@ -720,10 +720,12 @@ def bindRemoteTurnOwner (store : CoreStore) (mc? : Option ManagedComputeStore)
   return .ok ownedSpec
 
 structure PreparedRemoteCommand where
-  command     : String
-  envPairs    : Array (String × String)
-  managedAuth : Array String
-  proxyToken  : String
+  command               : String
+  envPairs              : Array (String × String)
+  managedAuth           : Array String
+  proxyToken            : String
+  antigravityAccountId? : Option String := none
+  antigravityOauthFile? : Option String := none
 
 private def resolveRemoteCallbackUrls (sup : RemoteJobSupervisor) (targetNodeId : String) : IO (String × String) := do
   let pubApiRaw := trimTrailingSlashes ((← lookupEnvWithFiles? "SANDBOXED_PUBLIC_URL").getD "")
@@ -842,10 +844,63 @@ private def antigravityAccountExhaustedOrRejected?
       if ← fp.pathExists then
         if let some raw ← (try some <$> IO.FS.readFile fp catch _ => pure none) then
           if let .ok jv := OrbBin.Json.parse raw then
-            if ((jv.fieldArr? "sandboxed_gemini_windows").getD #[]).any (antigravityWindowExhaustedAt · nowSec) then
+            let fileExhausted := match jv.field? "sandboxed_gemini_windows" with
+              | some (.arr ws) => ws.any (antigravityWindowExhaustedAt · nowSec)
+              | some (.obj kvs) => kvs.any (fun (_, w) => antigravityWindowExhaustedAt w nowSec)
+              | _ => false
+            if fileExhausted then
               return true
         break
   return false
+
+/-- Record a live Antigravity CLI `429 RESOURCE_EXHAUSTED` quota hit on the account that just ran,
+    both in `ProviderRuntimeHub`'s in-memory usage cache and durably in the CLIProxyAPI auth file's
+    `sandboxed_gemini_windows`, so subsequent turns immediately rotate to another healthy account. -/
+def recordAntigravityQuotaExhaustion
+    (hub? : Option ProviderRuntimeHub)
+    (accountId? oauthFile? : Option String)
+    (nowSec resetAt : UInt64) : IO Unit := do
+  let win : JVal := .obj #[
+    ("label", .str "cli_quota_429"),
+    ("used_percent", .num "100.0"),
+    ("reset_at", .num s!"{resetAt}")
+  ]
+  if let (some hub, some aid) := (hub?, accountId?) then
+    if !aid.isEmpty then
+      let nowIso := formatEpochIso8601Utc nowSec
+      hub.mu.atomically do
+        let st ← get
+        let existing? := st.usageEntries.find? (fun e => e.providerId == aid)
+        let nextPayload := match existing? with
+          | some e =>
+            let prevWins := (e.payload.fieldArr? "antigravity_windows").getD #[]
+            let kept := prevWins.filter (fun w => w.fieldStr? "label" != some "cli_quota_429")
+            e.payload.setField "antigravity_windows" (.arr (kept.push win))
+          | none =>
+            .obj #[("provider_id", .str aid), ("antigravity_windows", .arr #[win])]
+        let entry : CachedUsageEntry := {
+          providerId := aid, fetchedSec := nowSec, fetchedIso := nowIso, payload := nextPayload, refreshing := false
+        }
+        let others := st.usageEntries.filter (fun e => e.providerId != aid)
+        set { st with usageEntries := others.push entry }
+  if let some f := oauthFile? then
+    if !f.isEmpty then
+      for dir in ← candidateCliProxyAuthDirs do
+        let fp := System.FilePath.mk s!"{dir}/{f}"
+        if ← fp.pathExists then
+          if let some raw ← (try some <$> IO.FS.readFile fp catch _ => pure none) then
+            if let .ok jv := OrbBin.Json.parse raw then
+              let nextWins : JVal := match jv.field? "sandboxed_gemini_windows" with
+                | some (.arr ws) =>
+                  let kept := ws.filter (fun w => w.fieldStr? "label" != some "cli_quota_429")
+                  .arr (kept.push win)
+                | some (.obj kvs) =>
+                  let kept := kvs.filter (fun (k, _) => k != "cli_quota_429")
+                  .obj (kept.push ("cli_quota_429", win))
+                | _ => .arr #[win]
+              let updated := jv.setField "sandboxed_gemini_windows" nextWins
+              try IO.FS.writeFile fp (renderCompact updated) catch _ => pure ()
+          break
 
 /-- Determine whether an admin-owned Antigravity CLI turn on `effNodeId` may run through
     the node's `managed_auth` (`agy` with full workspace & MCP tools, provisioned via
@@ -1228,7 +1283,10 @@ def prepareRemoteHarnessCommand
       "command -v agy >/dev/null 2>&1 || { echo 'agy is not installed on this node' >&2; exit 127; }; " ++
       readPrompt ++ invocation spec.modelOverride
     let envs := skillEnvs ++ promptEnvs ++ mcpEnvs ++ vpnEnvs ++ #[("NO_COLOR", "1")]
-    return .ok { command := cmd, envPairs := envs, managedAuth := #["antigravity"], proxyToken := "" }
+    return .ok {
+      command := cmd, envPairs := envs, managedAuth := #["antigravity"], proxyToken := "",
+      antigravityAccountId? := agyAcctId?, antigravityOauthFile? := adminDirectOauth?
+    }
 
   else
     return .error s!"unsupported remote harness `{spec.backend}`"
@@ -1617,6 +1675,70 @@ def settleTransientTurnFailure
       ("retryable", .bool false)
     ])) nowIso
   return some ("failed", reasonStr)
+
+/-- Maximum automatic Antigravity account quota failovers per user turn. -/
+def maxAntigravityQuotaFailovers : Nat := 3
+
+/-- When an Antigravity CLI turn fails with `429 RESOURCE_EXHAUSTED` (`Individual quota reached`),
+    record the account's quota exhaustion (with its parsed reset timestamp) so future dispatches
+    skip it automatically. If another enabled Antigravity account is non-exhausted, arm a durable
+    one-shot continuation (`source='antigravity-quota-failover'`) to resume seamlessly on that
+    account instead of leaving the mission `failed`. -/
+def settleAntigravityQuotaFailover
+    (store : CoreStore)
+    (hub? : Option ProviderRuntimeHub)
+    (broadcastHub? : Option BroadcastHub)
+    (coreWorkDir missionId nowIso : String)
+    (nowSec : UInt64)
+    (errText? : Option String)
+    (agyAcctId? agyOauthFile? : Option String) : IO (Option (String × String)) := do
+  let some errText := errText? | return none
+  unless OrbBin.ClaudeControl.isAntigravityQuotaError errText do
+    return none
+  let resetSecs := (OrbBin.ClaudeControl.parseAntigravityQuotaResetSecs? errText).getD 3600
+  let resetAt := nowSec + resetSecs
+  recordAntigravityQuotaExhaustion hub? agyAcctId? agyOauthFile? nowSec resetAt
+  let hydrated ← loadHydratedProviders store coreWorkDir
+  let mut hasFallback := false
+  for hp in hydrated do
+    if hp.providerType == "antigravity" && hp.enabled && !hp.boundOauthFile.isEmpty then
+      let sameFile := agyOauthFile?.any (fun f => !f.isEmpty && f == hp.boundOauthFile)
+      let sameId := agyAcctId?.any (fun a => !a.isEmpty && a == hp.id)
+      if !sameFile && !sameId then
+        if !(← antigravityAccountExhaustedOrRejected? store hub? hp nowSec) then
+          hasFallback := true
+          break
+  unless hasFallback do
+    return none
+  let prior := match ← execParamQuery store.missionsDb
+      ("SELECT COUNT(*) FROM mission_continuations WHERE mission_id=?1 " ++
+       "AND source='antigravity-quota-failover' " ++
+       "AND created_at >= COALESCE((SELECT timestamp FROM mission_events WHERE mission_id=?1 AND event_type='user_message' ORDER BY id DESC LIMIT 1),'');")
+      #[missionId] with
+    | .ok rs => ((rs[1]?.bind (·[0]?)).bind String.toNat?).getD maxAntigravityQuotaFailovers
+    | .error _ => maxAntigravityQuotaFailovers
+  if prior < maxAntigravityQuotaFailovers then
+    let cid ← newUuidV4
+    let backoffSec : UInt64 := 5
+    let armed ← execParamQuery store.missionsDb
+      ("INSERT INTO mission_continuations(id,mission_id,run_generation,phase,due_epoch,trigger_kind,reason,prompt,request_id,job_id,source,error,recurrence,stop_after_first,created_at,updated_at) " ++
+       "SELECT ?1,id,COALESCE(run_generation,1),1,CAST(?3 AS INTEGER),'time',?4,?5,?1,'','antigravity-quota-failover','','',1,?6,?6 FROM missions WHERE id=?2;")
+      #[cid, missionId, s!"{nowSec + backoffSec}", s!"antigravity_quota_failover:{prior + 1}",
+        "Your previous Antigravity turn hit an account quota limit and was switched to another Antigravity account. Continue the task from where you left off.", nowIso]
+    if armed.isOk then
+      emitMissionEventAndBroadcast store broadcastHub? missionId "recovered"
+        (renderCompact (.obj #[
+          ("message", .str s!"Antigravity account quota exhausted; failing over to another account ({prior + 1} of {maxAntigravityQuotaFailovers})."),
+          ("reason", .str "antigravity_quota_failover"),
+          ("code", .str "antigravity_quota_failover"),
+          ("attempt", .num s!"{prior + 1}"),
+          ("max_retries", .num s!"{maxAntigravityQuotaFailovers}"),
+          ("backoff_seconds", .num s!"{backoffSec}"),
+          ("continuation_id", .str cid),
+          ("retryable", .bool true)
+        ])) nowIso
+      return some ("awaiting_user", "antigravity_quota_failover")
+  return none
 
 private def persistDiscoveredSessionId (store : CoreStore) (missionId sid : String) : IO Unit := do
   let clean := sid.trimAscii.toString
@@ -2062,7 +2184,9 @@ partial def spawnRemoteJobPoller
     (sup : RemoteJobSupervisor)
     (coreWorkDir missionId backend effNodeId jobId proxyTok : String)
     (initialOffset : Nat := 0)
-    (expectedGeneration : UInt64 := 0) : IO Unit := do
+    (expectedGeneration : UInt64 := 0)
+    (agyAcctId? : Option String := none)
+    (agyOauthFile? : Option String := none) : IO Unit := do
   let claimed ← claimPolledJob sup jobId
   if !claimed then return ()
   -- Capture this job's own generation synchronously BEFORE spawning the async task (`FLT-07`)
@@ -2539,8 +2663,13 @@ partial def spawnRemoteJobPoller
                     | some e => some e
                     | none =>
                       if !logTail.trimAscii.toString.isEmpty then some ((logTail.trimAscii.toString.take 600).toString) else none
+                let agyQuotaVerdict? ←
+                  if backend == "antigravity" && jState != "succeeded" && jState != "cancelled" && (← pollerOwnsGeneration) then
+                    settleAntigravityQuotaFailover store sup.providerHub? broadcastHub? coreWorkDir missionId nowIso nowSec transientErrHint? agyAcctId? agyOauthFile?
+                  else pure none
                 let transientVerdict? ←
-                  if jState != "succeeded" && jState != "cancelled" && (← pollerOwnsGeneration) then
+                  if let some v := agyQuotaVerdict? then pure (some v)
+                  else if jState != "succeeded" && jState != "cancelled" && (← pollerOwnsGeneration) then
                     settleTransientTurnFailure store broadcastHub? missionId nowIso nowSec transientErrHint?
                   else pure none
                 let mut curTermReason := ""
@@ -2850,7 +2979,7 @@ partial def submitRemoteMissionTurn
       let ownerUid? := if spec.ownerUserId.trimAscii.toString.isEmpty then none else some spec.ownerUserId.trimAscii.toString
       let ownerUname? := (ownerUser?.map (·.username.trimAscii.toString)).filter (!·.isEmpty)
       ensureTurnTelemetryStarted tSink spec.missionId spec.prompt ownerUid? ownerUname?
-    spawnRemoteJobPoller store mc? relayHub? broadcastHub? sup coreWorkDir spec.missionId spec.backend effTarget jobId prep.proxyToken 0 committedGen
+    spawnRemoteJobPoller store mc? relayHub? broadcastHub? sup coreWorkDir spec.missionId spec.backend effTarget jobId prep.proxyToken 0 committedGen prep.antigravityAccountId? prep.antigravityOauthFile?
     return .ok jobId
 
 end
