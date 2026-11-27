@@ -1860,15 +1860,16 @@ def runAllTests : IO UInt32 := do
 
   let spoolDir := tmpDir / "local-runs-spool"
   let gateFile := tmpDir / "reattach_live_gate"
+  let testConvId := "7f215fc9-db49-4e98-ba81-b0ef9b5f3f11"
   let mockAgyLive := tmpDir / "mock_agy_live.sh"
   IO.FS.writeFile mockAgyLive (
     "#!/bin/sh\n" ++
-    "printf '{\"type\":\"init\",\"session_id\":\"sess-reattach-1\"}\\n'\n" ++
-    "printf '{\"type\":\"message\",\"role\":\"assistant\",\"content\":\"part1 \",\"delta\":true}\\n'\n" ++
+    s!"printf '\{\"event\":\"init\",\"conversation_id\":\"{testConvId}\"}\\n'\n" ++
+    "printf '{\"event\":\"step_update\",\"step_update\":{\"step_type\":\"agent_response\",\"text_delta\":\"part1 \"}}\\n'\n" ++
     "i=0\n" ++
     s!"while [ ! -f \"{gateFile.toString}\" ] && [ \"$i\" -lt 300 ]; do sleep 0.05; i=$((i+1)); done\n" ++
-    "printf '{\"type\":\"message\",\"role\":\"assistant\",\"content\":\"part2\",\"delta\":true}\\n'\n" ++
-    "printf '{\"type\":\"result\",\"status\":\"success\"}\\n'\n"
+    "printf '{\"event\":\"step_update\",\"step_update\":{\"step_type\":\"agent_response\",\"text_delta\":\"part2\"}}\\n'\n" ++
+    s!"printf '\{\"event\":\"result\",\"result\":\{\"status\":\"SUCCESS\",\"conversation_id\":\"{testConvId}\"}}\\n'\n"
   )
   let _ ← IO.Process.output { cmd := "chmod", args := #["+x", mockAgyLive.toString] }
 
@@ -1893,7 +1894,7 @@ def runAllTests : IO UInt32 := do
   ensurePersistedRunsReattached mgr2 (fun _ => { onTurnFinished := fun _ => finishedRef.set true })
   let st2Init := (← getRunState? mgr2 "m-reattach-live").get!
   assertEq s!"Reattached manager sees live run as not done (exit={repr st2Init.exitCode?} err={repr st2Init.error?})" st2Init.done false
-  assertEq "Reattached manager restores session_id from spool" st2Init.sessionId? (some "sess-reattach-1")
+  assertEq "Reattached manager restores session_id from spool" st2Init.sessionId? (some testConvId)
   assertEq "Reattached manager replays initial text from spool" st2Init.text "part1 "
 
   -- Release the child so it emits part2 and exits 0.
@@ -1919,13 +1920,13 @@ def runAllTests : IO UInt32 := do
   assertEq "Completed-while-down manager recovers done=true" st3.done true
   assertEq "Completed-while-down manager recovers exit_code=0" st3.exitCode? (some 0)
   assertEq "Completed-while-down manager recovers full text" st3.text "part1 part2"
-  assertEq "Completed-while-down manager recovers session_id" st3.sessionId? (some "sess-reattach-1")
+  assertEq "Completed-while-down manager recovers session_id" st3.sessionId? (some testConvId)
 
   -- Verify Stop works on a reattached live process and removes its manifest.
   let mockAgySleep := tmpDir / "mock_agy_sleep.sh"
   IO.FS.writeFile mockAgySleep (
     "#!/bin/sh\n" ++
-    "printf '{\"type\":\"init\",\"session_id\":\"sess-reattach-stop\"}\\n'\n" ++
+    s!"printf '\{\"event\":\"init\",\"conversation_id\":\"{testConvId}\"}\\n'\n" ++
     "sleep 30\n"
   )
   let _ ← IO.Process.output { cmd := "chmod", args := #["+x", mockAgySleep.toString] }
