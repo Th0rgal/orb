@@ -420,24 +420,30 @@ def retryAfterSecs? (headers : Array (String × String)) : Option UInt64 :=
   | some v => parseRetryAfterValue? v
   | none => none
 
-/-- Extract a numeric retry/reset delay in seconds from upstream JSON error bodies
-    (`resets_in_seconds`, `retry_after_secs`, `retry_after`, top-level or nested in `error`). -/
+private def retryAfterFieldSecs? (jv : JVal) (key : String) : Option UInt64 :=
+  match jv.field? key with
+  | some (.num raw) | some (.str raw) =>
+    match parseRetryAfterValue? raw with
+    | some secs => if secs > 0 then some secs else none
+    | none => none
+  | _ => none
+
+/-- Parse an announced retry delay (seconds) from a JSON error body (`resets_in_seconds`,
+    `retry_after_secs`, or `retry_after` under `error` or at top level). -/
 def retryAfterBodySecs? (body : String) : Option UInt64 :=
   match OrbBin.Json.parse body with
-  | .error _ => none
   | .ok jv =>
-    let readField (obj : JVal) (k : String) : Option UInt64 :=
-      match obj.field? k with
-      | some (.num raw) => parseRetryAfterValue? raw
-      | some (.str raw) => parseRetryAfterValue? raw
-      | _ => none
-    let keys := #["resets_in_seconds", "retry_after_secs", "retry_after"]
-    let fromObj (obj : JVal) : Option UInt64 :=
-      keys.foldl (fun acc k => acc.orElse fun _ => readField obj k) none
-    (fromObj (jv.fieldOrNull "error")).orElse fun _ => fromObj jv
+    let errObj := jv.fieldOrNull "error"
+    let fromObj (o : JVal) : Option UInt64 :=
+      (retryAfterFieldSecs? o "resets_in_seconds").orElse
+        (fun _ => retryAfterFieldSecs? o "retry_after_secs") |>.orElse
+        (fun _ => retryAfterFieldSecs? o "retry_after")
+    (fromObj errObj).orElse (fun _ => fromObj jv)
+  | .error _ => none
 
+/-- Announced upstream retry delay (seconds), preferring `Retry-After` header over JSON body fields. -/
 def announcedRetryAfterSecs? (headers : Array (String × String)) (body : String) : Option UInt64 :=
-  (retryAfterSecs? headers).orElse fun _ => retryAfterBodySecs? body
+  (retryAfterSecs? headers).orElse (fun _ => retryAfterBodySecs? body)
 
 def defaultCooldownBaseSecs (reason : CooldownReason) : UInt64 :=
   match reason with

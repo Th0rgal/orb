@@ -1378,7 +1378,7 @@ def missionDetailJson
       s!"\"run_generation\":{cellNat r 19},\"health_verdict\":{jsonEscape verdict}," ++
       s!"\"terminal_evidence\":{evJson},\"continuation\":{contJson},\"tags\":{tagsOut},\"history\":{histOut}," ++
       s!"\"goal_mode\":{if goalMode then "true" else "false"},\"goal_objective\":{jsonEscape goalObjective},\"goal_iteration\":{cellNat r 51}" ++
-      (if goalMode then s!",\"terminal_reason\":{jsonEscape mReason}" else "") ++ "}"))
+      (if goalMode || !effReason.isEmpty then s!",\"terminal_reason\":{jsonEscape effReason}" else "") ++ "}"))
 
 def ensureQueueContSchema (st : CoreStore) : IO (Except String Unit) := do
   match ← st.missionsDb.mu.atomically (sqliteExecRaw st.missionsDb.handle queueContSchemaSql) with

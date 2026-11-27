@@ -5041,8 +5041,8 @@ def queryMissionEventsPage
       else pure "COALESCE(content,'')"
     | none => pure "COALESCE(content,'')"
   let resolvedHungNodeFilter :=
-    "NOT (event_type='error' AND CASE WHEN json_valid(payload) THEN json_extract(payload,'$.reason') END='hung_node' " ++
-    "AND NOT EXISTS (SELECT 1 FROM node_api_hangs h WHERE h.node_id=json_extract(payload,'$.node_id') AND h.strikes>=2))"
+    "NOT (event_type='error' AND COALESCE(CASE WHEN json_valid(payload) THEN json_extract(payload,'$.reason') END,'')='hung_node' " ++
+    "AND NOT EXISTS (SELECT 1 FROM node_api_hangs h WHERE h.node_id=COALESCE(CASE WHEN json_valid(payload) THEN json_extract(payload,'$.node_id') END,'') AND h.strikes>=2))"
   let mut whereSql := s!"WHERE mission_id=?1 AND {resolvedHungNodeFilter}"
   let forwardOrder ← do
     match sinceSeq?, beforeSeq? with
@@ -5133,7 +5133,7 @@ def queryMissionSyncReplayFrames
     let res ← execParamQuery st.missionsDb
       (s!"SELECT {effSeqExpr} AS eff_seq,event_type,COALESCE(payload,''),COALESCE(NULLIF(created_at,''),timestamp,'')," ++
        "COALESCE(event_id,''),COALESCE(tool_call_id,''),COALESCE(tool_name,''),COALESCE(content,''),COALESCE(content_file,''),COALESCE(metadata,'') " ++
-       "FROM mission_events WHERE mission_id=?1 AND NOT (event_type='error' AND CASE WHEN json_valid(payload) THEN json_extract(payload,'$.reason') END='hung_node' AND NOT EXISTS (SELECT 1 FROM node_api_hangs h WHERE h.node_id=json_extract(payload,'$.node_id') AND h.strikes>=2)) " ++
+       "FROM mission_events WHERE mission_id=?1 AND NOT (event_type='error' AND COALESCE(CASE WHEN json_valid(payload) THEN json_extract(payload,'$.reason') END,'')='hung_node' AND NOT EXISTS (SELECT 1 FROM node_api_hangs h WHERE h.node_id=COALESCE(CASE WHEN json_valid(payload) THEN json_extract(payload,'$.node_id') END,'') AND h.strikes>=2)) " ++
        s!"AND {effSeqExpr}>CAST(?2 AS INTEGER) ORDER BY {orderCol} ASC, id ASC LIMIT CAST(?3 AS INTEGER);")
       #[missionId, s!"{s}", s!"{fetchLim}"]
     let .ok rs := res | return .error "mission_events_replay_failed"

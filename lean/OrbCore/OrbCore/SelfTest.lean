@@ -8289,6 +8289,7 @@ def runSuite (emitLogPath? : Option String) : IO UInt32 := do
     OrbCore.ProviderContractTests.run
     OrbCore.ProxyRoutingTests.run
     OrbCore.ProxyRoutingTests.r27_stream_cut_truth_fixtures_and_breaker
+    OrbCore.ProxyRoutingTests.r7_single_cooling_target_429_mission_error
   catch e =>
     IO.eprintln s!"[orb-core-test] FAIL: {e}"
     return 1
@@ -9782,6 +9783,12 @@ def main (args : List String) : IO UInt32 := do
     return 0
   if args.contains "--suite-only" then
     return ← OrbCore.SelfTest.runSuite (OrbCore.SelfTest.findFlag? args "--emit-evidence-log")
+  if args.contains "--proxy-routing-only" then
+    OrbCore.ProxyRoutingTests.run
+    OrbCore.ProxyRoutingTests.r27_stream_cut_truth_fixtures_and_breaker
+    OrbCore.ProxyRoutingTests.r7_single_cooling_target_429_mission_error
+    IO.println "{\"ok\":true,\"suite\":\"proxy-routing\"}"
+    return 0
   OrbCore.SettingsDocumentTests.run
   OrbCore.LegacyMigrationTests.run
   OrbCore.SettingsTransferTests.run

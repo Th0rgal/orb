@@ -1884,13 +1884,23 @@ private def isMissionOwnedChain
   let rawMissionModel := mRec.modelOverride.trimAscii.toString
   let bLow := mRec.backend.trimAscii.toString.toLower
   let defaultChainId? := (chains.find? (·.isDefault)).map (·.id)
+  let normMissionModel :=
+    if bLow == "opencode" && rawMissionModel.startsWith "sandboxed-sh/" then
+      (rawMissionModel.drop 13).toString
+    else
+      rawMissionModel
   let effMissionModel :=
-    if !rawMissionModel.isEmpty then rawMissionModel
+    if !normMissionModel.isEmpty then normMissionModel
+    else if bLow == "opencode" then "builtin/smart"
     else if bLow == "codex" then defaultCodexModel
     else ""
   if effMissionModel.isEmpty then
-    return chainId == "default" || chainId == "builtin/smart" || chainId == "smart" ||
-      defaultChainId? == some chainId
+    if chainId == "default" || chainId == "builtin/smart" || chainId == "smart" ||
+        defaultChainId? == some chainId then
+      return true
+    if bLow == "claudecode" || bLow == "claude" then
+      return (OrbCore.ProxyModelRouting.directEntry? chainId cleanPath).map Prod.fst == some "anthropic"
+    return false
   match findMatchingRoutingChain? chains effMissionModel with
   | some mc => return mc.id == chainId
   | none =>
@@ -1937,15 +1947,19 @@ private def interruptMissionTurn
   match ← hostedStop st.store mid nowIso termReason (onlyWhenRunning := true) with
   | .error _ => return ()
   | .ok _ =>
-    discard <| cancelActiveRemoteJobForMission st.store st.managedStore? st.relayHub? mid errMsg "provider_error"
-    if let some mgr := st.warmMgr? then
-      OrbBin.ClaudeControl.stopHarnessRun mgr mid
     let errPayload := renderCompact (.obj #[("message", .str errMsg)])
     discard <| appendMissionEvent st.store mid "error" errPayload nowIso
     if !(← isBroadcastHubBridged st.broadcastHub?) then
       publishControlEvent st.broadcastHub? "error" errPayload (some mid)
     let statusPayload := renderCompact (.obj #[("status", .str "interrupted"), ("reason", .str termReason), ("mission_id", .str mid)])
     publishControlEvent st.broadcastHub? "mission_status_changed" statusPayload (some mid)
+    try
+      discard <| cancelActiveRemoteJobForMission st.store st.managedStore? st.relayHub? mid errMsg "provider_error"
+    catch _ => pure ()
+    try
+      if let some mgr := st.warmMgr? then
+        OrbBin.ClaudeControl.stopHarnessRun mgr mid
+    catch _ => pure ()
 
 /-- When a mission-bound `/v1/*` request authenticated by the mission's own `orb-mpt-v1_...`
     proxy token hits the mission's own routing chain with no eligible target and the soonest
@@ -2348,7 +2362,8 @@ private def handleProxyRequest (st : CoreAppState) (req : HttpRequest) (cleanPat
           (if postPlan.eligible.isEmpty then
             chainCooldownStopReason? activeChain.id postPlan.cooling nowEpochSec (allowUnconfigured := false)
           else none).orElse fun _ =>
-            let waitSecs := (announcedRetryAfterSecs? out.headers rawOutBodyStr).getD 0
+            let rawWait := (announcedRetryAfterSecs? out.headers rawOutBodyStr).getD 0
+            let waitSecs := if rawWait == 0 then 0 else clampCooldownRetryAfter rawWait
             if waitSecs > 60 then
               let returnIso := formatEpochIso8601Utc (nowEpochSec + waitSecs)
               let exhaustedModelCooldown := lookupHeader? out.headers "x-orb-retry-reason" == some "model_cooldown"
@@ -2361,7 +2376,8 @@ private def handleProxyRequest (st : CoreAppState) (req : HttpRequest) (cleanPat
                   s!"Provider is unavailable in chain '{activeChain.id}'; soonest retry at {returnIso} (in {waitSecs}s). Stopping turn.")
               else none
             else none
-        if let some (termReason, errMsg) := stopReason? then
+        if let some (termReason, rawErrMsg) := stopReason? then
+          let errMsg := loginMessage?.map (fun msg => s!"{msg} {rawErrMsg}") |>.getD rawErrMsg
           interruptMissionTurn st mid termReason errMsg nowEpochSec
   -- Usage, spend and access-program receipts read the reply body, so for a relayed
   -- stream they run once the stream has ended.
