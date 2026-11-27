@@ -196,13 +196,34 @@ def run (root : String) : IO Unit := do
     (identify "db-row" false "" "" "" "" true).isNone &&
     (identify "db-row" true "two.json" "" "" "" false).isNone)
     "conflicting, ambiguous and member-unowned bindings rejected"
-  let reconnected := { first with fileName := "reconnected.json", prefixId := "", email := "user@example.com" }
+  let reconnected := { first with fileName := "reconnected.json", prefixId := "", email := "user@example.com", mtimeSec := 200 }
   let reidentify := ProviderUsageAndLogin.matchCredential? #[reconnected]
   check ((reidentify "db-row" false "stale.json" "" "" "user@example.com" false).any (·.fileName == "reconnected.json") &&
     (reidentify "db-row" false "stale.json" "" "" "" true).isNone &&
     (ProviderUsageAndLogin.matchCredential? #[{ first with email := "user@example.com" }, second]
       "first" false "two.json" "" "" "user@example.com" false).isNone)
     "stale filename falls back to email while conflicting active filename and unhinted singleton reject"
+  let staleDisabled := { first with fileName := "stale.json", prefixId := "", email := "user@example.com", disabled := true, mtimeSec := 100 }
+  let reconnDisabled := { reconnected with disabled := true }
+  let reconnOwnedDisabled := { reconnDisabled with prefixId := "first" }
+  let reconnLinkedDisabled := { reconnDisabled with prefixId := "linked-1" }
+  let secondDisabled := { second with disabled := true }
+  check ((ProviderUsageAndLogin.matchCredential? #[staleDisabled, reconnOwnedDisabled]
+      "first" false "stale.json" "" "" "user@example.com" false).any (·.fileName == "reconnected.json") &&
+    (ProviderUsageAndLogin.matchCredential? #[staleDisabled, reconnLinkedDisabled]
+      "db-row" false "stale.json" "" "linked-1" "user@example.com" false).any (·.fileName == "reconnected.json") &&
+    (ProviderUsageAndLogin.matchCredential? #[staleDisabled, reconnDisabled]
+      "db-row" false "stale.json" "" "" "user@example.com" false).any (·.fileName == "reconnected.json") &&
+    (ProviderUsageAndLogin.matchCredential? #[{ staleDisabled with email := "", mtimeSec := 300 }, reconnDisabled]
+      "db-row" false "stale.json" "" "" "user@example.com" false).any (·.fileName == "reconnected.json"))
+    "allTyped disabled hydration resolves reconnected file via own, linkedId, and email"
+  check ((ProviderUsageAndLogin.matchCredential? #[reconnected]
+      "op-a" false "stale.json" "" "" "user@example.com" false #[staleDisabled, reconnected] #["reconnected.json"]).isNone &&
+    (ProviderUsageAndLogin.matchCredential? #[first]
+      "first" false "two.json" "" "" "" false #[first, secondDisabled] #["two.json"]).isNone &&
+    (ProviderUsageAndLogin.matchCredential? #[first]
+      "first" false "two.json" "" "" "" false #[first, secondDisabled]).isNone)
+    "claimed sibling files and disabled conflicting named files are rejected"
   check (ProviderUsageAndLogin.fileAccountId "openai" first.fileName != ProviderUsageAndLogin.fileAccountId "openai" second.fileName)
     "two unprefixed auth files get distinct IDs"
   routeStorage root

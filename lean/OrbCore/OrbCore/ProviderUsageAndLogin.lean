@@ -416,6 +416,90 @@ def removeLegacyAIProviderJson (workingDir storeRoot pid : String) : IO Unit := 
             if let some outJv := pruned? then
               let _ ← writeAtomicPrivate0600 fp ((renderPretty outJv) ++ "\n").toUTF8
 
+/-- Update a legacy `ai_providers.json` row's bound auth filename after an OAuth reconnect
+    so subsequent disable/re-enable cycles never revert to the superseded filename or dead
+    legacy token. Serialized via `legacyAiProvidersJsonMu`. -/
+def updateLegacyAIProviderAuthFile (workingDir storeRoot pid newFileName : String) : IO Unit := do
+  let target := pid.trimAscii.toString
+  let nextFile := newFileName.trimAscii.toString
+  if target.isEmpty || nextFile.isEmpty then return
+  legacyAiProvidersJsonMu.atomically do
+    let cands := #[
+      s!"{workingDir}/.sandboxed-sh/ai_providers.json",
+      s!"{storeRoot}/ai_providers.json"
+    ]
+    let updateEntry (item : JVal) : Bool × JVal :=
+      if ((item.fieldStr? "id").getD "").trimAscii.toString != target then (false, item)
+      else
+        match item with
+        | .obj kvs => Id.run do
+          let mut changed := false
+          let mut sawCliAuth := false
+          let mut next : Array (String × JVal) := #[]
+          for (k, v) in kvs do
+            if k == "cli_proxy_auth_file" then
+              sawCliAuth := true
+              if v.asStr? != some nextFile then changed := true
+              next := next.push (k, .str nextFile)
+            else if k == "auth_file" then
+              if v.asStr? != some nextFile then changed := true
+              next := next.push (k, .str nextFile)
+            else if k == "oauth" then
+              match v with
+              | .obj okvs =>
+                let mut nextO : Array (String × JVal) := #[]
+                for (ok, ov) in okvs do
+                  if ok == "access_token" then
+                    changed := true
+                  else if ok == "refresh_token" && (ov.asStr?.getD "").endsWith ".json" then
+                    changed := true
+                  else
+                    nextO := nextO.push (ok, ov)
+                next := next.push (k, .obj nextO)
+              | _ => next := next.push (k, v)
+            else
+              next := next.push (k, v)
+          if !sawCliAuth then
+            changed := true
+            next := next.push ("cli_proxy_auth_file", .str nextFile)
+          (changed, .obj next)
+        | _ => (false, item)
+    for p in cands do
+      let fp := System.FilePath.mk p
+      if ← fp.pathExists then
+        if let some raw ← (try some <$> IO.FS.readFile fp catch _ => pure none) then
+          if let .ok jv := OrbBin.Json.parse raw then
+            let updated? : Option JVal :=
+              match jv with
+              | .arr xs => Id.run do
+                let mut changed := false
+                let mut ys : Array JVal := #[]
+                for x in xs do
+                  let (c, y) := updateEntry x
+                  if c then changed := true
+                  ys := ys.push y
+                if changed then some (.arr ys) else none
+              | .obj kvs => Id.run do
+                let mut changed := false
+                let mut next : Array (String × JVal) := #[]
+                for (k, v) in kvs do
+                  if k == "providers" || k == "items" then
+                    match v with
+                    | .arr xs =>
+                      let mut ys : Array JVal := #[]
+                      for x in xs do
+                        let (c, y) := updateEntry x
+                        if c then changed := true
+                        ys := ys.push y
+                      next := next.push (k, .arr ys)
+                    | _ => next := next.push (k, v)
+                  else
+                    next := next.push (k, v)
+                if changed then some (.obj next) else none
+              | _ => none
+            if let some outJv := updated? then
+              let _ ← writeAtomicPrivate0600 fp ((renderPretty outJv) ++ "\n").toUTF8
+
 structure HydratedProvider where
   id              : String
   name            : String
@@ -479,6 +563,27 @@ def sidecarAuthFileDuplicated (out : Array HydratedProvider) (pType : String) (a
         afEmail.isEmpty && af.prefixId.isEmpty && hp.hasOAuth &&
         hp.accountEmail.trimAscii.toString.isEmpty)))
 
+private structure ProviderClaimRow where
+  id           : String
+  providerType : String
+  memberAdded  : Bool
+  named        : String
+  linkedId     : String
+
+private def claimedFilesByOtherRows (allTyped : Array CliAuthFileInfo)
+    (claimRows : Array ProviderClaimRow) (selfId selfType : String) : Array String := Id.run do
+  let mut claimed : Array String := #[]
+  for r in claimRows do
+    if r.id != selfId && r.providerType == selfType then
+      if !r.memberAdded && !r.named.isEmpty && !claimed.contains r.named then
+        claimed := claimed.push r.named
+      for f in allTyped do
+        if (authFileMatchesRowId f r.id r.memberAdded ||
+            (!r.memberAdded && !r.linkedId.isEmpty && authFileMatchesRowId f r.linkedId false)) &&
+            !claimed.contains f.fileName then
+          claimed := claimed.push f.fileName
+  return claimed
+
 def loadHydratedProviders (store : CoreStore) (workingDir : String)
     (includeDisabledForAll : Bool := false) : IO (Array HydratedProvider) := do
   let key32? ← loadPrivateKeyBytes? workingDir store.rootDir
@@ -520,6 +625,27 @@ def loadHydratedProviders (store : CoreStore) (workingDir : String)
     | .ok rows => pure ((rows.extract 1 rows.size).filterMap (·[0]?))
     | .error _ => pure #[]
 
+  let mut claimRows : Array ProviderClaimRow := #[]
+  let mut claimSeenIds : Array String := #[]
+  for p in dbProvs do
+    claimSeenIds := claimSeenIds.push p.id
+    let mAdded := !p.createdByUserId.isEmpty && memberIds.contains p.createdByUserId
+    let l? := if mAdded then none else legacyArr.find? (fun j => (j.fieldStr? "id") == some p.id)
+    let lAuth := (l?.bind (fun j => (j.fieldStr? "cli_proxy_auth_file").orElse (fun _ => j.fieldStr? "auth_file"))).getD ""
+    let lRef := (l?.bind (fun j => (j.field? "oauth").bind (fun o => o.fieldStr? "refresh_token"))).getD ""
+    let lNamed := if !lAuth.isEmpty then lAuth else if lRef.endsWith ".json" then lRef else ""
+    let lLinked := (l?.bind (fun j => (j.fieldStr? "sandboxed_provider_id").orElse (fun _ => j.fieldStr? "account_id"))).getD ""
+    claimRows := claimRows.push { id := p.id, providerType := p.providerType, memberAdded := mAdded, named := lNamed, linkedId := lLinked }
+  for leg in legacyArr do
+    let lid := ((leg.fieldStr? "id").getD "").trimAscii.toString
+    if !lid.isEmpty && !claimSeenIds.contains lid then
+      claimSeenIds := claimSeenIds.push lid
+      let pType := ((leg.fieldStr? "provider_type").getD "custom").trimAscii.toString
+      let lAuth := ((leg.fieldStr? "cli_proxy_auth_file").orElse fun _ => leg.fieldStr? "auth_file").getD ""
+      let lRef := ((leg.field? "oauth").bind (fun o => o.fieldStr? "refresh_token")).getD ""
+      let lNamed := if !lAuth.isEmpty then lAuth else if lRef.endsWith ".json" then lRef else ""
+      claimRows := claimRows.push { id := lid, providerType := pType, memberAdded := false, named := lNamed, linkedId := "" }
+
   let mut out : Array HydratedProvider := #[]
   let mut seenIds : Array String := #[]
 
@@ -540,9 +666,10 @@ def loadHydratedProviders (store : CoreStore) (workingDir : String)
     let allTyped := authFiles.filter (fun f => providerTypeMatchesAuthType p.providerType f.authType)
     let typed := allTyped.filter (fun f => !f.disabled)
     let singleton := plainKey == "cli-proxy-managed" && (dbProvs.filter (fun r => r.providerType == p.providerType)).size == 1
+    let claimedByOthers := claimedFilesByOtherRows allTyped claimRows p.id p.providerType
     let resolveIn := fun (fs : Array CliAuthFileInfo) =>
-      let b := matchCredential? fs p.id memberAdded legAuthFile legRefreshFile legSandboxedId legEmail false
-      let m := b.orElse fun _ => if singleton then matchCredential? fs p.id memberAdded legAuthFile legRefreshFile legSandboxedId legEmail true else none
+      let b := matchCredential? fs p.id memberAdded legAuthFile legRefreshFile legSandboxedId legEmail false allTyped claimedByOthers
+      let m := b.orElse fun _ => if singleton then matchCredential? fs p.id memberAdded legAuthFile legRefreshFile legSandboxedId legEmail true allTyped claimedByOthers else none
       (b, m)
     let (boundActive?, matchedActive?) := resolveIn typed
     let (boundAuth?, matchedAuth?) :=
@@ -636,10 +763,11 @@ def loadHydratedProviders (store : CoreStore) (workingDir : String)
       let allTyped := authFiles.filter (fun f => providerTypeMatchesAuthType pType f.authType)
       let typed := allTyped.filter (fun f => !f.disabled)
       let authFile := ((leg.fieldStr? "cli_proxy_auth_file").orElse fun _ => leg.fieldStr? "auth_file").getD ""
-      let matchedActive? := matchCredential? typed lid false authFile refFile "" email false
+      let claimedByOthers := claimedFilesByOtherRows allTyped claimRows lid pType
+      let matchedActive? := matchCredential? typed lid false authFile refFile "" email false allTyped claimedByOthers
       let matchedAuth? :=
         if matchedActive?.isSome || (en && !includeDisabledForAll) then matchedActive?
-        else matchCredential? allTyped lid false authFile refFile "" email false
+        else matchCredential? allTyped lid false authFile refFile "" email false allTyped claimedByOthers
       let hasApi := !aKey.isEmpty && aKey != "cli-proxy-managed"
       let hasOa := matchedAuth?.isSome || !accTok.isEmpty || (pType.toLower == "muse-code" && !refFile.isEmpty && !refFile.endsWith ".json")
       let effLegTok :=
@@ -2859,6 +2987,8 @@ def reconcileCliLoginCompletion
           let mgmtBase ← resolveCliProxyBaseUrl
           discard <| sendJsonRequest "PATCH" s!"{mgmtBase}/v0/management/auth-files/status"
             (some mgmtKey) (some (.obj #[("name", .str hp.oauthFile), ("disabled", .bool true)])) #[] 2000 65536
+      if hp.createdByUserId.isEmpty && newFile.fileName != hp.oauthFile then
+        updateLegacyAIProviderAuthFile workingDir store.rootDir hp.id newFile.fileName
     let mut completedProvId := sess.targetProvId?.getD ""
     if sess.targetProvId?.isNone && sess.authFileType == "antigravity" then
       if let some newFile := matchedFile? then

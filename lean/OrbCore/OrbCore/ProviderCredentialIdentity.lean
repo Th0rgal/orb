@@ -57,18 +57,49 @@ def vpnModelPrefix (file : String) : String := "orb-vpn-" ++ fileDigest file
 /-- Explicit metadata must resolve uniquely. In particular a stale filename
 or conflicting identity hints must never select the first login of the type. -/
 def matchCredential? (files : Array CliAuthFileInfo) (account : String) (member : Bool)
-    (file refreshFile linkedId email : String) (legacySingleton : Bool) : Option CliAuthFileInfo := Id.run do
+    (file refreshFile linkedId email : String) (legacySingleton : Bool)
+    (allFiles : Array CliAuthFileInfo := files)
+    (claimedByOthers : Array String := #[]) : Option CliAuthFileInfo := Id.run do
   if account.isEmpty then return none
   let named := if !file.isEmpty then file else if refreshFile.endsWith ".json" then refreshFile else ""
   let own := files.filter (fun f => authFileMatchesRowId f account member)
-  let mut possible := if own.isEmpty then files else own
+  let unclaimed := files.filter (fun f => !claimedByOthers.contains f.fileName)
+  let mut possible := if own.isEmpty then unclaimed else own
   if member then possible := own
   else
+    let foreignClaimed (f : CliAuthFileInfo) : Bool :=
+      !authFileMatchesRowId f account false &&
+      (claimedByOthers.contains f.fileName ||
+        (!f.prefixId.isEmpty && !f.prefixId.startsWith "cliproxyapi:" &&
+          (linkedId.isEmpty || !authFileMatchesRowId f linkedId false)))
     if !named.isEmpty then
       let byName := possible.filter (fun f => f.fileName == named)
-      if !byName.isEmpty then possible := byName
-      else if files.any (fun f => f.fileName == named) || (own.isEmpty && linkedId.isEmpty && email.isEmpty) then
+      let activeNamed := byName.filter (!·.disabled)
+      let namedConflictsInAll := allFiles.any fun f =>
+        f.fileName == named &&
+        !authFileMatchesRowId f account false &&
+        (!f.disabled || foreignClaimed f)
+      if !activeNamed.isEmpty then
+        possible := activeNamed
+      else if !byName.isEmpty then
+        let staleMtime := byName.foldl (fun acc f => max acc f.mtimeSec) 0
+        let replacement := possible.filter fun f =>
+          f.fileName != named &&
+          !foreignClaimed f &&
+          (linkedId.isEmpty || authFileMatchesRowId f linkedId false) &&
+          (email.isEmpty || f.email.toLower == email.toLower) &&
+          (!f.disabled || f.mtimeSec > staleMtime ||
+            byName.all (fun d =>
+              (!linkedId.isEmpty && !authFileMatchesRowId d linkedId false) ||
+              (!email.isEmpty && d.email.toLower != email.toLower)))
+        if (!own.isEmpty || !linkedId.isEmpty || !email.isEmpty) && replacement.size == 1 then
+          possible := replacement
+        else
+          possible := byName
+      else if namedConflictsInAll || (own.isEmpty && linkedId.isEmpty && email.isEmpty) then
         return none
+      else if own.isEmpty then
+        possible := possible.filter (!foreignClaimed ·)
     if !linkedId.isEmpty then possible := possible.filter (fun f => authFileMatchesRowId f linkedId false)
     if !email.isEmpty then possible := possible.filter (fun f => f.email.toLower == email.toLower)
     if own.isEmpty && named.isEmpty && linkedId.isEmpty && email.isEmpty && !legacySingleton then return none

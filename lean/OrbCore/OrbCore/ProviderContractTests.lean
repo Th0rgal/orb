@@ -336,6 +336,100 @@ private def antigravityReconnectClearsPerModelKeys
     try IO.FS.removeFile s!"{root}/auth-empty/antigravity-ben-shared.json" catch _ => pure ()
   return failures
 
+/-- End-to-end hydration & reconnect isolation contract:
+    1. A legacy operator row with a stale/disabled `cli_proxy_auth_file` must never hijack
+       a sibling member-owned auth file that shares the same email.
+    2. Reconnecting the operator row to a new filename updates `ai_providers.json`
+       (`cli_proxy_auth_file` + clears dead `oauth.access_token`) and hydrates the new token.
+    3. Disabling both the old and new auth files and hydrating with `includeDisabledForAll := true`
+       keeps resolving the reconnected file rather than reverting to the stale disabled file. -/
+private def legacyReconnectAndMemberIsolationContract
+    (hub : ProviderRuntimeHub) (store : CoreStore) (root : String)
+    (cooldowns : IO.Ref (Array AccountCooldown)) : IO (Array String) := do
+  let mut failures : Array String := #[]
+  let wallNow ← nowEpoch
+  let opId := "10000000-0000-4000-8000-000000000099"
+  let memFile := "xai-member-shared.json"
+  let memId := fileAccountId "xai" memFile
+  let staleFile := "xai-legacy-stale.json"
+  let reconnFile := "xai-reconnected-new.json"
+  let sharedEmail := "shared-reconn@fixture.invalid"
+  let origProvidersRaw ← IO.FS.readFile s!"{root}/.sandboxed-sh/ai_providers.json"
+  let .ok origArr := (OrbBin.Json.parse origProvidersRaw).map (fun j => j.asArr?.getD #[])
+    | return #["legacyReconnectAndMemberIsolationContract: orig providers parse failed"]
+  let opLegacyRow : JVal := .obj #[
+    ("id", .str opId),
+    ("provider_type", .str "xai"),
+    ("name", .str "xAI Operator"),
+    ("enabled", .bool true),
+    ("api_key", .str "cli-proxy-managed"),
+    ("account_email", .str sharedEmail),
+    ("cli_proxy_auth_file", .str staleFile),
+    ("oauth", .obj #[("access_token", .str "dead-legacy-token"), ("refresh_token", .str staleFile)])
+  ]
+  try
+    discard <| execParamQuery store.missionsDb
+      "INSERT OR IGNORE INTO users(id,username,password_hash,role,unix_username,disabled) VALUES('u-ben','Ben','x','member','orb-ben',0);" #[]
+    IO.FS.writeFile s!"{root}/.sandboxed-sh/ai_providers.json" (renderCompact (.arr (origArr.push opLegacyRow)))
+    discard <| upsertAIProvider store {
+      id := opId, providerType := "xai", name := "xAI Operator", enabled := true,
+      baseUrl := "", apiKey := "cli-proxy-managed", updatedAt := formatEpochIso8601Utc wallNow
+    }
+    discard <| upsertAIProvider store {
+      id := memId, providerType := "xai", name := "xAI Member", enabled := true,
+      baseUrl := "", apiKey := "cli-proxy-managed", updatedAt := formatEpochIso8601Utc wallNow,
+      createdByUserId := "u-ben"
+    }
+    IO.FS.writeFile s!"{root}/auth-empty/{staleFile}"
+      s!"\{\"type\":\"xai\",\"email\":\"{sharedEmail}\",\"disabled\":true,\"access_token\":\"dead-stale-token\"}"
+    IO.FS.writeFile s!"{root}/auth-empty/{memFile}"
+      s!"\{\"type\":\"xai\",\"email\":\"{sharedEmail}\",\"access_token\":\"member-live-token\"}"
+    let preHps ← loadHydratedProviders store root
+    let preOp? := preHps.find? (·.id == opId)
+    let preMem? := preHps.find? (·.id == memId)
+    if preOp?.map (·.boundOauthFile) != some "" || preOp?.map (·.oauthToken) == some "member-live-token" then
+      failures := failures.push s!"operator row with disabled legacy file must not hijack member file: {preOp?.map (·.boundOauthFile)}"
+    if preMem?.map (·.boundOauthFile) != some memFile || preMem?.map (·.oauthToken) != some "member-live-token" then
+      failures := failures.push s!"member row must retain its own active auth file: {preMem?.map (·.boundOauthFile)}"
+    let baseline := (← scanCliProxyAuthFiles).map (fun f => (f.fileName, f.fingerprint))
+    let sess : CliLoginSession := {
+      sessionId := "xai-reconn", providerSlug := "xai", authFileType := "xai",
+      targetProvId? := some opId, stateToken := "xai-state", authUrl := "fixture",
+      flow := "redirect", createdSec := wallNow, beforeFiles := baseline
+    }
+    IO.FS.writeFile s!"{root}/auth-empty/{reconnFile}"
+      s!"\{\"type\":\"xai\",\"email\":\"{sharedEmail}\",\"access_token\":\"fresh-op-token\"}"
+    let done ← reconcileCliLoginCompletion hub store root cooldowns none sess wallNow
+    if done.status != "completed" then
+      failures := failures.push s!"xai operator reconnect must complete, got {done.status}"
+    let postHps ← loadHydratedProviders store root
+    let postOp? := postHps.find? (·.id == opId)
+    if postOp?.map (·.boundOauthFile) != some reconnFile || postOp?.map (·.oauthToken) != some "fresh-op-token" then
+      failures := failures.push s!"reconnected operator row must bind {reconnFile}, got {postOp?.map (·.boundOauthFile)}"
+    let updatedRaw ← IO.FS.readFile s!"{root}/.sandboxed-sh/ai_providers.json"
+    match OrbBin.Json.parse updatedRaw with
+    | .ok jv =>
+      let row? := (jv.asArr?.getD #[]).find? (fun r => r.fieldStr? "id" == some opId)
+      if row?.bind (·.fieldStr? "cli_proxy_auth_file") != some reconnFile then
+        failures := failures.push "reconcileCliLoginCompletion must persist updated cli_proxy_auth_file in ai_providers.json"
+      if ((row?.bind (·.field? "oauth")).bind (·.fieldStr? "access_token")).isSome then
+        failures := failures.push "reconcileCliLoginCompletion must clear dead legacy oauth.access_token"
+    | .error e => failures := failures.push s!"updated ai_providers.json parse failed: {e}"
+    IO.FS.writeFile s!"{root}/auth-empty/{reconnFile}"
+      s!"\{\"type\":\"xai\",\"email\":\"{sharedEmail}\",\"disabled\":true,\"access_token\":\"fresh-op-token\"}"
+    let disHps ← loadHydratedProviders store root (includeDisabledForAll := true)
+    let disOp? := disHps.find? (·.id == opId)
+    if disOp?.map (·.oauthFile) != some reconnFile || disOp?.map (·.boundOauthFile) != some reconnFile then
+      failures := failures.push s!"includeDisabledForAll hydration must keep {reconnFile}, got {disOp?.map (·.oauthFile)}"
+  finally
+    cooldowns.set #[]
+    IO.FS.writeFile s!"{root}/.sandboxed-sh/ai_providers.json" origProvidersRaw
+    discard <| deleteAIProvider store opId
+    discard <| deleteAIProvider store memId
+    for f in #[staleFile, memFile, reconnFile] do
+      try IO.FS.removeFile s!"{root}/auth-empty/{f}" catch _ => pure ()
+  return failures
+
 /-- The routing health view merges the two cooldown owners, and clearing a login resets
     both: seed one cooldown under the legacy ref and one under the health tracker for a
     CLIProxyAPI-held login, plus one legacy cooldown for an unrelated account, and check
@@ -2507,6 +2601,7 @@ def run : IO Unit := do
       failures := failures ++ (← replayReconnect app store root jwt now hub)
       failures := failures ++ (← reconcileNegatives hub store root cooldownsRef)
       failures := failures ++ (← antigravityReconnectClearsPerModelKeys hub store root cooldownsRef)
+      failures := failures ++ (← legacyReconnectAndMemberIsolationContract hub store root cooldownsRef)
       failures := failures ++ (← healthCooldownOwners app jwt cooldownsRef)
       failures := failures ++ (← sidecarParkedHealthContract app root jwt cooldownsRef)
       let r26Tracker ← newProviderHealthTracker
