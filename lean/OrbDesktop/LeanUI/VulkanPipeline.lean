@@ -73,9 +73,10 @@ def lowerScene (vw vh : Nat) (scene : Scene) : LoweredFrame := Id.run do
   let mut ops : Array RenderOp := #[]
   let mut clipStack : List Rect := [vp]
   let mut rclipStack : List UInt32 := [0]
-  -- Layer stack tracks (slot, opacity, clampedClip, skipped, rounded clips active at the push).
-  -- Those clips are set aside while the layer is drawn and applied once, by its composite.
-  let mut layerStack : List (Nat × Nat × Rect × Bool × List UInt32) := []
+  -- Layer stack tracks (slot, opacity, clampedClip, skipped, rounded clips and clips active at the
+  -- push). The rounded clips are set aside while the layer is drawn and applied once, by its
+  -- composite; the clip stack is saved with them, so clip commands cannot outlive or escape a layer.
+  let mut layerStack : List (Nat × Nat × Rect × Bool × List UInt32 × List Rect) := []
   let mut skipDepth : Nat := 0
   let mut needsLayers := false
   let mut needsBlur := false
@@ -104,8 +105,9 @@ def lowerScene (vw vh : Nat) (scene : Scene) : LoweredFrame := Id.run do
       clips := clips.push { rect := r, radii, parentIdx := curRClip }
       rclipStack := nodeIdx :: rclipStack
     | .clipPop =>
+      -- The base entry stays: an unmatched pop cannot widen the scissor past the layer's render area.
       if let _ :: tail := clipStack then
-        clipStack := if tail.isEmpty then [vp] else tail
+        if !tail.isEmpty then clipStack := tail
       if let _ :: rtail := rclipStack then
         rclipStack := if rtail.isEmpty then [0] else rtail
     | .layerPush opacity =>
@@ -113,15 +115,17 @@ def lowerScene (vw vh : Nat) (scene : Scene) : LoweredFrame := Id.run do
       let depth := layerStack.length
       if skipDepth > 0 || clamped.isEmpty || depth >= 4 then
         skipDepth := skipDepth + 1
-        layerStack := (depth, min opacity 255, clamped, true, rclipStack) :: layerStack
+        layerStack := (depth, min opacity 255, clamped, true, rclipStack, clipStack) :: layerStack
       else
         needsLayers := true
         ops := ops.push (.layerPush depth clamped)
-        layerStack := (depth, min opacity 255, clamped, false, rclipStack) :: layerStack
+        layerStack := (depth, min opacity 255, clamped, false, rclipStack, clipStack) :: layerStack
+      clipStack := [clamped]
       rclipStack := [0]
     | .layerPop =>
-      if let (slot, opacity, clamped, skipped, outerRClips) :: rest := layerStack then
+      if let (slot, opacity, clamped, skipped, outerRClips, outerClips) :: rest := layerStack then
         layerStack := rest
+        clipStack := outerClips
         rclipStack := outerRClips
         let curRClip := outerRClips.head?.getD 0
         if skipped then

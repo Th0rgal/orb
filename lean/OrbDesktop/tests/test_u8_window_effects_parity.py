@@ -96,6 +96,10 @@ class U8WaylandCompositor(u6.WaylandTestCompositor):
         with self._lock:
             return self.last_frame_bytes, self.last_frame_w, self.last_frame_h
 
+    def frame_hash(self) -> str:
+        with self._lock:
+            return self.last_frame_hash
+
     def _handle_request(self, obj_id: int, opcode: int, body: bytes, fds: list[int]) -> None:
         iface = self._objects.get(obj_id, "")
         if iface == "wl_shm_pool" and opcode == 0:  # create_buffer(..., format)
@@ -311,7 +315,7 @@ class U8WindowEffectsParityTests(unittest.TestCase):
             proc = subprocess.Popen(args, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             try:
                 comp.wait_ready(timeout=15.0)
-                h_boot = comp.last_frame_hash
+                h_boot = comp.frame_hash()
                 u6._wait_until("initial roster /api/auth/me", lambda: count_req("GET", "/api/auth/me") >= 1)
                 comp.wait_frame_change(h_boot, timeout=5.0)
                 # Two changes of the active row's badge prove the roster is painted and its spinner

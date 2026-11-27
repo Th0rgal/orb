@@ -20,7 +20,7 @@ Pick the fragment for the installed Hyprland version:
 | 0.53 - 0.54 | hyprlang | `share/orb-desktop/hyprland.conf`: `windowrule = match:class ^(orb-desktop)$, opacity 1.0 override 1.0 override, rounding 12` |
 | 0.52 and older | hyprlang, previous rule syntax | not shipped; write `windowrule = opacity 1.0 override 1.0 override, class:^(orb-desktop)$` and `windowrule = rounding 12, class:^(orb-desktop)$` by hand |
 
-`windowrulev2` is not accepted by any of these: Hyprland 0.53 dropped the keyword and 0.54+ reports it as a config error.
+`windowrulev2` is not accepted on Hyprland 0.53 and later: 0.53 dropped the keyword and 0.54+ reports it as a config error.
 
 With Home Manager, `extraConfig` is appended to the generated file for both `configType` values, so read the fragment that matches it:
 

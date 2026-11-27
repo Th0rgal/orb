@@ -1002,6 +1002,18 @@ def windowEffectsSelfTest : IO Unit := do
   check (flat.any fun a => a > 0 && a < 255) "rounded clip fixture has no anti-aliased edge"
   check (raster #[clip, .layerPush 255, fill, .layerPop, .clipPop] == flat)
     "a rounded clip around a layer must clip it once, exactly like the same fill without the layer"
+  -- Clip commands inside a layer neither outlive it nor widen its render area, on both renderers.
+  let area : Rect := ⟨8, 8, 48, 48⟩
+  let leaked : Scene := #[clip, .layerPush 255, .clipPush ⟨8, 8, 4, 4⟩, .layerPop, fill, .clipPop]
+  let escaped : Scene := #[.clipPush area, .layerPush 255, .clipPop, fill, .layerPop, .clipPop]
+  let scissors (scene : Scene) : List Rect :=
+    (Vk.lowerScene 64 64 scene).ops.toList.filterMap fun op =>
+      match op with
+      | .drawBatch _ _ scissor => some scissor
+      | _ => none
+  check (raster leaked == flat) "a clip left open inside a layer outlived its layerPop on CPU"
+  check (scissors leaked == [area]) s!"a clip left open inside a layer outlived its layerPop on GPU: {repr (scissors leaked)}"
+  check (scissors escaped == [area]) s!"an unmatched clipPop widened the layer scissor on GPU: {repr (scissors escaped)}"
   -- 2. Active 4-quadrant rotation, stationary paused bars, and awaiting_user Bot fallback
   let rasterLead (status : String) (phase : Nat) : IO ByteArray := do
     let (ac, n) ← shapeStub ({ pageWidth := 1024, pageHeight := 1024, pad := 1 }) 120 (liveMissionLead orbDarkTheme status phase)
