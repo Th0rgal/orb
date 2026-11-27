@@ -154,7 +154,9 @@ jobs:
           lake env python3 -IB tests/test_resource_inventory.py -v
           lake env python3 -IB tests/test_cloud_destination.py -v
           lake env lean --run tests/InputU6Sweep.lean
+          lake env lean --run tests/WindowEffects.lean
           ORB_LEANUI_TEST_BINARY="$PWD/../../target/native/orb-desktop-native" python3 -IB tests/test_wayland_u6_session.py -v
+          ORB_LEANUI_TEST_BINARY="$PWD/../../target/native/orb-desktop-native" python3 -IB tests/test_u8_window_effects_parity.py -v
 
       - name: Palette on its Vulkan subsurface under Weston
         if: ${{ !cancelled() && steps.native_build.outcome == 'success' }}

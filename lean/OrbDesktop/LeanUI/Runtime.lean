@@ -808,11 +808,14 @@ def runWindow {σ : Type} (rt0 : RuntimeState σ)
         -- Anti-busy-spin rule: when redraw is deferred awaiting `wl_callback.done`, block on
         -- Wayland fd + `wakeFd` even when `workPending rt.app == true`!
         let deferredByFrameCb := rt.wayland.frameCallbackPending && !rt.wayland.configurePendingCommit
+        let animWaitMs : IO UInt64 := do
+          let rem := 16 - (← IO.monoMsNow) % 16
+          return (if rem == 0 then 16 else rem).toUInt64
         if deferredByFrameCb then
-          if animationVisible rt then timedWait (100 - (← IO.monoMsNow) % 100).toUInt64
+          if animationVisible rt then timedWait (← animWaitMs)
           else timedWait 0xffffffff
         else if !workPending rt.app then
-          if animationVisible rt then timedWait (100 - (← IO.monoMsNow) % 100).toUInt64
+          if animationVisible rt then timedWait (← animWaitMs)
           else if hasProducer rt.app then timedWait 0xffffffff else Wayland.waitEvents rt.wayland
   return rt
 

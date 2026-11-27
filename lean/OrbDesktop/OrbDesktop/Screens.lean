@@ -1389,7 +1389,7 @@ def buildDesktopScreen (st : DesktopState) (availW availH : SubPx)
             let title := if st.sidePanelTab == "files" then "Files" else "Side question"
             let bodyMsg := if st.sidePanelTab == "files" then "Workspace files for this mission" else "Ask a side question without interrupting the main turn"
             WidgetNode.box
-              (BoxStyle.col (pxToSub 8) |>.withPadding (Edges.all (pxToSub 12)) |>.withFixedSize rightW splitH |>.withBg pal.canvas)
+              (BoxStyle.col (pxToSub 8) |>.withPadding (Edges.all (pxToSub 12)) |>.withFixedSize rightW splitH |>.withBg st.theme.palette.canvas)
               [ WidgetNode.box (BoxStyle.row 0 |>.withAlign .center |>.withJustify .spaceBetween |>.withFixedSize (rightW - pxToSub 24) (pxToSub 28))
                   [ screenTextLine theme (rightW - pxToSub 56) (pxToSub 20) (pxToSub 14) (pxToSub 20) pal.textPrimary title 600
                   , WidgetNode.focusable sidePanelCloseId <|

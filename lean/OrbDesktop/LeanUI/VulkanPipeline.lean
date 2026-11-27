@@ -127,7 +127,7 @@ def lowerScene (vw vh : Nat) (scene : Scene) : LoweredFrame := Id.run do
           insts := insts.push {
             dst := clamped, uv := ⟨0, 0, 0, 0⟩, clip := clamped,
             radii := (0, 0, 0, 0), colorRGBA := 0xFFFFFFFF,
-            kind := 7, roundedClipIdx := 0,
+            kind := 7, roundedClipIdx := curRClip,
             aux0 := slot.toUInt32, aux1 := opacity.toUInt32
           }
           ops := ops.push (.layerPop slot clamped compIdx)

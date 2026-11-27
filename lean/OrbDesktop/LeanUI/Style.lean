@@ -397,11 +397,13 @@ def orbLightTheme : Theme := {
 
 namespace Theme
 
-/-- The live Wayland shell uses the same frosted surface alphas as the WebKit client.
+/-- The live Wayland shell uses the same Linux surface alphas as the WebKit/hybrid client
+(`orb/src/styles.css` `[data-platform="linux"]`): frosted sidebar (`78%` dark / `72%` light)
+over Hyprland Kawase blur with vibrancy, and a solid `100%` opaque main surface (`canvas`/`header`).
 Headless golden renders keep the opaque parity palette; the runtime applies this theme only
 for a real compositor window. -/
 def withWindowEffects (t : Theme) : Theme :=
-  let mainAlpha : UInt32 := if t.isDark then 240 else 244
+  let mainAlpha : UInt32 := 255
   let sidebarAlpha : UInt32 := if t.isDark then 199 else 184
   { t with palette :=
       { t.palette with

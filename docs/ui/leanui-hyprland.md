@@ -1,14 +1,13 @@
 # LeanUI window effects on Hyprland
 
-U8 keeps the GTK/WebKit and LeanUI shells on the same compositor-facing path:
+U8 keeps the GTK/WebKit (`--webkit`), hybrid (`--leanui-hybrid`), and pure LeanUI (`--leanui`) shells on the same compositor-facing path:
 
-- both shells use the `orb-desktop` Wayland/XDG app id and desktop-file class;
-- LeanUI presents premultiplied `ARGB8888`, so its transparent rounded corners are
-  composited instead of being forced through opaque `XRGB8888`;
-- live LeanUI surfaces use the WebKit Linux alphas (dark: main 94%, sidebar 78%;
-  light: main 95.5%, sidebar 72%); deterministic headless goldens remain opaque;
-- the package installs `share/orb-desktop/hyprland.conf` with the shared opacity,
-  blur, and 12px rounding rule.
+- all Linux shells use the `orb-desktop` Wayland/XDG `app_id` (`xdg_toplevel.set_app_id("orb-desktop")`) and `StartupWMClass=orb-desktop`;
+- LeanUI presents premultiplied `ARGB8888` on `wl_shm` and `VK_COMPOSITE_ALPHA_PRE_MULTIPLIED_BIT_KHR` on Vulkan 1.3 WSI, so its 12px rounded window corners and frosted sidebar are composited cleanly over Hyprland Kawase blur instead of opaque `XRGB8888`;
+- live LeanUI surfaces match the WebKit/hybrid Linux palette (`orb/src/styles.css` `[data-platform="linux"]`): frosted sidebar (`78%` = `199/255` dark, `72%` = `184/255` light) and solid `100%` (`255/255`) main surface; deterministic headless goldens remain opaque;
+- 12px rounded corners are preserved across the base shell, context menus, error toasts, and `Cmd+K` / `Cmd+Shift+F` backdrop-blur modal overlays (via rounded-clipped `layerPop` on both CPU and Vulkan 1.3 GPU);
+- live mission status badges match WebKit/hybrid: 60-step smooth active spinner (`liveSpinnerPhase`, 1 rev/s), crisp paused bars, check/clock/alert icons, case-insensitive status normalization, and Bot fallback for `awaiting_user` / idle rows;
+- the package installs `share/orb-desktop/hyprland.conf` with the Hyprland vibrancy blur parameters (`size = 10`, `passes = 3`, `vibrancy = 0.25`, `vibrancy_darkness = 0.25`, `ignore_opacity = true`), `opacity 1.0 override`, and `rounding 12` for `class:^(orb-desktop)$`.
 
 For a NixOS/home-manager Hyprland configuration, import the installed fragment:
 
@@ -18,18 +17,18 @@ wayland.windowManager.hyprland.extraConfig =
 ```
 
 Or include the generated file from the package in an existing Hyprland config.
-Restart/reload Hyprland after changing the rule. The focused source check is:
+Restart/reload Hyprland after changing the rule.
+
+## Verification commands
 
 ```bash
 python3 scripts/test_leanui_window_effects.py
+(cd lean/OrbDesktop && lake env lean --run tests/WindowEffects.lean)
+target/native/orb-desktop-native --self-test
+ORB_LEANUI_TEST_BINARY="$PWD/target/native/orb-desktop-native" \
+  python3 -IB lean/OrbDesktop/tests/test_u8_window_effects_parity.py -v
 ```
 
-## Verification limits in this checkout
-
-This worker environment has no `WAYLAND_DISPLAY`, no `HYPRLAND_INSTANCE_SIGNATURE`,
-and no `hyprctl`/Hyprland process. Therefore the required side-by-side Hyprland
-screenshots could not be captured here. The PR records the exact compositor rule,
-window protocol format, class, and focused source evidence; visual parity still
-requires running the packaged clients in a Hyprland session.
+`tests/WindowEffects.lean` verifies the pure Lean U8 contracts (`Theme.withWindowEffects` alphas, `liveBadgeKind` normalization, `liveSpinnerPhase` 60-step cadence, and `liveMissionLead` paths/Bot fallback). `orb-desktop-native --self-test` (`windowEffectsSelfTest`) verifies CPU and Vulkan 1.3 GPU readback parity on live window-effects scenes (sidebar transparency, solid main surface, 12px rounded corners including modal backdrop blur, active 4-quadrant spinner, stationary paused bars, `awaiting_user` Bot fallback, and 0-pixel-diff pure vs hybrid `EmbeddedSidebar` parity). `tests/test_u8_window_effects_parity.py` drives the compiled `orb-desktop-native` binary against a real AF_UNIX Wayland compositor and disposable local Core fixture to capture live premultiplied `ARGB8888` frames, assert `xdg_toplevel.set_app_id("orb-desktop")`, verify 60-step spinner rotation and paused badge pixels, and generate side-by-side vibrancy-blurred captures comparing pure `--leanui` against the hybrid/WebKit reference.
 
 When a saved Core session expires, the live window clears the previous account's roster. It retries in the background with bounded backoff. Saving a valid session restores the project list and reloads its model catalog in the same window.

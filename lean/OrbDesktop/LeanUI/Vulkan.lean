@@ -616,12 +616,16 @@ def rasterizeSceneInto (vw vh : Nat) (clearColor : Color) (atlas : Text.GlyphAtl
               let lb := layerBuf.get! (idx + 2)
               let la := layerBuf.get! (idx + 3)
               if la > 0 && modA > 0 then
-                let dr := fb.get! idx
-                let dg := fb.get! (idx + 1)
-                let db := fb.get! (idx + 2)
-                let da := fb.get! (idx + 3)
-                let (nr, ng, nb, na) := blendOverPremul dr dg db da lr lg lb la modA
-                fb := fb.set! idx nr |>.set! (idx + 1) ng |>.set! (idx + 2) nb |>.set! (idx + 3) na
+                let effModA : UInt8 :=
+                  if activeRClips.isEmpty then modA
+                  else ((modA.toNat * roundedClipCov activeRClips (px : Int) (py : Int) + 127) / 255).toUInt8
+                if effModA > 0 then
+                  let dr := fb.get! idx
+                  let dg := fb.get! (idx + 1)
+                  let db := fb.get! (idx + 2)
+                  let da := fb.get! (idx + 3)
+                  let (nr, ng, nb, na) := blendOverPremul dr dg db da lr lg lb la effModA
+                  fb := fb.set! idx nr |>.set! (idx + 1) ng |>.set! (idx + 2) nb |>.set! (idx + 3) na
     | .quad r fill rad bw border =>
       let radii : CornerRadii := (rad, rad, rad, rad)
       instances := instances.push {
