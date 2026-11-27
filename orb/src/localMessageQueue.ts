@@ -23,6 +23,7 @@ export type LocalQueueEntryBase={
  delegated?:boolean;
  scheduled?:boolean;
  resumes?:number;
+ userSynced?:boolean;
  lastSyncedText?:string;
 };
 export type LocalQueueQueuedEntry=LocalQueueEntryBase&{
@@ -43,7 +44,6 @@ export type LocalQueueDispatchingEntry=LocalQueueEntryBase&{
 export type LocalQueueAcceptedEntry=LocalQueueEntryBase&{
  kind:'accepted';
  receipt?:ClientRunReceipt;
- userSynced?:boolean;
  result?:PollLocal;
  resultStatus?:'interrupted'|'failed'|'awaiting_user';
  resultId?:ReturnType<typeof crypto.randomUUID>;
@@ -59,7 +59,6 @@ export type LocalQueueErrorEntry=LocalQueueEntryBase&{
  autoResumed?:boolean;
  cut?:'restart'|'connection'|'background';
  receipt?:ClientRunReceipt;
- userSynced?:boolean;
  result?:PollLocal;
  resultStatus?:'interrupted'|'failed'|'awaiting_user';
  resultId?:ReturnType<typeof crypto.randomUUID>;
@@ -85,6 +84,7 @@ export function toLocalQueueEntry(raw:LocalQueueEntry|QueuedLocalMessage):LocalQ
   ...(raw.delegated!==undefined?{delegated:raw.delegated}:{}),
   ...(raw.scheduled!==undefined?{scheduled:raw.scheduled}:{}),
   ...(raw.resumes!==undefined?{resumes:raw.resumes}:{}),
+  ...(legacy.userSynced!==undefined?{userSynced:legacy.userSynced}:{}),
   ...(raw.lastSyncedText!==undefined?{lastSyncedText:raw.lastSyncedText}:{}),
  };
  if(state==='dispatching'){
@@ -102,7 +102,6 @@ export function toLocalQueueEntry(raw:LocalQueueEntry|QueuedLocalMessage):LocalQ
    ...base,
    kind:'accepted',
    ...(legacy.receipt!==undefined?{receipt:legacy.receipt}:{}),
-   ...(legacy.userSynced!==undefined?{userSynced:legacy.userSynced}:{}),
    ...(legacy.result!==undefined?{result:legacy.result}:{}),
    ...(legacy.resultStatus!==undefined?{resultStatus:legacy.resultStatus}:{}),
    ...(legacy.resultId!==undefined?{resultId:legacy.resultId}:{}),
@@ -121,7 +120,6 @@ export function toLocalQueueEntry(raw:LocalQueueEntry|QueuedLocalMessage):LocalQ
    ...(legacy.autoResumed!==undefined?{autoResumed:legacy.autoResumed}:{}),
    ...(legacy.cut!==undefined?{cut:legacy.cut}:{}),
    ...(legacy.receipt!==undefined?{receipt:legacy.receipt}:{}),
-   ...(legacy.userSynced!==undefined?{userSynced:legacy.userSynced}:{}),
    ...(legacy.result!==undefined?{result:legacy.result}:{}),
    ...(legacy.resultStatus!==undefined?{resultStatus:legacy.resultStatus}:{}),
    ...(legacy.resultId!==undefined?{resultId:legacy.resultId}:{}),
