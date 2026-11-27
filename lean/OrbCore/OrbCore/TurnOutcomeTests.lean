@@ -1152,6 +1152,37 @@ private def verifyAdminDirectAntigravityStaticTarget (root : String) : IO Unit :
       check (fallbackAdmin == some "antigravity-admin.json")
         s!"expected fallback to antigravity-admin.json when priority-0 is at 100%, got {reprStr fallbackAdmin}"
 
+      -- 5b-ii. Live Antigravity CLI 429 RESOURCE_EXHAUSTED parser, durable exhaustion recording,
+      --        and automatic quota failover continuation onto the remaining healthy account.
+      let quotaDiag := "RESOURCE_EXHAUSTED (code 429): Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 131h28m56s."
+      check (OrbBin.ClaudeControl.parseAntigravityQuotaResetSecs? quotaDiag == some 473336)
+        s!"expected 131h28m56s = 473336s, got {reprStr (OrbBin.ClaudeControl.parseAntigravityQuotaResetSecs? quotaDiag)}"
+      check (OrbBin.ClaudeControl.parseAntigravityQuotaResetSecs? "Resets in 1d2h3m4s" == some 93784)
+        "expected 1d2h3m4s = 93784s"
+      let agyErr? := OrbBin.ClaudeControl.antigravityAccountError? quotaDiag
+      check (agyErr? == some "Antigravity account quota reached (429 RESOURCE_EXHAUSTED, resets in 131h28m56s).")
+        s!"unexpected antigravityAccountError?: {reprStr agyErr?}"
+      -- Reset ag-ben auth file back to unexhausted, then trigger live 429 failover settlement.
+      IO.FS.writeFile s!"{authDir}/antigravity-ben.json" (renderCompact (.obj #[
+        ("type", .str "antigravity"), ("prefix", .str "ag-ben"),
+        ("access_token", .str "tok-ben"), ("refresh_token", .str "ref-ben"),
+        ("email", .str "ben@example.test"), ("disabled", .bool false)
+      ]))
+      execute "INSERT INTO missions(id,status,title,backend,run_generation,created_at,updated_at) VALUES('m-agy-quota','active','Acier','antigravity',36,'2026-11-27T19:00:00Z','2026-11-27T19:00:00Z');"
+      let failoverVerdict? ← OrbCore.RemoteDispatch.settleAntigravityQuotaFailover
+        store none none workRoot "m-agy-quota" "2026-11-27T19:33:00Z" 1000
+        (some quotaDiag) (some "ag-ben") (some "antigravity-ben.json")
+      check (failoverVerdict? == some ("awaiting_user", "antigravity_quota_failover"))
+        s!"expected quota failover verdict, got {reprStr failoverVerdict?}"
+      let afterFailover ← OrbCore.RemoteDispatch.adminDirectAntigravityStaticTarget?
+        store workRoot "ashur" "u-admin" "u-admin" none .unrestricted false staticNodes none 1000
+      check (afterFailover == some "antigravity-admin.json")
+        s!"expected automatic rotation to antigravity-admin.json after live 429, got {reprStr afterFailover}"
+      let contRows ← match ← execParamQuery db "SELECT source, phase FROM mission_continuations WHERE mission_id='m-agy-quota' AND source='antigravity-quota-failover';" #[] with
+        | .ok rs => pure rs
+        | .error e => throw (IO.userError e)
+      check (contRows.size == 2) s!"expected 1 armed antigravity-quota-failover continuation, got {contRows.size - 1}"
+
       -- 5c. Cross-harness migration (`session_id = NULL` on a mission with prior assistant turns)
       --     carries over mission board + recent conversation history without altering brand-new missions.
       execute "INSERT INTO missions(id,status,title,backend,created_at,updated_at) VALUES('m-handoff','awaiting_user','Pareto','antigravity','2026-11-26T00:00:00Z','2026-11-26T00:00:00Z');"

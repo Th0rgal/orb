@@ -1708,6 +1708,62 @@ def parseOpenCodeAcpUpdate (u : JVal) : OneShotLineParsed :=
         } }
   else {}
 
+/-- Parse an Antigravity CLI `"Resets in <N>d<N>h<N>m<N>s"` duration (e.g. `"Resets in 131h28m56s."`)
+    into seconds. Returns `none` when no valid duration phrase is present. -/
+def parseAntigravityQuotaResetSecs? (diagnostic : String) : Option UInt64 := Id.run do
+  let lower := diagnostic.toLower
+  let parts := lower.splitOn "resets in "
+  if parts.length < 2 then return none
+  let tail := (parts.drop 1).headD ""
+  let mut total : UInt64 := 0
+  let mut cur : UInt64 := 0
+  let mut hasDigit := false
+  let mut hasUnit := false
+  for c in tail.toList do
+    if c.isDigit then
+      cur := cur * 10 + (c.toNat - '0'.toNat).toUInt64
+      hasDigit := true
+    else if hasDigit && (c == 'd' || c == 'h' || c == 'm' || c == 's') then
+      let mult : UInt64 := match c with
+        | 'd' => 86400
+        | 'h' => 3600
+        | 'm' => 60
+        | _ => 1
+      total := total + cur * mult
+      cur := 0
+      hasDigit := false
+      hasUnit := true
+    else if c == ' ' then
+      if hasUnit && !hasDigit then pure () else break
+    else
+      break
+  if hasUnit && total > 0 then some total else none
+
+/-- Extract a sanitized `"<N>d<N>h<N>m<N>s"` reset duration token from `"Resets in ..."`. -/
+private def extractAntigravityResetToken? (diagnostic : String) : Option String := Id.run do
+  let lower := diagnostic.toLower
+  let parts := lower.splitOn "resets in "
+  if parts.length < 2 then return none
+  let tail := (parts.drop 1).headD ""
+  let mut chars : List Char := []
+  for c in tail.toList do
+    if c.isDigit || c == 'd' || c == 'h' || c == 'm' || c == 's' then
+      chars := c :: chars
+    else
+      break
+  let tok := String.ofList chars.reverse
+  if tok.isEmpty || (parseAntigravityQuotaResetSecs? ("resets in " ++ tok)).isNone then none
+  else some tok
+
+/-- True when an Antigravity CLI error indicates per-account quota exhaustion (`429 RESOURCE_EXHAUSTED`). -/
+def isAntigravityQuotaError (diagnostic : String) : Bool :=
+  let lower := diagnostic.toLower
+  lower.contains "resource_exhausted" ||
+  lower.contains "individual quota reached" ||
+  lower.contains "quota reached" ||
+  lower.contains "quota_exhausted" ||
+  (lower.contains "429" && (lower.contains "quota" || lower.contains "rate limit"))
+
 /-- Publish a stable account diagnostic without echoing Google account identifiers or OAuth URLs. -/
 def antigravityAccountError? (diagnostic : String) : Option String :=
   let lower := diagnostic.toLower
@@ -1721,6 +1777,10 @@ def antigravityAccountError? (diagnostic : String) : Option String :=
       "paste the authorization code here", "authentication timed out", "authentication failed or timed out",
       "accounts.google.com/o/oauth2/auth"].any (fun marker => diagnostic.contains marker) then
     some "Antigravity needs a native Google sign-in for the account on this machine. Check its connection in Inference before retrying."
+  else if isAntigravityQuotaError diagnostic then
+    match extractAntigravityResetToken? diagnostic with
+    | some tok => some s!"Antigravity account quota reached (429 RESOURCE_EXHAUSTED, resets in {tok})."
+    | none => some "Antigravity account quota reached (429 RESOURCE_EXHAUSTED)."
   else none
 
 /-- The native holder and the transcript decoder share this closed diagnostic vocabulary. -/
