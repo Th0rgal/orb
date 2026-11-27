@@ -198,6 +198,10 @@ def run (root : String) : IO Unit := do
     "conflicting, ambiguous and member-unowned bindings rejected"
   check (ProviderUsageAndLogin.fileAccountId "openai" first.fileName != ProviderUsageAndLogin.fileAccountId "openai" second.fileName)
     "two unprefixed auth files get distinct IDs"
+  let sharedEmail := { first with fileName := "other.json", prefixId := "", email := "shared@example.test" }
+  check ((ProviderUsageAndLogin.matchCredential? #[sharedEmail] "db-row" false "missing.json" "" "" "shared@example.test" false).isNone &&
+    (ProviderUsageAndLogin.matchCredential? #[sharedEmail] "db-row" false "missing.json" "" "" "shared@example.test" true).any (·.fileName == "other.json"))
+    "stale filename rejects strict binding (legacySingleton=false) while preserving legacySingleton email fallback"
   routeStorage root
   let parseIp := AirVpnObservation.parseExit?
   let v4 := Orb.AccountVpn.ExitAddress.v4 0x01020304

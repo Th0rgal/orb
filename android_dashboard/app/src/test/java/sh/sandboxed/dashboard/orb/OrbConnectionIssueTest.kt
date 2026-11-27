@@ -46,7 +46,7 @@ class OrbConnectionIssueTest {
     }
 
     @Test fun defaultServerFailureOffersNoUseDefault() {
-        val issue = OrbConnection.issue("https://agent-backend.thomas.md/", "timeout", defaultReachable = true)!!
+        val issue = OrbConnection.issue("${OrbConnection.DEFAULT_BASE_URL}/", "timeout", defaultReachable = true)!!
         assertFalse(issue.offerUseDefault)
         assertFalse(issue.recommendDefault)
     }
@@ -63,6 +63,7 @@ class OrbConnectionIssueTest {
 
     @Test fun probeOnlyWhenItCanChangeTheAdvice() {
         assertTrue(OrbConnection.shouldProbeDefault("http://192.168.1.5:8080", lanError))
+        assertFalse(OrbConnection.shouldProbeDefault(OrbConnection.DEFAULT_BASE_URL, lanError))
         assertFalse(OrbConnection.shouldProbeDefault("https://agent-backend.thomas.md", lanError))
         assertFalse(OrbConnection.shouldProbeDefault("https://orb.example.com", lanError))
         assertFalse(OrbConnection.shouldProbeDefault("http://192.168.1.5:8080", "HTTP 401"))
@@ -70,7 +71,7 @@ class OrbConnectionIssueTest {
 
     @Test fun deadSystemProxyIsNamedInsteadOfBlamingTheServer() {
         val issue = OrbConnection.issue(
-            "https://agent-backend.thomas.md", lanError, defaultReachable = null, proxy = "192.168.1.5:8080"
+            OrbConnection.DEFAULT_BASE_URL, lanError, defaultReachable = null, proxy = "192.168.1.5:8080"
         )!!
         assertEquals("192.168.1.5:8080", issue.proxy)
         assertTrue(issue.message.contains("proxy at 192.168.1.5:8080"))
@@ -117,6 +118,10 @@ class OrbConnectionIssueTest {
         assertTrue(OrbConnection.isFastRetryableStatus(524))
         assertFalse(OrbConnection.isFastRetryableStatus(500))
         assertFalse(OrbConnection.isFastRetryableStatus(401))
+        assertEquals(0, OrbCore.TransportEpochState.classifyEndpoint("https://agent-backend.thomas.md/"))
+        assertEquals(1, OrbCore.TransportEpochState.classifyEndpoint("https://orbcore.thomas.md/"))
+        assertEquals(2, OrbCore.TransportEpochState.classifyEndpoint("https://agent-backend.nico-best-pc-ever.ovh/"))
+        assertEquals(3, OrbCore.TransportEpochState.classifyEndpoint("https://orb.example.com"))
     }
 
     @Test fun idempotencyKeyAttachmentEligibility() {

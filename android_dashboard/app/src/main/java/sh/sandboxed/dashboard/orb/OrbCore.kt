@@ -2009,10 +2009,12 @@ class OrbCore private constructor(context: Context) {
     val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
 
     val httpClient: OkHttpClient = OkHttpClient.Builder()
+        .connectionPool(okhttp3.ConnectionPool(8, 5, TimeUnit.MINUTES))
         .connectTimeout(15, TimeUnit.SECONDS)
         .readTimeout(45, TimeUnit.SECONDS)
         .writeTimeout(45, TimeUnit.SECONDS)
         .pingInterval(15, TimeUnit.SECONDS)
+        .retryOnConnectionFailure(true)
         .build()
 
     val sseHttpClient: OkHttpClient = httpClient.newBuilder()
@@ -3532,7 +3534,7 @@ class OrbCore private constructor(context: Context) {
             fun classifyEndpoint(url: String): Int {
                 val lower = OrbConnection.normalize(url).lowercase()
                 return when (lower) {
-                    OrbConnection.DEFAULT_BASE_URL -> 0
+                    OrbConnection.CLOUDFLARE_EDGE_BASE_URL -> 0
                     OrbConnection.ORBCORE_BASE_URL -> 1
                     OrbConnection.KNOWN_DIRECT_BASE_URL -> 2
                     else -> 3

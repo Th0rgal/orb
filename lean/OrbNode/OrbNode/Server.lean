@@ -1366,7 +1366,9 @@ def handleRequest (rt0 : NodeRuntime) (req : HttpRequest) : IO (NodeRuntime × H
       `Std.Mutex NodeRuntime` so slow network/git/archive/command I/O never blocks `/heartbeat`, `/cancel`,
       `/jobs/:id/log`, or deadline enforcement! -/
 def handleRequestConcurrent
-    (mtx : Std.Mutex NodeRuntime) (transferMtx : Std.Mutex Unit) (req : HttpRequest) : IO HttpResponse := do
+    (mtx : Std.Mutex NodeRuntime) (transferMtx : Std.Mutex Unit) (req : HttpRequest)
+    (coreUrlRef? : Option (IO.Ref (Option String)) := none)
+    (cordonedRef? : Option (IO.Ref Bool) := none) : IO HttpResponse := do
   let segs := (req.path.splitOn "/").filter (fun s => !s.isEmpty)
   if req.method == "GET" && segs == ["heartbeat"] then
     let (snapRes, preLaunches) ← mtx.atomically do
@@ -1380,6 +1382,17 @@ def handleRequestConcurrent
     match snapRes with
     | .error errResp => return errResp
     | .ok rtSnap =>
+      if !rtSnap.cfg.autoUpdateStateDir.isEmpty then
+        OrbNode.AutoUpdate.confirmFirstHeartbeat rtSnap.cfg.autoUpdateStateDir
+      if let some ref := coreUrlRef? then
+        if rtSnap.cfg.coreUrl?.isNone then
+          if let some hdrUrl := req.header? "x-orb-core-url" then
+            if OrbNode.AutoUpdate.isAllowedCoreUrl hdrUrl then
+              ref.set (some hdrUrl.trimAscii.toString)
+      if let some cRef := cordonedRef? then
+        if let some hdrCord := req.header? "x-orb-node-cordoned" then
+          let lv := hdrCord.trimAscii.toString.toLower
+          cRef.set (lv == "1" || lv == "true")
       let hb ← buildHeartbeatJson rtSnap
       return jsonResp 200 hb
   if req.method == "GET" && (segs == ["health"] || segs == ["api", "health"]) then
@@ -2004,6 +2017,55 @@ private def reloadCapacityAndTick (mtx : Std.Mutex NodeRuntime) : IO Unit := do
   if !launches.isEmpty then
     spawnAsyncLaunches mtx launches
 
+/-- Background Core-driven auto-update & startup-rollback watchdog task.
+    Runs with `Task.Priority.dedicated` so it never starves `/heartbeat` on 1-vCPU nodes. -/
+private def spawnAutoUpdateDaemon
+    (mtx : Std.Mutex NodeRuntime)
+    (goneRef : IO.Ref Bool)
+    (coreUrlRef : IO.Ref (Option String))
+    (cordonedRef : IO.Ref Bool)
+    (dialCred? : Option OrbNode.Dial.DialCredential) : IO (Task (Except IO.Error Unit)) :=
+  IO.asTask (prio := Task.Priority.dedicated) do
+    let initRt ← mtx.atomically get
+    let stateDir := initRt.cfg.autoUpdateStateDir
+    if stateDir.isEmpty || !initRt.cfg.autoUpdateEnabled then return
+    let pollMs : Nat := max 5000 (initRt.cfg.autoUpdatePollSecs * 1000)
+    let mut nextPollMs : Nat := (← IO.monoMsNow) + 3000
+    while !(← goneRef.get) do
+      IO.sleep 1000
+      if ← goneRef.get then break
+      -- 1. Startup heartbeat rollback watchdog: if a newly updated binary fails to receive its
+      --    first confirmed heartbeat within `startupWindowSecs`, restore `.prev` and exit cleanly.
+      let st ← OrbNode.AutoUpdate.loadAutoUpdateState stateDir
+      if let some pending := st.pending? then
+        let nowSec ← OrbNode.Posix.nowEpoch
+        if let some reason := OrbNode.AutoUpdate.shouldRollbackStartup pending nowSec false false then
+          let _ ← OrbNode.AutoUpdate.rollbackPendingUpdate stateDir st pending reason
+          goneRef.set true
+          break
+      -- 2. Periodic pull heartbeat & idle auto-update against Core.
+      let nowMs ← IO.monoMsNow
+      if nowMs ≥ nextPollMs then
+        nextPollMs := nowMs + pollMs
+        let coreUrl? ← match ← coreUrlRef.get with
+          | some u => pure (some u)
+          | none => pure (dialCred?.map (·.coreUrl))
+        if let some coreUrl := coreUrl? then
+          if !coreUrl.isEmpty then
+            let (nodeId, nodeToken, runningJobs, queuedJobs, enabled) ← mtx.atomically do
+              let rt ← get
+              let activeJobs := rt.launching.size + rt.liveProcs.size + rt.activeExecMain.toNat + rt.activeExecSide.toNat
+              return (rt.cfg.nodeId, rt.cfg.token, activeJobs, rt.queueOrder.size, rt.cfg.autoUpdateEnabled)
+            let binShas ← collectNodeBinaryShas
+            let curSha := (binShas.fieldStr? "sandboxed-node").getD ""
+            let localCordoned ← cordonedRef.get
+            let machineId? := dialCred?.map (·.machineId)
+            let shouldRestart ← OrbNode.AutoUpdate.runAutoUpdateTick
+              stateDir coreUrl nodeId nodeToken curSha machineId? enabled runningJobs queuedJobs localCordoned
+            if shouldRestart then
+              goneRef.set true
+              break
+
 /-- Serve HTTP/1.1 requests concurrently on `rt.cfg.bindHost:rt.cfg.bindPort` until `SIGTERM`/`SIGINT`
     (or `410 Gone` from dial-out relay), reloading capacity on `SIGHUP` or a changed env-file mtime
     and running background 2-second project-context replica synchronization. -/
@@ -2015,7 +2077,10 @@ def runServerLoop (rtInit : NodeRuntime) (dialCred? : Option OrbNode.Dial.DialCr
   let workDirConst := rtInit.cfg.workDir
   let authTokensConst := some (rtInit.cfg.token, rtInit.cfg.tokenPrevious?)
   let goneRef ← IO.mkRef false
+  let coreUrlRef ← IO.mkRef (rtInit.cfg.coreUrl?.orElse (fun _ => dialCred?.map (·.coreUrl)))
+  let cordonedRef ← IO.mkRef false
   let _ ← startProjectContextDaemon rtInit.cfg.workDir goneRef
+  let _ ← spawnAutoUpdateDaemon mtx goneRef coreUrlRef cordonedRef dialCred?
   let capacityPollMs := rtInit.cfg.capacityPollMs
   let mut lastCapacityEnvMtime ← capacityEnvMtime? rtInit.cfg.envFile
   let mut nextCapacityPoll ← IO.monoMsNow
@@ -2062,7 +2127,7 @@ def runServerLoop (rtInit : NodeRuntime) (dialCred? : Option OrbNode.Dial.DialCr
               else
                 pure ()
             | .ok req =>
-              let resp ← handleRequestConcurrent mtx transferMtx req
+              let resp ← handleRequestConcurrent mtx transferMtx req (some coreUrlRef) (some cordonedRef)
               sendHttpResponse cfd resp
           finally
             OrbNode.Posix.fdClose cfd

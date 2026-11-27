@@ -385,7 +385,7 @@ does that once B2 and B3 are deployed.
 | X3 | Tether: lease revoked on every terminal transition; WAN endpoint chosen for remote fleet hosts | — | ready | Tests first |
 | X4 | Plain `ethereumfoundation/glm-5.3` is rejected for our key (the flash variants work): fix the entry or remove it from the catalog | — | done | A turn on it replies, or it is gone from the list |
 | X5 | Tether end-to-end retest from a fleet node | 5.3 | blocked (Thomas) | SSH as `orb-tether` succeeds |
-| X6 | Routing checks from 15 Nov still hold on prod: provider catalog complete, chain test endpoint authenticated, one "Weekly" row for ChatGPT | R30 | verify | Three checks against prod |
+| X6 | Routing checks from 15 Nov still hold on prod: provider catalog complete, chain test endpoint authenticated, one "Weekly" row for ChatGPT (verified 27 Nov 15:04 UTC on post-R30 prod build `af3d97496` containing `ab882720`: `/api/providers` returns all 10 static + 7 hydrated providers including `antigravity` Carbon models and `Surplus Intelligence` `gemini-4-argon` with zero duplicates/leaks; `/api/model-routing/chains/builtin{/,%2F}smart/test` rejects unauth/bad-bearer with 401 and returns 200 `ok:true` with admin JWT without mutating chains/health; both ChatGPT OAuth accounts report exactly one `"Weekly"` row) | R30 | done (27 Nov, prod `af3d97496`) | Three checks against prod |
 | X7 | Remote `/goal` in the clients: the pure policy and event sync of #1877 drive a Goal mode for remote missions on desktop, iOS and Android (start, progress, Stop, truthful completion); harnesses Core cannot loop no longer offer Goal and show why; iOS and Android ship together with version bumps | — | wip | Browser test on desktop and unit tests on iOS and Android with the shared fixtures; Goal on an opencode remote mission continues until the objective is met or Stop |
 
 ## 5. Waiting on Thomas
@@ -430,6 +430,6 @@ Only these. Each one names what it unblocks.
 Rows the reconciler dispatches, in order. A row leaves the queue by PR when it
 is done or dropped.
 
-`U5a`, `U6a`, `U6`, `U8`, `U7`, `V1`, `V1a`, `V2`, `H1`, `R30a`, `R30`, `U3`, `X6`, `R7`, `R8`, `R21`, `M3`, `L5`, `R17`, `R18`, `R18a`, `R19`, `O3`, `O4`
+`U5a`, `U6a`, `U6`, `U8`, `U7`, `V1`, `V1a`, `V2`, `H1`, `R30a`, `R30`, `U3`, `R7`, `R8`, `R21`, `M3`, `L5`, `R17`, `R18`, `R18a`, `R19`, `O3`, `O4`
 
 **Already-owned Linux trial lanes:** follow the [U4 lane table](#u4-linux-trial-owners-and-acceptance). The controller's two cloud verification lanes can proceed in parallel with the existing Spark/m2air work. Source changes stay with #1977 and the separate #1971 owner. These are assignments, not additional automatic starts. Device acceptance gates only the trial and default decision; unrelated queued work keeps its order and capacity.

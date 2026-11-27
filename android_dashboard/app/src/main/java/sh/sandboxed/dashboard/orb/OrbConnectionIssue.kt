@@ -24,8 +24,9 @@ data class OrbConnectionIssue(
 )
 
 object OrbConnection {
-    const val DEFAULT_BASE_URL = "https://agent-backend.thomas.md"
+    const val DEFAULT_BASE_URL = "https://orbcore.thomas.md"
     const val ORBCORE_BASE_URL = "https://orbcore.thomas.md"
+    const val CLOUDFLARE_EDGE_BASE_URL = "https://agent-backend.thomas.md"
     const val KNOWN_DIRECT_BASE_URL = "https://agent-backend.nico-best-pc-ever.ovh"
 
     fun normalize(url: String): String = url.trim().trimEnd('/')
@@ -34,7 +35,7 @@ object OrbConnection {
 
     /**
      * Ordered candidate origins for 3-way Edge-diverse multi-path failover (mirrors Desktop/Tauri/iOS).
-     * Prefers Cloudflare Edge BBR (`DEFAULT_BASE_URL`) before direct OVH (`KNOWN_DIRECT_BASE_URL`) so lossy/high-RTT
+     * Prefers Cloudflare Edge BBR (`CLOUDFLARE_EDGE_BASE_URL`) before direct OVH (`KNOWN_DIRECT_BASE_URL`) so lossy/high-RTT
      * links avoid transatlantic CUBIC collapse when `orbcore` degrades.
      */
     fun candidateEndpoints(primary: String): List<String> {
@@ -42,12 +43,12 @@ object OrbConnection {
         if (clean.isEmpty()) return emptyList()
         val lower = clean.lowercase()
         if (lower == ORBCORE_BASE_URL) {
-            return listOf(clean, DEFAULT_BASE_URL, KNOWN_DIRECT_BASE_URL)
+            return listOf(clean, CLOUDFLARE_EDGE_BASE_URL, KNOWN_DIRECT_BASE_URL)
         }
         if (lower == KNOWN_DIRECT_BASE_URL) {
-            return listOf(clean, DEFAULT_BASE_URL, ORBCORE_BASE_URL)
+            return listOf(clean, CLOUDFLARE_EDGE_BASE_URL, ORBCORE_BASE_URL)
         }
-        if (lower == DEFAULT_BASE_URL) {
+        if (lower == CLOUDFLARE_EDGE_BASE_URL) {
             return listOf(clean, ORBCORE_BASE_URL, KNOWN_DIRECT_BASE_URL)
         }
         // Dev and custom instances never share credentials or writes with prod.
