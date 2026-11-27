@@ -1855,10 +1855,11 @@ private def verifiedManagedWorkerLoss (mc? : Option ManagedComputeStore) (node :
   let some mc := mc? | return false
   if !node.startsWith "managed-" then return false
   let .ok rows ← execParamQuery mc.db
-      ("SELECT 1 FROM managed_machines m JOIN managed_expirations e ON e.machine_id=m.id " ++
+      ("SELECT 1 FROM managed_machines m LEFT JOIN managed_expirations e ON e.machine_id=m.id " ++
        "AND e.boot_epoch=m.node_boot_epoch AND e.provider_id=m.provider_id " ++
-       "WHERE m.id=?1 AND m.phase_code IN (2,3) AND e.state='completed' " ++
-       "AND e.observed_state IN ('reaped','deleted','destroyed','absent') " ++
+       "WHERE m.id=?1 AND ((m.phase_code=3 AND m.status='destroyed') OR " ++
+       "(m.phase_code IN (2,3) AND e.state='completed' " ++
+       "AND e.observed_state IN ('reaped','deleted','destroyed','absent'))) " ++
        "AND NOT EXISTS (SELECT 1 FROM managed_resume_intents r WHERE r.machine_id=m.id AND r.state IN ('pending','aborting'));")
       #[(node.drop 8).toString] | return false
   if rows.size < 2 then return false
@@ -2763,6 +2764,28 @@ def reattachActiveRemoteJobsOnStartup
           "UPDATE remote_node_jobs SET state='cancelled', updated_at=?2 WHERE job_id=?1;" #[sjid, nowIso]
         discard <| execParamQuery store.projectsDb
           "UPDATE remote_jobs SET state='cancelled', heartbeat_at=?2, finished_at=COALESCE(finished_at,?2), updated_at=?2 WHERE job_id=?1;" #[sjid, nowIso]
+  -- Also reconcile missions still marked active/pending whose current placement_job_id
+  -- already reached 'cancelled' or 'lost' in remote_node_jobs (e.g. cancelled via the
+  -- durable-job cancel API before a restart).
+  if let .ok orphanRows ← execParamQuery store.missionsDb
+      ("SELECT m.id, j.job_id, j.state FROM missions m JOIN remote_node_jobs j ON j.job_id = m.placement_job_id " ++
+       "WHERE m.status IN ('active','pending') AND j.state IN ('cancelled','lost');") #[] then
+    for i in [1:orphanRows.size] do
+      let orow := orphanRows[i]!
+      let omid := (cell orow 0).trimAscii.toString
+      let ojid := (cell orow 1).trimAscii.toString
+      let ojstate := (cell orow 2).trimAscii.toString
+      if !omid.isEmpty && !ojid.isEmpty then
+        let nextStatus := if ojstate == "cancelled" then "cancelled" else "interrupted"
+        let reason := if ojstate == "cancelled" then "cancelled" else "managed_worker_lost"
+        discard <| execParamQuery store.missionsDb
+          "UPDATE mission_runs SET execution_state='terminal', terminal_reason=?2, updated_at=?3 WHERE mission_id=?1 AND remote_job_id=?4 AND execution_state NOT IN ('terminal','completed','failed','aborted');"
+          #[omid, reason, nowIso, ojid]
+        discard <| execParamQuery store.missionsDb
+          "UPDATE missions SET status=?2, terminal_reason=?3, state_revision=state_revision+1, updated_at=?4 WHERE id=?1 AND placement_job_id=?5 AND status IN ('active','pending');"
+          #[omid, nextStatus, reason, nowIso, ojid]
+        emitMissionEventAndBroadcast store broadcastHub? omid "mission_status_changed"
+          (renderCompact (.obj #[("status", .str nextStatus), ("reason", .str reason)])) nowIso
   let qRes ← execParamQuery store.missionsDb
     ("SELECT r.mission_id, COALESCE(NULLIF(r.remote_job_id,''), NULLIF(m.placement_job_id,''), ''), COALESCE(r.owner_actor_id,''), COALESCE(r.scope_unit,''), " ++
      "COALESCE(m.backend,'codex'), COALESCE(r.updated_at,'') " ++

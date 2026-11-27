@@ -135,6 +135,51 @@ def verifyManagedWorkerLoss (root : String) : IO Unit := do
       (← cellOf store.projectsDb "SELECT state FROM remote_jobs WHERE job_id=?1;" #[job]) == "succeeded" &&
       (← cellOf store.missionsDb "SELECT status FROM missions WHERE id=?1;" #[mid]) == "active")
       "existing success evidence takes precedence over a later loss observation"
+    -- An explicitly destroyed managed VM (phase_code=3, status='destroyed') has no
+    -- managed_expirations row, yet its unreachable remote jobs must still settle.
+    let dMachine := "destroyed-worker"
+    let dNode := s!"managed-{dMachine}"
+    let dMid := "managed-destroyed-mission"
+    let dJob := "managed-destroyed-job"
+    insert mc.db
+      ("INSERT INTO managed_machines(id,sandbox_name,provider,size,status,owner_mission,ttl_minutes,spent_cents," ++
+       "cordoned,node_boot_epoch,deletable_at_sec,owner_kind,requested_by_mission_id,phase_code,active_compute_eligible,provider_id) " ++
+       "VALUES(?1,'destroyed-worker','boat','xlarge','destroyed',?2,60,0,0,1,0,'mission',?2,3,0,'bx_destroyed');") #[dMachine, dMid]
+    insert store.missionsDb
+      "INSERT INTO missions(id,status,run_generation,placement_job_id,placement_kind) VALUES(?1,'active',2,?2,'managed');" #[dMid, dJob]
+    let .ok _ ← store.missionsDb.mu.atomically do
+      insertMissionRunUnlocked store.missionsDb "destroyed-run" dMid "2" "running" "" dJob "t0" true dJob dNode
+      | throw (IO.userError "managed destroyed fixture run")
+    insert store.missionsDb
+      "INSERT INTO remote_node_jobs(job_id,mission_id,node_id,state,updated_at) VALUES(?1,?2,?3,'unreachable','t0');" #[dJob, dMid, dNode]
+    insert store.projectsDb
+      "INSERT INTO remote_jobs(job_id,mission_id,node_id,kind,state,started_at,updated_at) VALUES(?1,?2,?3,'mission','unreachable','t0','t0');" #[dJob, dMid, dNode]
+    spawnRemoteJobPoller store (some mc) none none sup root dMid "claudecode" dNode dJob ""
+    for _ in [:100] do
+      if (← cellOf store.missionsDb "SELECT status FROM missions WHERE id=?1;" #[dMid]) == "interrupted" then break
+      IO.sleep 50
+    check ((← cellOf store.missionsDb "SELECT status FROM missions WHERE id=?1;" #[dMid]) == "interrupted" &&
+      (← cellOf store.missionsDb "SELECT terminal_reason FROM missions WHERE id=?1;" #[dMid]) == "managed_worker_lost" &&
+      (← cellOf store.missionsDb "SELECT execution_state FROM mission_runs WHERE mission_id=?1;" #[dMid]) == "terminal" &&
+      (← cellOf store.missionsDb "SELECT state FROM remote_node_jobs WHERE job_id=?1;" #[dJob]) == "lost" &&
+      (← cellOf store.projectsDb "SELECT state FROM remote_jobs WHERE job_id=?1;" #[dJob]) == "lost")
+      "explicitly destroyed managed VM settles unreachable job without expiration row"
+    -- An active mission whose placement_job_id is already cancelled in remote_node_jobs
+    -- must be settled on startup reconciliation instead of staying active forever.
+    let cMid := "managed-cancelled-orphan-mission"
+    let cJob := "managed-cancelled-orphan-job"
+    insert store.missionsDb
+      "INSERT INTO missions(id,status,run_generation,placement_job_id,placement_kind) VALUES(?1,'active',1,?2,'managed');" #[cMid, cJob]
+    let .ok _ ← store.missionsDb.mu.atomically do
+      insertMissionRunUnlocked store.missionsDb "cancelled-orphan-run" cMid "1" "running" "" cJob "t0" true cJob dNode
+      | throw (IO.userError "cancelled orphan fixture run")
+    insert store.missionsDb
+      "INSERT INTO remote_node_jobs(job_id,mission_id,node_id,state,updated_at) VALUES(?1,?2,?3,'cancelled','t0');" #[cJob, cMid, dNode]
+    discard <| reattachActiveRemoteJobsOnStartup store (some mc) none none sup root
+    check ((← cellOf store.missionsDb "SELECT status FROM missions WHERE id=?1;" #[cMid]) == "cancelled" &&
+      (← cellOf store.missionsDb "SELECT terminal_reason FROM missions WHERE id=?1;" #[cMid]) == "cancelled" &&
+      (← cellOf store.missionsDb "SELECT execution_state FROM mission_runs WHERE mission_id=?1;" #[cMid]) == "terminal")
+      "startup reconciliation settles active mission whose remote_node_jobs row is already cancelled"
   finally
     closeCoreStore store
     closeManagedComputeStore mc
