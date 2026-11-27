@@ -197,7 +197,7 @@ same node (then split or restate the node).
 | L2 | lean.ci default in code with Boat fallback (#1793), park/resume, extend (#1798, #1802) | — | done | — |
 | L3 | Node enrolment tries every resolved address (IPv4 when IPv6 has no route), public URL `orbcore.thomas.md` (owned by the mission "lean.ci: make a fresh VM enrol and run a turn") | — | done (#1815, 994ef16a) | Merged and deployed |
 | L4 | Probe: a fresh `auto-managed:leanci:small` VM enrols and runs opencode, claude and codex turns (16 Nov 11:52Z, reported by the operator: `orb-managed-d2f8a3e7-66d` ready 8 s after spawn, three "reply OK" turns, destroyed; it needed #1853) | L3 | done | Three "reply OK" turns on one VM, VM destroyed |
-| L5 | Prod uses lean.ci when a request names no provider. The code default is already `leanci` (`Managed.lean`, `defaultManagedProviderOf`), yet prod answers `default_provider: boat` (16 Nov), so the prod environment must set `SANDBOXED_MANAGED_DEFAULT_PROVIDER` (inferred, not read on the host); that name is not classified in `scripts/ops/orb-env`, which refuses unclassified keys | L4, M3 | ready | Env changed through a deploy; `list_managed_machines` answers `default_provider: leanci`; a mission on `auto-managed` lands on lean.ci |
+| L5 | Prod uses lean.ci when a request names no provider. Classified in `scripts/ops/orb-env` (#1858) with known-provider value validation and tests; verified on prod build `e9e740221` (27 Nov): `list_managed_machines` reports `default_provider: leanci` (`leanci` `is_default: true`, `boat` `is_default: false`), and an unnamed `auto-managed` probe mission (`2f6af8db`) landed on lean.ci VM `orb-managed-657a443e-fe0` (`small`, `$0/hr`), replied `OK`, and was destroyed | L4, M3 | done (27 Nov, prod `e9e740221`) | Env changed through a deploy; `list_managed_machines` answers `default_provider: leanci`; a mission on `auto-managed` lands on lean.ci |
 | L6 | Rollout doc and `build` script match reality: idle check, 100 GiB default, warm-repo trap, layered update, rollback | — | done (lean.ci #40, 705dfaf9) | A dry run following only the doc succeeds |
 | L7 | Split the base image from warm project state with named snapshots | L5 | blocked | — |
 | L8 | Colab and lean.ci at Boat parity in the UI (list, start, stop, extend, destroy, cost) on desktop, iOS, Android | L5 | verify | Real rental through each client on dev then prod |
@@ -430,6 +430,6 @@ Only these. Each one names what it unblocks.
 Rows the reconciler dispatches, in order. A row leaves the queue by PR when it
 is done or dropped.
 
-`U5a`, `U6a`, `U6`, `U8`, `U7`, `V1`, `V1a`, `V2`, `H1`, `R30a`, `R30`, `U3`, `R7`, `R8`, `R21`, `M3`, `L5`, `R17`, `R18`, `R18a`, `R19`, `O3`, `O4`
+`U5a`, `U6a`, `U6`, `U8`, `U7`, `V1`, `V1a`, `V2`, `H1`, `R30a`, `R30`, `U3`, `R7`, `R8`, `R21`, `M3`, `R17`, `R18`, `R18a`, `R19`, `O3`, `O4`
 
 **Already-owned Linux trial lanes:** follow the [U4 lane table](#u4-linux-trial-owners-and-acceptance). The controller's two cloud verification lanes can proceed in parallel with the existing Spark/m2air work. Source changes stay with #1977 and the separate #1971 owner. These are assignments, not additional automatic starts. Device acceptance gates only the trial and default decision; unrelated queued work keeps its order and capacity.
