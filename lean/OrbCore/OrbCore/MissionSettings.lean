@@ -52,7 +52,8 @@ def retiredMissionSettingsFields : Array String :=
 
 def restAllowedSettingsFields : Array String :=
   #["title", "backend", "model_override", "model_effort", "short_description", "github_pr",
-    "project", "project_slug", "folder", "approval_policy", "descendant_ids"]
+    "project", "project_slug", "folder", "approval_policy", "descendant_ids",
+    "resume", "service_tier"]
 
 def mcpAllowedSettingsFields : Array String :=
   #["mission_id", "title", "backend", "model_override", "model_effort",
@@ -67,6 +68,17 @@ def resolve (existing : MissionRecord) (patch : JVal)
       .error s!"unsupported_field:{k}"
     if !allowedKeys.contains k then
       .error s!"unknown_field:{k}"
+  match patch.field? "resume" with
+  | none | some .null | some (.bool false) => pure ()
+  | some (.bool true) => .error "unsupported_field:resume"
+  | some _ => .error "invalid_resume"
+  match patch.field? "service_tier" with
+  | none | some .null => pure ()
+  | some (.str s) =>
+    let t := s.trimAscii.toString.toLower
+    if t.isEmpty || t == "standard" then pure ()
+    else .error "unsupported_field:service_tier"
+  | some _ => .error "invalid_service_tier"
   let title ← match patch.field? "title" with
     | none => pure existing.title
     | some (.str s) => pure s

@@ -794,6 +794,96 @@ private def runCarbonRegressionChecks
     restBadBackendSt == 400 && restRetiredSt == 501 && restBadEffortSt == 400)
     s!"R17-R2-F5 enforces effort/goal compatibility and REST /settings parity (badB={restBadBackendSt}, ret={restRetiredSt}, badEff={restBadEffortSt})"
 
+  -- Round 3 regressions (Findings 1–3)
+  -- R3-F1: REST /settings accepts resume:false and service_tier:standard from first-party clients, refuses resume:true & service_tier:fast with 501
+  let (r3ResFalseSt, r3ResFalseBody) ← restRaw (some jwt) "PATCH" "/api/control/missions/m-r17-settings/settings"
+    "{\"resume\":false,\"model_override\":\"gpt-5-r3\"}"
+  let .ok r3ResFalseJv := OrbBin.Json.parse r3ResFalseBody | throw (IO.userError "R17-R3-F1 resume=false JSON")
+  let (r3ResTrueSt, r3ResTrueBody) ← restRaw (some jwt) "PATCH" "/api/control/missions/m-r17-settings/settings"
+    "{\"resume\":true}"
+  let (r3ResBadSt, _) ← restRaw (some jwt) "PATCH" "/api/control/missions/m-r17-settings/settings"
+    "{\"resume\":\"yes\"}"
+  let (r3TierFastSt, r3TierFastBody) ← restRaw (some jwt) "PATCH" "/api/control/missions/m-r17-settings/settings"
+    "{\"resume\":false,\"service_tier\":\"fast\"}"
+  let (r3TierStdSt, _) ← restRaw (some jwt) "PATCH" "/api/control/missions/m-r17-settings/settings"
+    "{\"resume\":false,\"service_tier\":\"standard\"}"
+  let (r3TierBadSt, _) ← restRaw (some jwt) "PATCH" "/api/control/missions/m-r17-settings/settings"
+    "{\"resume\":false,\"service_tier\":123}"
+  let mcpResumeRej ← call operator "update_mission_settings" (.obj #[
+    ("mission_id", .str "m-r17-settings"), ("resume", .bool false), ("idempotency_key", .str "r17-r3-f1-mcp-res")])
+  check (r3ResFalseSt == 200 && r3ResFalseJv.fieldStr? "model_override" == some "gpt-5-r3" &&
+    r3ResTrueSt == 501 && r3ResTrueBody.contains "unsupported" &&
+    r3ResBadSt == 400 &&
+    r3TierFastSt == 501 && r3TierFastBody.contains "unsupported" &&
+    r3TierStdSt == 200 && r3TierBadSt == 400 &&
+    (mcpResumeRej.fieldOrNull "error").fieldStr? "code" == some "invalid_arguments")
+    s!"R17-R3-F1 REST /settings honors resume:false/service_tier:standard and refuses resume:true/service_tier:fast with 501 (resF={r3ResFalseSt}, resT={r3ResTrueSt}, tierF={r3TierFastSt})"
+
+  -- R3-F2: REST GET|POST /api/projects/:slug/grant includes nested grant object (or null before set) alongside top-level fields
+  let (r3MkProjSt, _) ← restRaw (some jwt) "POST" "/api/projects" "{\"slug\":\"r17-grant-env\",\"title\":\"Grant Env\"}"
+  let (r3GetEmptySt, r3GetEmptyBody) ← restRaw (some jwt) "GET" "/api/projects/r17-grant-env/grant" ""
+  let .ok r3GetEmptyJv := OrbBin.Json.parse r3GetEmptyBody | throw (IO.userError "R17-R3-F2 empty grant JSON")
+  let (r3PostGrSt, r3PostGrBody) ← restRaw (some jwt) "POST" "/api/projects/r17-grant-env/grant" "{\"parallel_missions\":3}"
+  let .ok r3PostGrJv := OrbBin.Json.parse r3PostGrBody | throw (IO.userError "R17-R3-F2 post grant JSON")
+  let (r3GetSetSt, r3GetSetBody) ← restRaw (some jwt) "GET" "/api/projects/r17-grant-env/grant" ""
+  let .ok r3GetSetJv := OrbBin.Json.parse r3GetSetBody | throw (IO.userError "R17-R3-F2 get grant JSON")
+  check (r3MkProjSt == 200 && r3GetEmptySt == 200 && r3GetEmptyJv.field? "grant" == some .null &&
+    r3PostGrSt == 200 && (r3PostGrJv.fieldOrNull "grant").fieldNat? "parallel_missions" == some 3 &&
+    r3PostGrJv.fieldNat? "parallel_missions" == some 3 &&
+    r3GetSetSt == 200 && (r3GetSetJv.fieldOrNull "grant").fieldNat? "parallel_missions" == some 3)
+    s!"R17-R3-F2 REST grant endpoints expose nested grant null/object envelope ({r3PostGrBody})"
+
+  -- R3-F3: loopback static node resolves before pre-dispatch proxy check on auto/inherited/consult_model
+  let supLoop ← OrbCore.RemoteDispatch.newRemoteJobSupervisor cfg.jwtSecret false
+  supLoop.boundPortRef.set 39999
+  let appLoop : CoreAppState := { app with remoteSup? := some supLoop }
+  let prevPub3 ← IO.getEnv "SANDBOXED_PUBLIC_URL"
+  let prevProxy3 ← IO.getEnv "SANDBOXED_PROXY_PUBLIC_URL"
+  let prevRn3 ← IO.getEnv "SANDBOXED_REMOTE_NODES"
+  unsetenvVar "SANDBOXED_PUBLIC_URL"
+  unsetenvVar "SANDBOXED_PROXY_PUBLIC_URL"
+  setenvVar "SANDBOXED_REMOTE_NODES" "r17loop=http://localhost:19999|tok,r17loop127=http://127.0.0.1:19999|tok"
+  try
+    discard <| msql
+      ("INSERT INTO missions(id,title,status,backend,project,authority_mode,owner_user_id,tags,created_at,updated_at) " ++
+       "VALUES('m-r17-loop-parent','Loop Parent','active','opencode','r17-project','writer','admin','[\"remote-node:r17loop127\"]','2026-11-18T00:00:00Z','2026-11-18T00:00:00Z');")
+    let (restAutoLoopSt, restAutoLoopBody) ← restRaw (some jwt) "POST" "/api/control/missions"
+      "{\"title\":\"Loop Auto\",\"backend\":\"opencode\",\"remote_node_id\":\"auto\"}" appLoop
+    let mcpAutoLoop ← call operator "start_mission" (.obj #[
+      ("title", .str "MCP Loop Auto"), ("backend", .str "opencode"), ("prompt", .str ""),
+      ("remote_node_id", .str "auto"), ("idempotency_key", .str "r17-r3-f3-mcp-auto")]) (some supLoop)
+    let mcpInhLoop ← call operator "start_mission" (.obj #[
+      ("title", .str "MCP Loop Inherit"), ("backend", .str "opencode"), ("prompt", .str ""),
+      ("parent_mission_id", .str "m-r17-loop-parent"), ("idempotency_key", .str "r17-r3-f3-mcp-inh")]) (some supLoop)
+    let mcpConsultLoop ← call operator "consult_model" (.obj #[
+      ("model", .str "builtin/smart"), ("question", .str "Loopback check"),
+      ("idempotency_key", .str "r17-r3-f3-consult")]) (some supLoop)
+    let consultMsg := ((mcpConsultLoop.fieldOrNull "error").fieldStr? "message").getD ""
+    check (restAutoLoopSt == 201 &&
+      mcpAutoLoop.fieldBool? "ok" == some true &&
+      mcpInhLoop.fieldBool? "ok" == some true &&
+      !consultMsg.contains "REMOTE_AUTH_REQUIRED" &&
+      !consultMsg.contains "no_eligible_node")
+      s!"R17-R3-F3 loopback static node passes proxy check for auto/inherited/consult_model (rest={restAutoLoopSt} {restAutoLoopBody}, auto={renderCompact mcpAutoLoop}, inh={renderCompact mcpInhLoop}, consult={consultMsg})"
+    -- Non-loopback static node still refuses opencode without SANDBOXED_PUBLIC_URL before mission insert
+    setenvVar "SANDBOXED_REMOTE_NODES" "r17rem=http://10.255.255.1:19999|tok"
+    let beforeNonLoop ← msql "SELECT COUNT(*) FROM missions;"
+    let (restNonLoopSt, restNonLoopBody) ← restRaw (some jwt) "POST" "/api/control/missions"
+      "{\"title\":\"NonLoop Auto\",\"backend\":\"opencode\",\"remote_node_id\":\"auto\"}" appLoop
+    let mcpNonLoop ← call operator "start_mission" (.obj #[
+      ("title", .str "MCP NonLoop Inherit"), ("backend", .str "opencode"), ("prompt", .str ""),
+      ("idempotency_key", .str "r17-r3-f3-mcp-nonloop")]) (some supLoop)
+    let afterNonLoop ← msql "SELECT COUNT(*) FROM missions;"
+    let mcpNonLoopMsg := ((mcpNonLoop.fieldOrNull "error").fieldStr? "message").getD ""
+    check (restNonLoopSt == 400 && restNonLoopBody.contains "REMOTE_AUTH_REQUIRED" &&
+      mcpNonLoop.fieldBool? "ok" == some false && mcpNonLoopMsg.contains "REMOTE_AUTH_REQUIRED" &&
+      beforeNonLoop == afterNonLoop)
+      s!"R17-R3-F3 non-loopback static node still rejects opencode without proxy URL before mission insert (rest={restNonLoopSt}, mcp={mcpNonLoopMsg})"
+  finally
+    match prevPub3 with | some v => setenvVar "SANDBOXED_PUBLIC_URL" v | none => unsetenvVar "SANDBOXED_PUBLIC_URL"
+    match prevProxy3 with | some v => setenvVar "SANDBOXED_PROXY_PUBLIC_URL" v | none => unsetenvVar "SANDBOXED_PROXY_PUBLIC_URL"
+    match prevRn3 with | some v => setenvVar "SANDBOXED_REMOTE_NODES" v | none => unsetenvVar "SANDBOXED_REMOTE_NODES"
+
 def run (root : String) : IO Unit := do
   let .ok store ← openCoreStore s!"{root}/r17"
     | throw (IO.userError "R17 store open failed")

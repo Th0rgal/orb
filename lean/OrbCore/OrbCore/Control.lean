@@ -3324,7 +3324,12 @@ private def launchBtwSideAgent (st : CoreAppState) (caller : CallerPrincipal) (s
       match out.remoteNodeId? with
       | some targetNode =>
         if let some sup := st.remoteSup? then
-          let (_, proxyBase) ← resolveRemoteCallbackUrls sup targetNode
+          let targetLower := targetNode.trimAscii.toString.toLower
+          let targetForUrl ←
+            if targetLower != "auto-managed" && !targetLower.startsWith "auto-managed:" then
+              pure ((← resolveConcreteRemoteTargetNode st.managedStore? targetNode none).toOption.getD targetNode)
+            else pure targetNode
+          let (_, proxyBase) ← resolveRemoteCallbackUrls sup targetForUrl
           if let .error pErr := validateRemoteLaunchPlan out.backend turnPrompt proxyBase then
             cleanupUnbornBtw
             return (remoteDispatchHttpStatus pErr, s!"\{\"error\":{jsonEscape pErr}}")
@@ -6185,7 +6190,12 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
           abortIdem
           return .ok (mkJson (remoteDispatchHttpStatus hErr) s!"\{\"error\":{jsonEscape hErr}}")
         if let (some sup, some targetNode) := (st.remoteSup?, remoteNodeId?) then
-          let (_, proxyBase) ← resolveRemoteCallbackUrls sup targetNode
+          let targetLower := targetNode.trimAscii.toString.toLower
+          let targetForUrl ←
+            if targetLower != "auto-managed" && !targetLower.startsWith "auto-managed:" then
+              pure ((← resolveConcreteRemoteTargetNode st.managedStore? targetNode none).toOption.getD targetNode)
+            else pure targetNode
+          let (_, proxyBase) ← resolveRemoteCallbackUrls sup targetForUrl
           if let .error pErr := validateRemoteBackendAndProxy backend proxyBase then
             abortIdem
             return .ok (mkJson (remoteDispatchHttpStatus pErr) s!"\{\"error\":{jsonEscape pErr}}")

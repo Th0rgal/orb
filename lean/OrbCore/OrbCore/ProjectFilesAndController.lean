@@ -315,8 +315,7 @@ def getProjectGrantJVal (store : CoreStore) (scopedSlug clientSlug : String) : I
       let parVal : JVal := match (cell r 2).trimAscii.toString.toNat? with
         | some n => JVal.nat n
         | none => .null
-      return .obj #[
-        ("slug", .str clientSlug),
+      let grantFields : Array (String × JVal) := #[
         ("merge_authority", optStrJVal (cell r 0)),
         ("budget_per_tick", optStrJVal (cell r 1)),
         ("parallel_missions", parVal),
@@ -326,9 +325,11 @@ def getProjectGrantJVal (store : CoreStore) (scopedSlug clientSlug : String) : I
         ("autonomy_level", optStrJVal (cell r 6)),
         ("updated_at", .str (cell r 7))
       ]
+      return .obj (#[("slug", .str clientSlug), ("grant", .obj grantFields)] ++ grantFields)
     else
       return .obj #[
         ("slug", .str clientSlug),
+        ("grant", .null),
         ("merge_authority", .null),
         ("budget_per_tick", .null),
         ("parallel_missions", .null),
@@ -339,7 +340,7 @@ def getProjectGrantJVal (store : CoreStore) (scopedSlug clientSlug : String) : I
         ("updated_at", .str "")
       ]
   | .error _ =>
-    return .obj #[("slug", .str clientSlug)]
+    return .obj #[("slug", .str clientSlug), ("grant", .null)]
 
 def upsertProjectGrantJVal (store : CoreStore) (scopedSlug clientSlug : String) (jv : JVal) (nowIso : String)
     (extraAllowed : Array String := #[]) : IO (Except String JVal) := do

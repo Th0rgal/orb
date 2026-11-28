@@ -1395,13 +1395,17 @@ def dispatchMcpToolCall
       | .ok _ => pure ()
     if let .error hErr := validateRemoteHarness backend then
       return ← failReservedOrErr store claims callerUserId toolName idemKeyTop "unsupported" hErr nowIso
-    if let some sup := remoteSup? then
-      let (_, proxyBase) ← resolveRemoteCallbackUrls sup (requestedRn?.getD "")
-      if let .error pErr := validateRemoteBackendAndProxy backend proxyBase then
-        return ← failReservedOrErr store claims callerUserId toolName idemKeyTop "invalid_arguments" pErr nowIso
-      if !prompt.isEmpty then
-        if let .error pErr := validateRemoteLaunchPlan backend prompt proxyBase then
+    let isExplicitConcreteRn := match requestedRn? with
+      | some rn => rn.toLower != "auto" && !rn.toLower.startsWith "auto:"
+      | none => false
+    if autoManaged || isExplicitConcreteRn then
+      if let some sup := remoteSup? then
+        let (_, proxyBase) ← resolveRemoteCallbackUrls sup (requestedRn?.getD "")
+        if let .error pErr := validateRemoteBackendAndProxy backend proxyBase then
           return ← failReservedOrErr store claims callerUserId toolName idemKeyTop "invalid_arguments" pErr nowIso
+        if !prompt.isEmpty then
+          if let .error pErr := validateRemoteLaunchPlan backend prompt proxyBase then
+            return ← failReservedOrErr store claims callerUserId toolName idemKeyTop "invalid_arguments" pErr nowIso
     -- `auto-managed[:size]` rents one machine for this child through the shared spawn
     -- path. Nothing is rented when validation, admission or the snapshot lookup fails.
     let (explicitRn?, rentedMachineId, reused?, providerChoice) ← if !autoManaged
@@ -1541,6 +1545,22 @@ def dispatchMcpToolCall
     if !prompt.isEmpty && (remoteSup?.isNone || inheritedRn?.isNone) then
       releaseRented
       return ← settleReservedMcpAction store claims callerUserId toolName idemKeyTop "failed" "no execution node is available" nowIso "no_execution_placement"
+    -- Re-check remote backend/proxy preconditions once `inheritedRn?` / `"auto"` resolves to a concrete node.
+    if let (some sup, some rawTarget) := (remoteSup?, inheritedRn?) then
+      let concreteTarget ←
+        if rawTarget.toLower == "auto" || rawTarget.toLower.startsWith "auto:" then
+          match ← resolveConcreteRemoteTargetNode mc? rawTarget (if parentMid.isEmpty then none else some (store, parentMid)) with
+          | .ok c => pure c
+          | .error _ => pure rawTarget
+        else pure rawTarget
+      let (_, proxyBase) ← resolveRemoteCallbackUrls sup concreteTarget
+      if let .error pErr := validateRemoteBackendAndProxy backend proxyBase then
+        releaseRented
+        return ← settleReservedMcpAction store claims callerUserId toolName idemKeyTop "failed" pErr nowIso "invalid_arguments"
+      if !prompt.isEmpty then
+        if let .error pErr := validateRemoteLaunchPlan backend prompt proxyBase then
+          releaseRented
+          return ← settleReservedMcpAction store claims callerUserId toolName idemKeyTop "failed" pErr nowIso "invalid_arguments"
     let mid ← newUuidV4
     -- The model name the turn is launched with. Empty means the harness's own default.
     let sentModel := if backend == "opencode" && modelOv.isEmpty then "builtin/smart" else modelOv
