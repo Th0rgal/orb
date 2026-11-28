@@ -25,7 +25,7 @@ namespace LeanUI.Widgets
       cluster := idx
       xAdvance := charAdv
     }
-  { glyphs := glyphs, style := style, allowBreakAfter := false, hardBreakAfter := false }
+  { glyphs := glyphs, style := style, allowBreakAfter := false, hardBreakAfter := false, isSynthetic := true }
 
 /-- Specification for a labeled form `Field`. -/
 structure FieldSpec where

@@ -75,33 +75,39 @@ uint8_t lean_ui_same_rows(b_lean_obj_arg a, b_lean_obj_arg b, size_t off,
 typedef uint64_t (*fn6_t)(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 
 static double icon_coord(const uint8_t *p) { return (int)p[0]+256*(int)p[1]-128; }
-
-/* Match rasterizeIconReference: 16 pixel-center samples, round segment
- * endpoints, and the same floating-point operations (no fused multiply-add). */
-lean_obj_res lean_ui_icon_mask(b_lean_obj_arg segments, size_t size) {
+static int seg_near(const uint8_t *q, double xlo, double xhi, double lo, double hi, double c) {
+  double ax=icon_coord(q), ay=icon_coord(q+2), bx=icon_coord(q+4), by=icon_coord(q+6);
+  return (ax<bx?ax:bx)-c<=xhi && (ax>bx?ax:bx)+c>=xlo && (ay<by?ay:by)-c<=hi && (ay>by?ay:by)+c>=lo;
+}
+/* Match rasterizeIconReference: 16 pixel-center samples, arbitrary stroke_tenths, bounded w*h. */
+lean_obj_res lean_ui_icon_mask(b_lean_obj_arg segments, size_t w, size_t h, uint32_t st) {
 #ifdef __clang__
 #pragma STDC FP_CONTRACT OFF
 #endif
-  if (size > 1024) return lean_alloc_sarray(1,0,0);
-  lean_obj_res out = lean_alloc_sarray(1,size*size,size*size);
-  const uint8_t *p = lean_sarray_cptr(segments);
-  size_t n = lean_sarray_size(segments)/8;
-  for (size_t y=0; y<size; ++y) for (size_t x=0; x<size; ++x) {
-    unsigned coverage = 0;
-    for (unsigned sy=0; sy<4; ++sy) for (unsigned sx=0; sx<4; ++sx) {
-      double px=(x+(sx+0.5)/4)*160/size, py=(y+(sy+0.5)/4)*160/size;
-      for (size_t j=0; j<n; ++j) {
-        const uint8_t *q=p+8*j;
-        double ax=icon_coord(q), ay=icon_coord(q+2);
-        double dx=icon_coord(q+4)-ax, dy=icon_coord(q+6)-ay;
-        double vx=px-ax, vy=py-ay, len=dx*dx+dy*dy;
-        double t=len ? (vx*dx+vy*dy)/len : 0;
-        t=t<0 ? 0 : t>1 ? 1 : t;
-        double ex=vx-t*dx, ey=vy-t*dy;
-        if (ex*ex+ey*ey<=30.25) { ++coverage; break; }
+  if (!w || !h || w > 1024 || h > w || st > 10000) return lean_alloc_sarray(1,0,0);
+  lean_obj_res out = lean_alloc_sarray(1,w*h,w*h);
+  uint8_t *dst = lean_sarray_cptr(out); memset(dst, 0, w*h);
+  const uint8_t *p = lean_sarray_cptr(segments); size_t n = lean_sarray_size(segments)/8;
+  double rad = (double)st / 10.0, r2 = rad*rad, c = rad + 0.5, dw = (double)w;
+  for (size_t y=0; y<h; ++y) {
+    double lo = (double)y*160.0/dw, hi = (double)(y+1)*160.0/dw;
+    int any = 0; for (size_t j=0; j<n && !any; ++j) any = seg_near(p+8*j, -1e9, 1e9, lo, hi, c);
+    if (!any) continue;
+    for (size_t x=0; x<w; ++x) {
+      double xlo = (double)x*160.0/dw, xhi = (double)(x+1)*160.0/dw;
+      unsigned cov = 0; for (size_t j=0; j<n && !cov; ++j) cov = seg_near(p+8*j, xlo, xhi, lo, hi, c);
+      if (!cov) continue; else cov = 0;
+      for (unsigned sy=0; sy<4; ++sy) for (unsigned sx=0; sx<4; ++sx) {
+        double px=(x+(sx+0.5)/4)*160/dw, py=(y+(sy+0.5)/4)*160/dw;
+        for (size_t j=0; j<n; ++j) {
+          const uint8_t *q=p+8*j; double ax=icon_coord(q), ay=icon_coord(q+2);
+          double dx=icon_coord(q+4)-ax, dy=icon_coord(q+6)-ay, vx=px-ax, vy=py-ay, len=dx*dx+dy*dy;
+          double t=len ? (vx*dx+vy*dy)/len : 0; t=t<0 ? 0 : t>1 ? 1 : t;
+          double ex=vx-t*dx, ey=vy-t*dy; if (ex*ex+ey*ey<=r2) { ++cov; break; }
+        }
       }
+      dst[y*w+x]=(cov*255+8)/16;
     }
-    lean_sarray_cptr(out)[y*size+x]=(coverage*255+8)/16;
   }
   return out;
 }
@@ -140,41 +146,28 @@ lean_obj_res lean_ui_box_axis(b_lean_obj_arg src, size_t w, size_t h,
 
 lean_obj_res lean_ui_dl_sym(b_lean_obj_arg lib, b_lean_obj_arg sym, lean_obj_arg w) {
   (void)w;
-  const char *lib_str = lean_string_cstr(lib);
-  const char *sym_str = lean_string_cstr(sym);
+  const char *lib_str = lean_string_cstr(lib), *sym_str = lean_string_cstr(sym);
   void *h = dlopen(lib_str[0] ? lib_str : NULL, RTLD_LAZY | RTLD_LOCAL);
-  if (!h)
-    return lean_io_result_mk_ok(lean_box_usize(0));
-  void *fn = dlsym(h, sym_str);
-  return lean_io_result_mk_ok(lean_box_usize((size_t)fn));
+  if (!h) return lean_io_result_mk_ok(lean_box_usize(0));
+  return lean_io_result_mk_ok(lean_box_usize((size_t)dlsym(h, sym_str)));
 }
 
 lean_obj_res lean_ui_call(size_t fn, b_lean_obj_arg args, lean_obj_arg w) {
   (void)w;
-  if (!fn)
-    return io_err("lean_ui_call: null function pointer");
-  if (lean_sarray_size(args) < 48)
-    return io_err("lean_ui_call: args requires 48 bytes (6 * u64)");
-  uint64_t a[6];
-  memcpy(a, lean_sarray_cptr(args), 48);
-  fn6_t f;
-  memcpy(&f, &fn, sizeof(fn));
-  uint64_t res = f(a[0], a[1], a[2], a[3], a[4], a[5]);
-  return lean_io_result_mk_ok(lean_box_uint64(res));
+  if (!fn) return io_err("lean_ui_call: null function pointer");
+  if (lean_sarray_size(args) < 48) return io_err("lean_ui_call: args requires 48 bytes (6 * u64)");
+  uint64_t a[6]; memcpy(a, lean_sarray_cptr(args), 48);
+  fn6_t f; memcpy(&f, &fn, sizeof(fn));
+  return lean_io_result_mk_ok(lean_box_uint64(f(a[0], a[1], a[2], a[3], a[4], a[5])));
 }
 
 lean_obj_res lean_ui_mem_alloc(size_t size, lean_obj_arg w) {
-  (void)w;
-  void *p = calloc(1, size ? size : 1);
-  if (!p)
-    return io_err("lean_ui_mem_alloc: out of memory");
-  return lean_io_result_mk_ok(lean_box_usize((size_t)p));
+  (void)w; void *p = calloc(1, size ? size : 1);
+  return p ? lean_io_result_mk_ok(lean_box_usize((size_t)p)) : io_err("lean_ui_mem_alloc: out of memory");
 }
 
 lean_obj_res lean_ui_mem_free(size_t ptr, lean_obj_arg w) {
-  (void)w;
-  if (ptr)
-    free((void *)ptr);
+  (void)w; if (ptr) free((void *)ptr);
   return lean_io_result_mk_ok(lean_box(0));
 }
 

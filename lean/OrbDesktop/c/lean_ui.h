@@ -90,7 +90,7 @@ lean_obj_res lean_ui_mem_free(size_t ptr, lean_obj_arg w);
 lean_obj_res lean_ui_present_argb(size_t ptr, b_lean_obj_arg bytes, lean_obj_arg w);
 lean_obj_res lean_ui_mem_write(size_t ptr, b_lean_obj_arg bytes, lean_obj_arg w);
 lean_obj_res lean_ui_mem_read(size_t ptr, size_t size, lean_obj_arg w);
-lean_obj_res lean_ui_icon_mask(b_lean_obj_arg segments, size_t size);
+lean_obj_res lean_ui_icon_mask(b_lean_obj_arg segments, size_t w, size_t h, uint32_t stroke_tenths);
 lean_obj_res lean_ui_box_axis(b_lean_obj_arg src, size_t w, size_t h, size_t r, uint8_t horizontal);
 uint8_t lean_ui_same_rows(b_lean_obj_arg a, b_lean_obj_arg b, size_t off,
                           size_t stride, size_t bytes, size_t rows);
@@ -103,6 +103,9 @@ lean_obj_res lean_ui_vk_copy_rect(size_t dst_ptr, size_t dst_cap, b_lean_obj_arg
                                   size_t rows, lean_obj_arg w);
 lean_obj_res lean_ui_vk_read_rect(size_t src_ptr, size_t src_stride, size_t row_bytes,
                                   size_t rows, lean_obj_arg w);
+lean_obj_res lean_ui_present_argb_rect(size_t dst_ptr, size_t dst_cap, b_lean_obj_arg src,
+                                       size_t x, size_t y, size_t w, size_t h,
+                                       size_t stride_px, lean_obj_arg world);
 
 /* ---- lean_ui_text.c : Fontconfig + FreeType 2 + HarfBuzz -------------------------- */
 /* Single-threaded: FT_Face is not thread-safe. */

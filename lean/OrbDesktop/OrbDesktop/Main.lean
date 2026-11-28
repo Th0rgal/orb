@@ -48,6 +48,7 @@ structure DesktopCliConfig where
   gpuReadbackAllPrims : Option System.FilePath := none
   screenOpt : Option ScreenId := none
   benchIterations : Option Nat := none
+  benchLongIterations : Option Nat := none
   benchWsiIterations : Option Nat := none
   verifyRepaint : Bool := false
   selfTest : Bool := false
@@ -73,6 +74,8 @@ def parseDesktopArgs (args : List String) : DesktopCliConfig :=
       loop rest { cfg with screenOpt := ScreenId.parse? scrStr }
     | "--bench" :: nStr :: rest =>
       loop rest { cfg with benchIterations := some (max 1 (nStr.toNat?.getD 20)) }
+    | "--bench-long" :: nStr :: rest =>
+      loop rest { cfg with benchLongIterations := some (max 1 (nStr.toNat?.getD 60)) }
     | "--bench-wsi" :: nStr :: rest =>
       loop rest { cfg with benchWsiIterations := some (max 1 (nStr.toNat?.getD 20)) }
     | "--verify-repaint" :: rest => loop rest { cfg with verifyRepaint := true }
@@ -149,7 +152,7 @@ def shapeDesktopRuns (ac : Text.GlyphAtlasCache) (font : Text.FontHandle)
         curAc := { curAc with resolved := entries, resolvedMap := map' }
     return (curAc, [run])
   else
-    return (ac, [overlaySynthRun style text])
+    return (ac, [{ overlaySynthRun style text with isSynthetic := false }])
 
 /-- Shape words independently so the layout engine can break between them. Keep
 spaces and explicit empty lines; split oversized tokens only between clusters. -/
@@ -186,32 +189,31 @@ def shapeStreamRuns (atlas : Text.GlyphAtlasCache) (font : Text.FontHandle) (sca
   return (ac, runs.toList)
 
 /-- Recursively shape any synthetic `.text` runs in `WidgetNode` into real HarfBuzz/FreeType
-glyph runs so every label, badge, table cell, composer text, modal, and toast renders with `Inter`. -/
-partial def shapeWidgetTree (ac : Text.GlyphAtlasCache) (font mono bold medium semibold : Text.FontHandle) (scale120 : Nat)
-    (node : WidgetNode) : IO (Text.GlyphAtlasCache × WidgetNode) := do
+glyph runs so every label, badge, table cell, composer text, modal, and toast renders with `Inter`.
+When `skipWidgetId` matches a node's `wid` (e.g. an already-shaped `CachedLiveTranscript` subtree),
+that subtree is returned unchanged in O(1) so zero-bitmap glyphs like spaces are never re-shaped. -/
+private partial def shapeWidgetTreeWithSkip (ac : Text.GlyphAtlasCache) (font mono bold medium semibold : Text.FontHandle)
+    (scale120 : Nat) (skipWidgetId : Option WidgetId) (node : WidgetNode) : IO (Text.GlyphAtlasCache × WidgetNode) := do
   match node with
   | .mk wid focusable hitTestable style payload children =>
+    if skipWidgetId.isSome && wid == skipWidgetId then
+      return (ac, node)
     let mut curAc := ac
     let newPayload ←
       match payload with
       | .vectorIcon paths color badgeBg strokeTenths =>
-        let size := scaleSubPx scale120 (if badgeBg.isSome then pxToSub 10 else style.minWidth)
-        -- The stroke radius participates in the atlas key: two icons with the same
-        -- paths but different weights must rasterize into distinct entries.
-        let key : GlyphKey :=
-          { font := 0xFFFF, glyph := mixHash (hash paths) (hash strokeTenths) |>.toNat,
-            sizeSub := size, subpx := 0 }
-        let (ac', entry) :=
-          match curAc.cache.lookup Text.hashGlyphKey key with
-          | some entry => ({ curAc with hits := curAc.hits + 1 }, entry)
-          | none => curAc.insertRasterized key (Text.rasterizeIcon paths size strokeTenths)
+        let w0 := scaleSubPx scale120 (if badgeBg.isSome then pxToSub 10 else style.minWidth)
+        let h0 :=
+          if badgeBg.isSome then w0
+          else if style.minHeight > 0 then scaleSubPx scale120 style.minHeight
+          else w0
+        let (ac', entry) := curAc.getOrRasterizeIcon paths w0 h0 strokeTenths
         curAc := ac'
         pure (WidgetPayload.iconMask entry.page entry.uv color badgeBg)
       | .text lineHeightSub runs caret =>
         let mut shapedRuns : Array InlineRun := #[]
         for r in runs do
-          let isSynth := !r.glyphs.isEmpty && r.glyphs.all (fun g => g.sizePx.1 == 0 && g.sizePx.2 == 0)
-          if isSynth then
+          if r.isSynthetic && !r.glyphs.isEmpty then
             let txt := String.ofList (r.glyphs.map (fun g => Char.ofNat g.glyphId))
             let face := if r.style.monospace then mono else if r.style.weight >= 700 then bold else if r.style.weight >= 600 then semibold else if r.style.weight >= 500 then medium else font
             let (ac', rs) ← shapeDesktopRuns curAc face scale120 r.style txt
@@ -251,10 +253,16 @@ partial def shapeWidgetTree (ac : Text.GlyphAtlasCache) (font mono bold medium s
       | other => pure other
     let mut shapedChildren : Array WidgetNode := #[]
     for c in children do
-      let (ac', c') ← shapeWidgetTree curAc font mono bold medium semibold scale120 c
+      let (ac', c') ← shapeWidgetTreeWithSkip curAc font mono bold medium semibold scale120 skipWidgetId c
       curAc := ac'
       shapedChildren := shapedChildren.push c'
     return (curAc, .mk wid focusable hitTestable style newPayload shapedChildren.toList)
+
+/-- Recursively shape any synthetic `.text` runs in `WidgetNode` into real HarfBuzz/FreeType
+glyph runs so every label, badge, table cell, composer text, modal, and toast renders with `Inter`. -/
+def shapeWidgetTree (ac : Text.GlyphAtlasCache) (font mono bold medium semibold : Text.FontHandle) (scale120 : Nat)
+    (node : WidgetNode) : IO (Text.GlyphAtlasCache × WidgetNode) :=
+  shapeWidgetTreeWithSkip ac font mono bold medium semibold scale120 none node
 
 private partial def scrollRegionsOf : WidgetNode → ComputedBox → List Runtime.ScrollRegion
   | .mk _ _ _ _ payload wChildren, b =>
@@ -273,6 +281,393 @@ private def runningRowRegions (st : DesktopState) (regions : List (EntityId × R
   regions.filter fun (id, _) => st.sidebarRows.any fun row =>
     row.widgetId == id && row.kind == "mission" && liveBadgeKind row.status == "loader"
 
+/-- Collect every focusable `WidgetId` inside `node` in document order so virtualized
+offscreen spacers preserve exact `focusableOrder` parity with `Scene.subtreeFocusOrder`. -/
+private partial def collectWidgetFocusIds (node : WidgetNode) : List WidgetId :=
+  match node with
+  | .mk wid focusable _ _ _ children =>
+    let self := match wid with
+      | some id => if focusable then [id] else []
+      | none => []
+    self ++ children.flatMap collectWidgetFocusIds
+
+/-- Mask backticks and tildes on interior lines of `` ```mermaid ... ``` `` blocks (1:1 ASCII byte
+replacement, preserving exact UTF-8 byte offsets) so `Orb.Stream.committedLen` stays strictly in
+phase with `OrbDesktop.splitMermaidFences` even when a Mermaid diagram contains `>= 4` backticks. -/
+def maskMermaidInteriorForCommit (s : String) : String := Id.run do
+  let mut out : Array String := #[]
+  let mut inMermaid := false
+  for line in s.splitOn "\n" do
+    let t := mermaidTrim line
+    if !inMermaid && t.startsWith "```mermaid" then
+      inMermaid := true
+      out := out.push line
+    else if inMermaid && t == "```" then
+      inMermaid := false
+      out := out.push line
+    else if inMermaid then
+      out := out.push ((line.replace "`" "_").replace "~" "_")
+    else
+      out := out.push line
+  return String.intercalate "\n" out.toList
+
+/-- True when `s` ends with BOTH `splitMermaidFences` and `liveProseLines` fences closed, so
+committing `s` can never split a Mermaid diagram or a fenced code block. -/
+def transcriptCommitSafe (s : String) : Bool := Id.run do
+  let mut inMermaid := false
+  let mut inCodeFence := false
+  for line in s.splitOn "\n" do
+    let t := mermaidTrim line
+    if !inMermaid && t.startsWith "```mermaid" then
+      inMermaid := true
+      inCodeFence := false
+    else if inMermaid && t == "```" then
+      inMermaid := false
+      inCodeFence := false
+    else if !inMermaid && t.startsWith "```" then
+      inCodeFence := !inCodeFence
+  return !inMermaid && !inCodeFence
+
+private structure CachedRowEntry where
+  node : WidgetNode
+  height : SubPx
+  focusIds : List WidgetId := []
+  deriving Inhabited
+
+private structure CachedTurnEntry where
+  nextBand : Nat
+  rows : Array CachedRowEntry
+  deriving Inhabited
+
+private structure CachedStreamPrefix where
+  baseBand : Nat := liveDiagramBandBase
+  committedText : String := ""
+  committedBytes : Nat := 0
+  midBand : Nat := liveDiagramBandBase
+  rows : Array CachedRowEntry := #[]
+  deriving Inhabited
+
+private structure CachedPlainStream where
+  width : SubPx := 0
+  color : Color := 0
+  stableText : String := ""
+  stableRuns : List InlineRun := []
+  fullText : String := ""
+  fullRuns : List InlineRun := []
+  deriving Inhabited
+
+private structure TranscriptRenderCache where
+  sessionId : UInt64 := 0
+  atlasGen : UInt64 := 0
+  isDark : Bool := true
+  scale120 : Nat := 120
+  colW : SubPx := 0
+  width : SubPx := 0
+  turns : Std.HashMap (String × Nat) CachedTurnEntry := {}
+  turnKeys : Array (String × Nat) := #[]
+  lineCache : Std.HashMap (Bool × String) (Option CachedRowEntry) := {}
+  lineKeys : Array (Bool × String) := #[]
+  streamPrefix : CachedStreamPrefix := {}
+  plainStream : CachedPlainStream := {}
+  deriving Inhabited
+
+initialize transcriptRenderCacheRef : IO.Ref TranscriptRenderCache ← IO.mkRef {}
+
+private def utf8Slice (bytes : ByteArray) (lo hi : Nat) : String :=
+  if hi ≤ lo || lo ≥ bytes.size then ""
+  else (String.fromUTF8? (bytes.extract lo (min hi bytes.size))).getD ""
+
+/-- Split a single-line string into `(stablePrefixEndingWithSpace, trailingWord)` so that
+`shapeStreamRuns (stable ++ tail) == shapeStreamRuns stable ++ shapeStreamRuns tail`. -/
+private def splitLastSpace (s : String) : String × String :=
+  let bytes := s.toUTF8
+  let rec findSpace : Nat → Option Nat
+    | 0 => none
+    | n + 1 => if bytes.get! n == ' '.toNat.toUInt8 then some (n + 1) else findSpace n
+  match findSpace bytes.size with
+  | some cut => (utf8Slice bytes 0 cut, utf8Slice bytes cut bytes.size)
+  | none => ("", s)
+
+/-- Shape and measure a list of raw transcript rows once so cached rows need neither
+`shapeWidgetTree` nor `measureNode` on subsequent frames. -/
+private def shapeAndMeasureRows (ac : Text.GlyphAtlasCache)
+    (font mono bold medium semibold : Text.FontHandle) (sc : Nat) (colW : SubPx)
+    (rawRows : List WidgetNode) : IO (Text.GlyphAtlasCache × Array CachedRowEntry) := do
+  let mut curAc := ac
+  let mut out : Array CachedRowEntry := #[]
+  for row in rawRows do
+    let (ac', shaped) ← shapeWidgetTree curAc font mono bold medium semibold sc row
+    curAc := ac'
+    let (_, h) := measureNode colW shaped.toLayoutNode
+    out := out.push { node := shaped, height := h, focusIds := collectWidgetFocusIds shaped }
+  return (curAc, out)
+
+/-- Shape a multi-line non-Mermaid open stream tail using a bounded per-line cache so even
+long unclosed code fences shape only changed lines in O(1) per frame. -/
+private def shapeOpenTailLinesCached (cache : TranscriptRenderCache) (ac : Text.GlyphAtlasCache)
+    (font mono bold medium semibold : Text.FontHandle) (sc : Nat) (theme : Theme)
+    (colW width : SubPx) (tailStr : String) :
+    IO (TranscriptRenderCache × Text.GlyphAtlasCache × Array CachedRowEntry) := do
+  let mut curCache := cache
+  let mut curAc := ac
+  let mut out : Array CachedRowEntry := #[]
+  let mut inFence := false
+  for line in tailStr.splitOn "\n" do
+    let t := mermaidTrim line
+    if t.startsWith "```" then
+      inFence := !inFence
+    else
+      let lKey := (inFence, line)
+      match curCache.lineCache.get? lKey with
+      | some (some cachedRow) =>
+        out := out.push cachedRow
+      | some none =>
+        pure ()
+      | none =>
+        let rawOpt : Option WidgetNode :=
+          if inFence then some (liveCodeRow theme colW width line)
+          else liveProseLine theme colW width line
+        let entryOpt ← match rawOpt with
+          | none => pure none
+          | some raw =>
+            let (ac', shaped) ← shapeWidgetTree curAc font mono bold medium semibold sc raw
+            curAc := ac'
+            let (_, h) := measureNode colW shaped.toLayoutNode
+            pure (some { node := shaped, height := h, focusIds := collectWidgetFocusIds shaped })
+        let mut lc' := curCache.lineCache.insert lKey entryOpt
+        let mut lk' := curCache.lineKeys.push lKey
+        if lk'.size > 512 then
+          if let some oldKey := lk'[0]? then
+            if oldKey != lKey then lc' := lc'.erase oldKey
+          lk' := lk'.extract 1 lk'.size
+        curCache := { curCache with lineCache := lc', lineKeys := lk' }
+        if let some entry := entryOpt then
+          out := out.push entry
+  return (curCache, curAc, out)
+
+/-- Compute the transcript pane logical width in `SubPx`, matching `Screens.buildDesktopScreen`. -/
+@[inline] private def transcriptPaneWidth (st : DesktopState) (availW : SubPx) : SubPx :=
+  let mainW : SubPx := availW - st.sidebarWidth
+  if st.screen == .missionSplitDiff then pxToSub 688
+  else if st.screen == .missionTranscript && st.sidePanelOpen then
+    mainW - min (pxToSub 480) (mainW / 2)
+  else mainW
+
+/-- Build a virtualized offscreen spacer that preserves exact vertical height AND attaches
+zero-size non-hit-testable focusable placeholders so `rt.focusableOrder` stays scroll-invariant. -/
+private def buildVirtualizedSpacer (colW spH : SubPx) (focusIds : Array WidgetId) : WidgetNode :=
+  let placeholders : List WidgetNode := focusIds.toList.map fun id =>
+    WidgetNode.mk (some id) true false (BoxStyle.row 0 |>.withFixedSize 0 0) .container []
+  WidgetNode.box (BoxStyle.col 0 |>.withFixedSize colW spH) placeholders
+
+/-- Build and cache a live transcript's shaped rows using `Orb.Stream.committedLen` for
+the growing streaming reply and exact-height spacer virtualization for offscreen rows. -/
+private def buildCachedLiveTranscript (rt : Runtime.RuntimeState DesktopState)
+    (ac : Text.GlyphAtlasCache) (theme : Theme) (st : DesktopState)
+    (availW availH : SubPx) (hoverRow : Option WidgetId) :
+    IO (Text.GlyphAtlasCache × CachedLiveTranscript) := do
+  let sc := rt.wayland.scale120
+  let transcriptW : SubPx := transcriptPaneWidth st availW
+  let colW : SubPx := min (pxToSub 748) (transcriptW - pxToSub 48)
+  let width : SubPx := transcriptTextWidth transcriptW
+  let bodyH : SubPx := availH - chromeHeaderHeightSub - chromeComposerHeightSub
+  let mut cache ← transcriptRenderCacheRef.get
+  if cache.sessionId != rt.sessionId || cache.atlasGen != ac.generation ||
+      cache.isDark != theme.isDark || cache.scale120 != sc ||
+      cache.colW != colW || cache.width != width then
+    cache := { sessionId := rt.sessionId, atlasGen := ac.generation,
+               isDark := theme.isDark, scale120 := sc, colW, width }
+  let mut curAc := ac
+  let mut allRows : Array CachedRowEntry := #[]
+  -- 1. Optional history banner (depends on hover / loading state)
+  if st.showsHistoryBanner then
+    let pal := theme.palette
+    let label :=
+      if st.historyLoading then "Loading older turns…"
+      else if st.historyLoadError then "Could not load older turns · Retry"
+      else "Load older turns"
+    let hovered := !st.historyLoading && hoverRow == some loadOlderTurnsId
+    let bg := if hovered then pal.plusBg else pal.elevatedSurface
+    let txtColor := if st.historyLoading then pal.textMuted else pal.textSecondary
+    let pillW : SubPx := min colW (pxToSub (if st.historyLoadError then 250 else 170))
+    let pill := WidgetNode.rrect
+      (BoxStyle.row 0 |>.withAlign .center |>.withJustify .center
+        |>.withPadding (Edges.xy (pxToSub 12) 0) |>.withFixedSize pillW transcriptHistoryBannerHeightSub)
+      bg (CornerRadii.uniform (pxToSub 8)) (BorderStyle.uniform theme.borderWidth pal.border)
+      [screenTextLine theme (pillW - pxToSub 24) (pxToSub 18) (pxToSub 12) (pxToSub 18) txtColor label 500]
+      (if st.historyLoading then none else some loadOlderTurnsId)
+    let item := if st.historyLoading then pill else WidgetNode.focusable loadOlderTurnsId pill
+    let bannerRaw := WidgetNode.box
+      (BoxStyle.row 0 |>.withAlign .center |>.withJustify .center |>.withFixedSize colW transcriptHistoryBannerHeightSub)
+      [item]
+    let (ac', bannerShaped) ← shapeWidgetTree curAc rt.primaryFont rt.monoFont rt.boldFont rt.mediumFont rt.semiboldFont sc bannerRaw
+    curAc := ac'
+    allRows := allRows.push {
+      node := bannerShaped, height := transcriptHistoryBannerHeightSub,
+      focusIds := collectWidgetFocusIds bannerShaped }
+  -- 2. Completed live turns (O(1) cache hit per unchanged turn)
+  let mut band := liveDiagramBandBase
+  for turn in st.liveTurns do
+    let tKey := (turn, band)
+    match cache.turns.get? tKey with
+    | some entry =>
+      for r in entry.rows do allRows := allRows.push r
+      band := entry.nextBand
+    | none =>
+      let (rawRows, nextBand) := buildOneLiveTurn theme colW width band turn
+      let (ac', shapedRows) ← shapeAndMeasureRows curAc rt.primaryFont rt.monoFont rt.boldFont rt.mediumFont rt.semiboldFont sc colW rawRows
+      curAc := ac'
+      let entry : CachedTurnEntry := { nextBand, rows := shapedRows }
+      let mut turns' := cache.turns.insert tKey entry
+      let mut keys' := cache.turnKeys.push tKey
+      if keys'.size > 512 then
+        if let some oldKey := keys'[0]? then
+          if oldKey != tKey then turns' := turns'.erase oldKey
+        keys' := keys'.extract 1 keys'.size
+      cache := { cache with turns := turns', turnKeys := keys' }
+      for r in shapedRows do allRows := allRows.push r
+      band := nextBand
+  -- 3. Growing streaming reply using `Orb.Stream.committedLen` + bounded line cache
+  let currentText := streamedText st
+  let streamActive := st.stream.renders > 1 && !currentText.isEmpty
+  let hasMermaid := (splitMermaidFences currentText).any (·.1)
+  if hasMermaid || streamActive then
+    if hasMermaid || currentText.contains "\n" then
+      let bytes := currentText.toUTF8
+      let prev := cache.streamPrefix
+      let canResume := prev.baseBand == band && prev.committedBytes > 0 &&
+        prev.committedBytes ≤ bytes.size && currentText.startsWith prev.committedText
+      let mut sp : CachedStreamPrefix :=
+        if canResume then prev
+        else { baseBand := band, committedText := "", committedBytes := 0, midBand := band, rows := #[] }
+      let suffix := utf8Slice bytes sp.committedBytes bytes.size
+      let deltaCommit := Orb.Stream.committedLen (maskMermaidInteriorForCommit suffix)
+      let newCommit := sp.committedBytes + deltaCommit
+      if deltaCommit > 0 then
+        let newlyCommitted := utf8Slice bytes sp.committedBytes newCommit
+        -- Verify both `splitMermaidFences` and post-Mermaid `liveProseLines` fences are closed.
+        if transcriptCommitSafe newlyCommitted then
+          let (deltaRaw, nextMid) := buildOneLiveTurn theme colW width sp.midBand newlyCommitted
+          let (ac', deltaShaped) ← shapeAndMeasureRows curAc rt.primaryFont rt.monoFont rt.boldFont rt.mediumFont rt.semiboldFont sc colW deltaRaw
+          curAc := ac'
+          sp := { sp with
+            committedText := utf8Slice bytes 0 newCommit
+            committedBytes := newCommit
+            midBand := nextMid
+            rows := sp.rows ++ deltaShaped }
+      cache := { cache with streamPrefix := sp }
+      for r in sp.rows do allRows := allRows.push r
+      let tailStr := utf8Slice bytes sp.committedBytes bytes.size
+      if !tailStr.isEmpty then
+        if hasMermaid then
+          -- Mirror `buildOneLiveTurn` segmentation on `tailStr` so unclosed `` ```mermaid ``
+          -- snippets inside an outer code fence split identically to uncached full repaints,
+          -- while still caching unchanged prose/code lines via `lineCache`.
+          let mut tailBand := sp.midBand
+          for (isFence, seg) in splitMermaidFences tailStr do
+            if isFence then
+              match parseMermaidFlowchart seg with
+              | some spec0 =>
+                let spec := { spec0 with nodes := spec0.nodes.mapIdx fun i n =>
+                  { n with widgetId := some (tailBand + i) } }
+                let (ac', diagShaped) ← shapeAndMeasureRows curAc rt.primaryFont rt.monoFont rt.boldFont rt.mediumFont rt.semiboldFont sc colW
+                  [buildMermaidDiagramWidget theme colW spec]
+                curAc := ac'
+                for r in diagShaped do allRows := allRows.push r
+                tailBand := tailBand + liveDiagramStride
+              | none =>
+                let (cache', ac', segShaped) ← shapeOpenTailLinesCached cache curAc
+                  rt.primaryFont rt.monoFont rt.boldFont rt.mediumFont rt.semiboldFont sc theme colW width seg
+                cache := cache'
+                curAc := ac'
+                for r in segShaped do allRows := allRows.push r
+            else
+              let (cache', ac', segShaped) ← shapeOpenTailLinesCached cache curAc
+                rt.primaryFont rt.monoFont rt.boldFont rt.mediumFont rt.semiboldFont sc theme colW width seg
+              cache := cache'
+              curAc := ac'
+              for r in segShaped do allRows := allRows.push r
+        else
+          let (cache', ac', tailShaped) ← shapeOpenTailLinesCached cache curAc
+            rt.primaryFont rt.monoFont rt.boldFont rt.mediumFont rt.semiboldFont sc theme colW width tailStr
+          cache := cache'
+          curAc := ac'
+          for r in tailShaped do allRows := allRows.push r
+    else if needsMarkdownLite currentText then
+      -- Match `Screens.lean` single-line markdown-lite path (`liveProseLine`, not `liveProseLines`).
+      if cache.streamPrefix.committedBytes > 0 || !cache.streamPrefix.rows.isEmpty then
+        cache := { cache with streamPrefix := {} }
+      if let some raw := liveProseLine theme colW width currentText then
+        let (ac', shapedRows) ← shapeAndMeasureRows curAc rt.primaryFont rt.monoFont rt.boldFont rt.mediumFont rt.semiboldFont sc colW [raw]
+        curAc := ac'
+        for r in shapedRows do allRows := allRows.push r
+    else
+      -- Plain single-line stream text fast path
+      if cache.streamPrefix.committedBytes > 0 || !cache.streamPrefix.rows.isEmpty then
+        cache := { cache with streamPrefix := {} }
+      let (ac', sRuns) ← shapeStreamRuns curAc rt.primaryFont sc
+        { (Theme.bodyText theme) with color := theme.palette.textPrimary } currentText width
+      curAc := ac'
+      let (_, _, height) := wrapInlineRuns width theme.typo.lineBase sRuns
+      let rowH := height + pxToSub 12
+      let rowNode := WidgetNode.box
+        (BoxStyle.row 0 |>.withPadding (Edges.xy (pxToSub 20) (pxToSub 6)) |>.withFixedSize colW rowH)
+        [WidgetNode.text (BoxStyle.row 0 |>.withFixedSize width height) theme.typo.lineBase sRuns (some 900)]
+      allRows := allRows.push { node := rowNode, height := rowH, focusIds := [] }
+  else
+    if cache.streamPrefix.committedBytes > 0 || !cache.streamPrefix.rows.isEmpty then
+      cache := { cache with streamPrefix := {} }
+  -- 4. Optional status row
+  if let some c := st.selectedCard then
+    let statusRaw := screenTextLine theme colW (pxToSub 21) (pxToSub 12) (pxToSub 21)
+      theme.palette.textMuted (conversationStatusLabel c.status)
+    let (ac', statusShaped) ← shapeWidgetTree curAc rt.primaryFont rt.monoFont rt.boldFont rt.mediumFont rt.semiboldFont sc statusRaw
+    curAc := ac'
+    allRows := allRows.push { node := statusShaped, height := pxToSub 21, focusIds := [] }
+  transcriptRenderCacheRef.set cache
+  -- 5. Exact total height + viewport spacer virtualization (bit-exact visible coordinates & focus order)
+  let gap := transcriptColumnGapSub
+  let mut rowsH : SubPx := 0
+  for r in allRows do rowsH := rowsH + r.height
+  let gapsH : SubPx := if allRows.size > 1 then (allRows.size - 1) * gap else 0
+  let contentH : SubPx := pxToSub 3 + rowsH + gapsH
+  let offset := (st.scroll.onLayout contentH bodyH).topSub
+  let overscan := pxToSub 200
+  let visTop := if offset > overscan then offset - overscan else 0
+  let visBot := offset + bodyH + overscan
+  let mut y : SubPx := pxToSub 3
+  let mut prefixCount : Nat := 0
+  let mut prefixRowsH : SubPx := 0
+  let mut prefixFocusIds : Array WidgetId := #[]
+  let mut visibleNodes : Array WidgetNode := #[]
+  let mut suffixCount : Nat := 0
+  let mut suffixRowsH : SubPx := 0
+  let mut suffixFocusIds : Array WidgetId := #[]
+  let mut inVisible := false
+  for r in allRows do
+    let yEnd := y + r.height
+    if !inVisible && yEnd < visTop then
+      prefixCount := prefixCount + 1
+      prefixRowsH := prefixRowsH + r.height
+      for fid in r.focusIds do prefixFocusIds := prefixFocusIds.push fid
+    else if y > visBot then
+      suffixCount := suffixCount + 1
+      suffixRowsH := suffixRowsH + r.height
+      for fid in r.focusIds do suffixFocusIds := suffixFocusIds.push fid
+    else
+      inVisible := true
+      visibleNodes := visibleNodes.push r.node
+    y := yEnd + gap
+  let mut outRows : Array WidgetNode := #[]
+  if prefixCount > 0 then
+    let spH := prefixRowsH + (prefixCount - 1) * gap
+    outRows := outRows.push (buildVirtualizedSpacer colW spH prefixFocusIds)
+  for n in visibleNodes do outRows := outRows.push n
+  if suffixCount > 0 then
+    let spH := suffixRowsH + (suffixCount - 1) * gap
+    outRows := outRows.push (buildVirtualizedSpacer colW spH suffixFocusIds)
+  return (curAc, { rows := outRows.toList, contentH })
+
 /-- Render one frame of `DesktopState` via `OrbDesktop.buildDesktopScreen`, `Layout.layoutNode`,
 `Scene.buildSceneFromLayout`, and HarfBuzz/FreeType glyph shaping (`shapeDesktopRuns` + `Text.layoutTextRun`). -/
 def renderDesktopView (rt : Runtime.RuntimeState DesktopState) :
@@ -285,37 +680,103 @@ def renderDesktopView (rt : Runtime.RuntimeState DesktopState) :
   let (availW, availH) := rt.wayland.logicalSubSize
   let profile := (← IO.getEnv "ORB_U7_PROFILE") == some "1"
   let t0 ← IO.monoNanosNow
+  let hoverRow := st.hoverTarget rt.hoveredEntity
 
   let (ac1, hdrRuns) ←
     shapeDesktopRuns rt.atlas.beginUploads rt.primaryFont sc (chromeTitleStyle theme)
       st.headerTitle
-  let (ac2, codeRuns) ←
-    shapeDesktopRuns ac1 rt.primaryFont sc (Theme.bodyText theme)
-      "Turn #1 (builtin/smart) — Verified pure Lean 4 layout, KaTeX math, and unified diff:"
-  let (ac3, delRuns) ←
-    shapeDesktopRuns ac2 rt.primaryFont sc
-      { (Theme.codeText theme) with color := pal.diffDelText }
-      "- webkit_web_view_load_uri(wv, orb_dev_url);"
-  let (ac4, addRuns) ←
-    shapeDesktopRuns ac3 rt.primaryFont sc
-      { (Theme.codeText theme) with color := pal.diffAddText }
-      "+ buildDesktopScreen st availW availH shapedRuns"
-  let streamText := if st.stream.renders > 1 then streamedText st else ""
-  let (ac5, streamRuns) ←
-    shapeStreamRuns ac4 rt.primaryFont sc
-      { (Theme.bodyText theme) with color := pal.textPrimary }
-      streamText (transcriptTextWidth (availW - st.sidebarWidth))
+  let needDiffRuns := st.screen == .missionSplitDiff || (st.screen == .missionTranscript && st.sidePanelOpen)
+  let (ac2, delRuns) ←
+    if needDiffRuns then
+      shapeDesktopRuns ac1 rt.primaryFont sc
+        { (Theme.codeText theme) with color := pal.diffDelText }
+        "- webkit_web_view_load_uri(wv, orb_dev_url);"
+    else pure (ac1, [])
+  let (ac3, addRuns) ←
+    if needDiffRuns then
+      shapeDesktopRuns ac2 rt.primaryFont sc
+        { (Theme.codeText theme) with color := pal.diffAddText }
+        "+ buildDesktopScreen st availW availH shapedRuns"
+    else pure (ac2, [])
+  let useLiveCache := st.liveData && !rt.forceFullRepaint &&
+    (st.screen == .missionTranscript || st.screen == .missionSplitDiff)
+  let (ac5, streamRuns, cachedLive?) ←
+    if useLiveCache then
+      let (ac', cached) ← buildCachedLiveTranscript rt ac3 theme st availW availH hoverRow
+      pure (ac', [], some cached)
+    else
+      let streamText := if st.stream.renders > 1 then streamedText st else ""
+      let streamW := transcriptTextWidth (transcriptPaneWidth st availW)
+      let plainStyle := { (Theme.bodyText theme) with color := pal.textPrimary }
+      if streamText.isEmpty then
+        pure (ac3, [], none)
+      else if (splitMermaidFences streamText).any (·.1) || streamText.contains "\n" || needsMarkdownLite streamText then
+        -- Non-plain stream text takes the markdown/mermaid path in `Screens.lean`, which only
+        -- checks `!_runs.streamRuns.isEmpty`. Pass a lightweight non-empty marker instead of
+        -- shaping the entire string and discarding the result.
+        pure (ac3, [{ style := plainStyle, glyphs := [] }], none)
+      else if !rt.forceFullRepaint then
+        let cache ← transcriptRenderCacheRef.get
+        let ps := cache.plainStream
+        let sameCtx := cache.sessionId == rt.sessionId && cache.atlasGen == ac3.generation &&
+          cache.isDark == theme.isDark && cache.scale120 == sc &&
+          ps.width == streamW && ps.color == pal.textPrimary
+        if sameCtx && !ps.fullText.isEmpty && streamText == ps.fullText then
+          pure (ac3, ps.fullRuns, none)
+        else if sameCtx && !ps.stableText.isEmpty && streamText.startsWith ps.stableText then
+          let bytes := streamText.toUTF8
+          let suffix := utf8Slice bytes ps.stableText.utf8ByteSize bytes.size
+          let (deltaStable, tailWord) := splitLastSpace suffix
+          let (acA, deltaRuns) ←
+            if deltaStable.isEmpty then pure (ac3, [])
+            else shapeStreamRuns ac3 rt.primaryFont sc plainStyle deltaStable streamW
+          let (acB, tailRuns) ←
+            if tailWord.isEmpty then pure (acA, [])
+            else shapeStreamRuns acA rt.primaryFont sc plainStyle tailWord streamW
+          let nextStableRuns := ps.stableRuns ++ deltaRuns
+          let nextStableText := ps.stableText ++ deltaStable
+          let combined := nextStableRuns ++ tailRuns
+          transcriptRenderCacheRef.set { cache with
+            plainStream := { width := streamW, color := pal.textPrimary,
+                             stableText := nextStableText, stableRuns := nextStableRuns,
+                             fullText := streamText, fullRuns := combined } }
+          pure (acB, combined, none)
+        else
+          let (stable, tailWord) := splitLastSpace streamText
+          let (acA, stableRuns) ←
+            if stable.isEmpty then pure (ac3, [])
+            else shapeStreamRuns ac3 rt.primaryFont sc plainStyle stable streamW
+          let (acB, tailRuns) ←
+            if tailWord.isEmpty then pure (acA, [])
+            else shapeStreamRuns acA rt.primaryFont sc plainStyle tailWord streamW
+          let runs := stableRuns ++ tailRuns
+          let nextPs : CachedPlainStream :=
+            { width := streamW, color := pal.textPrimary,
+              stableText := stable, stableRuns, fullText := streamText, fullRuns := runs }
+          let nextCache :=
+            if cache.sessionId == rt.sessionId && cache.atlasGen == acB.generation &&
+                cache.isDark == theme.isDark && cache.scale120 == sc then
+              { cache with plainStream := nextPs }
+            else
+              { sessionId := rt.sessionId, atlasGen := acB.generation, isDark := theme.isDark, scale120 := sc,
+                plainStream := nextPs }
+          transcriptRenderCacheRef.set nextCache
+          pure (acB, runs, none)
+      else
+        let (ac', runs) ← shapeStreamRuns ac3 rt.primaryFont sc plainStyle streamText streamW
+        pure (ac', runs, none)
 
   let shapedRuns : ShapedScreenRuns := {
     headerTitleRuns := hdrRuns
-    codeSampleRuns := codeRuns
     streamRuns := streamRuns
     diffDelRuns := delRuns
     diffAddRuns := addRuns
+    cachedLiveTranscript := cachedLive?
   }
 
-  let widgetRootRaw := buildDesktopScreen st availW availH shapedRuns liveWindow (st.hoverTarget rt.hoveredEntity)
-  let (ac6, widgetRoot) ← shapeWidgetTree ac5 rt.primaryFont rt.monoFont rt.boldFont rt.mediumFont rt.semiboldFont sc widgetRootRaw
+  let widgetRootRaw := buildDesktopScreen st availW availH shapedRuns liveWindow hoverRow
+  let skipId : Option WidgetId := if cachedLive?.isSome then some transcriptViewportId else none
+  let (ac6, widgetRoot) ← shapeWidgetTreeWithSkip ac5 rt.primaryFont rt.monoFont rt.boldFont rt.mediumFont rt.semiboldFont sc skipId widgetRootRaw
   let layoutRoot := widgetRoot.toLayoutNode
   let t1 ← IO.monoNanosNow
   let rootBox := layoutNode sc rt.focus.owner pal.focusRing 0 0 availW availH layoutRoot
@@ -406,7 +867,12 @@ def desktopReducer (rt : Runtime.RuntimeState DesktopState) :
                 | none => []
               else []
             if let some composer := st.composer.editKey? key mods rows then
-              return ({ st with composer }, if composer == st.composer then none else some viewport)
+              let dmg : Damage :=
+                if composer == st.composer then none
+                else if st.screen == .missionTranscript || st.screen == .missionSplitDiff then
+                  some (composerDamageRect scale viewport st.sidebarWidth)
+                else some viewport
+              return ({ st with composer }, dmg)
     if !st.liveData && st.screen == .settingsGeneral && rt.focus.owner == some settingsApiUrlId then
       match ev with
       | .text text =>
@@ -769,7 +1235,7 @@ def runWsiBench (cfg : Runtime.RuntimeConfig) (iterations : Nat) : IO UInt32 := 
     let rendered0 := rt.framesRendered
     rt ← Runtime.stepFrameWithRegions rt desktopReducer renderDesktopView
     if rt.framesRendered != rendered0 && rt.vulkan.backend == .cpuShm then
-      let wl ← Wayland.present rt.wayland rt.vulkan.framebuffer
+      let wl ← Wayland.present rt.wayland rt.vulkan.framebuffer rt.vulkan.lastUploadedDirtyRect
       rt := { rt with wayland := wl, presentCount := rt.presentCount + 1 }
     rtRef.set rt
     let coldUs := ((← IO.monoNanosNow) - t0) / 1000
@@ -787,7 +1253,10 @@ def runWsiBench (cfg : Runtime.RuntimeConfig) (iterations : Nat) : IO UInt32 := 
       let prevR := rt.framesRendered
       rt ← Runtime.stepFrameWithRegions rt desktopReducer renderDesktopView
       if rt.framesRendered != prevR && rt.vulkan.backend == .cpuShm then
-        let wl ← Wayland.present rt.wayland rt.vulkan.framebuffer
+        let presentDirty : Option Rect :=
+          if rt.vulkan.lastDamagePixels == 0 then some ⟨0, 0, 0, 0⟩
+          else rt.vulkan.lastUploadedDirtyRect
+        let wl ← Wayland.present rt.wayland rt.vulkan.framebuffer presentDirty
         rt := { rt with wayland := wl, presentCount := rt.presentCount + 1 }
       rtRef.set rt
       let f1 ← IO.monoNanosNow
@@ -837,16 +1306,6 @@ def runDesktopBench (cfg : Runtime.RuntimeConfig) (iterations : Nat) (verifyRepa
   let firstCrc := Vulkan.crc32 rt.vulkan.framebuffer
   let fullScenePrims := rt.vulkan.lastDrawnPrims
 
-  let openSt := DesktopState.forScreen .controlEmpty cfg.darkTheme cfg.scale120
-  let openRt0Raw ← Runtime.initRuntime { cfg with headless := true } openSt
-  let openRt0 := { openRt0Raw with focus := openSt.initialFocusState }
-  let mut openRt ← Runtime.stepFrame openRt0 (desktopReducer openRt0) renderDesktopFrame
-  let openStartNs ← IO.monoNanosNow
-  openRt := { openRt.markFullDamage with app := firstSt, focus := firstSt.initialFocusState }
-  openRt ← Runtime.stepFrame openRt (desktopReducer openRt) renderDesktopFrame
-  let transcriptOpenUs : Nat := ((← IO.monoNanosNow) - openStartNs) / 1000
-  Runtime.shutdownRuntime openRt
-
   let mut frameTimesUs : Array Nat := #[]
   let mut partialDrawnPrims : Nat := 0
   let mut allUpdatesCulled : Bool := true
@@ -871,19 +1330,172 @@ def runDesktopBench (cfg : Runtime.RuntimeConfig) (iterations : Nat) (verifyRepa
     if profile then IO.eprintln s!"u7-update {idx} ns={f1-f0} pixels={rt.vulkan.lastDamagePixels} primitives={rt.vulkan.lastDrawnPrims}"
     frameTimesUs := frameTimesUs.push ((f1 - f0) / 1000)
     partialDrawnPrims := rt.vulkan.lastDrawnPrims
-    allUpdatesCulled := allUpdatesCulled && rt.vulkan.lastDrawnPrims > 0 && rt.vulkan.lastDamagePixels < rt.vulkan.width * rt.vulkan.height
+    allUpdatesCulled := allUpdatesCulled && rt.vulkan.lastDrawnPrims < fullScenePrims && rt.vulkan.lastDamagePixels < rt.vulkan.width * rt.vulkan.height
     rt ← Runtime.stepFrame rt (desktopReducer rt) renderDesktopFrame
   let (bw, bh) := (rt.vulkan.width, rt.vulkan.height)
   let fbBytes := rt.vulkan.framebuffer.size
   let partialFrames := rt.vulkan.partialFrames
+  let framesRendered := rt.framesRendered
+  let quiescentSkips := rt.quiescentSkips
+  let iconHits := rt.atlas.iconRasterHits
+  let iconMisses := rt.atlas.iconRasterMisses
+  let maxIconPx := rt.atlas.maxIconRasterPixels
   Runtime.shutdownRuntime rt
+
+  -- Measure transcript open sequentially after releasing `rt` so peak RSS reflects a single runtime.
+  let openSt := DesktopState.forScreen .controlEmpty cfg.darkTheme cfg.scale120
+  let openRt0Raw ← Runtime.initRuntime { cfg with headless := true } openSt
+  let openRt0 := { openRt0Raw with focus := openSt.initialFocusState }
+  let mut openRt ← Runtime.stepFrame openRt0 (desktopReducer openRt0) renderDesktopFrame
+  let openStartNs ← IO.monoNanosNow
+  openRt := { openRt.markFullDamage with app := firstSt, focus := firstSt.initialFocusState }
+  openRt ← Runtime.stepFrame openRt (desktopReducer openRt) renderDesktopFrame
+  let transcriptOpenUs : Nat := ((← IO.monoNanosNow) - openStartNs) / 1000
+  Runtime.shutdownRuntime openRt
+
   let sorted := frameTimesUs.qsort (· < ·)
   let p50Us := sorted[sorted.size / 2]?.getD 0
+  let p95Us := sorted[min ((sorted.size * 95) / 100) (sorted.size - 1)]?.getD 0
   let p99Us := sorted[min ((sorted.size * 99) / 100) (sorted.size - 1)]?.getD 0
   let errors : Nat :=
-    if rt.framesRendered == iters + 1 && rt.quiescentSkips == iters && partialFrames == iters &&
+    if framesRendered == iters + 1 && quiescentSkips == iters && partialFrames == iters &&
         fbBytes == bw * bh * 4 && allUpdatesCulled then 0 else 1
-  IO.println s!"\{\"cold_ms\": {fmtMs coldUs}, \"startup_ms\": {fmtMs coldUs}, \"transcript_open_ms\": {fmtMs transcriptOpenUs}, \"frame_p50_ms\": {fmtMs p50Us}, \"frame_p99_ms\": {fmtMs p99Us}, \"frames_rendered\": {rt.framesRendered}, \"quiescent_skips\": {rt.quiescentSkips}, \"partial_frames\": {partialFrames}, \"full_scene_prims\": {fullScenePrims}, \"partial_drawn_prims\": {partialDrawnPrims}, \"work_units\": {iters}, \"error_count\": {errors}, \"width\": {bw}, \"height\": {bh}, \"scale120\": {cfg.scale120}, \"first_frame_crc32\": {firstCrc.toNat}}"
+  IO.println s!"\{\"cold_ms\": {fmtMs coldUs}, \"startup_ms\": {fmtMs coldUs}, \"transcript_open_ms\": {fmtMs transcriptOpenUs}, \"frame_p50_ms\": {fmtMs p50Us}, \"frame_p95_ms\": {fmtMs p95Us}, \"frame_p99_ms\": {fmtMs p99Us}, \"frames_rendered\": {framesRendered}, \"quiescent_skips\": {quiescentSkips}, \"partial_frames\": {partialFrames}, \"full_scene_prims\": {fullScenePrims}, \"partial_drawn_prims\": {partialDrawnPrims}, \"icon_raster_hits\": {iconHits}, \"icon_raster_misses\": {iconMisses}, \"max_icon_raster_pixels\": {maxIconPx}, \"work_units\": {iters}, \"error_count\": {errors}, \"width\": {bw}, \"height\": {bh}, \"scale120\": {cfg.scale120}, \"first_frame_crc32\": {firstCrc.toNat}}"
+  return (if errors == 0 then 0 else 1)
+
+/-- Build a realistic 120-turn live transcript containing Markdown prose, bullet lists,
+fenced code blocks, and Mermaid flowcharts with decision diamonds and non-adjacent routing lanes. -/
+private def buildLongTranscriptTurns (count : Nat := 120) : List String :=
+  (List.range count).map fun i =>
+    if i % 10 == 9 then
+      s!"## Turn {i + 1}: Architecture & Routing Check\n\n" ++
+      s!"Verified **damage-only** redraws and `Orb.Stream` prefix commit for batch {i + 1}.\n" ++
+      "```mermaid\n" ++
+      "flowchart LR\n" ++
+      "  A[Ingest Delta] --> B{Coalesce?}\n" ++
+      "  B -->|yes| C[Commit Prefix]\n" ++
+      "  C --> D[Partial Paint]\n" ++
+      "  D -->|retry| A\n" ++
+      "```\n" ++
+      "- Non-adjacent return lane (`D -> A`) stays cached in the icon atlas.\n"
+    else if i % 4 == 0 then
+      s!"### Step {i + 1}: Module Audit\n" ++
+      s!"Inspected `module_{i + 1}.lean` and verified **O(1)** lookup on atlas hits.\n" ++
+      "```lean\n" ++
+      s!"def check_{i + 1} (n : Nat) : Nat := n + {i + 1}\n" ++
+      "```\n"
+    else
+      s!"Turn {i + 1}: Verified incremental layout, *bounded* vector-icon lane rasterisation, and [spec](https://orb.dev/u7/{i + 1}).\n" ++
+      s!"- Damage rect stays confined to changed nodes for turn {i + 1}."
+
+/-- Execute `--bench-long <iterations>`: measures startup, transcript-open, and 60 fps streaming
+frame budget while a long 120-turn transcript (with Markdown, code blocks, and Mermaid routing
+lanes) receives coalesced multi-delta bursts into a growing Markdown + Mermaid reply. -/
+def runLongTranscriptBench (cfg : Runtime.RuntimeConfig) (iterations : Nat) (verifyRepaint := false) : IO UInt32 := do
+  let iters := max 1 iterations
+  let turns := buildLongTranscriptTurns 120
+  let mkLongState : DesktopState :=
+    { DesktopState.liveUnavailable cfg.darkTheme cfg.scale120 with
+      screen := .missionTranscript
+      connectionBinding := "u7-bench"
+      openMission := some "m-u7-long"
+      missionCards := [{ (default : MissionSummaryCard) with
+        widgetId := 211, missionId := "m-u7-long", title := "U7 Long Transcript (120 turns)", status := "running" }]
+      liveTurns := turns
+      scroll := { pinned := true, topSub := 0 }
+      stream := { shown := ["Initial long-transcript baseline."], pending := [], renders := 1 }
+      sidebarRows := defaultSidebarRows .missionTranscript }
+  let tStartNs ← IO.monoNanosNow
+  let firstSt := mkLongState
+  let rt0Raw ← Runtime.initRuntime { cfg with headless := true } firstSt
+  let rt0 := { rt0Raw with focus := firstSt.initialFocusState }
+  let mut rt ← Runtime.stepFrame rt0 (desktopReducer rt0) renderDesktopFrame
+  let coldUs : Nat := ((← IO.monoNanosNow) - tStartNs) / 1000
+  let fullScenePrims := rt.vulkan.lastDrawnPrims
+
+  let mut frameTimesUs : Array Nat := #[]
+  let mut partialDrawnPrims : Nat := 0
+  let mut allUpdatesCulled : Bool := true
+  let mut totalDeltas : Nat := 0
+  let rendersBefore := rt.app.stream.renders
+  for idx in [0:iters] do
+    let deltas : List String :=
+      if idx % 15 == 14 then
+        [ s!"\n\n### Stream Section {idx + 1}\n"
+        , "```mermaid\nflowchart LR\n  S[Stream] --> Q{Valid?}\n"
+        , "  Q --> R[Render]\n  R -->|loop| S\n```\n\n"
+        , s!"Paragraph after diagram {idx + 1} with **bold** and `code`." ]
+      else if idx % 5 == 4 then
+        [ s!"\n\nParagraph {idx + 1}: "
+        , "coalesced burst token A, "
+        , "token B with `Orb.Stream.committedLen`, "
+        , "and trailing punctuation.\n" ]
+      else
+        [ s!" delta_{idx}_a"
+        , s!" delta_{idx}_b"
+        , s!" delta_{idx}_c"
+        , " with stable prefix." ]
+    totalDeltas := totalDeltas + deltas.length
+    let (nextSt, streamDamage) :=
+      applyStreamFrame cfg.scale120 rt.viewportDeviceRect rt.app deltas
+    let nextDamage := match streamDamage with
+      | none => rt.damage
+      | some d => Damage.add rt.damage d
+    rt := { rt with app := nextSt, damage := nextDamage }
+    let f0 ← IO.monoNanosNow
+    -- Spot-check bit-exact pixel & focus-order parity against uncached full repaint on key frames
+    let checkFull := verifyRepaint && (idx < 3 || idx % 15 == 14 || idx + 1 == iters)
+    let reference ← if checkFull then do
+      let ref ← Runtime.stepFrame rt.markFullDamage (desktopReducer rt) renderDesktopFrame
+      pure (some (ref.vulkan.framebuffer, ref.vulkan.lastDrawnPrims, ref.focusableOrder))
+      else pure none
+    rt ← Runtime.stepFrame rt (desktopReducer rt) renderDesktopFrame
+    if let some (fb, fullPrims, fullFocusOrder) := reference then
+      if fb != rt.vulkan.framebuffer then
+        throw <| IO.userError s!"long stream frame {idx} differs from uncached full repaint"
+      if rt.focusableOrder != fullFocusOrder then
+        throw <| IO.userError s!"long stream frame {idx} focusableOrder diverged from uncached full repaint"
+      if rt.vulkan.lastDrawnPrims >= fullPrims then
+        throw <| IO.userError s!"long stream frame {idx} did not cull unchanged primitives ({rt.vulkan.lastDrawnPrims} >= {fullPrims})"
+    let f1 ← IO.monoNanosNow
+    frameTimesUs := frameTimesUs.push ((f1 - f0) / 1000)
+    partialDrawnPrims := rt.vulkan.lastDrawnPrims
+    allUpdatesCulled := allUpdatesCulled && rt.vulkan.lastDamagePixels < rt.vulkan.width * rt.vulkan.height
+    -- Quiescent frame must skip rendering completely (0 redraws)
+    rt ← Runtime.stepFrame rt (desktopReducer rt) renderDesktopFrame
+  let (bw, bh) := (rt.vulkan.width, rt.vulkan.height)
+  let fbBytes := rt.vulkan.framebuffer.size
+  let partialFrames := rt.vulkan.partialFrames
+  let framesRendered := rt.framesRendered
+  let quiescentSkips := rt.quiescentSkips
+  let streamRenders := rt.app.stream.renders - rendersBefore
+  let iconHits := rt.atlas.iconRasterHits
+  let iconMisses := rt.atlas.iconRasterMisses
+  let maxIconPx := rt.atlas.maxIconRasterPixels
+  Runtime.shutdownRuntime rt
+
+  -- Measure opening the 120-turn transcript sequentially after releasing `rt` to keep peak RSS bounded
+  let openSt := DesktopState.forScreen .controlEmpty cfg.darkTheme cfg.scale120
+  let openRt0Raw ← Runtime.initRuntime { cfg with headless := true } openSt
+  let openRt0 := { openRt0Raw with focus := openSt.initialFocusState }
+  let mut openRt ← Runtime.stepFrame openRt0 (desktopReducer openRt0) renderDesktopFrame
+  let openStartNs ← IO.monoNanosNow
+  openRt := { openRt.markFullDamage with app := firstSt, focus := firstSt.initialFocusState }
+  openRt ← Runtime.stepFrame openRt (desktopReducer openRt) renderDesktopFrame
+  let transcriptOpenUs : Nat := ((← IO.monoNanosNow) - openStartNs) / 1000
+  Runtime.shutdownRuntime openRt
+
+  let sorted := frameTimesUs.qsort (· < ·)
+  let p50Us := sorted[sorted.size / 2]?.getD 0
+  let p95Us := sorted[min ((sorted.size * 95) / 100) (sorted.size - 1)]?.getD 0
+  let p99Us := sorted[min ((sorted.size * 99) / 100) (sorted.size - 1)]?.getD 0
+  let maxAllowedIconPx := Text.maxIconRasterDim * Text.maxIconRasterDim
+  let errors : Nat :=
+    if framesRendered == iters + 1 && quiescentSkips == iters && partialFrames == iters &&
+        streamRenders == iters && totalDeltas > iters &&
+        maxIconPx ≤ maxAllowedIconPx &&
+        fbBytes == bw * bh * 4 && allUpdatesCulled then 0 else 1
+  IO.println s!"\{\"mode\": \"long_transcript\", \"turns\": {turns.length}, \"cold_ms\": {fmtMs coldUs}, \"startup_ms\": {fmtMs coldUs}, \"transcript_open_ms\": {fmtMs transcriptOpenUs}, \"frame_p50_ms\": {fmtMs p50Us}, \"frame_p95_ms\": {fmtMs p95Us}, \"frame_p99_ms\": {fmtMs p99Us}, \"frames_rendered\": {framesRendered}, \"quiescent_skips\": {quiescentSkips}, \"partial_frames\": {partialFrames}, \"stream_coalesced_deltas\": {totalDeltas}, \"stream_renders\": {streamRenders}, \"icon_raster_hits\": {iconHits}, \"icon_raster_misses\": {iconMisses}, \"max_icon_raster_pixels\": {maxIconPx}, \"full_scene_prims\": {fullScenePrims}, \"partial_drawn_prims\": {partialDrawnPrims}, \"work_units\": {iters}, \"error_count\": {errors}, \"width\": {bw}, \"height\": {bh}, \"scale120\": {cfg.scale120}}"
   return (if errors == 0 then 0 else 1)
 
 /-- Exercise wheel routing and click selection against the hit map of the painted layout. -/
@@ -1112,7 +1724,105 @@ def windowEffectsSelfTest : IO Unit := do
   else if (← IO.getEnv "ORB_REQUIRE_WINDOW_EFFECTS_GPU") == some "1" then
     throw (IO.userError "no Vulkan device for the GPU window-effects readback")
 
-/-- `--self-test`: check live viewports, embedded palette, window effects, and quiescent rendering. -/
+/-- U7 cache-vs-uncached regression checks covering Finding 2 (offscreen `focusableOrder`),
+Finding 3 (single-line opening fence + 4-backtick Mermaid guard), and Finding 4
+(`.missionSplitDiff` / `sidePanelOpen` hover & stream width parity). -/
+private def u7CacheParitySelfTest (cfg : Runtime.RuntimeConfig) : IO Unit := do
+  let checkParity (label : String) (st : DesktopState) (hover? : Option EntityId := none) : IO Unit := do
+    let rt0 ← Runtime.initRuntime { cfg with headless := true, width := 1280, height := 800 } st
+    try
+      let rtBase := { rt0 with focus := st.initialFocusState, hoveredEntity := hover? }
+      let rtCached ← Runtime.stepFrame rtBase (desktopReducer rtBase) renderDesktopFrame
+      let rtUncached ← Runtime.stepFrame rtBase.markFullDamage (desktopReducer rtBase) renderDesktopFrame
+      unless rtCached.vulkan.framebuffer == rtUncached.vulkan.framebuffer do
+        throw <| IO.userError s!"u7 cache parity ({label}): framebuffer differs from uncached full repaint"
+      unless rtCached.focusableOrder == rtUncached.focusableOrder do
+        throw <| IO.userError s!"u7 cache parity ({label}): focusableOrder differs ({repr rtCached.focusableOrder} vs {repr rtUncached.focusableOrder})"
+    finally
+      Runtime.shutdownRuntime rt0
+  let baseLive : DesktopState :=
+    { DesktopState.liveUnavailable cfg.darkTheme cfg.scale120 with
+      screen := .missionTranscript
+      connectionBinding := "u7-parity"
+      openMission := some "m-u7-p"
+      sidebarRows := defaultSidebarRows .missionTranscript }
+  -- 1. Single-line opening fence `"```lean"` (no newline yet)
+  checkParity "single-line-fence"
+    { baseLive with stream := { shown := ["```lean"], pending := [], renders := 2 } }
+  -- 2. Four-backtick line inside a Mermaid fence followed by a blank line and a subsequent code fence
+  let trickyMermaid := "```mermaid\nflowchart LR\n  A --> B\n````\n\n  B --> C\n```"
+  if transcriptCommitSafe "```mermaid\nflowchart LR\n  A --> B\n````\n\n" then
+    throw <| IO.userError "u7 cache parity: transcriptCommitSafe accepted 4-backtick closer"
+  checkParity "mermaid-4tick-fence"
+    { baseLive with stream := { shown := [trickyMermaid], pending := [], renders := 2 } }
+  -- Incremental multi-block stream: 4-backtick Mermaid block followed by a fenced code block with blank line
+  let rtInc0 ← Runtime.initRuntime { cfg with headless := true, width := 1280, height := 800 } baseLive
+  try
+    let mut rtInc := { rtInc0 with focus := baseLive.initialFocusState }
+    for chunk in [ "```mermaid\nflowchart LR\n  A --> B\n````\n\n"
+                 , "  B --> C\n```\n\n```lean\ndef foo := 1\n\n"
+                 , "def bar := 2\n```\n\nDone" ] do
+      let (nextSt, dmg) := applyStreamFrame cfg.scale120 rtInc.viewportDeviceRect rtInc.app [chunk]
+      let rtNext := { rtInc with app := nextSt, damage := dmg.elim rtInc.damage (Damage.add rtInc.damage) }
+      let rtFull ← Runtime.stepFrame rtNext.markFullDamage (desktopReducer rtNext) renderDesktopFrame
+      rtInc ← Runtime.stepFrame rtNext (desktopReducer rtNext) renderDesktopFrame
+      unless rtInc.vulkan.framebuffer == rtFull.vulkan.framebuffer do
+        throw <| IO.userError s!"u7 cache parity (incremental 4-tick mermaid + lean fence): framebuffer mismatch"
+      unless rtInc.focusableOrder == rtFull.focusableOrder do
+        throw <| IO.userError s!"u7 cache parity (incremental 4-tick mermaid + lean fence): focusableOrder mismatch"
+  finally
+    Runtime.shutdownRuntime rtInc0
+  -- 3. Long transcript with history banner + offscreen Mermaid nodes scrolled to bottom
+  checkParity "virtualized-focus-order"
+    { baseLive with
+      historyHasMore := true
+      liveTurns := buildLongTranscriptTurns 40
+      scroll := { pinned := true, topSub := 0 } }
+  -- 4. Split-diff hover on history banner & sidePanelOpen plain stream width
+  checkParity "split-diff-hover-banner"
+    { baseLive with
+      screen := .missionSplitDiff
+      historyHasMore := true
+      liveTurns := ["Turn one"]
+      stream := { shown := ["plain split stream text"], pending := [], renders := 2 } }
+    (some loadOlderTurnsId)
+  checkParity "side-panel-plain-stream"
+    { baseLive with
+      sidePanelOpen := true
+      liveData := false
+      stream := { shown := ["word1 word2 word3 word4 word5 word6 word7 word8 word9 word10"], pending := [], renders := 2 } }
+
+  -- 5. Space-only runs in cached live turns and pre-shaped plain streams (must never be double-shaped)
+  checkParity "cached-space-only-runs"
+    { baseLive with
+      liveTurns :=
+        [ "**bold** `code` and **a** *b*"
+        , "```lean\ndef f :=\n  \n  1\n```" ] }
+  checkParity "plain-stream-leading-double-spaces"
+    { baseLive with
+      stream := { shown := ["  Hello  world"], pending := [], renders := 2 } }
+  checkParity "plain-stream-nonlive-spaces"
+    { baseLive with
+      liveData := false
+      stream := { shown := ["  Hello  world   "], pending := [], renders := 2 } }
+  -- 6. Open outer code fence containing an unclosed ```mermaid snippet after an earlier committed Mermaid diagram
+  let rtSeg0 ← Runtime.initRuntime { cfg with headless := true, width := 1280, height := 800 } baseLive
+  try
+    let mut rtSeg := { rtSeg0 with focus := baseLive.initialFocusState }
+    for chunk in [ "```mermaid\nflowchart LR\n  A --> B\n```\n\n"
+                 , "```markdown\n```mermaid\nflowchart LR\n  C --> D" ] do
+      let (nextSt, dmg) := applyStreamFrame cfg.scale120 rtSeg.viewportDeviceRect rtSeg.app [chunk]
+      let rtNext := { rtSeg with app := nextSt, damage := dmg.elim rtSeg.damage (Damage.add rtSeg.damage) }
+      let rtFull ← Runtime.stepFrame rtNext.markFullDamage (desktopReducer rtNext) renderDesktopFrame
+      rtSeg ← Runtime.stepFrame rtNext (desktopReducer rtNext) renderDesktopFrame
+      unless rtSeg.vulkan.framebuffer == rtFull.vulkan.framebuffer do
+        throw <| IO.userError "u7 cache parity (committed mermaid + unclosed nested mermaid): framebuffer mismatch"
+      unless rtSeg.focusableOrder == rtFull.focusableOrder do
+        throw <| IO.userError "u7 cache parity (committed mermaid + unclosed nested mermaid): focusableOrder mismatch"
+  finally
+    Runtime.shutdownRuntime rtSeg0
+
+/-- `--self-test`: check live viewports, embedded palette, window effects, U7 cache parity, and quiescent rendering. -/
 def runSelfTest (cfg : Runtime.RuntimeConfig) (initSt : DesktopState) : IO UInt32 := do
   unless liveViewportRegression do
     IO.eprintln "orb-desktop self-test: live viewport regression"
@@ -1131,6 +1841,11 @@ def runSelfTest (cfg : Runtime.RuntimeConfig) (initSt : DesktopState) : IO UInt3
     windowEffectsSelfTest
   catch e =>
     IO.eprintln s!"orb-desktop self-test: window effects regression: {e}"
+    return 1
+  try
+    u7CacheParitySelfTest cfg
+  catch e =>
+    IO.eprintln s!"orb-desktop self-test: U7 cache parity regression: {e}"
     return 1
   let rt0Raw ← Runtime.initRuntime { cfg with headless := true } initSt
   let rt0 := { rt0Raw with focus := initSt.initialFocusState }
@@ -1178,6 +1893,8 @@ def main (args : List String) : IO UInt32 := do
   let rcfg := dcfg.runtimeCfg
   if let some iters := dcfg.benchIterations then
     return (← runDesktopBench rcfg iters dcfg.verifyRepaint)
+  if let some longIters := dcfg.benchLongIterations then
+    return (← runLongTranscriptBench rcfg longIters dcfg.verifyRepaint)
   if let some wsiIters := dcfg.benchWsiIterations then
     return (← runWsiBench rcfg wsiIters)
   if let some path := dcfg.headlessGoldenAllPrims then

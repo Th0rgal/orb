@@ -30,6 +30,13 @@ namespace OrbDesktop
 open LeanUI
 open LeanUI.Widgets
 
+/-- Pre-built, pre-shaped, and viewport-virtualized live transcript rows supplied by the native
+incremental renderer (`Orb.Stream.committedLen` + completed-turn cache). -/
+structure CachedLiveTranscript where
+  rows : List WidgetNode
+  contentH : SubPx
+  deriving Repr, Inhabited
+
 /-- Pre-shaped inline text runs optionally supplied by the native HarfBuzz/FreeType shaper. -/
 structure ShapedScreenRuns where
   headerTitleRuns : List InlineRun := []
@@ -38,6 +45,7 @@ structure ShapedScreenRuns where
   streamRuns : List InlineRun := []
   diffDelRuns : List InlineRun := []
   diffAddRuns : List InlineRun := []
+  cachedLiveTranscript : Option CachedLiveTranscript := none
   deriving Repr, Inhabited
 
 /-- Helper for a single line of text with explicit `sizePx`, `lineH`, and `color`. -/
@@ -353,6 +361,15 @@ def buildMissionTranscriptBody (st : DesktopState) (mainW bodyH : SubPx)
   let theme := st.theme
   let pal := theme.palette
   let colW : SubPx := min (pxToSub 748) (mainW - pxToSub 48)
+  match st.liveData, _runs.cachedLiveTranscript with
+  | true, some cached =>
+    let column := WidgetNode.box { BoxStyle.col transcriptColumnGapSub with minWidth := colW, maxWidth := colW } cached.rows
+    let child := WidgetNode.box (BoxStyle.col 0 |>.withAlign .center
+      |>.withPadding (Edges.trbl (pxToSub 3) 0 0 0)) [column]
+    let offset := (st.scroll.onLayout cached.contentH bodyH).topSub
+    WidgetNode.scrollClip (BoxStyle.col 0 |>.withFixedSize mainW bodyH |>.withBg pal.canvas)
+      { offsetY := offset } child (some transcriptViewportId) (hitTestable := false)
+  | _, _ =>
   let turn58 := buildReferenceTurnWidget theme colW 58
   let turn59 := buildReferenceTurnWidget theme colW 59
   let workingRow : WidgetNode :=
@@ -1587,7 +1604,7 @@ def buildDesktopScreen (st : DesktopState) (availW availH : SubPx)
       let leftW : SubPx := pxToSub 688
       let rightW : SubPx := mainW - leftW
       let leftBodyH := splitH - composerH
-      let leftTranscript := buildMissionTranscriptBody st leftW leftBodyH runs
+      let leftTranscript := buildMissionTranscriptBody st leftW leftBodyH runs hoverRow
       let ds := st.draftSettings
       let fixtureUnderLabels : Option (String × String × String × String × String) :=
         some (

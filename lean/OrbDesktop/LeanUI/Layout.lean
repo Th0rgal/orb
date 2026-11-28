@@ -31,6 +31,8 @@ structure InlineRun where
   style : TextStyle := {}
   allowBreakAfter : Bool := true
   hardBreakAfter : Bool := false
+  /-- True when `glyphs` hold placeholder Unicode codepoints (`Char.toNat`) awaiting HarfBuzz shaping. -/
+  isSynthetic : Bool := false
   deriving DecidableEq, Repr, Inhabited
 
 namespace InlineRun

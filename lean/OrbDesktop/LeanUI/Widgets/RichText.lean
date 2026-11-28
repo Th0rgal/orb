@@ -81,7 +81,8 @@ def synthInlineRun (style : TextStyle) (text : String)
   { glyphs := glyphs
     style := style
     allowBreakAfter := allowBreakAfter
-    hardBreakAfter := hardBreakAfter }
+    hardBreakAfter := hardBreakAfter
+    isSynthetic := true }
 
 /-- Map a `SyntaxRole` to its semantic theme color. -/
 @[inline] def syntaxRoleColor (theme : Theme) : SyntaxRole → Color

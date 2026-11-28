@@ -234,7 +234,7 @@ end ComposerBuffer
       isBreakOpportunity := c == ' '
       isHardBreak := c == '\n'
     }
-  { glyphs := glyphs, style := style, allowBreakAfter := true, hardBreakAfter := false }
+  { glyphs := glyphs, style := style, allowBreakAfter := true, hardBreakAfter := false, isSynthetic := true }
 
 /-- Keep explicit line breaks and word boundaries through native font shaping. -/
 private def composerTextRuns (style : TextStyle) (text : String) : List InlineRun := Id.run do

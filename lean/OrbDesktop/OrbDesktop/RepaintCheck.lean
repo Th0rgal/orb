@@ -27,6 +27,103 @@ def verifyRepaintEdges : IO Unit := do
     let paths := [[(-4,2),(90,156),(90,156)],[(160,0),(0,160)]]
     if (Text.rasterizeIcon paths n).pixels != (Text.rasterizeIconReference paths n).pixels then
       throw <| IO.userError "native icon coverage differs from reference"
+  -- Verify rectangular thin-stroke vector icons (Mermaid diamonds & non-adjacent routing lanes)
+  -- match the pure-Lean reference bit-for-bit and stay bounded/cached in the atlas.
+  let lanePaths : List (List (Int × Int)) := [[(1, 0), (1, 1), (159, 1), (159, 0)]]
+  let diamondPaths : List (List (Int × Int)) := [[(80, 0), (160, 24), (80, 47), (0, 24), (80, 0)]]
+  for (ps, w, h, st) in [(diamondPaths, 136, 40, 12), (lanePaths, 542, 8, 4), (lanePaths, 8, 8, 200)] do
+    let fast := Text.rasterizeIcon ps w st h
+    let ref := Text.rasterizeIconReference ps w st h
+    unless fast.width == w && fast.height == h && fast.pixels == ref.pixels do
+      throw <| IO.userError s!"native rectangular icon ({w}x{h} stroke={st}) differs from reference"
+  let (acIcon0, eLane1) := ({} : Text.GlyphAtlasCache).getOrRasterizeIcon lanePaths 1400 16 4
+  let (acIcon1, eLane2) := acIcon0.getOrRasterizeIcon lanePaths 1400 16 4
+  unless eLane1 == eLane2 && eLane1.uv.w == Text.maxIconRasterDim && eLane1.uv.h == 16 &&
+      acIcon1.iconRasterMisses == 1 && acIcon1.iconRasterHits == 1 &&
+      acIcon1.maxIconRasterPixels == Text.maxIconRasterDim * 16 do
+    throw <| IO.userError "bounded vector-icon lane caching or clamping mismatch"
+  -- Scaled CPU `.mask` rendering must map the clamped 1022x16 lane across the full 1400x16
+  -- destination (matching GPU VK_FILTER_NEAREST) so the right stub lands at x≈1390..1399,
+  -- and a tall 8x24 icon clamped to 8x8 must never read unrelated lower atlas shelves.
+  let (laneFb, _) := Vulkan.rasterizeScene 1400 16 0 acIcon1 #[.mask eLane1.page eLane1.uv ⟨0, 0, 1400, 16⟩ 0xFFFFFFFF]
+  let mut rightStubInk := false
+  for x in [1385 : 1400] do
+    if laneFb.get! (x * 4 + 3) > 0 then rightStubInk := true
+  unless rightStubInk do
+    throw <| IO.userError "scaled CPU .mask did not stretch clamped lane stub to right destination edge"
+  let (acTall0, eTall) := ({} : Text.GlyphAtlasCache).getOrRasterizeIcon [[(80, 0), (80, 0)]] 8 24 0
+  -- Place a solid opaque icon on a lower shelf of the same page; tall 8x24 blit must never sample it.
+  let (acTall1, _) := acTall0.getOrRasterizeIcon [[(0, 0), (160, 160)]] 16 16 200
+  let (tallFb, _) := Vulkan.rasterizeScene 8 24 0 acTall1 #[.mask eTall.page eTall.uv ⟨0, 0, 8, 24⟩ 0xFFFFFFFF]
+  for y in [8 : 24] do
+    for x in [0 : 8] do
+      if tallFb.get! ((y * 8 + x) * 4 + 3) > 0 then
+        throw <| IO.userError s!"tall .mask leaked lower atlas shelf pixel at ({x},{y})"
+  -- Negative `dst.x` / `dst.y` on 1:1 `.mask`, scaled `.mask`, and `.glyph` must subtract signed
+  -- coordinates before `.toNat` so top/left-clipped icons & glyphs sample the exact right texel.
+  let mut negPageRgba := Text.AtlasPageBuffer.zeroBytes (8 * 8 * 4)
+  for y in [0 : 8] do
+    for x in [0 : 8] do
+      let idx := (y * 8 + x) * 4
+      let alpha : UInt8 := ((y * 8 + x) * 3 + 10).toUInt8
+      negPageRgba := negPageRgba.set! idx 255 |>.set! (idx + 1) 255 |>.set! (idx + 2) 255 |>.set! (idx + 3) alpha
+  let negAtlas : Text.GlyphAtlasCache :=
+    { pages := #[{ atlas := { width := 8, height := 8 }, rgba := negPageRgba }] }
+  let (m1Fb, _) := Vulkan.rasterizeScene 8 8 0 negAtlas #[.mask 0 ⟨0, 0, 8, 8⟩ ⟨-2, -3, 8, 8⟩ 0xFFFFFFFF]
+  unless m1Fb.get! 3 == ((3 * 8 + 2) * 3 + 10).toUInt8 do
+    throw <| IO.userError s!"negative-dst 1:1 .mask sampled wrong texel alpha: got {m1Fb.get! 3}"
+  let (msFb, _) := Vulkan.rasterizeScene 8 16 0 negAtlas #[.mask 0 ⟨0, 0, 8, 8⟩ ⟨0, -8, 8, 24⟩ 0xFFFFFFFF]
+  -- At py=0, dy = (0 - (-8)) = 8, tyOff = ((2*8+1)*8)/(2*24) = 136/48 = 2 -> texel (0, 2)
+  unless msFb.get! 3 == ((2 * 8 + 0) * 3 + 10).toUInt8 do
+    throw <| IO.userError s!"negative-dst scaled .mask sampled wrong texel alpha: got {msFb.get! 3}"
+  let (gNegFb, _) := Vulkan.rasterizeScene 8 8 0 negAtlas #[.glyph ⟨0, 0, 8, 8⟩ ⟨-1, -2, 8, 8⟩ 0xFFFFFFFF false 0]
+  unless gNegFb.get! 3 == ((2 * 8 + 1) * 3 + 10).toUInt8 do
+    throw <| IO.userError s!"negative-dst .glyph sampled wrong texel alpha: got {gNegFb.get! 3}"
+  -- Mixed externally-populated `ac.cache` + `insertRasterized` must retain pre-existing cache keys.
+  let preKey : GlyphKey := { font := 1, glyph := 42, sizeSub := 12, subpx := 0 }
+  let preEntry : Text.AtlasGlyphEntry := { page := 0, uv := ⟨1, 2, 3, 4⟩, bearingX := 0, bearingY := 0, isColor := false }
+  let mixed0 : Text.GlyphAtlasCache := { cache := ({} : HashCache Text.AtlasGlyphEntry).insert Text.hashGlyphKey preKey preEntry }
+  let otherKey : GlyphKey := { font := 1, glyph := 99, sizeSub := 12, subpx := 0 }
+  let (mixed1, _) := mixed0.insertRasterized otherKey { width := 0, height := 0, bearingX := 0, bearingY := 0, format := 1, isColor := false, pixels := ByteArray.empty }
+  unless mixed1.lookupGlyph preKey == some preEntry && (mixed1.lookupGlyph otherKey).isSome do
+    throw <| IO.userError "GlyphAtlasCache.lookupGlyph dropped externally-populated cache entry after insertRasterized"
+  -- Verify dirty-rect ARGB presentation matches full-frame conversion on the updated sub-rect
+  -- without disturbing pixels outside the sub-rect, and check double-buffer dirty-rect tracking.
+  let (pw, ph) := (8, 6)
+  let srcFb := ByteArray.mk ((Array.range (pw * ph * 4)).map fun i => ((i * 37 + 11) % 256).toUInt8)
+  let cap := pw * ph * 4
+  let ptrFull ← FFI.memAlloc cap.toUSize
+  let ptrPart ← FFI.memAlloc cap.toUSize
+  if ptrFull == 0 || ptrPart == 0 then
+    if ptrFull != 0 then FFI.memFree ptrFull
+    if ptrPart != 0 then FFI.memFree ptrPart
+    throw <| IO.userError "cannot allocate presentArgbRect test buffers"
+  try
+    FFI.presentArgb ptrFull srcFb
+    FFI.presentArgbRect ptrPart cap.toUSize srcFb 2 1 4 3 pw.toUSize
+    let fullBytes ← FFI.memRead ptrFull cap.toUSize
+    let partBytes ← FFI.memRead ptrPart cap.toUSize
+    for y in [0:ph] do
+      for x in [0:pw] do
+        let off := (y * pw + x) * 4
+        let inside := x >= 2 && x < 6 && y >= 1 && y < 4
+        let gotPx := partBytes.extract off (off + 4)
+        let expPx := if inside then fullBytes.extract off (off + 4) else ⟨#[0, 0, 0, 0]⟩
+        unless gotPx == expPx do
+          throw <| IO.userError s!"presentArgbRect mismatch at ({x},{y}) inside={inside}"
+  finally
+    FFI.memFree ptrFull
+    FFI.memFree ptrPart
+  let shmVp : Rect := ⟨0, 0, 100, 80⟩
+  let r1 : Rect := ⟨10, 10, 20, 15⟩
+  let r2 : Rect := ⟨50, 40, 15, 10⟩
+  let (c1, d1, a1, b1) := Wayland.computeShmDamageStep shmVp false (some shmVp) (some shmVp) (some r1)
+  let (c2, d2, a2, b2) := Wayland.computeShmDamageStep shmVp true a1 b1 (some r2)
+  let (c3, d3, _, _) := Wayland.computeShmDamageStep shmVp false a2 b2 (some r1)
+  let expUnion : Rect := ⟨10, 10, 55, 40⟩
+  unless c1 == shmVp && d1 == r1 && c2 == shmVp && d2 == r2 &&
+      c3 == expUnion && d3 == r1 do
+    throw <| IO.userError s!"computeShmDamageStep mismatch: c3={repr c3} d3={repr d3}"
   for (w,h) in [(1,5),(7,1),(9,4)] do
     let pixels := ByteArray.mk ((Array.range (w*h*4)).map fun i => ((i*i+13*i)%251).toUInt8)
     for r in [0,1,2,12] do

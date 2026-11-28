@@ -118,7 +118,7 @@ def decodeRasterizedGlyph (b : ByteArray) : RasterizedGlyph :=
       { width := w, height := h, bearingX := bx, bearingY := by_,
         format := if isC17 then 4 else 1, isColor := isC17, pixels := b.extract 17 b.size }
 
-/-- Deterministic 64-bit mixing hash for `GlyphKey` used with `Kernel.HashCache`. -/
+/-- Deterministic 64-bit mixing hash for `GlyphKey` used with `Kernel.HashCache` and `Std.HashMap`. -/
 @[inline] def hashGlyphKey (k : GlyphKey) : UInt64 :=
   let h0 : UInt64 := 0x9e3779b97f4a7c15
   let h1 := (h0 ^^^ k.font.toUInt64) * 0xbf58476d1ce4e5b9
@@ -126,6 +126,9 @@ def decodeRasterizedGlyph (b : ByteArray) : RasterizedGlyph :=
   let h3 := (h2 ^^^ k.sizeSub.toUInt64) * 0xbf58476d1ce4e5b9
   let h4 := (h3 ^^^ (k.subpx &&& 3).toUInt64) * 0x94d049bb133111eb
   h4 ^^^ (h4 >>> 31)
+
+instance : Hashable GlyphKey where
+  hash := hashGlyphKey
 
 /-- Cached atlas entry for a rasterized glyph. -/
 structure AtlasGlyphEntry where
@@ -212,13 +215,29 @@ structure ShapeCacheEntry where
   features : String
   glyphs : Array ShapedGlyph
 
+/-- Maximum single-dimension pixel extent of any vector-icon / diagram-lane raster (fits one
+1024×1024 GPU atlas page with `pad = 1` on both axes). -/
+def maxIconRasterDim : Nat := 1022
+
+/-- Bound a vector-icon or lane raster `(w, h)` to fit inside a single atlas page with `1 ≤ h ≤ w ≤ maxIconRasterDim`. -/
+@[inline] def boundIconRasterSize (w h : Nat) : Nat × Nat :=
+  let bw := min maxIconRasterDim (max 1 w)
+  let bh := min bw (max 1 (if h == 0 then bw else h))
+  (bw, bh)
+
 /-- Supersampled round-cap/round-join SVG strokes, shared by desktop chrome icons.
 The source view box is 16px; path coordinates are tenths of a logical pixel.
 `strokeTenths` is the stroke radius in tenths of a view unit (55 → the historical
 5.5-unit radius); edge routing and decision outlines pass a thinner radius so their
-rendered stroke matches the 2px widget borders instead of stretching with the raster. -/
+rendered stroke matches the 2px widget border weight instead of stretching with the raster.
+`rasterHeight` bounds vertical rasterisation to the widget's actual visible height while
+keeping the 160-unit view box scaled by `size` (1:1 aspect ratio). -/
 def rasterizeIconReference (paths : List (List (Int × Int))) (size : Nat)
-    (strokeTenths : Nat := 55) : RasterizedGlyph := Id.run do
+    (strokeTenths : Nat := 55) (rasterHeight : Nat := size) : RasterizedGlyph := Id.run do
+  let h := min size rasterHeight
+  if size == 0 || h == 0 then
+    return { width := size, height := h, bearingX := 0, bearingY := 0,
+             format := 1, isColor := false, pixels := ByteArray.empty }
   let radius := strokeTenths.toFloat / 10
   let r2 := radius * radius
   let cull := radius + 0.5
@@ -226,30 +245,41 @@ def rasterizeIconReference (paths : List (List (Int × Int))) (size : Nat)
     let dx := (bx - ax).toFloat
     let dy := (by_ - ay).toFloat
     (ax.toFloat, ay.toFloat, dx, dy, dx * dx + dy * dy,
-      (min ay by_).toFloat - cull, (max ay by_).toFloat + cull)
-  let mut pixels := ByteArray.empty
-  for y in [0:size] do
+      (min ay by_).toFloat - cull, (max ay by_).toFloat + cull,
+      (min ax bx).toFloat - cull, (max ax bx).toFloat + cull)
+  let zeroRow := AtlasPageBuffer.zeroBytes size
+  let mut pixels := ByteArray.emptyWithCapacity (size * h)
+  for y in [0:h] do
     -- Exclude segments outside this scanline's expanded interval before running
     -- the 16 sample tests.
     let lo := y.toFloat * 160 / size.toFloat
     let hi := (y + 1).toFloat * 160 / size.toFloat
-    let active := segments.filter fun (_, _, _, _, _, ymin, ymax) => ymin ≤ hi && ymax ≥ lo
-    for x in [0:size] do
-      let mut coverage := 0
-      for sy in [0:4] do
-        for sx in [0:4] do
-          let px := (x.toFloat + (sx.toFloat + 0.5) / 4) * 160 / size.toFloat
-          let py := (y.toFloat + (sy.toFloat + 0.5) / 4) * 160 / size.toFloat
-          let hit := active.any fun (ax, ay, dx, dy, len, _, _) =>
-            let vx := px - ax
-            let vy := py - ay
-            let t := if len == 0 then 0 else max 0 (min 1 ((vx * dx + vy * dy) / len))
-            let ex := vx - t * dx
-            let ey := vy - t * dy
-            ex * ex + ey * ey <= r2
-          if hit then coverage := coverage + 1
-      pixels := pixels.push ((coverage * 255 + 8) / 16).toUInt8
-  return { width := size, height := size, bearingX := 0, bearingY := 0,
+    let active := segments.filter fun (_, _, _, _, _, ymin, ymax, _, _) => ymin ≤ hi && ymax ≥ lo
+    if active.isEmpty then
+      pixels := pixels ++ zeroRow
+    else
+      for x in [0:size] do
+        let xlo := x.toFloat * 160 / size.toFloat
+        let xhi := (x + 1).toFloat * 160 / size.toFloat
+        let activeX := active.filter fun (_, _, _, _, _, _, _, xmin, xmax) => xmin ≤ xhi && xmax ≥ xlo
+        if activeX.isEmpty then
+          pixels := pixels.push 0
+        else
+          let mut coverage := 0
+          for sy in [0:4] do
+            for sx in [0:4] do
+              let px := (x.toFloat + (sx.toFloat + 0.5) / 4) * 160 / size.toFloat
+              let py := (y.toFloat + (sy.toFloat + 0.5) / 4) * 160 / size.toFloat
+              let hit := activeX.any fun (ax, ay, dx, dy, len, _, _, _, _) =>
+                let vx := px - ax
+                let vy := py - ay
+                let t := if len == 0 then 0 else max 0 (min 1 ((vx * dx + vy * dy) / len))
+                let ex := vx - t * dx
+                let ey := vy - t * dy
+                ex * ex + ey * ey <= r2
+              if hit then coverage := coverage + 1
+          pixels := pixels.push ((coverage * 255 + 8) / 16).toUInt8
+  return { width := size, height := h, bearingX := 0, bearingY := 0,
            format := 1, isColor := false, pixels := pixels }
 
 /-- Stroke radius (tenths of a view unit) whose rendered stroke on a raster drawn 1:1
@@ -259,20 +289,25 @@ def iconStrokeTenthsForPxWidth (rasterW : Nat) : Nat :=
   max 4 ((1600 + rasterW / 2) / max 1 rasterW)
 
 def rasterizeIcon (paths : List (List (Int × Int))) (size : Nat)
-    (strokeTenths : Nat := 55) : RasterizedGlyph :=
-  if strokeTenths == 55 then Id.run do
-    if size > 1024 then return rasterizeIconReference paths size
-    let mut segments := ByteArray.empty
-    for path in paths do
-      for ((ax,ay),(bx,by_)) in path.zip (path.drop 1) do
-        for coord in [ax,ay,bx,by_] do
-          if coord < -128 || coord > 255 then return rasterizeIconReference paths size
-          -- Store signed coordinates losslessly in two little-endian bytes.
-          let biased := (coord + 128).toNat
-          segments := segments.push biased.toUInt8 |>.push (biased / 256).toUInt8
-    return { width := size, height := size, bearingX := 0, bearingY := 0,
-             format := 1, isColor := false, pixels := FFI.iconMask segments size.toUSize }
-  else rasterizeIconReference paths size strokeTenths
+    (strokeTenths : Nat := 55) (rasterHeight : Nat := size) : RasterizedGlyph := Id.run do
+  let h := min size rasterHeight
+  if size == 0 || h == 0 then
+    return { width := size, height := h, bearingX := 0, bearingY := 0,
+             format := 1, isColor := false, pixels := ByteArray.empty }
+  if size > 1024 || h > size || strokeTenths > 10000 then
+    return rasterizeIconReference paths size strokeTenths h
+  let mut segments := ByteArray.empty
+  for path in paths do
+    for ((ax, ay), (bx, by_)) in path.zip (path.drop 1) do
+      for coord in [ax, ay, bx, by_] do
+        if coord < -128 || coord > 255 then
+          return rasterizeIconReference paths size strokeTenths h
+        -- Store signed coordinates losslessly in two little-endian bytes.
+        let biased := (coord + 128).toNat
+        segments := segments.push biased.toUInt8 |>.push (biased / 256).toUInt8
+  return { width := size, height := h, bearingX := 0, bearingY := 0,
+           format := 1, isColor := false,
+           pixels := FFI.iconMask segments size.toUSize h.toUSize strokeTenths.toUInt32 }
 
 /-- Maximum UTF-8 byte length eligible for short-label shaping/resolved-run caching.
 Longer strings (such as growing streaming replies) bypass caching to prevent thrashing. -/
@@ -318,6 +353,12 @@ structure GlyphAtlasCache where
   /-- Monotonic atlas generation incremented on `resetAll` (triggers GPU `vkCmdClearColorImage`). -/
   generation : UInt64 := 0
   cache : HashCache AtlasGlyphEntry := {}
+  /-- O(1) index mirroring `cache` so glyph and vector-icon lookups never scan linearly. -/
+  cacheMap : Std.HashMap GlyphKey AtlasGlyphEntry := {}
+  /-- `true` once every entry in `cache` is known to be indexed in `cacheMap` (set on first
+  insert into an empty `cache` and on `resetAll`). When `false` (externally populated `cache`),
+  `lookupGlyph` falls back to `cache.lookup` on miss so mixed states never drop keys. -/
+  cacheMapSynced : Bool := false
   /-- Shaping results reused across frames; glyph rasterization is cached separately below. -/
   shapeCache : Array ShapeCacheEntry := #[]
   fallbackFonts : Array FontHandle := #[]
@@ -326,9 +367,23 @@ structure GlyphAtlasCache where
   resolvedMap : Std.HashMap ResolvedRunKey InlineRun := {}
   hits : Nat := 0
   misses : Nat := 0
+  /-- Bounded vector-icon / diagram-lane rasterisation telemetry. -/
+  iconRasterHits : Nat := 0
+  iconRasterMisses : Nat := 0
+  iconRasterPixels : Nat := 0
+  maxIconRasterPixels : Nat := 0
   deriving Inhabited
 
 namespace GlyphAtlasCache
+
+/-- O(1) glyph/icon cache lookup via `cacheMap`, with sound fallback to `cache` if `cache` was
+populated externally without going through `insertRasterized`. -/
+@[inline] def lookupGlyph (ac : GlyphAtlasCache) (key : GlyphKey) : Option AtlasGlyphEntry :=
+  match ac.cacheMap.get? key with
+  | some entry => some entry
+  | none =>
+    if ac.cache.entries.isEmpty || ac.cacheMapSynced then none
+    else ac.cache.lookup hashGlyphKey key
 
 def beginUploads (ac : GlyphAtlasCache) : GlyphAtlasCache :=
   { ac with pendingUploads := some (ac.pendingUploads.getD #[]) }
@@ -351,7 +406,7 @@ def finishUploads (ac : GlyphAtlasCache) : GlyphAtlasCache := Id.run do
 def clearGpuDirtyRects (ac : GlyphAtlasCache) : GlyphAtlasCache :=
   { ac with gpuDirtyRects := #[] }
 
-/-- Reset all atlas pages (`Atlas.reset`) and clear the `HashCache`. -/
+/-- Reset all atlas pages (`Atlas.reset`) and clear the `HashCache` and O(1) index. -/
 def resetAll (ac : GlyphAtlasCache) : GlyphAtlasCache :=
   let pages' := ac.pages.map fun p =>
     { atlas := p.atlas.reset
@@ -359,6 +414,8 @@ def resetAll (ac : GlyphAtlasCache) : GlyphAtlasCache :=
   { ac with
     pages := pages'
     cache := {}
+    cacheMap := {}
+    cacheMapSynced := true
     resolved := #[]
     resolvedMap := {}
     pendingUploads := none
@@ -369,12 +426,14 @@ def resetAll (ac : GlyphAtlasCache) : GlyphAtlasCache :=
 and blit the rasterized bitmap into the chosen page. -/
 def insertRasterized (ac : GlyphAtlasCache) (key : GlyphKey) (rg : RasterizedGlyph) :
     GlyphAtlasCache × AtlasGlyphEntry := Id.run do
+  let synced := ac.cacheMapSynced || ac.cache.entries.isEmpty
   if rg.width == 0 || rg.height == 0 then
     let entry : AtlasGlyphEntry :=
       { page := 0, uv := { x := 0, y := 0, w := 0, h := 0 },
         bearingX := rg.bearingX, bearingY := rg.bearingY, isColor := rg.isColor }
     let cache' := ac.cache.insert hashGlyphKey key entry
-    return ({ ac with cache := cache', misses := ac.misses + 1 }, entry)
+    let cacheMap' := ac.cacheMap.insert key entry
+    return ({ ac with cache := cache', cacheMap := cacheMap', cacheMapSynced := synced, misses := ac.misses + 1 }, entry)
   -- Try existing pages with `Atlas.allocPadded` first
   for idx in [0:ac.pages.size] do
     let p := ac.pages[idx]!
@@ -387,8 +446,9 @@ def insertRasterized (ac : GlyphAtlasCache) (key : GlyphKey) (rg : RasterizedGly
       let entry : AtlasGlyphEntry :=
         { page := idx, uv := rect, bearingX := rg.bearingX, bearingY := rg.bearingY, isColor := rg.isColor }
       let cache' := ac.cache.insert hashGlyphKey key entry
+      let cacheMap' := ac.cacheMap.insert key entry
       let gpuDirty' := if ac.pendingUploads.isSome then ac.gpuDirtyRects else ac.gpuDirtyRects.push (idx, rect)
-      return ({ ac with pages := pages', cache := cache', misses := ac.misses + 1,
+      return ({ ac with pages := pages', cache := cache', cacheMap := cacheMap', cacheMapSynced := synced, misses := ac.misses + 1,
                         pendingUploads := ac.pendingUploads.map (·.push (idx, rect, rg)),
                         gpuDirtyRects := gpuDirty' }, entry)
   -- Otherwise allocate a new page via `Atlas.allocPages` / `Atlas.allocPadded`
@@ -404,8 +464,9 @@ def insertRasterized (ac : GlyphAtlasCache) (key : GlyphKey) (rg : RasterizedGly
     let entry : AtlasGlyphEntry :=
       { page := pageIdx, uv := rect, bearingX := rg.bearingX, bearingY := rg.bearingY, isColor := rg.isColor }
     let cache' := ac.cache.insert hashGlyphKey key entry
+    let cacheMap' := ac.cacheMap.insert key entry
     let gpuDirty' := if ac.pendingUploads.isSome then ac.gpuDirtyRects else ac.gpuDirtyRects.push (pageIdx, rect)
-    return ({ ac with pages := pages', cache := cache', misses := ac.misses + 1,
+    return ({ ac with pages := pages', cache := cache', cacheMap := cacheMap', cacheMapSynced := synced, misses := ac.misses + 1,
                       pendingUploads := ac.pendingUploads.map (·.push (pageIdx, rect, rg)),
                       gpuDirtyRects := gpuDirty' }, entry)
   | none =>
@@ -416,6 +477,37 @@ def insertRasterized (ac : GlyphAtlasCache) (key : GlyphKey) (rg : RasterizedGly
       { page := 0, uv := { x := 0, y := 0, w := rg.width, h := rg.height },
         bearingX := rg.bearingX, bearingY := rg.bearingY, isColor := rg.isColor }
     return ({ ac with misses := ac.misses + 1 }, entry)
+
+/-- Look up or rasterize a bounded vector icon / Mermaid routing lane (`w × h`) into the shared
+atlas with O(1) cache lookup, capping raster extents to `maxIconRasterDim` and bounding vertical
+rasterisation to the visible widget height `h`. -/
+def getOrRasterizeIcon (ac : GlyphAtlasCache) (paths : List (List (Int × Int)))
+    (w h : Nat) (strokeTenths : Nat := 55) : GlyphAtlasCache × AtlasGlyphEntry :=
+  if w == 0 then
+    let key : GlyphKey :=
+      { font := 0xFFFF, glyph := (mixHash (hash paths) (hash strokeTenths)).toNat,
+        sizeSub := 0, subpx := 0 }
+    match ac.lookupGlyph key with
+    | some entry => ({ ac with hits := ac.hits + 1, iconRasterHits := ac.iconRasterHits + 1 }, entry)
+    | none =>
+      let (ac', entry) := ac.insertRasterized key (rasterizeIcon paths 0 strokeTenths 0)
+      ({ ac' with iconRasterMisses := ac'.iconRasterMisses + 1 }, entry)
+  else
+    let (bw, bh) := boundIconRasterSize w h
+    let key : GlyphKey :=
+      { font := 0xFFFF,
+        glyph := (mixHash (hash paths) (mixHash (hash strokeTenths) (hash bh))).toNat,
+        sizeSub := bw, subpx := 0 }
+    match ac.lookupGlyph key with
+    | some entry => ({ ac with hits := ac.hits + 1, iconRasterHits := ac.iconRasterHits + 1 }, entry)
+    | none =>
+      let rg := rasterizeIcon paths bw strokeTenths bh
+      let px := rg.width * rg.height
+      let (ac', entry) := ac.insertRasterized key rg
+      ({ ac' with
+        iconRasterMisses := ac'.iconRasterMisses + 1
+        iconRasterPixels := ac'.iconRasterPixels + px
+        maxIconRasterPixels := max ac'.maxIconRasterPixels px }, entry)
 
 end GlyphAtlasCache
 
@@ -511,7 +603,7 @@ def getOrRasterizeGlyph (ac : GlyphAtlasCache) (f : FontHandle) (glyphId : UInt3
   let bin := (subpx &&& 3).toNat
   let key : GlyphKey :=
     { font := f.fontId, glyph := glyphId.toNat, sizeSub := size64.toNat, subpx := bin }
-  if let some entry := ac.cache.lookup hashGlyphKey key then
+  if let some entry := ac.lookupGlyph key then
     return ({ ac with hits := ac.hits + 1 }, entry)
   let raw ← FFI.rasterize f.facePtr size64 glyphId (subpx &&& 3)
   let rg := decodeRasterizedGlyph raw

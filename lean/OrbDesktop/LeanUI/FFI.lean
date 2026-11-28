@@ -4,7 +4,7 @@
 namespace LeanUI.FFI
 
 @[extern "lean_ui_icon_mask"]
-opaque iconMask (segments : @& ByteArray) (size : USize) : ByteArray
+opaque iconMask (segments : @& ByteArray) (w h : USize) (strokeTenths : UInt32) : ByteArray
 
 @[extern "lean_ui_box_axis"]
 opaque boxAxis (src : @& ByteArray) (w h radius : USize) (horizontal : Bool) : ByteArray
@@ -92,6 +92,12 @@ opaque memFree (ptr : USize) : IO Unit
 /-- Copy `bytes` into native memory at `ptr`. -/
 @[extern "lean_ui_present_argb"]
 opaque presentArgb (ptr : USize) (bytes : @& ByteArray) : IO Unit
+
+/-- Convert and copy a dirty sub-rectangle `(x, y, w, h)` of RGBA8 `bytes` (stride `stridePx` pixels)
+into ARGB8888 native memory at `ptr` (capacity `dstCap` bytes). -/
+@[extern "lean_ui_present_argb_rect"]
+opaque presentArgbRect (ptr dstCap : USize) (bytes : @& ByteArray)
+    (x y w h stridePx : USize) : IO Unit
 
 @[extern "lean_ui_mem_write"]
 opaque memWrite (ptr : USize) (bytes : @& ByteArray) : IO Unit
