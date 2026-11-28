@@ -2206,18 +2206,24 @@ private def handleProxyRequest (st : CoreAppState) (req : HttpRequest) (cleanPat
   if !headersAlreadyCommitted && plan.eligible.isEmpty then
     stopMissionTurnForUnavailableChain st stopMid? chains cleanPath activeChain.id plan.cooling nowEpochSec
     if !plan.cooling.isEmpty then
-      let coolTarget? := activeChain.targets[0]?
+      let chosenCd? := (soonestCooldown? plan.cooling).orElse (fun _ => plan.cooling[0]?)
+      let coolTarget? := (chosenCd?.bind fun c => activeChain.targets.find? (fun t => t.accountId == c.accountId)).orElse
+        (fun _ => activeChain.targets[0]?)
       let coolProv := (coolTarget?.map (·.provider)).getD ""
-      let coolAcct := (plan.cooling[0]?.map (·.accountId)).orElse (fun _ => coolTarget?.map (·.accountId)) |>.getD ""
+      let coolAcct := (chosenCd?.map (·.accountId)).orElse (fun _ => coolTarget?.map (·.accountId)) |>.getD ""
       let coolModel := (coolTarget?.map (·.modelId)).filter (!·.isEmpty) |>.getD rawRequestedModel
-      let (reply, coolStatus) :=
+      let reply :=
         if plan.allUsageLimited then
-          let limit := (soonestCooldown? plan.cooling).getD
+          let limit := chosenCd?.getD
             { accountId := "", untilEpoch := nowEpochSec + 60, reason := .usageLimit, label := "" }
-          (usageLimitReply activeChain.id limit nowEpochSec, "rate_limited_or_quota")
+          usageLimitReply activeChain.id limit nowEpochSec
         else
           let retryAfter := (plan.retryAfterSecs? nowEpochSec).getD 60
-          (cooldownReply activeChain.id retryAfter, "model_cooldown")
+          cooldownReply activeChain.id retryAfter
+      let coolStatus := match chosenCd?.map (·.reason) with
+        | some .usageLimit | some .rateLimit => "rate_limited_or_quota"
+        | some .overloaded => "overloaded"
+        | _ => "error"
       discard <| execParamQuery st.store.missionsDb
         ("INSERT INTO proxy_outcomes(timestamp,chain_id,provider,account_id,model,requested_model,status,http_status,retries) " ++
          "VALUES(?1,?2,?3,?4,?5,?6,?7,?8,0);")
@@ -3858,8 +3864,16 @@ private def collectResourcesPoolHealthHints
   let mut hints : Array InferencePoolHealthHint := #[]
   let hps ← loadHydratedProviders st.store st.cfg.workingDir
   let enabledHps := hps.filter (·.enabled)
-  let poolSlugForHp (hp : HydratedProvider) : String :=
-    if hp.providerType == "custom" then s!"custom:{hp.id}" else hp.providerType
+  let poolSlugsForHp (hp : HydratedProvider) : Array String :=
+    if hp.providerType == "custom" then
+      let addSafe (acc : Array String) (cand : String) : Array String :=
+        if cand.isEmpty || cand == "custom" || (OrbCore.ProxyModelRouting.providerId? cand).isSome || acc.contains cand then
+          acc
+        else acc.push cand
+      let base := #[s!"custom:{hp.id}"]
+      let withSlug := addSafe base (providerSlugOf hp.name)
+      addSafe withSlug (OrbCore.ProxyModelRouting.customProviderName hp.name)
+    else #[hp.providerType]
   let trackedCooldowns ← match st.healthTracker? with
     | some ht => snapshotActiveHealthCooldowns ht nowEpochSec
     | none => pure #[]
@@ -3870,20 +3884,33 @@ private def collectResourcesPoolHealthHints
   let usageCached ← match st.providerHub? with
     | some hub => hub.mu.atomically (do return (← get).usageEntries)
     | none => pure #[]
-  let hpMatchesAcct (hp : HydratedProvider) (acctId : String) : Bool :=
+  let isFileAccountHash (s : String) : Bool :=
+    s.length == 64 && s.toList.all (fun c => ('0' ≤ c && c ≤ '9') || ('a' ≤ c && c ≤ 'f'))
+  let hpOwnsExact (hp : HydratedProvider) (acctId : String) : Bool :=
     acctId == hp.id ||
     (!hp.modelPrefix.isEmpty && acctId == hp.modelPrefix) ||
-    (hp.providerType == "custom" && acctId == s!"custom:{hp.id}") ||
-    (hp.hasOAuth && (acctId == s!"cliproxyapi:{hp.providerType}" || acctId.startsWith s!"cliproxyapi:{hp.providerType}:"))
+    (hp.providerType == "custom" && acctId == s!"custom:{hp.id}")
+  let hpMatchesSharedPool (hp : HydratedProvider) (acctId : String) : Bool :=
+    hp.hasOAuth && !hp.hasApiKey &&
+    (acctId == s!"cliproxyapi:{hp.providerType}" ||
+     (hp.providerType == "antigravity" && acctId.startsWith "cliproxyapi:antigravity:" &&
+      !isFileAccountHash (acctId.drop "cliproxyapi:antigravity:".length).toString))
   let enabledSlugsForAccount (acctId : String) : Array String :=
-    let matchedAll := hps.filter (fun hp => hpMatchesAcct hp acctId)
-    if !matchedAll.isEmpty then
-      (matchedAll.filter (·.enabled)).map poolSlugForHp
+    let exactAll := hps.filter (fun hp => hpOwnsExact hp acctId)
+    if !exactAll.isEmpty then
+      (exactAll.filter (·.enabled)).foldl (fun acc hp => acc ++ poolSlugsForHp hp) #[]
     else if acctId.startsWith "cliproxyapi:" then
-      let rest := (acctId.drop 12).toString
-      let seg := (rest.splitOn ":").headD rest
-      let typed := hps.filter (fun hp => hp.providerType == seg)
-      if typed.isEmpty || typed.any (·.enabled) then #[seg] else #[]
+      let sharedAll := hps.filter (fun hp => hpMatchesSharedPool hp acctId)
+      if !sharedAll.isEmpty then
+        (sharedAll.filter (·.enabled)).foldl (fun acc hp => acc ++ poolSlugsForHp hp) #[]
+      else
+        let rest := (acctId.drop 12).toString
+        let seg := (rest.splitOn ":").headD rest
+        let tail := if rest.length > seg.length + 1 then (rest.drop (seg.length + 1)).toString else ""
+        if isFileAccountHash tail then #[]
+        else
+          let typed := hps.filter (fun hp => hp.providerType == seg)
+          if typed.isEmpty || typed.any (·.enabled) then #[seg] else #[]
     else
       let seg := (acctId.splitOn ":").headD acctId
       if acctId.startsWith "custom:" then #[acctId] else #[seg]
@@ -3900,14 +3927,16 @@ private def collectResourcesPoolHealthHints
         }
   if let some ht := st.healthTracker? then
     for hp in enabledHps do
-      let slug := poolSlugForHp hp
+      let slugs := poolSlugsForHp hp
       let keys := #[hp.id] ++ (if hp.modelPrefix.isEmpty then #[] else #[hp.modelPrefix])
       for k in keys do
         let rec ← lookupAccountHealthRecord ht k
         if rec.disabledByProvider then
-          hints := hints.push { provider := slug, health := "disabled_by_provider" }
+          for slug in slugs do
+            hints := hints.push { provider := slug, health := "disabled_by_provider" }
         else if rec.parkedQuota || rec.poisonedSub || rec.transientStreak > 0 || rec.consecutiveTrips > 0 then
-          hints := hints.push { provider := slug, health := "degraded" }
+          for slug in slugs do
+            hints := hints.push { provider := slug, health := "degraded" }
   for u in usageCached do
     if let some hp := enabledHps.find? (fun p => p.id == u.providerId) then
       let opt := u.payload.fieldOrNull "optimize"
@@ -3916,12 +3945,13 @@ private def collectResourcesPoolHealthHints
       let chosen? := (pKey?.bind fun pk => wins.find? (fun w => w.fieldStr? "key" == some pk)).orElse (fun _ => wins[0]?)
       if let some pct := chosen?.bind (fun w => w.field? "pct_remaining") then
         let reset? := chosen?.bind (fun w => w.fieldStr? "reset_at")
-        hints := hints.push {
-          provider := poolSlugForHp hp
-          health := "ok"
-          quotaPctRemaining? := some pct
-          resetAt? := reset?
-        }
+        for slug in poolSlugsForHp hp do
+          hints := hints.push {
+            provider := slug
+            health := "ok"
+            quotaPctRemaining? := some pct
+            resetAt? := reset?
+          }
   return hints
 
 set_option maxHeartbeats 1600000 in

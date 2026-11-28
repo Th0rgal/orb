@@ -2436,6 +2436,13 @@ private def v2RoutingEndToEndContract
     guardApp.chainsRef.set savedChains
     if gResp.status != 429 || !(← tried.get).isEmpty || ((String.fromUTF8! gResp.body).splitOn "usage limit").length <= 1 then
       failures := failures.push s!"v2: disabledByProvider + shadowed usageLimit must short-circuit with usage-limit 429 without resurrecting banned account, got status={gResp.status} tried={← tried.get} body={String.fromUTF8! gResp.body}"
+    -- Pre-dispatch cooldown outcome for `v2-guard-chain` must attribute `provider="openai"` (matching `usageId`), NOT `targets[0]` (`antigravity`).
+    let guardOutProv := match ← execParamQuery store.missionsDb
+        "SELECT provider, account_id, status FROM proxy_outcomes WHERE chain_id='v2-guard-chain' ORDER BY id DESC LIMIT 1;" #[] with
+      | .ok rs => ((rs[1]?.bind (·[0]?)).getD "", (rs[1]?.bind (·[1]?)).getD "", (rs[1]?.bind (·[2]?)).getD "")
+      | .error _ => ("", "", "")
+    if guardOutProv != ("openai", usageId, "rate_limited_or_quota") then
+      failures := failures.push s!"v2: pre-dispatch cooldown outcome must attribute cooling target (openai/{usageId}/rate_limited_or_quota), got {repr guardOutProv}"
 
     -- 10) `GET /api/resources/overview` must reflect real Core `proxy_outcomes` 503 `model_cooldown`
     --     and pre-dispatch cooldown `429` counts recorded via real `dispatchCoreRequest` calls,
@@ -2485,23 +2492,45 @@ private def v2RoutingEndToEndContract
     if ovResp1.status != 503 || ovResp2.status != 429 || ov429 < 2 ||
        xaiPoolHealth != "cooldown" || xaiPoolReset.isEmpty || !xaiLinkDeg then
       failures := failures.push s!"v2: /api/resources/overview must reflect real 503/429 dispatch outcomes, cooldown pool health, and degraded link: r1={ovResp1.status} r2={ovResp2.status} 429={ov429} health={xaiPoolHealth} reset={xaiPoolReset} deg={xaiLinkDeg}"
-    -- Disabled account (`enabled=false`) must never poison active pool, and `custom:prov-a` cooldown
-    -- must not bleed into unrelated `custom:prov-b`.
+    -- Disabled DB account (`enabled=false`), disabled 3-segment OAuth sidecar hash account, and
+    -- custom providers routed through real saved chains (`canonicalChainProviderId` slugs `customa`/`customb`)
+    -- must stay isolated and accurately reflect live health in `GET /api/resources/overview`.
     let disAcctId := "v2-xai-disabled-banned"
+    let disOAuthHash := "cliproxyapi:openai:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
     let custAId := "v2-cust-a"
     let custBId := "v2-cust-b"
+    let custAChain := "v2-cust-a-chain"
+    let custBChain := "v2-cust-b-chain"
     discard <| upsertAIProvider store { id := disAcctId, providerType := "xai", name := "Disabled Banned", enabled := false, apiKey := "k", updatedAt := resNowIso }
-    discard <| upsertAIProvider store { id := custAId, providerType := "custom", name := "Custom A", enabled := true, apiKey := "k", updatedAt := resNowIso }
-    discard <| upsertAIProvider store { id := custBId, providerType := "custom", name := "Custom B", enabled := true, apiKey := "k", updatedAt := resNowIso }
+    discard <| upsertAIProvider store { id := custAId, providerType := "custom", name := "Custom A", enabled := true, apiKey := "k-ca", updatedAt := resNowIso }
+    discard <| upsertAIProvider store { id := custBId, providerType := "custom", name := "Custom B", enabled := true, apiKey := "k-cb", updatedAt := resNowIso }
+    discard <| postJson v2App liveJwt "/api/model-routing/chains"
+      s!"\{\"id\":{jsonEscape custAChain},\"name\":\"Cust A\",\"entries\":[\{\"provider_id\":{jsonEscape s!"custom:{custAId}"},\"model_id\":\"m-a\"}]}" resNow
+    discard <| postJson v2App liveJwt "/api/model-routing/chains"
+      s!"\{\"id\":{jsonEscape custBChain},\"name\":\"Cust B\",\"entries\":[\{\"provider_id\":{jsonEscape s!"custom:{custBId}"},\"model_id\":\"m-b\"}]}" resNow
+    let okUsageApp : CoreAppState := {
+      v2App with
+      proxyMockTransport? := some fun tgt => pure (.ok {
+        status := 200
+        headers := #[("Content-Type", "application/json")]
+        body := s!"\{\"model\":{jsonEscape tgt.modelId},\"usage\":\{\"prompt_tokens\":4000,\"completion_tokens\":500},\"choices\":[\{\"message\":\{\"role\":\"assistant\",\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}".toUTF8
+      })
+    }
+    for cid in #[custAChain, custBChain] do
+      let cBody := renderCompact (.obj #[("model", .str cid), ("messages", .arr #[])])
+      let cRaw := s!"POST /v1/chat/completions HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {liveJwt}\r\nContent-Length: {cBody.utf8ByteSize}\r\n\r\n{cBody}"
+      let .ok cReq := parseRequest cRaw.toUTF8 none | throw (IO.userError "v2 cust req parse failed")
+      discard <| dispatchCoreRequest okUsageApp cReq resNow
     discard <| execParamQuery store.missionsDb "DELETE FROM proxy_outcomes;" #[]
     discard <| execParamQuery store.missionsDb
       ("INSERT INTO proxy_usage(timestamp,model,input_tokens,output_tokens,cost_cents,provider,account_id,mission_id) " ++
-       "VALUES(?1,'m-a',4000,500,5,?2,?3,?4),(?1,'m-b',4000,500,5,?5,?6,?4);")
-      #[resNowIso, s!"custom:{custAId}", custAId, defMid, s!"custom:{custBId}", custBId]
+       "VALUES(?1,'gpt-6.1-sol',4000,500,5,'openai','10000000-0000-4000-8000-000000000002',?2);")
+      #[resNowIso, defMid]
     let isoTracker ← newProviderHealthTracker 1 2
     isoTracker.health.atomically do
       modify fun s => { s with accounts := #[
         { accountId := disAcctId, slotId := accountSlotId disAcctId, disabledByProvider := true, disabledMessage := "BANNED" },
+        { accountId := disOAuthHash, slotId := accountSlotId disOAuthHash, disabledByProvider := true, disabledMessage := "BANNED_SIDECAR" },
         { accountId := custAId, slotId := accountSlotId custAId,
           cooldown? := some { accountId := custAId, untilEpoch := resNow + 600, reason := .usageLimit } }
       ] }
@@ -2510,10 +2539,12 @@ private def v2RoutingEndToEndContract
     let ovIso ← getJson isoApp liveJwt "/api/resources/overview?range=6h" resNow
     let isoPools := (ovIso.fieldOrNull "inference").fieldArr? "pools" |>.getD #[]
     let xaiIsoHealth := (isoPools.find? (·.fieldStr? "id" == some "xai") |>.bind (·.fieldStr? "health")).getD ""
-    let custAHealth := (isoPools.find? (·.fieldStr? "id" == some s!"custom:{custAId}") |>.bind (·.fieldStr? "health")).getD ""
-    let custBHealth := (isoPools.find? (·.fieldStr? "id" == some s!"custom:{custBId}") |>.bind (·.fieldStr? "health")).getD ""
-    if xaiIsoHealth != "ok" || custAHealth != "cooldown" || custBHealth != "ok" then
-      failures := failures.push s!"v2: disabled account must not poison xai and custom pools must stay isolated: xai={xaiIsoHealth} custA={custAHealth} custB={custBHealth}"
+    let oaIsoHealth := (isoPools.find? (·.fieldStr? "id" == some "openai") |>.bind (·.fieldStr? "health")).getD ""
+    let custAHealth := (isoPools.find? (·.fieldStr? "id" == some "customa") |>.bind (·.fieldStr? "health")).getD ""
+    let custBHealth := (isoPools.find? (·.fieldStr? "id" == some "customb") |>.bind (·.fieldStr? "health")).getD ""
+    if xaiIsoHealth != "ok" || oaIsoHealth != "ok" || custAHealth != "cooldown" || custBHealth != "ok" then
+      failures := failures.push s!"v2: disabled accounts/sidecar hashes must not poison active pools and saved-chain custom pools must reflect live health cleanly: xai={xaiIsoHealth} openai={oaIsoHealth} customa={custAHealth} customb={custBHealth}"
+    discard <| execParamQuery store.missionsDb "DELETE FROM model_routing_chains WHERE id IN (?1,?2);" #[custAChain, custBChain]
     discard <| deleteAIProvider store disAcctId
     discard <| deleteAIProvider store custAId
     discard <| deleteAIProvider store custBId
