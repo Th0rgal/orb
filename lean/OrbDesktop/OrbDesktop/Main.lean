@@ -1330,7 +1330,7 @@ def runDesktopBench (cfg : Runtime.RuntimeConfig) (iterations : Nat) (verifyRepa
     if profile then IO.eprintln s!"u7-update {idx} ns={f1-f0} pixels={rt.vulkan.lastDamagePixels} primitives={rt.vulkan.lastDrawnPrims}"
     frameTimesUs := frameTimesUs.push ((f1 - f0) / 1000)
     partialDrawnPrims := rt.vulkan.lastDrawnPrims
-    allUpdatesCulled := allUpdatesCulled && rt.vulkan.lastDrawnPrims > 0 && rt.vulkan.lastDamagePixels < rt.vulkan.width * rt.vulkan.height
+    allUpdatesCulled := allUpdatesCulled && rt.vulkan.lastDrawnPrims < fullScenePrims && rt.vulkan.lastDamagePixels < rt.vulkan.width * rt.vulkan.height
     rt ← Runtime.stepFrame rt (desktopReducer rt) renderDesktopFrame
   let (bw, bh) := (rt.vulkan.width, rt.vulkan.height)
   let fbBytes := rt.vulkan.framebuffer.size
