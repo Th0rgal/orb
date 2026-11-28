@@ -21,6 +21,8 @@ import OrbCore.LegacyHydrate
 import OrbCore.SecretAndApproval
 import OrbCore.RemoteFleetAndRelay
 import OrbCore.RemoteDispatch
+import OrbCore.Cyber
+import OrbCore.RemoteGoal
 import OrbCore.ProxyModelRouting
 import OrbCore.CloudHttpAndWorker
 import OrbCore.ProjectFilesAndController
@@ -115,7 +117,10 @@ private def checkMissionReadAccess
 
 /-- Enrich a settled MCP action result with receipt metadata (`action_id`, `tool_name`, `state`, `status`, `accepted`, `result`). -/
 private def settledMcpActionReceipt (actionId toolName state : String) (resObj : JVal) (targetMissionId : String := "") : JVal :=
-  let accepted := if state == "uncertain" || state == "accepted" then "unknown" else if state == "succeeded" then "yes" else "no"
+  let accepted :=
+    if state == "uncertain" || state == "reconciliation_required" then "unknown"
+    else if #["succeeded", "completed", "accepted", "running", "queued", "pending", "dispatching"].contains state then "yes"
+    else "no"
   (MissionBoard.settledActionReceipt actionId toolName state resObj targetMissionId).setField "accepted" (.str accepted)
 
 structure McpActionReservation where
@@ -961,27 +966,72 @@ def dispatchMcpToolCall
     ])
 
   | "cancel_action" =>
-    let aid := (args.fieldStr? "action_id").orElse (fun _ => args.fieldStr? "id") |>.getD ""
-    if aid.trimAscii.toString.isEmpty then
+    let aid := ((args.fieldStr? "action_id").orElse (fun _ => args.fieldStr? "id") |>.getD "").trimAscii.toString
+    if aid.isEmpty then
       return mcpErr "invalid_arguments" "missing action_id"
+    if idemKeyTop.isEmpty || idemKeyTop.utf8ByteSize > 200 then
+      return mcpErr "invalid_arguments" "missing idempotency_key"
+    let cScope := actionScope claims callerUserId toolName
+    let reqFp := renderCanonical args
+    if let .ok existingRows ← execParamQuery store.projectsDb
+        "SELECT id, COALESCE(fingerprint,''), COALESCE(result,'{}') FROM mcp_actions_v1 WHERE scope=?1 AND retry_key=?2 LIMIT 1;"
+        #[cScope, idemKeyTop] then
+      if existingRows.size > 1 then
+        let existingFp := cell existingRows[1]! 1
+        if existingFp != reqFp then
+          return mcpErr "conflict" "mcp_idempotency_conflict"
+        let storedRes := (OrbBin.Json.parse (cell existingRows[1]! 2)).toOption.getD (.obj #[])
+        return mcpOk storedRes
+    let persistCancelReceipt (resObj : JVal) (didCancel : Bool) (targetOwner : String) : IO String := do
+      let cid ← newUuidV4
+      let principalVal := s!"{claims.role}:{callerUserId}:{claims.missionId}"
+      let stVal := if didCancel then "succeeded" else "rejected"
+      let resJson := renderCompact resObj
+      let ownerVal := if targetOwner.isEmpty then claims.missionId else targetOwner
+      match ← execParamQuery store.projectsDb
+          ("INSERT INTO mcp_actions_v1(id,owner,scope,retry_key,fingerprint,principal,tool,arguments,state,result,created_at,updated_at) " ++
+           "VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?11) ON CONFLICT(scope,retry_key) DO NOTHING;")
+          #[cid, ownerVal, cScope, idemKeyTop, reqFp, principalVal, toolName, reqFp, stVal, resJson, nowIso] with
+      | .ok _ =>
+        if let .ok rRows ← execParamQuery store.projectsDb
+            "SELECT COALESCE(fingerprint,''), COALESCE(result,'{}') FROM mcp_actions_v1 WHERE scope=?1 AND retry_key=?2 LIMIT 1;"
+            #[cScope, idemKeyTop] then
+          if rRows.size > 1 then
+            if cell rRows[1]! 0 != reqFp then
+              return mcpErr "conflict" "mcp_idempotency_conflict"
+            return mcpOk ((OrbBin.Json.parse (cell rRows[1]! 1)).toOption.getD resObj)
+        return mcpErr "receipt_record_failed" "The cancellation receipt could not be verified after persistence." false
+      | .error _ =>
+        return mcpErr "receipt_record_failed" "The cancellation receipt could not be persisted." false
     if ← ManagedSpawnActions.isSpawnAction store aid then
       match ← ManagedSpawnActions.cancel store aid { userId := callerUserId, missionId := callerMid } operatorIsAdmin with
-      | .ok cancelled => return mcpOk cancelled
+      | .ok cancelled =>
+        let targetOwner := (cancelled.fieldStr? "target_mission_id").getD ""
+        return ← persistCancelReceipt cancelled (cancelled.fieldBool? "cancelled" == some true) targetOwner
       | .error _ => return mcpErr "not_found" "Action not found"
     if let some rec ← lookupCallerAction? aid then
+      let targetOwner := (rec.fieldStr? "target_mission_id").getD ""
       let curSt := (rec.fieldStr? "state").getD "succeeded"
-      let cancelled := curSt == "queued" || curSt == "pending"
-      if cancelled then
-        let .ok _ ← execParamQuery store.projectsDb
-          "UPDATE mcp_actions_v1 SET state='cancelled', updated_at=?2 WHERE id=?1;" #[aid, nowIso]
-          | return mcpErr "cancel_failed" "action receipt update failed" false
-      return mcpOk (.obj #[
+      let canCancel := curSt == "queued" || curSt == "pending" || curSt == "accepted"
+      let mut didCancel := false
+      if canCancel then
+        match ← execParamQuery store.projectsDb
+            "UPDATE mcp_actions_v1 SET state='cancelled', updated_at=?2 WHERE id=?1 AND state IN ('queued','pending','accepted') RETURNING id;"
+            #[aid, nowIso] with
+        | .ok rows => didCancel := rows.size > 1
+        | .error _ => return mcpErr "cancel_failed" "action receipt update failed" false
+      let finalSt ← if didCancel then pure "cancelled" else do
+        match ← lookupCallerAction? aid with
+        | some refreshed => pure ((refreshed.fieldStr? "state").getD curSt)
+        | none => pure curSt
+      let resObj := JVal.obj #[
         ("action_id", .str aid),
-        ("cancelled", .bool cancelled),
-        ("state", .str (if cancelled then "cancelled" else curSt)),
-        ("accepted", .str "yes")
-      ])
-    return mcpOk (.obj #[("action_id", .str aid), ("cancelled", .bool false), ("state", .str "not_found")])
+        ("cancelled", .bool didCancel),
+        ("state", .str finalSt),
+        ("accepted", .str (if didCancel then "yes" else "no"))
+      ]
+      return ← persistCancelReceipt resObj didCancel targetOwner
+    return mcpErr "not_found" "Action not found"
 
   | "get_fleet_sweep" =>
     let scopeTree := !callerMid.isEmpty && !claims.isExternal && !directOperator
@@ -1331,6 +1381,31 @@ def dispatchMcpToolCall
       | none => false
     if wantsSnapshot && !autoManaged then
       return ← failReservedOrErr store claims callerUserId toolName idemKeyTop "invalid_arguments" "managed_from_snapshot requires remote_node_id auto-managed[:size]" nowIso
+    -- `FLT-14`: validate remote `/goal`, harness, and proxy preconditions BEFORE renting
+    -- any paid `auto-managed` VM or inserting any mission row (including empty-prompt creates).
+    if let some goalObj := OrbCore.Cyber.parseGoalPrefix? prompt then
+      let capability := if OrbCore.RemoteGoal.supportsHarness (normalizeRemoteHarness backend) && remoteSup?.isSome
+        then OrbCore.RemoteGoal.Capability.coreEmulated else .unavailable
+      match OrbCore.RemoteGoal.admit capability false goalObj with
+      | .error .emptyObjective =>
+        return ← failReservedOrErr store claims callerUserId toolName idemKeyTop "invalid_arguments" "Goal mode requires a non-empty objective." nowIso
+      | .error _ =>
+        return ← failReservedOrErr store claims callerUserId toolName idemKeyTop "unsupported"
+          "remote_goal_unsupported: This remote harness cannot continue a Goal. Choose a Goal-capable harness or send a standard turn." nowIso
+      | .ok _ => pure ()
+    if let .error hErr := validateRemoteHarness backend then
+      return ← failReservedOrErr store claims callerUserId toolName idemKeyTop "unsupported" hErr nowIso
+    let isExplicitConcreteRn := match requestedRn? with
+      | some rn => rn.toLower != "auto" && !rn.toLower.startsWith "auto:"
+      | none => false
+    if autoManaged || isExplicitConcreteRn then
+      if let some sup := remoteSup? then
+        let (_, proxyBase) ← resolveRemoteCallbackUrls sup (requestedRn?.getD "")
+        if let .error pErr := validateRemoteBackendAndProxy backend proxyBase then
+          return ← failReservedOrErr store claims callerUserId toolName idemKeyTop "invalid_arguments" pErr nowIso
+        if !prompt.isEmpty then
+          if let .error pErr := validateRemoteLaunchPlan backend prompt proxyBase then
+            return ← failReservedOrErr store claims callerUserId toolName idemKeyTop "invalid_arguments" pErr nowIso
     -- `auto-managed[:size]` rents one machine for this child through the shared spawn
     -- path. Nothing is rented when validation, admission or the snapshot lookup fails.
     let (explicitRn?, rentedMachineId, reused?, providerChoice) ← if !autoManaged
@@ -1470,6 +1545,22 @@ def dispatchMcpToolCall
     if !prompt.isEmpty && (remoteSup?.isNone || inheritedRn?.isNone) then
       releaseRented
       return ← settleReservedMcpAction store claims callerUserId toolName idemKeyTop "failed" "no execution node is available" nowIso "no_execution_placement"
+    -- Re-check remote backend/proxy preconditions once `inheritedRn?` / `"auto"` resolves to a concrete node.
+    if let (some sup, some rawTarget) := (remoteSup?, inheritedRn?) then
+      let concreteTarget ←
+        if rawTarget.toLower == "auto" || rawTarget.toLower.startsWith "auto:" then
+          match ← resolveConcreteRemoteTargetNode mc? rawTarget (if parentMid.isEmpty then none else some (store, parentMid)) with
+          | .ok c => pure c
+          | .error _ => pure rawTarget
+        else pure rawTarget
+      let (_, proxyBase) ← resolveRemoteCallbackUrls sup concreteTarget
+      if let .error pErr := validateRemoteBackendAndProxy backend proxyBase then
+        releaseRented
+        return ← settleReservedMcpAction store claims callerUserId toolName idemKeyTop "failed" pErr nowIso "invalid_arguments"
+      if !prompt.isEmpty then
+        if let .error pErr := validateRemoteLaunchPlan backend prompt proxyBase then
+          releaseRented
+          return ← settleReservedMcpAction store claims callerUserId toolName idemKeyTop "failed" pErr nowIso "invalid_arguments"
     let mid ← newUuidV4
     -- The model name the turn is launched with. Empty means the harness's own default.
     let sentModel := if backend == "opencode" && modelOv.isEmpty then "builtin/smart" else modelOv
@@ -1857,6 +1948,18 @@ def dispatchMcpToolCall
       return mcpOk settled
 
   | "update_mission_settings" => withReservedMcpOutcome store claims callerUserId toolName idemKeyTop nowIso do
+    let .obj kvs := args
+      | return ← failReservedOrErr store claims callerUserId toolName idemKeyTop "invalid_arguments" "arguments must be a JSON object" nowIso
+    for (k, v) in kvs do
+      if MissionSettings.retiredMissionSettingsFields.contains k then
+        return ← failReservedOrErr store claims callerUserId toolName idemKeyTop "unsupported"
+          s!"Field `{k}` is not supported by update_mission_settings; no settings were changed." nowIso false ""
+      if !MissionSettings.mcpAllowedSettingsFields.contains k then
+        return ← failReservedOrErr store claims callerUserId toolName idemKeyTop "invalid_arguments"
+          s!"Unknown or unsupported update_mission_settings field `{k}`; no settings were changed." nowIso false ""
+      if (k == "mission_id" || k == "idempotency_key") && v.asStr?.isNone then
+        return ← failReservedOrErr store claims callerUserId toolName idemKeyTop "invalid_arguments"
+          s!"Field `{k}` must be a string." nowIso false ""
     let mid := (args.fieldStr? "mission_id").getD callerMid
     if mid.isEmpty then return ← failReservedOrErr store claims callerUserId toolName idemKeyTop "invalid_arguments" "missing mission_id" nowIso
     let some existing ← getMission? store mid
@@ -1870,9 +1973,22 @@ def dispatchMcpToolCall
       if !callerProj.isEmpty && callerProj != existing.project then return false
       return ← managedMissionAncestor store callerMid mid callerUserId existing.project)
     if !allowed then return ← failReservedOrErr store claims callerUserId toolName idemKeyTop "forbidden" "mission_settings_mutation_forbidden" nowIso false mid
-    let settings ← match MissionSettings.resolve existing args with
+    let settings ← match MissionSettings.resolve existing args MissionSettings.mcpAllowedSettingsFields with
       | .ok settings => pure settings
-      | .error e => return ← failReservedOrErr store claims callerUserId toolName idemKeyTop "invalid_arguments" e nowIso false mid
+      | .error e =>
+        let code := if e.startsWith "unsupported_field:" then "unsupported" else "invalid_arguments"
+        return ← failReservedOrErr store claims callerUserId toolName idemKeyTop code e nowIso false mid
+    if (args.field? "backend").isSome then
+      let isRemoteMission :=
+        existing.placementKind == "remote" || existing.placementKind == "remote_node" ||
+        existing.placementKind == "managed_vm" ||
+        (← resolveMissionRemoteNode? store mc? mid).isSome
+      if isRemoteMission then
+        if let .error hErr := validateRemoteHarness settings.backend then
+          return ← failReservedOrErr store claims callerUserId toolName idemKeyTop "invalid_arguments" hErr nowIso false mid
+        if existing.goalMode && !OrbCore.RemoteGoal.supportsHarness settings.backend then
+          return ← failReservedOrErr store claims callerUserId toolName idemKeyTop "invalid_arguments"
+            "remote_goal_unsupported: This remote harness cannot continue a Goal." nowIso false mid
     if let .error _ ← MissionSettings.persist store existing settings nowIso then
       return ← failReservedOrErr store claims callerUserId toolName idemKeyTop "mission_settings_update_failed" "mission_settings_update_failed" nowIso true mid
     let resObj := JVal.obj #[("ok", .bool true), ("mission_id", .str mid)]
@@ -2409,13 +2525,13 @@ def dispatchMcpToolCall
     if slug.isEmpty then return ← failReservedOrErr store claims callerUserId toolName idemKeyTop "invalid_arguments" "missing project slug" nowIso
     if idemKeyTop.isEmpty then
       return mcpErr "invalid_arguments" "missing idempotency_key"
-    if let some lvl := args.fieldStr? "autonomy_level" then
-      if !(["observe", "propose", "act_reversible", "act_full"].contains lvl) then
-        return ← failReservedOrErr store claims callerUserId toolName idemKeyTop "invalid_arguments" s!"unknown autonomy_level `{lvl}`" nowIso
+    let grantMcpExtra := #["slug", "project", "idempotency_key"]
+    if let .error e := validateProjectGrantPatch args grantMcpExtra then
+      return ← failReservedOrErr store claims callerUserId toolName idemKeyTop "invalid_arguments" e nowIso
     match ← execParamQuery store.projectsDb "SELECT slug FROM projects WHERE slug=?1 LIMIT 1;" #[slug] with
     | .ok rows => unless rows.size > 1 do return ← failReservedOrErr store claims callerUserId toolName idemKeyTop "not_found" s!"Project `{slug}` not found" nowIso
     | .error e => return ← failReservedOrErr store claims callerUserId toolName idemKeyTop "internal_error" e nowIso true
-    match ← upsertProjectGrantJVal store slug slug args nowIso with
+    match ← upsertProjectGrantJVal store slug slug args nowIso grantMcpExtra with
     | .ok grant =>
       let .ok settled ← recordSettledMcpAction store claims callerUserId toolName args grant nowIso ""
         | return mcpErr "receipt_record_failed" "The project grant was updated but its receipt could not be recorded. Reconcile the action." false
@@ -2492,7 +2608,10 @@ def dispatchMcpToolCall
           finalRes := finalRes.setField "auto_resume" (.bool true)
     return mcpOk finalRes
 
-  | "secret_request" | "secret_put" | "secret_delete" | "secret_move" =>
+  | "secret_put" | "secret_delete" | "secret_move" =>
+    return mcpErr "unsupported" s!"`{toolName}` is not implemented; Bitwarden secret mutations (write/delete/move) are unsupported and no request was queued."
+
+  | "secret_request" =>
     let bwProj := (args.fieldStr? "bitwarden_project").orElse (fun _ => args.fieldStr? "project") |>.getD "unassigned"
     let secName := (args.fieldStr? "name").orElse (fun _ => args.fieldStr? "secret_name") |>.getD ""
     let val := (args.fieldStr? "value").getD ""
@@ -2591,11 +2710,98 @@ def dispatchMcpToolCall
   | "get_cloud_execution" =>
     let mid := (args.fieldStr? "mission_id").orElse (fun _ => args.fieldStr? "id") |>.getD callerMid
     if mid.isEmpty then return mcpErr "invalid_arguments" "missing mission_id"
+    if let .error e ← checkMissionReadAccess store claims mid nowEpochSec then
+      return mcpErr "forbidden" e
+    let includePrompt ← match args.field? "include_prompt" with
+      | none | some .null => pure false
+      | some (.bool b) => pure b
+      | some _ => return mcpErr "invalid_arguments" "include_prompt must be a boolean"
+    let limit ← match args.field? "limit" with
+      | none | some .null => pure 1
+      | some v =>
+        match v.asNat? with
+        | some n =>
+          if n ≥ 1 && n ≤ 5 then pure n
+          else return mcpErr "invalid_arguments" "limit must be an integer between 1 and 5"
+        | none => return mcpErr "invalid_arguments" "limit must be an integer between 1 and 5"
+    let offset? ← match args.field? "offset" with
+      | none | some .null => pure none
+      | some v =>
+        match v.asNat? with
+        | some n => pure (some n)
+        | none => return mcpErr "invalid_arguments" "offset must be a non-negative integer"
+    let textLimit ← match args.field? "text_limit" with
+      | none | some .null => pure 4096
+      | some v =>
+        match v.asNat? with
+        | some n =>
+          if n ≥ 1 && n ≤ 8192 then pure n
+          else return mcpErr "invalid_arguments" "text_limit must be an integer between 1 and 8192"
+        | none => return mcpErr "invalid_arguments" "text_limit must be an integer between 1 and 8192"
+    let textOffset ← match args.field? "text_offset" with
+      | none | some .null => pure 0
+      | some v =>
+        match v.asNat? with
+        | some n => pure n
+        | none => return mcpErr "invalid_arguments" "text_offset must be a non-negative integer"
     match ← OrbCore.CloudHttpAndWorker.loadCloudExecutionJson? store mid with
     | none =>
       return mcpOk (.obj #[("enabled", .bool false), ("mission_id", .str mid), ("revision", .null), ("execution", .null)])
     | some (rev, execJv) =>
-      return mcpOk (.obj #[("enabled", .bool true), ("mission_id", .str mid), ("revision", JVal.nat rev), ("execution", execJv)])
+      let allTurns := (execJv.fieldArr? "turns").getD #[]
+      let totalTurns := allTurns.size
+      let startIdx := match offset? with
+        | some o => Nat.min o totalTurns
+        | none => if totalTurns > limit then totalTurns - limit else 0
+      let endIdx := Nat.min totalTurns (startIdx + limit)
+      let sliceText (raw : String) : String × JVal :=
+        let totalChars := raw.length
+        let sliced := ((raw.drop textOffset).take textLimit).toString
+        let consumed := Nat.min totalChars (textOffset + sliced.length)
+        let truncated := consumed < totalChars
+        let metaJv := JVal.obj #[
+          ("offset", JVal.nat textOffset),
+          ("returned", JVal.nat sliced.length),
+          ("total_chars", JVal.nat totalChars),
+          ("truncated", .bool truncated),
+          ("next_offset", if truncated then JVal.nat consumed else .null)
+        ]
+        (sliced, metaJv)
+      let mut pagedTurns : Array JVal := #[]
+      for idx in [startIdx:endIdx] do
+        let t := allTurns[idx]!
+        let mut tObj := (t.removeField "prompt").removeField "artifacts" |>.removeField "branches"
+        let artCnt := ((t.fieldArr? "artifacts").getD #[]).size
+        let brCnt := ((t.fieldArr? "branches").getD #[]).size
+        tObj := (tObj.setField "artifact_count" (JVal.nat artCnt)).setField "branch_count" (JVal.nat brCnt)
+        let mut slices : Array (String × JVal) := #[]
+        if includePrompt then
+          if let some pStr := t.fieldStr? "prompt" then
+            let (ps, pm) := sliceText pStr
+            tObj := tObj.setField "prompt" (.str ps)
+            slices := slices.push ("prompt", pm)
+        if let some rStr := t.fieldStr? "result" then
+          let (rs, rm) := sliceText rStr
+          tObj := tObj.setField "result" (.str rs)
+          slices := slices.push ("result", rm)
+        if let some dStr := t.fieldStr? "detail" then
+          let (ds, dm) := sliceText dStr
+          tObj := tObj.setField "detail" (.str ds)
+          slices := slices.push ("detail", dm)
+        tObj := tObj.setField "text_slices" (.obj slices)
+        pagedTurns := pagedTurns.push tObj
+      let pageObj := JVal.obj #[
+        ("offset", JVal.nat startIdx),
+        ("limit", JVal.nat limit),
+        ("returned", JVal.nat pagedTurns.size),
+        ("total_turns", JVal.nat totalTurns),
+        ("next_offset", if endIdx < totalTurns then JVal.nat endIdx else .null)
+      ]
+      let boundedExec := (execJv.setField "turns" (.arr pagedTurns)).setField "page" pageObj
+      return mcpOk (.obj #[
+        ("enabled", .bool true), ("mission_id", .str mid), ("revision", JVal.nat rev),
+        ("page", pageObj), ("execution", boundedExec)
+      ])
 
   | _ =>
     return mcpErr "unknown_tool" s!"Unknown or unsupported MCP tool `{toolName}`"

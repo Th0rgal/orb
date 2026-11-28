@@ -727,7 +727,7 @@ structure PreparedRemoteCommand where
   antigravityAccountId? : Option String := none
   antigravityOauthFile? : Option String := none
 
-private def resolveRemoteCallbackUrls (sup : RemoteJobSupervisor) (targetNodeId : String) : IO (String × String) := do
+def resolveRemoteCallbackUrls (sup : RemoteJobSupervisor) (targetNodeId : String) : IO (String × String) := do
   let pubApiRaw := trimTrailingSlashes ((← lookupEnvWithFiles? "SANDBOXED_PUBLIC_URL").getD "")
   let apiBase ←
     if !pubApiRaw.isEmpty then
@@ -1037,14 +1037,19 @@ def prepareRemoteHarnessCommand
   let tags := parseTagsArray spec.tagsJson
   let wsPrefix := buildWorkspacePrefix coreWorkDir spec.workingDirectory tags
   let (apiBase, proxyBase) ← resolveRemoteCallbackUrls sup effNodeId
-  let mcpEnvs ← mintMissionScopedMcpEnv store sup spec.missionId spec.ownerUserId spec.project apiBase spec.sideQuestion nowSec
   if let some rawCmd := spec.rawCommandOverride?.filter (fun s => !s.trimAscii.toString.isEmpty) then
+    let mcpEnvs ← mintMissionScopedMcpEnv store sup spec.missionId spec.ownerUserId spec.project apiBase spec.sideQuestion nowSec
     return .ok {
       command     := wsPrefix ++ rawCmd
       envPairs    := mcpEnvs.push ("NO_COLOR", "1")
       managedAuth := #[]
       proxyToken  := ""
     }
+  -- Shared typed launch-plan validation (`FLT-14`) before minting tokens or side effects.
+  let harness ← match validateRemoteLaunchPlan spec.backend spec.prompt proxyBase with
+    | .ok h => pure h
+    | .error e => return .error e
+  let mcpEnvs ← mintMissionScopedMcpEnv store sup spec.missionId spec.ownerUserId spec.project apiBase spec.sideQuestion nowSec
   let trimmedPrompt := spec.prompt.trimAscii.toString
   let isPlanPrompt :=
     trimmedPrompt == "/plan" || trimmedPrompt.startsWith "/plan " || trimmedPrompt.startsWith "/plan\n"
@@ -1072,12 +1077,10 @@ def prepareRemoteHarnessCommand
       some s!"{apiBase}/api/mcp/rpc"
     else
       none
-  let bLow := spec.backend.trimAscii.toString.toLower
-  let harness := if bLow == "claude" then "claudecode" else bLow
 
   if harness == "opencode" then
     if proxyBase.isEmpty then
-      return .error "SANDBOXED_PUBLIC_URL (or SANDBOXED_PROXY_PUBLIC_URL) must be configured for remote opencode turns"
+      return .error "REMOTE_AUTH_REQUIRED: SANDBOXED_PUBLIC_URL (or SANDBOXED_PROXY_PUBLIC_URL) must be configured for remote opencode turns"
     let pTok ← match ← mintMissionProxyToken store spec.missionId spec.ownerUserId (nowSec + 86400) with
       | .ok t => pure t
       | .error e => return .error s!"failed to mint mission proxy token: {e}"
@@ -1289,7 +1292,7 @@ def prepareRemoteHarnessCommand
     }
 
   else
-    return .error s!"unsupported remote harness `{spec.backend}`"
+    return .error s!"REMOTE_HARNESS_UNSUPPORTED: unsupported remote harness `{spec.backend}`"
 
 /-! ## NDJSON Line Ingestion (`claudecode` + `opencode` + `codex` + `grok` + `antigravity`) -/
 
@@ -2053,11 +2056,16 @@ def cancelActiveRemoteJobForMission
     ("x-sandboxed-cancel-reason", if reason.isEmpty then "Mission stopped on Core" else reason)
   ]
   match ← callRemoteNodeHttpOpt relayHub? mc? effNode "POST" s!"/jobs/{jobId}/cancel" (some (.obj #[])) hdrs 10000 with
-  | .ok (st, respTxt, _, _, _) =>
-    let confirmed := (200 ≤ st && st < 300) || (st == 404 && respTxt.trimAscii.toString == "job not found")
-    if confirmed then
+  | .ok (st, respTxt, jv?, _, _) =>
+    match classifyOrbNodeCancelReply st respTxt jobId jv? with
+    | .confirmedCancelled =>
       markCancelState jobId "cancelled"
-    return confirmed
+      return true
+    | .alreadyTerminal termSt =>
+      markCancelState jobId termSt
+      return false
+    | .notConfirmed =>
+      return false
   | .error _ =>
     return false
 
@@ -2277,8 +2285,9 @@ partial def spawnRemoteJobPoller
             -- Only mark cancellation delivered once the node confirms it (`FLT-06`);
             -- during a partition, keep `cancelSent = false` so later ticks retry `/cancel`.
             match ← callRemoteNodeHttpOpt relayHub? mc? effNodeId "POST" s!"/jobs/{jobId}/cancel" (some (.obj #[])) hdrs 8000 with
-            | .ok (cSt, cBody, _, _, _) =>
-              if (200 ≤ cSt && cSt < 300) || (cSt == 404 && cBody.trimAscii.toString == "job not found") then
+            | .ok (cSt, cBody, cJv?, _, _) =>
+              match classifyOrbNodeCancelReply cSt cBody jobId cJv? with
+              | .confirmedCancelled =>
                 cancelSent := true
                 discard <| execParamQuery store.missionsDb
                   "UPDATE remote_node_jobs SET state='cancelled', updated_at=?2 WHERE job_id=?1 AND state NOT IN ('succeeded','failed','lost','terminal','completed','aborted');"
@@ -2286,6 +2295,15 @@ partial def spawnRemoteJobPoller
                 discard <| execParamQuery store.projectsDb
                   "UPDATE remote_jobs SET state='cancelled', heartbeat_at=?2, finished_at=COALESCE(finished_at,?2), updated_at=?2 WHERE job_id=?1 AND state NOT IN ('succeeded','failed','lost','terminal','completed','aborted');"
                   #[jobId, nowIso]
+              | .alreadyTerminal termSt =>
+                cancelSent := true
+                discard <| execParamQuery store.missionsDb
+                  "UPDATE remote_node_jobs SET state=?2, updated_at=?3 WHERE job_id=?1 AND state NOT IN ('succeeded','failed','cancelled','lost','terminal','completed','aborted');"
+                  #[jobId, termSt, nowIso]
+                discard <| execParamQuery store.projectsDb
+                  "UPDATE remote_jobs SET state=?2, heartbeat_at=?3, finished_at=COALESCE(finished_at,?3), updated_at=?3 WHERE job_id=?1 AND state NOT IN ('succeeded','failed','cancelled','lost','terminal','completed','aborted');"
+                  #[jobId, termSt, nowIso]
+              | .notConfirmed => pure ()
             | .error _ => pure ()
       if keepRunning then
         let ownsGen ← pollerOwnsGeneration
@@ -3224,22 +3242,26 @@ def reattachActiveRemoteJobsOnStartup
       let snid := (cell srow 1).trimAscii.toString
       let smid := (cell srow 2).trimAscii.toString
       if !sjid.isEmpty then
-        let mut confirmed := snid.isEmpty
+        let mut nextSt := if snid.isEmpty then "cancelled" else "cancel_requested"
         if !snid.isEmpty then
           let effNode ← match ← resolveConcreteRemoteTargetNode mc? snid (if smid.isEmpty then none else some (store, smid)) with
             | .ok n => pure n
             | .error _ => pure snid
           let hdrs := #[("x-sandboxed-cancel-actor", "core"), ("x-sandboxed-cancel-reason", "Mission inactive on Core startup")]
           match ← callRemoteNodeHttpOpt relayHub? mc? effNode "POST" s!"/jobs/{sjid}/cancel" (some (.obj #[])) hdrs 6000 with
-          | .ok (cSt, cBody, _, _, _) =>
-            confirmed := (200 ≤ cSt && cSt < 300) || (cSt == 404 && cBody.trimAscii.toString == "job not found")
-          | .error _ => confirmed := false
-        let nextSt := if confirmed then "cancelled" else "cancel_requested"
+          | .ok (cSt, cBody, cJv?, _, _) =>
+            match classifyOrbNodeCancelReply cSt cBody sjid cJv? with
+            | .confirmedCancelled => nextSt := "cancelled"
+            | .alreadyTerminal termSt => nextSt := termSt
+            | .notConfirmed => nextSt := "cancel_requested"
+          | .error _ => nextSt := "cancel_requested"
         discard <| execParamQuery store.missionsDb
-          "UPDATE remote_node_jobs SET state=?2, updated_at=?3 WHERE job_id=?1;" #[sjid, nextSt, nowIso]
+          "UPDATE remote_node_jobs SET state=?2, updated_at=?3 WHERE job_id=?1 AND state NOT IN ('terminal','completed','succeeded','failed','aborted','cancelled','lost');"
+          #[sjid, nextSt, nowIso]
         discard <| execParamQuery store.projectsDb
           ("UPDATE remote_jobs SET state=?2, heartbeat_at=?3, " ++
-           "finished_at=CASE WHEN ?2='cancelled' THEN COALESCE(finished_at,?3) ELSE finished_at END, updated_at=?3 WHERE job_id=?1;")
+           "finished_at=CASE WHEN ?2 IN ('cancelled','succeeded','failed','completed','aborted','terminal') THEN COALESCE(finished_at,?3) ELSE finished_at END, updated_at=?3 " ++
+           "WHERE job_id=?1 AND state NOT IN ('terminal','completed','succeeded','failed','aborted','cancelled','lost');")
           #[sjid, nextSt, nowIso]
   -- Also reconcile missions still marked active/pending whose current placement_job_id
   -- already reached 'cancelled' or 'lost' in remote_node_jobs (e.g. cancelled via the
