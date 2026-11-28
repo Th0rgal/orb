@@ -43,7 +43,6 @@ import {
 import { ApprovalCancelled } from "./deviceApproval";
 import {
   loadPendingGitHubOAuthAttempt,
-  signInWithGitHubDesktop,
   verifyGitHubOAuthCallback,
   verifyIssuedAuthToken,
 } from "./githubSignIn";
@@ -822,25 +821,6 @@ export function BackendTab(p: { standalone?: boolean } = {}) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setBusy(false);
-    }
-  };
-
-  const signInGitHub = async () => {
-    if (busy() || githubBusy()) return;
-    setApiUrl(url());
-    setGithubBusy(true);
-    setError(null);
-    setNotice(null);
-    try {
-      const h = health();
-      await signInWithGitHubDesktop(
-        url(),
-        h ? h.github_oauth_client_state === true : undefined,
-      );
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setGithubBusy(false);
     }
   };
 

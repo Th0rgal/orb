@@ -789,6 +789,25 @@ class PlannerCoverageTest(unittest.TestCase):
         self.assertIn('replace("http://archive.ubuntu.com", "https://archive.ubuntu.com")', script)
         self.assertIn('replace("http://security.ubuntu.com", "https://security.ubuntu.com")', script)
 
+    def test_kernel_abi_bounds_native_compiler_memory_on_lean_ci(self):
+        """kernel-abi builds all Lean packages with tests on boost-jit-* runners;
+        keep it in the validated native object cache + flock serialization guard
+        (matching `test`) so Lake's parallel clang fan-out cannot OOM (master run
+        46119196420, job 140902870283), and scope LIBRARY_PATH for OrbNetLeaf
+        strictly to compilation rather than leaking it to self-tests."""
+        action = (ROOT / ".github/actions/setup-turbo-lean/action.yml").read_text()
+        cache_step = action.split("- name: Configure validated native object cache", 1)[1].split(
+            "- name: Restore native C compiler cache", 1
+        )[0]
+        self.assertIn("github.job == 'kernel-abi'", cache_step)
+        self.assertIn('"$GITHUB_JOB" == kernel-abi', cache_step)
+        self.assertIn('CCACHE_PREFIX=$RUNNER_TEMP/orb-cc/compile-one', cache_step)
+        kabi_wf = (ROOT / ".github/workflows/kernel-abi.yml").read_text()
+        self.assertIn(
+            'LIBRARY_PATH="$(lean --print-prefix)/lib${LIBRARY_PATH:+:$LIBRARY_PATH}" "$GITHUB_WORKSPACE/scripts/turbo_lean.sh" build && ./.lake/build/bin/orb-net-leaf-test',
+            kabi_wf,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

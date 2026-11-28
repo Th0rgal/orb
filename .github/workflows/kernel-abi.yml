@@ -230,7 +230,7 @@ jobs:
           c_lines=$(wc -l < lean/OrbNetLeaf/c/orb_net_leaf.c)
           echo "orb_net_leaf.c LOC: $c_lines"
           test "$c_lines" -le 220
-          (cd lean/OrbNetLeaf && "$GITHUB_WORKSPACE/scripts/turbo_lean.sh" build && ./.lake/build/bin/orb-net-leaf-test)
+          (cd lean/OrbNetLeaf && LIBRARY_PATH="$(lean --print-prefix)/lib${LIBRARY_PATH:+:$LIBRARY_PATH}" "$GITHUB_WORKSPACE/scripts/turbo_lean.sh" build && ./.lake/build/bin/orb-net-leaf-test)
           python3 scripts/test_account_vpn_transport.py lean/OrbNetLeaf/.lake/build/bin/orb-net-leaf-test --probe-account-vpn
           elab_syms=$(nm -u lean/OrbNetLeaf/.lake/build/bin/orb-net-leaf-test | grep -c lean_elab || true)
           test "$elab_syms" -eq 0
