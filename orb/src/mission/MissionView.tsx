@@ -1118,7 +1118,7 @@ export function NativeMissionView(p: { id: string; active?: boolean; launch?:Lau
           if (ev.type === "goal_status" || ev.type === "goal_iteration") {
             setLiveGoal(old => applyRemoteGoalEvent(old ?? { phase: "active", objective: "", iteration: 0 }, { type: ev.type, data: ev.data }));
           }
-          if (ev.type === "secret_approval_decided") {
+          if (ev.type === "secret_approval_decided" || ev.type === "mac_tether_decided") {
             const reqId = typeof ev.data?.request_id === "string" ? ev.data.request_id : "";
             const prompt = typeof ev.data?.prompt === "string" ? ev.data.prompt : "";
             const autoResume = ev.data?.auto_resume === true && ev.data?.auto_resume_host === "client";
