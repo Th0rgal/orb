@@ -2697,14 +2697,20 @@ def resolvedLogicalSubSize (scale120 : Nat) (viewport : Rect)
     ((viewport.w.toNat * subPerPx * scaleDen) / s,
      (viewport.h.toNat * subPerPx * scaleDen) / s)
 
+/-- Compute the transcript pane logical width in `SubPx`, matching `Screens.buildDesktopScreen`. -/
+@[inline] def DesktopState.transcriptPaneWidth (st : DesktopState) (availW : SubPx) : SubPx :=
+  let mainW : SubPx := availW - st.sidebarWidth
+  if st.screen == .missionSplitDiff then pxToSub 688 - st.theme.borderWidth
+  else if st.screen == .missionTranscript && st.sidePanelOpen then
+    mainW - min (pxToSub 480) (mainW / 2) - st.theme.borderWidth
+  else mainW
+
 /-- Measure the current rendered transcript `(contentH, bodyH)` in `SubPx`, matching
 `buildMissionTranscriptBody` so scroll-anchor updates clamp against the actual layout. -/
 def measureTranscriptContentHeight (st : DesktopState) (scale120 : Nat) (viewport : Rect)
     (logicalSubSize? : Option (SubPx × SubPx) := none) : SubPx × SubPx := Id.run do
   let (availW, availH) := resolvedLogicalSubSize scale120 viewport logicalSubSize?
-  let mainW : SubPx := availW - st.sidebarWidth
-  let transcriptW : SubPx :=
-    if st.sidePanelOpen then mainW - min (pxToSub 480) (mainW / 2) else mainW
+  let transcriptW : SubPx := st.transcriptPaneWidth availW
   let colW : SubPx := min (pxToSub 748) (transcriptW - pxToSub 48)
   let width : SubPx := transcriptTextWidth transcriptW
   let bodyH : SubPx := availH - chromeHeaderHeightSub - chromeComposerHeightSub
@@ -2737,9 +2743,7 @@ def measurePrependedHeightDelta (st : DesktopState) (scale120 : Nat) (viewport :
     (addedTurns : List String) (hadBanner willHaveBanner : Bool)
     (logicalSubSize? : Option (SubPx × SubPx) := none) : Int := Id.run do
   let (availW, _) := resolvedLogicalSubSize scale120 viewport logicalSubSize?
-  let mainW : SubPx := availW - st.sidebarWidth
-  let transcriptW : SubPx :=
-    if st.sidePanelOpen then mainW - min (pxToSub 480) (mainW / 2) else mainW
+  let transcriptW : SubPx := st.transcriptPaneWidth availW
   let colW : SubPx := min (pxToSub 748) (transcriptW - pxToSub 48)
   let width : SubPx := transcriptTextWidth transcriptW
   let (addedRows, _) := buildLiveTurnsNodes st.theme colW width addedTurns

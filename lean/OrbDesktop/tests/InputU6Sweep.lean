@@ -461,15 +461,47 @@ private def verifyInteractionRegressions : IO Unit := do
   let deltaOpen := measurePrependedHeightDelta txOpen 120 narrowVp [longTurn] false false
   unless deltaOpen > deltaClosed do
     throw <| IO.userError s!"measurePrependedHeightDelta with sidePanelOpen=true ({deltaOpen}) must exceed sidePanelOpen=false ({deltaClosed}) for wrapping text"
-  let mainW1200 : SubPx := pxToSub 1200 - txOpen.sidebarWidth
-  let leftW1200 : SubPx := mainW1200 - min (pxToSub 480) (mainW1200 / 2)
+  let leftW1200 : SubPx := txOpen.transcriptPaneWidth (pxToSub 1200)
   let colW1200 : SubPx := min (pxToSub 748) (leftW1200 - pxToSub 48)
   let (expectedRows, _) := buildLiveTurnsNodes txOpen.theme colW1200 (transcriptTextWidth leftW1200) [longTurn]
   let expectedDelta : Int := expectedRows.foldl (fun acc row =>
-    let (_, rowH) := measureNode leftW1200 row.toLayoutNode
+    let (_, rowH) := measureNode colW1200 row.toLayoutNode
     acc + (rowH : Int) + (transcriptColumnGapSub : Int)) 0
   unless deltaOpen == expectedDelta do
     throw <| IO.userError s!"measurePrependedHeightDelta sidePanelOpen mismatch: got {deltaOpen}, expected {expectedDelta}"
+  -- Verify measureTranscriptContentHeight & measurePrependedHeightDelta match buildDesktopScreen's
+  -- laid-out transcriptViewportId scroll limit even on the exact 1px border-width boundary (682px vs 681px at 1470x923).
+  let rec findViewportContentH : Nat → WidgetNode → ComputedBox → Option SubPx
+    | 0, _, _ => none
+    | fuel + 1, .mk wid _ _ _ _ wChildren, b =>
+      if wid == some transcriptViewportId then
+        b.scrollLimitXY.map fun (_, limY) => b.contentRectSub.h.toNat + limY
+      else
+        (wChildren.zip b.children).findSome? fun (cw, cb) => findViewportContentH fuel cw cb
+  let boundaryLine : String := "`cccc`" ++ String.ofList (List.replicate 92 'a') ++ "**bb**"
+  let txBoundaryBase : DesktopState := {
+    txOpen with
+    liveTurns := List.replicate 18 boundaryLine
+  }
+  let txBoundaryMore : DesktopState := {
+    txBoundaryBase with
+    liveTurns := [boundaryLine, boundaryLine] ++ txBoundaryBase.liveTurns
+  }
+  let layoutContentH (st : DesktopState) : IO SubPx := do
+    let tree := buildDesktopScreen st vpW vpH {}
+    let box := layoutNode 120 none st.theme.palette.focusRing 0 0 vpW vpH tree.toLayoutNode
+    match findViewportContentH 64 tree box with
+    | some h => pure h
+    | none => throw <| IO.userError "transcriptViewportId missing in sidePanelOpen layout check"
+  let (measBaseH, _) := measureTranscriptContentHeight txBoundaryBase 120 vpDev
+  let actualBaseH ← layoutContentH txBoundaryBase
+  unless measBaseH == actualBaseH do
+    throw <| IO.userError s!"measureTranscriptContentHeight 1px-boundary mismatch: got {measBaseH}, actual {actualBaseH}"
+  let actualMoreH ← layoutContentH txBoundaryMore
+  let measDelta := measurePrependedHeightDelta txBoundaryBase 120 vpDev [boundaryLine, boundaryLine] false false
+  let actualDelta : Int := (actualMoreH : Int) - (actualBaseH : Int)
+  unless measDelta == actualDelta do
+    throw <| IO.userError s!"measurePrependedHeightDelta 1px-boundary mismatch: got {measDelta}, actual {actualDelta}"
 
 private def verifyScrollbarQuietFocusAndCaret : IO Unit := do
   -- 1. Pure caret positioning (empty, mid-string, multi-byte UTF-8, IME preedit).

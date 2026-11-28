@@ -447,11 +447,7 @@ private def shapeOpenTailLinesCached (cache : TranscriptRenderCache) (ac : Text.
 
 /-- Compute the transcript pane logical width in `SubPx`, matching `Screens.buildDesktopScreen`. -/
 @[inline] private def transcriptPaneWidth (st : DesktopState) (availW : SubPx) : SubPx :=
-  let mainW : SubPx := availW - st.sidebarWidth
-  if st.screen == .missionSplitDiff then pxToSub 688 - st.theme.borderWidth
-  else if st.screen == .missionTranscript && st.sidePanelOpen then
-    mainW - min (pxToSub 480) (mainW / 2) - st.theme.borderWidth
-  else mainW
+  st.transcriptPaneWidth availW
 
 /-- Build a virtualized offscreen spacer that preserves exact vertical height AND attaches
 zero-size non-hit-testable focusable placeholders so `rt.focusableOrder` stays scroll-invariant. -/
