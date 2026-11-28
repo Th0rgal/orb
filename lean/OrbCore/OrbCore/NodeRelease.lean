@@ -30,14 +30,24 @@ private initialize agyVersionCache : Std.Mutex (Std.HashMap String (UInt64 × IO
 private def allowedReleaseBinaryName (name : String) : Bool :=
   name == "sandboxed-node" || name == "orb-privd" || name == "agy"
 
-private def candidateBinaryPaths (name arch : String) : IO (Array String) := do
+private def allowedReleaseArch (normArch : String) : Bool :=
+  normArch == "x86_64" || normArch == "aarch64"
+
+/-- Candidate filesystem paths for a release binary matching `arch`.
+    When `ORB_NODE_RELEASE_DIR` is configured (non-empty), it is authoritative:
+    only `<relDir>/<normArch>/<name>` and `<relDir>/<name>` are consulted, never
+    falling through to host-global release/guest/system paths. -/
+def candidateBinaryPaths (name arch : String) : IO (Array String) := do
+  if !allowedReleaseBinaryName name then return #[]
   let normArch := OrbNode.AutoUpdate.normalizeArch arch
+  if !allowedReleaseArch normArch then return #[]
+  if let some relDir ← getEnvNonEmpty "ORB_NODE_RELEASE_DIR" then
+    let trimmed := relDir.trimAscii.toString
+    if !trimmed.isEmpty then
+      let r := stripTrailingSlash trimmed
+      return #[s!"{r}/{normArch}/{name}", s!"{r}/{name}"]
   let buildSha := ((← IO.getEnv "ORB_BUILD_SHA").getD "").trimAscii.toString
   let mut cands : Array String := #[]
-  if let some relDir ← getEnvNonEmpty "ORB_NODE_RELEASE_DIR" then
-    let r := stripTrailingSlash relDir
-    cands := cands.push s!"{r}/{normArch}/{name}"
-    cands := cands.push s!"{r}/{name}"
   if !buildSha.isEmpty then
     cands := cands.push s!"/usr/local/share/orb/releases/{buildSha}/bin/{normArch}/{name}"
     cands := cands.push s!"/usr/local/share/orb/releases/{buildSha}/bin/{name}"
