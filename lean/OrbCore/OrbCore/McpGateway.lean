@@ -1933,6 +1933,13 @@ def dispatchMcpToolCall
         if let some cause ← nodeApiHangCause? store effTarget then
           return ← settleReservedMcpAction store claims callerUserId toolName idemKeyTop "failed" cause nowIso "hung_node"
         resolvedTarget? := some effTarget
+      let hasInflight : Bool ← match ← execParamQuery store.missionsDb
+          "SELECT 1 FROM remote_node_jobs WHERE mission_id=?1 AND state NOT IN ('succeeded','failed','cancelled','lost','terminal','completed','aborted','unreachable') LIMIT 1;" #[mid] with
+        | .ok rows => pure (decide (rows.size > 1))
+        | .error _ => pure false
+      if hasInflight then
+        return ← settleReservedMcpAction store claims callerUserId toolName idemKeyTop "failed"
+          "Mission already has a live remote job; use send_message_to_mission to queue steering or cancel_mission first." nowIso "mission_already_active"
       if let some t := (args.fieldStr? "title").map (·.trimAscii.toString) then
         if !t.isEmpty then
           discard <| execParamQuery store.missionsDb "UPDATE missions SET title=?2, metadata_updated_at=?3 WHERE id=?1;" #[mid, t, nowIso]
@@ -1946,8 +1953,6 @@ def dispatchMcpToolCall
             if sRows.size > 1 then
               let s := (cell sRows[1]! 0).trimAscii.toString
               if !s.isEmpty then resumeSid? := some s
-          discard <| appendMissionEvent store mid "user_message"
-            (renderCompact (.obj #[("content", .str effPrompt), ("source", .str "mcp_resume")])) nowIso
           let spec : RemoteTurnSpec := {
             missionId        := mid
             targetNodeId     := targetNode
@@ -1965,8 +1970,12 @@ def dispatchMcpToolCall
             resumeSessionId? := resumeSid?
           }
           if let .error dispErr ← submitRemoteMissionTurn store mc? relayHub? broadcastHub? sup workingDir spec nowEpochSec then
+            if dispErr.startsWith "remote_dispatch_busy:" then
+              return ← settleReservedMcpAction store claims callerUserId toolName idemKeyTop "failed" dispErr nowIso "mission_already_active"
             let outcome := if dispErr.startsWith "remote_dispatch_uncertain:" || dispErr.startsWith "remote_accept_persist_failed:" then "uncertain" else "failed"
             return ← settleReservedMcpAction store claims callerUserId toolName idemKeyTop outcome dispErr nowIso
+          discard <| appendMissionEvent store mid "user_message"
+            (renderCompact (.obj #[("content", .str effPrompt), ("source", .str "mcp_resume")])) nowIso
           let .ok settled ← recordSettledMcpAction store claims callerUserId toolName args
             (.obj #[("ok", .bool true), ("mission_id", .str mid), ("status", .str "active")]) nowIso mid
             | return mcpErr "receipt_record_failed" "The mutation completed but its receipt could not be recorded. Reconcile the action." false
