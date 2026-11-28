@@ -1429,14 +1429,15 @@ def buildDesktopScreen (st : DesktopState) (availW availH : SubPx)
           [WidgetNode.box (BoxStyle.row 0) pager] ++ actions ++ errors)
       return WidgetNode.box (BoxStyle.col 0 |>.withFixedSize mainW availH |>.withBg mainFill) [headerNode, body]
     | .resources => Id.run do
+      let toolbarW := min (pxToSub 640) (mainW - pxToSub 24)
       let w := min (pxToSub 920) (mainW - pxToSub 24)
       let line := fun (width : SubPx) (t : String) =>
         screenTextLine theme width (pxToSub 32) (pxToSub 14) (pxToSub 24) pal.textPrimary t
       let button := fun id width title =>
         inventoryTarget theme hoverRow id width (pxToSub 32) (line width title)
       let ranges := resourceRanges.mapIdx fun i range =>
-        button (955 + i) (w / 7) (if st.resourceRange == range then "✓ " ++ range else range)
-      let toolbar := WidgetNode.box (BoxStyle.row 0) (ranges ++ [button 945 (2 * w / 7) "Refresh"])
+        button (955 + i) (toolbarW / 7) (if st.resourceRange == range then "✓ " ++ range else range)
+      let toolbar := WidgetNode.box (BoxStyle.row 0) (ranges ++ [button 945 (2 * toolbarW / 7) "Refresh"])
       let lensBar := WidgetNode.box (BoxStyle.row 0)
         [button resourceLensAllId (w / 3) (if st.resourceLens == "all" then "✓ All" else "All"),
          button resourceLensInferenceId (w / 3) (if st.resourceLens == "inference" then "✓ Inference" else "Inference"),
