@@ -37,7 +37,7 @@ function effortsFromCore(): Record<string, string[]> {
 describe("effort options come from the core's own gate", () => {
   it("matches normalize_model_effort_for_backend exactly", () => {
     const core = effortsFromCore();
-    expect(Object.keys(core).sort()).toEqual(["antigravity", "claudecode", "codex"]);
+    expect(Object.keys(core).sort()).toEqual(["antigravity", "claudecode", "codex", "pi"]);
     for (const [backend, ladder] of Object.entries(core)) {
       expect(supportedEfforts(backend)).toEqual(ladder);
     }

@@ -1414,7 +1414,10 @@ export async function listBackendModels(): Promise<Record<string, BackendModelOp
   const directOpencode = (data.backends?.opencode ?? []).filter(
     opt => opt.value && !chainIds.has(opt.value) && !chainIds.has(opt.value.replace(/^builtin\//, "")) && !opt.label.startsWith("Routing — "),
   );
-  return { ...data.backends, opencode: [...chainOptions, ...directOpencode] };
+  const directPi = (data.backends?.pi ?? []).filter(
+    opt => opt.value && !chainIds.has(opt.value) && !chainIds.has(opt.value.replace(/^builtin\//, "")) && !opt.label.startsWith("Routing — "),
+  );
+  return { ...data.backends, opencode: [...chainOptions, ...directOpencode], pi: [...chainOptions, ...directPi] };
 }
 
 
@@ -1448,7 +1451,7 @@ const harnessProvider: Record<string, string> = modelCatalogRules.harnessProvide
 export function availableModelSuccessor(backend: string, value: string, models: BackendModelOption[], providerId?: string): string | undefined {
   const slash = value.indexOf("/");
   const namespace = slash < 0 ? "" : value.slice(0, slash + 1);
-  const provider = backend === "opencode" ? namespace.slice(0, -1) : harnessProvider[backend];
+  const provider = (backend === "opencode" || backend === "pi") ? namespace.slice(0, -1) : harnessProvider[backend];
   if (!provider || (namespace && namespace !== provider + "/")) return;
   const successor = modelSuccessors[provider]?.[value.slice(namespace.length)];
   if (typeof successor !== "string") return;

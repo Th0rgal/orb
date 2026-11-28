@@ -29,6 +29,7 @@ def nativeDirectory (harness : String) : String :=
   | "codex" | "antigravity" => ".agents/skills"
   | "grok" => ".grok/skills"
   | "vibe" => ".vibe/skills"
+  | "pi" => ".pi/skills"
   | _ => ".opencode/skills"
 
 /-- Library fallback directory used when the native path is absent. -/

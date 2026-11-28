@@ -3180,6 +3180,7 @@ private fun OrbMissionListItem(
 fun serviceName(value: String): String = when (value.lowercase()) {
     "claudecode", "claude" -> "Claude Code"
     "codex" -> "Codex"
+    "pi" -> "Pi"
     "opencode" -> "OpenCode"
     "gemini" -> "Gemini"
     "antigravity" -> "Antigravity"

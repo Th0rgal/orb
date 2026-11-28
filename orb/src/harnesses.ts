@@ -6,6 +6,7 @@ export const HARNESSES = [
   { id: "claudecode", name: "Claude Code", goal: true, remoteNeedsProxy: true },
   { id: "codex", name: "Codex", goal: true, remoteNeedsProxy: true },
   { id: "grok", name: "Grok", goal: true, remoteNeedsProxy: false },
+  { id: "pi", name: "Pi", goal: true, remoteNeedsProxy: true },
   { id: "opencode", name: "OpenCode", goal: true, remoteNeedsProxy: true },
   { id: "antigravity", name: "Antigravity CLI", goal: true, remoteNeedsProxy: false },
   { id: "vibe", name: "Mistral Vibe", goal: false, remoteNeedsProxy: false },
@@ -25,6 +26,6 @@ export const GOAL_HARNESSES: ReadonlySet<string> = new Set(HARNESSES.filter(h =>
 /** Default when a server does not list `requires_proxy_harnesses`. */
 export const REMOTE_PROXY_HARNESSES: ReadonlySet<string> = new Set(HARNESSES.filter(h => h.remoteNeedsProxy).map(h => h.id));
 /** Side questions run on these, in the order the settings offer them. */
-export const SIDE_QUESTION_HARNESSES: readonly HarnessId[] = ["opencode", "claudecode", "codex", "grok"];
+export const SIDE_QUESTION_HARNESSES: readonly HarnessId[] = ["opencode", "pi", "claudecode", "codex", "grok"];
 /** Composer order; unknown backends sort last. */
 export const harnessRank = (id: string): number => { const i = HARNESS_IDS.indexOf(id as HarnessId); return i < 0 ? 99 : i; };

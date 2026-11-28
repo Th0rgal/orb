@@ -176,7 +176,7 @@ private fun OrbSideSystemStartDialog(
     onStarted: (String) -> Unit
 ) {
     val scope = rememberCoroutineScope()
-    val backends = remember { listOf("claudecode" to "Claude Code", "opencode" to "OpenCode", "codex" to "Codex") }
+    val backends = remember { listOf("claudecode" to "Claude Code", "pi" to "Pi", "opencode" to "OpenCode", "codex" to "Codex") }
     var prompt by remember { mutableStateOf("") }
     var backend by remember { mutableStateOf("claudecode") }
     var busy by remember { mutableStateOf(false) }

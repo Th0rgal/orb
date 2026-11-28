@@ -1160,6 +1160,7 @@ def buildSoftwareInventoryJson (hub : SystemRuntimeHub) (force : Bool) : IO JVal
 
   let comps : Array JVal := #[
     (← probeComponentInventory "opencode" "OpenCode" "coding_cli" "opencode" none "npm global"),
+    (← probeComponentInventory "pi" "Pi" "coding_cli" "pi" none "npm global"),
     (← probeComponentInventory "claude_code" "Claude Code" "coding_cli" "claude" none "npm global"),
     (← probeComponentInventory "codex" "Codex" "coding_cli" "codex" none "npm global"),
     (← probeComponentInventory "antigravity" "Antigravity CLI" "coding_cli" "agy" none "script"),

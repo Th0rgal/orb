@@ -17,6 +17,7 @@ import OrbNode.LeanBuild
 import OrbNode.FileBrowser
 import OrbNode.Transfer
 import OrbNode.Runner
+import OrbNode.PiRpc
 import OrbNode.Server
 import OrbNode.Main
 import OrbNode.AutoUpdateTests
@@ -3632,6 +3633,47 @@ def runTests : IO UInt32 := do
 
   runOpenLedgerDeltaPerfTests check tmpRoot missionId
   OrbNode.AutoUpdateTests.run check tmpRoot
+
+  -- Pi RPC driver unit & mock-subprocess verification (`OrbNode.PiRpc`)
+  check "pi-rpc rejects traversal session paths and accepts confined .jsonl paths"
+    (OrbNode.PiRpc.isSafePiSessionFilePath "mission-1/session.jsonl" &&
+     OrbNode.PiRpc.isSafePiSessionFilePath "/tmp/pi/mission-1/session.jsonl" &&
+     !OrbNode.PiRpc.isSafePiSessionFilePath "../escape/session.jsonl" &&
+     !OrbNode.PiRpc.isSafePiSessionFilePath "mission-1/session.txt")
+  let badPiCfg : OrbNode.PiRpc.PiRpcTurnConfig := {
+    cwd := tmpRoot, prompt := "hi", model? := some "orb/tok-secret-value",
+    sessionFile? := some "mission-1/session.jsonl"
+  }
+  check "pi-rpc preflightPiConfigGate blocks secrets in argv"
+    (!OrbNode.PiRpc.preflightPiConfigGate badPiCfg (OrbNode.PiRpc.buildPiRpcArgs badPiCfg) #["tok-secret-value"])
+  let mockPiScript := s!"{tmpRoot}/mock-pi.sh"
+  IO.FS.writeFile mockPiScript
+    ("#!/bin/sh\n" ++
+     "while IFS= read -r line; do\n" ++
+     "  case \"$line\" in\n" ++
+     "    *get_state*) printf '%s\\n' '{\"id\":\"orb-state\",\"type\":\"response\",\"command\":\"get_state\",\"success\":true,\"data\":{\"sessionId\":\"pi-s1\",\"sessionFile\":\"/tmp/m/session.jsonl\",\"model\":{\"id\":\"builtin/smart\"}}}' ;;\n" ++
+     "    *set_model*) printf '%s\\n' '{\"id\":\"orb-switch\",\"type\":\"response\",\"command\":\"set_model\",\"success\":true,\"data\":{\"id\":\"anthropic/claude-opus-5-5\"}}' ;;\n" ++
+     "    *prompt*)\n" ++
+     "      printf '%s\\n' '{\"id\":\"orb-prompt\",\"type\":\"response\",\"command\":\"prompt\",\"success\":true}'\n" ++
+     "      printf '%s\\n' '{\"type\":\"message_update\",\"assistantMessageEvent\":{\"type\":\"thinking_delta\",\"delta\":\"checking proof\"}}'\n" ++
+     "      printf '%s\\n' '{\"type\":\"message_update\",\"assistantMessageEvent\":{\"type\":\"text_delta\",\"delta\":\"PI_RPC_OK\"}}'\n" ++
+     "      printf '%s\\n' '{\"type\":\"agent_end\",\"messages\":[{\"role\":\"assistant\",\"stopReason\":\"stop\"}]}'\n" ++
+     "      exit 0 ;;\n" ++
+     "  esac\n" ++
+     "done\n")
+  let _ ← IO.Process.output { cmd := "chmod", args := #["755", mockPiScript] }
+  let piLinesRef ← IO.mkRef (#[] : Array String)
+  let piRc ← OrbNode.PiRpc.runPiRpcTurn {
+    cwd := tmpRoot, prompt := "hello pi", binPath := mockPiScript,
+    provider? := some "orb", model? := some "builtin/smart",
+    switchModel? := some "anthropic/claude-opus-5-5",
+    sessionFile? := some s!"{tmpRoot}/session.jsonl"
+  } #[] (fun ln => piLinesRef.modify (·.push ln))
+  let piLines ← piLinesRef.get
+  check "pi-rpc drives get_state + set_model + prompt and streams events cleanly"
+    (piRc == 0 &&
+     piLines.any (fun l => (l.splitOn "\"type\":\"pi_session\"").length > 1) &&
+     piLines.any (fun l => (l.splitOn "PI_RPC_OK").length > 1))
 
   let _ ← IO.Process.output { cmd := "rm", args := #["-rf", tmpRoot] }
   let passed ← passedRef.get

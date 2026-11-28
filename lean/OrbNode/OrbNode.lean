@@ -11,5 +11,6 @@ import OrbNode.Transfer
 import OrbNode.ProjectContext
 import OrbNode.PrivdClient
 import OrbNode.Runner
+import OrbNode.PiRpc
 import OrbNode.Server
 import OrbNode.Main

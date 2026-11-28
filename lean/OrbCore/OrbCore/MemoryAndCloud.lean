@@ -899,7 +899,7 @@ def isCloudBackendName (backend : String) : Bool :=
 
 def isNativeWorkspaceBackendName (backend : String) : Bool :=
   match backend.trimAscii.toString.toLower with
-  | "claudecode" | "codex" | "opencode" | "grok" | "antigravity" | "vibe" => true
+  | "claudecode" | "codex" | "opencode" | "pi" | "grok" | "antigravity" | "vibe" => true
   | _ => false
 
 structure ForkMissionRequest where

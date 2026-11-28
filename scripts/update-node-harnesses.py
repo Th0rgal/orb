@@ -26,6 +26,7 @@ import urllib.request
 ROOT = Path('/opt/sandboxed-tools')
 HARNESS_TOOLS_ROOT = Path('/opt/sandboxed-harnesses')
 DEFAULT_VIBE_VERSION = '2.19.1'
+DEFAULT_PI_VERSION = '0.73.1'
 ORIGINS = (
     'https://registry.npmjs.org/',
     'https://api.github.com/repos/anomalyco/opencode/',
@@ -107,6 +108,7 @@ def probe(binary, name, version, user):
         'claude': (['--help'], ['--output-format', '--resume', '--print']),
         'grok': (['--help'], ['--output-format', '--resume']),
         'vibe': (['--help'], ['ACP']),
+        'pi': (['--help'], ['--mode', '--session', '--extension', '--model']),
     }[name]
     help_text = run_probe(binary, args, user)
     if not all(flag in help_text for flag in required):
@@ -119,6 +121,8 @@ def resolve(name, pins):
         return stable(pins[name])
     if name == 'vibe':
         return DEFAULT_VIBE_VERSION
+    if name == 'pi':
+        return DEFAULT_PI_VERSION
     if name == 'opencode':
         return stable(metadata('https://api.github.com/repos/anomalyco/opencode/releases/latest')['tag_name'].removeprefix('v'))
     if name == 'grok':
@@ -189,9 +193,66 @@ def reconcile_vibe(version, user):
     return {'version': version, 'observed': observed, 'path': str(link)}
 
 
+def reconcile_pi(version, user):
+    if shutil.disk_usage(ROOT).free < 2 * 1024**3:
+        raise ValueError('Need 2 GiB free for safe staging')
+    npm = shutil.which('npm')
+    if not npm:
+        raise ValueError('npm is required to install @mariozechner/pi-coding-agent')
+    root = ROOT / 'pi'
+    root.mkdir(parents=True, exist_ok=True)
+    destination = root / version
+    binary = destination / 'node_modules' / '.bin' / 'pi'
+    if not binary.exists():
+        old_umask = os.umask(0o022)
+        try:
+            with tempfile.TemporaryDirectory(prefix='.stage-', dir=root) as temporary:
+                stage = Path(temporary)
+                stage.chmod(0o755)
+                subprocess.run(
+                    [npm, 'install', '--no-audit', '--no-fund', '--prefix', str(stage),
+                     f'@mariozechner/pi-coding-agent@{version}'],
+                    check=True,
+                    timeout=300,
+                    env={**os.environ, 'HOME': '/root', 'NO_COLOR': '1'},
+                )
+                candidate = stage / 'node_modules' / '.bin' / 'pi'
+                if not candidate.exists():
+                    raise ValueError('pi binary missing after npm install')
+                observed = probe(candidate, 'pi', version, user)
+                (stage / 'receipt.json').write_text(json.dumps({
+                    'name': 'pi',
+                    'package': '@mariozechner/pi-coding-agent',
+                    'version': version,
+                    'observed': observed,
+                    'verified_at': time.time(),
+                }))
+                stage.rename(destination)
+        finally:
+            os.umask(old_umask)
+    observed = probe(binary, 'pi', version, user)
+    link = Path('/usr/local/bin/pi')
+    if link.exists() or link.is_symlink():
+        previous = root / 'previous'
+        target = link.resolve() if link.is_symlink() else (root / 'before-managed-install')
+        if target != binary:
+            temp_previous = root / '.previous.next'
+            temp_previous.unlink(missing_ok=True)
+            temp_previous.symlink_to(target)
+            temp_previous.replace(previous)
+    temporary_link = link.with_name('.pi.next')
+    temporary_link.unlink(missing_ok=True)
+    temporary_link.symlink_to(binary)
+    temporary_link.replace(link)
+    prune_versions(root, destination)
+    return {'version': version, 'observed': observed, 'path': str(binary)}
+
+
 def reconcile(name, version, user):
     if name == 'vibe':
         return reconcile_vibe(version, user)
+    if name == 'pi':
+        return reconcile_pi(version, user)
     if name == 'codex':
         subprocess.run(['/usr/bin/python3', '/usr/local/sbin/update-node-codex'],
                        env={**os.environ, 'CODEX_NODE_VERSION': version}, check=True, timeout=300)
@@ -315,7 +376,7 @@ def update_agy():
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--only', choices=['opencode', 'claude', 'codex', 'grok', 'vibe', 'agy'])
+    parser.add_argument('--only', choices=['opencode', 'claude', 'codex', 'grok', 'vibe', 'pi', 'agy'])
     parser.add_argument('--probe-user', default='sandboxed-node')
     parser.add_argument('--version', type=stable, help='Exact stable version; requires --only')
     args = parser.parse_args()
@@ -329,7 +390,7 @@ def main():
     with (ROOT / '.harness-update.lock').open('w') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         results = {}
-        for name in ([args.only] if args.only else ['opencode', 'claude', 'codex', 'grok', 'vibe', 'agy']):
+        for name in ([args.only] if args.only else ['opencode', 'claude', 'codex', 'grok', 'vibe', 'pi', 'agy']):
             try:
                 if name == 'agy':
                     results[name] = {'ok': True, **update_agy()}

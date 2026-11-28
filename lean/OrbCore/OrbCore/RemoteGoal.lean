@@ -3,7 +3,7 @@
 namespace OrbCore.RemoteGoal
 
 /-- The current emulated adapter contract, shared by admission and discovery. -/
-def harnesses : Array String := #["opencode", "claudecode", "codex", "grok", "antigravity"]
+def harnesses : Array String := #["opencode", "claudecode", "codex", "grok", "antigravity", "pi"]
 
 def normalizeHarness (backend : String) : String :=
   let b := backend.trimAscii.toString.toLower

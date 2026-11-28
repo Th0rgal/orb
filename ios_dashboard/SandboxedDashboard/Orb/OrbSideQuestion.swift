@@ -4,7 +4,7 @@ import SwiftUI
 @MainActor
 enum OrbBtwConfig {
     private static let harnessKey = "orb.btw.harness", modelKey = "orb.btw.model"
-    static let harnesses: [(String, String)] = [("opencode", "OpenCode"), ("claudecode", "Claude Code"), ("codex", "Codex"), ("grok", "Grok")]
+    static let harnesses: [(String, String)] = [("opencode", "OpenCode"), ("pi", "Pi"), ("claudecode", "Claude Code"), ("codex", "Codex"), ("grok", "Grok")]
     static var harness: String {
         get { UserDefaults.standard.string(forKey: harnessKey) ?? "opencode" }
         set { UserDefaults.standard.set(newValue, forKey: harnessKey) }

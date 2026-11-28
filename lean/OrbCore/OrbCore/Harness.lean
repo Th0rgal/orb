@@ -5,6 +5,7 @@
 -/
 import LeanSys
 import Orb.Kernel
+import Orb.PiHarness
 import Orb.HarnessCloud
 import OrbBin.Json
 import OrbBin.ClaudeControl
@@ -230,6 +231,105 @@ def stepHarnessJsonLine (st : HarnessParserState) (line : String) : HarnessParse
                 emittedEvents := st.emittedEvents.push (.TurnResult st.missionId true s!"OpenCode stopped abnormally (stop reason: {normReason}).") }
           else
             st
+
+/-- Extract concatenated text blocks from a Pi `tool_execution_end` `result` object. -/
+private def extractPiToolResultText (res : JVal) : String :=
+  match res.fieldArr? "content" with
+  | some items =>
+    let parts := items.filterMap fun blk => blk.fieldStr? "text"
+    if parts.isEmpty then renderCompact res else String.intercalate "\n" parts.toList
+  | none =>
+    match res with
+    | .str s => s
+    | .null => ""
+    | other => renderCompact other
+
+/-- Normalize a single Pi `--mode rpc` JSONL line into `AgentEvent` (`#2258`),
+    using `Orb.Kernel.piNormalizeTag` to enforce strict `Thinking` vs `TextDelta` separation,
+    correlating `toolCallId` between `tool_execution_start` and `tool_execution_end`
+    (including `sandboxed__*` and `turbo_lean__*`), and mapping RPC/agent errors to `TurnResult(isError := true)`. -/
+def stepPiJsonLine (st : HarnessParserState) (line : String) : HarnessParserState :=
+  let trimmed := line.trimAscii.toString
+  if trimmed.isEmpty then st
+  else
+    match OrbBin.Json.parse trimmed with
+    | .error _ => st
+    | .ok jv =>
+      let evType := (jv.fieldStr? "type").getD ""
+      if evType == "message_update" then
+        let ame := jv.fieldOrNull "assistantMessageEvent"
+        let ameTy := (ame.fieldStr? "type").getD ""
+        let tag : PiExtractedEventTag :=
+          if ameTy == "thinking_delta" then .thinkingDelta
+          else if ameTy == "thinking_end" then .thinkingEnd
+          else if ameTy == "text_delta" then .textDelta
+          else if ameTy == "error" then .rpcError
+          else .other
+        match piNormalizeTag tag with
+        | .thinking =>
+          let thought := (ame.fieldStr? "delta").orElse (fun _ => ame.fieldStr? "content") |>.getD ""
+          let done := ameTy == "thinking_end"
+          if thought.isEmpty && !done then st
+          else { st with sawActivity := true, emittedEvents := st.emittedEvents.push (.Thinking st.missionId thought done) }
+        | .textDelta =>
+          let delta := (ame.fieldStr? "delta").getD ""
+          if delta.isEmpty then st
+          else { st with sawUserText := true, sawActivity := true, emittedEvents := st.emittedEvents.push (.TextDelta st.missionId delta) }
+        | .turnError =>
+          let reason := (ame.fieldStr? "reason").orElse (fun _ => ame.fieldStr? "error") |>.getD "pi_stream_error"
+          { st with sawActivity := true, lastStopReason := reason, emittedEvents := st.emittedEvents.push (.TurnResult st.missionId true reason) }
+        | _ => st
+      else if evType == "tool_execution_start" then
+        let callId := (jv.fieldStr? "toolCallId").getD ""
+        let toolName := (jv.fieldStr? "toolName").getD "tool"
+        let argsJson := match jv.field? "args" with | some a => renderCompact a | none => "{}"
+        let baseCalls := if st.pendingCalls.size ≥ 1024 then st.pendingCalls.extract 1 st.pendingCalls.size else st.pendingCalls
+        let calls' := baseCalls.push (callId, toolName)
+        { st with
+          sawActivity := true
+          pendingCalls := calls'
+          emittedEvents := st.emittedEvents.push (.ToolCall st.missionId callId toolName argsJson) }
+      else if evType == "tool_execution_end" then
+        let callId := (jv.fieldStr? "toolCallId").getD ""
+        let explicitName := (jv.fieldStr? "toolName").getD ""
+        let toolName := if !explicitName.isEmpty then explicitName else lookupToolName st.pendingCalls callId
+        let calls' := st.pendingCalls.filter (fun p => p.1 != callId)
+        let out := extractPiToolResultText (jv.fieldOrNull "result")
+        { st with
+          sawActivity := true
+          pendingCalls := calls'
+          emittedEvents := st.emittedEvents.push (.ToolResult st.missionId callId toolName out) }
+      else if evType == "response" then
+        let ok := (jv.fieldBool? "success").getD true
+        if !ok then
+          let cmd := (jv.fieldStr? "command").getD "rpc"
+          let err := (jv.fieldStr? "error").getD s!"pi_rpc_{cmd}_failed"
+          let _ := piNormalizeTag .rpcError
+          { st with sawActivity := true, lastStopReason := "error", emittedEvents := st.emittedEvents.push (.TurnResult st.missionId true err) }
+        else st
+      else if evType == "extension_error" || evType == "error" then
+        let errObj := jv.fieldOrNull "error"
+        let msg :=
+          (errObj.fieldStr? "message")
+            |>.orElse (fun _ => jv.fieldStr? "error")
+            |>.orElse (fun _ => jv.fieldStr? "message")
+            |>.getD "pi_error"
+        let _ := piNormalizeTag .processError
+        { st with sawActivity := true, lastStopReason := "error", emittedEvents := st.emittedEvents.push (.TurnResult st.missionId true msg) }
+      else if evType == "agent_end" then
+        let msgs := (jv.fieldArr? "messages").getD #[]
+        let last? := msgs.back?
+        let stopReason := (last?.bind (·.fieldStr? "stopReason")).getD "stop"
+        let isErr := stopReason == "error" || stopReason == "aborted"
+        let tag : PiExtractedEventTag := if isErr then .agentEndError else .agentEndOk
+        match piNormalizeTag tag with
+        | .turnError =>
+          let msg := (last?.bind (·.fieldStr? "errorMessage")).getD s!"Pi agent ended with stopReason={stopReason}"
+          { st with lastStopReason := stopReason, emittedEvents := st.emittedEvents.push (.TurnResult st.missionId true msg) }
+        | .turnOk =>
+          { st with lastStopReason := "end_turn", emittedEvents := st.emittedEvents.push (.TurnResult st.missionId false "end_turn") }
+        | _ => st
+      else st
 
 /-- Parse an OpenCode SSE frame (`event: ... \n data: {...}`), ignoring keepalive comments and `[DONE]` sentinels. -/
 def parseOpenCodeSseChunk (st : HarnessParserState) (ssePayload : String) : HarnessParserState := Id.run do
@@ -521,6 +621,37 @@ def opencode_length_stop_and_nested_tool_use_contract : Bool :=
     .TurnResult "m-err" true "APIError: Context window exceeded"
   ]
 
+def pi_thinking_never_leaks_to_text_delta_contract : Bool :=
+  let s0 : HarnessParserState := { missionId := "m-pi-1" }
+  let s1 := stepPiJsonLine s0 "{\"type\":\"message_update\",\"assistantMessageEvent\":{\"type\":\"thinking_delta\",\"delta\":\"internal proof sketch\"}}"
+  let s2 := stepPiJsonLine s1 "{\"type\":\"message_update\",\"assistantMessageEvent\":{\"type\":\"text_delta\",\"delta\":\"Theorem proved.\"}}"
+  s2.emittedEvents == #[
+    .Thinking "m-pi-1" "internal proof sketch" false,
+    .TextDelta "m-pi-1" "Theorem proved."
+  ]
+
+def pi_mcp_tool_call_correlation_contract : Bool :=
+  let s0 : HarnessParserState := { missionId := "m-pi-2" }
+  let s1 := stepPiJsonLine s0 "{\"type\":\"tool_execution_start\",\"toolCallId\":\"call_sb_1\",\"toolName\":\"sandboxed__get_mission_health\",\"args\":{\"mission_id\":\"m-pi-2\"}}"
+  let s2 := stepPiJsonLine s1 "{\"type\":\"tool_execution_start\",\"toolCallId\":\"call_tl_2\",\"toolName\":\"turbo_lean__turbo_check_decl\",\"args\":{\"file\":\"Orb/Spec.lean\"}}"
+  let s3 := stepPiJsonLine s2 "{\"type\":\"tool_execution_end\",\"toolCallId\":\"call_sb_1\",\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"healthy\"}]},\"isError\":false}"
+  let s4 := stepPiJsonLine s3 "{\"type\":\"tool_execution_end\",\"toolCallId\":\"call_tl_2\",\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"ok\"}]},\"isError\":false}"
+  s4.pendingCalls.isEmpty &&
+  s4.emittedEvents == #[
+    .ToolCall "m-pi-2" "call_sb_1" "sandboxed__get_mission_health" "{\"mission_id\":\"m-pi-2\"}",
+    .ToolCall "m-pi-2" "call_tl_2" "turbo_lean__turbo_check_decl" "{\"file\":\"Orb/Spec.lean\"}",
+    .ToolResult "m-pi-2" "call_sb_1" "sandboxed__get_mission_health" "healthy",
+    .ToolResult "m-pi-2" "call_tl_2" "turbo_lean__turbo_check_decl" "ok"
+  ]
+
+def pi_rpc_error_and_agent_end_error_contract : Bool :=
+  let r1 := stepPiJsonLine { missionId := "m-pi-3" } "{\"type\":\"response\",\"id\":\"orb-switch\",\"command\":\"set_model\",\"success\":false,\"error\":\"Model not found\"}"
+  let r2 := stepPiJsonLine { missionId := "m-pi-3" } "{\"type\":\"agent_end\",\"messages\":[{\"role\":\"assistant\",\"stopReason\":\"error\",\"errorMessage\":\"upstream 503\"}]}"
+  let r3 := stepPiJsonLine { missionId := "m-pi-3" } "{\"type\":\"agent_end\",\"messages\":[{\"role\":\"assistant\",\"stopReason\":\"stop\"}]}"
+  r1.emittedEvents == #[.TurnResult "m-pi-3" true "Model not found"] &&
+  r2.emittedEvents == #[.TurnResult "m-pi-3" true "upstream 503"] &&
+  r3.emittedEvents == #[.TurnResult "m-pi-3" false "end_turn"]
+
 def runAllHarnessContractTests : Bool :=
   text_delta_does_not_contain_thinking_content &&
   thinking_produces_thinking_event &&
@@ -534,6 +665,9 @@ def runAllHarnessContractTests : Bool :=
   opencode_empty_stop_after_reasoning_or_compaction_is_flagged &&
   opencode_raced_sse_idle_vs_nonzero_cli_exit_contract &&
   claude_control_request_emits_ui_native_request &&
-  opencode_length_stop_and_nested_tool_use_contract
+  opencode_length_stop_and_nested_tool_use_contract &&
+  pi_thinking_never_leaks_to_text_delta_contract &&
+  pi_mcp_tool_call_correlation_contract &&
+  pi_rpc_error_and_agent_end_error_contract
 
 end OrbCore.Harness

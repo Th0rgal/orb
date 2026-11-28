@@ -39,7 +39,7 @@ export function folderCanChange(id: string): boolean {
 }
 
 /** Harnesses whose sessions cannot be resumed from a different working directory. */
-export const CWD_SCOPED_SESSIONS: ReadonlySet<string> = new Set(["claudecode", "claude", "opencode"]);
+export const CWD_SCOPED_SESSIONS: ReadonlySet<string> = new Set(["claudecode", "claude", "opencode", "pi"]);
 
 const SEED_KEY = "orb.localFolderSeed";
 const SEED_BYTES = 12_000;

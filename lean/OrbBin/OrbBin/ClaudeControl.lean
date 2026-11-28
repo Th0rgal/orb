@@ -880,11 +880,12 @@ def probeOpenCodeModels (binPath : String) (homeOverride? : Option String := non
     return .error "No OpenCode models are configured on this computer"
   return .ok (ordered.map fun id => (id, formatOpenCodeModelLabel id provNames))
 
-/-- Scan local agent CLIs (`claudecode`, `codex`, `opencode`, `antigravity`, `grok`, `vibe`) matching `ScanRow[]` in `orb/src/localAgents.ts`. -/
+/-- Scan local agent CLIs (`claudecode`, `codex`, `pi`, `opencode`, `antigravity`, `grok`, `vibe`) matching `ScanRow[]` in `orb/src/localAgents.ts`. -/
 def scanInstalledHarnesses (overrides : JVal := .obj #[]) (homeOverride? : Option String := none) : IO JVal := do
   let specs : Array (String × String × Bool) := #[
     ("claudecode",  "claude",   true),
     ("codex",       "codex",    true),
+    ("pi",          "pi",       true),
     ("opencode",    "opencode", true),
     ("antigravity", "agy",      false),
     ("grok",        "grok",     false),
@@ -1752,6 +1753,22 @@ def buildOneShotHarnessArgs
     if let some s := sid? then args := args ++ #["--resume", s]
     args := args ++ #["-p", prompt]
     return args
+  else if harness == "pi" then
+    let mut args := #["--mode", "json", "-p"]
+    if let some m := mdl? then
+      let cleanM := if m.startsWith "orb/" then m else s!"orb/{m}"
+      args := args ++ #["--model", cleanM]
+    if let some e := eff? then
+      args := args ++ #["--thinking", e]
+    if let some s := sid? then
+      args := args ++ #["--session", s]
+    if permissionMode == .plan then
+      args := args.push "--plan"
+    for img in imagePaths do
+      let cleanImg := img.trimAscii.toString
+      if !cleanImg.isEmpty then args := args.push s!"@{cleanImg}"
+    args := args.push prompt
+    return args
   else
     -- `vibe` or custom CLI
     return #["--prompt", prompt]
@@ -1900,10 +1917,140 @@ private def antigravityFailure (event : JVal) (diagnostic : JVal) : String := Id
         "Antigravity ended the turn without an assistant response."].contains text then return text
   return (antigravityAccountError? (renderCompact diagnostic)).getD "Antigravity turn failed"
 
+/-- Parse one Pi `--mode rpc` / `--mode json` event line into `OneShotLineParsed`.
+    Strictly separates `thinking_delta` from `text_delta`, correlates `toolCallId` on
+    `tool_execution_start`/`tool_execution_end`, and surfaces RPC/agent errors fail-closed. -/
+def parsePiRpcEvent (rawLine : String) : OneShotLineParsed := Id.run do
+  let trimmed := rawLine.trimAscii.toString
+  if trimmed.isEmpty then return {}
+  let .ok jv := OrbBin.Json.parse trimmed | return {}
+  let ty := (jv.fieldStr? "type").getD ""
+  if ty == "pi_session" then
+    let sid? :=
+      (jv.fieldStr? "sessionFile").filter (!·.trimAscii.toString.isEmpty)
+        |>.orElse (fun _ => (jv.fieldStr? "sessionId").filter (!·.trimAscii.toString.isEmpty))
+    let mdl? := (jv.fieldStr? "model").filter (!·.trimAscii.toString.isEmpty)
+    return { sessionId? := sid?, model? := mdl? }
+  if ty == "message_update" then
+    let ame := jv.fieldOrNull "assistantMessageEvent"
+    let ameTy := (ame.fieldStr? "type").getD ""
+    if ameTy == "thinking_delta" then
+      let th := (ame.fieldStr? "delta").getD ""
+      return { thinking? := if th.isEmpty then none else some th }
+    else if ameTy == "text_delta" then
+      return { textDelta := (ame.fieldStr? "delta").getD "", isChunk := true }
+    else if ameTy == "error" then
+      let reason := (ame.fieldStr? "reason").orElse (fun _ => ame.fieldStr? "error") |>.getD "Pi stream error"
+      return { errorMsg? := some ((reason.take 1000).toString) }
+    else if ameTy == "done" then
+      let msg := jv.fieldOrNull "message"
+      let usage := msg.fieldOrNull "usage"
+      return {
+        model? := (msg.fieldStr? "model").filter (!·.trimAscii.toString.isEmpty)
+        inputTokens? := usage.fieldUInt64? "input"
+        outputTokens? := usage.fieldUInt64? "output"
+        cacheReadTokens? := usage.fieldUInt64? "cacheRead"
+      }
+    else return {}
+  if ty == "tool_execution_start" then
+    let aid := (jv.fieldStr? "toolCallId").filter (!·.isEmpty) |>.getD "pi-tool"
+    let toolName := (jv.fieldStr? "toolName").getD "tool"
+    let argsVal := jv.fieldOrNull "args"
+    let args? := if argsVal.isNull then none else some argsVal
+    let detail? :=
+      (argsVal.fieldStr? "command")
+        |>.orElse (fun _ => argsVal.fieldStr? "path")
+        |>.orElse (fun _ => argsVal.fieldStr? "file")
+        |>.orElse (fun _ => argsVal.fieldStr? "pattern")
+        |>.orElse (fun _ => argsVal.fieldStr? "query")
+        |>.map (fun s => (s.take 240).toString)
+    let kind :=
+      if toolName == "bash" then "command"
+      else if toolName == "read" || toolName == "grep" || toolName == "find" || toolName == "ls" then "read"
+      else if toolName == "edit" || toolName == "write" then "edit"
+      else "tool"
+    return { activity? := some {
+      id := aid
+      label := toolName
+      done := false
+      failed := false
+      kind := kind
+      toolUseId? := some aid
+      detail? := detail?
+      args? := args?
+      status := "running"
+    } }
+  if ty == "tool_execution_end" then
+    let aid := (jv.fieldStr? "toolCallId").filter (!·.isEmpty) |>.getD "pi-tool"
+    let toolName := (jv.fieldStr? "toolName").getD "tool"
+    let isErr := (jv.fieldBool? "isError").getD false
+    let resObj := jv.fieldOrNull "result"
+    let resTxt : String :=
+      match resObj.fieldArr? "content" with
+      | some items =>
+        let parts : Array String := items.filterMap (·.fieldStr? "text")
+        if parts.isEmpty then renderCompact resObj else String.intercalate "\n" parts.toList
+      | none =>
+        match resObj with
+        | .str s => s
+        | .null => ""
+        | other => renderCompact other
+    let bounded : String := if resTxt.length ≤ 4096 then resTxt else (resTxt.take 4096).toString ++ "…"
+    let kind :=
+      if toolName == "bash" then "command"
+      else if toolName == "read" || toolName == "grep" || toolName == "find" || toolName == "ls" then "read"
+      else if toolName == "edit" || toolName == "write" then "edit"
+      else "tool"
+    return { activity? := some {
+      id := aid
+      label := toolName
+      done := true
+      failed := isErr
+      kind := kind
+      toolUseId? := some aid
+      result? := if bounded.isEmpty then none else some bounded
+      error? := if isErr && !bounded.isEmpty then some ((bounded.take 500).toString) else none
+      status := if isErr then "failed" else "completed"
+    } }
+  if ty == "response" then
+    let ok := (jv.fieldBool? "success").getD true
+    if !ok then
+      let err := (jv.fieldStr? "error").getD "Pi RPC command failed"
+      return { errorMsg? := some ((err.take 1000).toString) }
+    else return {}
+  if ty == "extension_error" || ty == "error" then
+    let errObj := jv.fieldOrNull "error"
+    let rawMsg :=
+      (errObj.fieldStr? "message")
+        |>.orElse (fun _ => jv.fieldStr? "error")
+        |>.orElse (fun _ => jv.fieldStr? "message")
+        |>.getD "Pi harness error"
+    return { errorMsg? := some ((rawMsg.take 1000).toString) }
+  if ty == "agent_end" then
+    let msgs := (jv.fieldArr? "messages").getD #[]
+    if let some last := msgs.back? then
+      let sr := (last.fieldStr? "stopReason").getD "stop"
+      let usage := last.fieldOrNull "usage"
+      let err? :=
+        if sr == "error" || sr == "aborted" then
+          some (((last.fieldStr? "errorMessage").getD s!"Pi agent stopped with reason: {sr}").take 1000 |>.toString)
+        else none
+      return {
+        model? := (last.fieldStr? "model").filter (!·.trimAscii.toString.isEmpty)
+        inputTokens? := usage.fieldUInt64? "input"
+        outputTokens? := usage.fieldUInt64? "output"
+        cacheReadTokens? := usage.fieldUInt64? "cacheRead"
+        errorMsg? := err?
+      }
+    return {}
+  return {}
+
 /-- Extract session ID, assistant text, tool activities, thinking, and structured JSON errors from a single stdout line. -/
 def parseOneShotHarnessEvent (harness : String) (rawLine : String) : OneShotLineParsed := Id.run do
   let trimmed := rawLine.trimAscii.toString
   if trimmed.isEmpty then return {}
+  if harness == "pi" then
+    return parsePiRpcEvent trimmed
   if harness == "antigravity" then
     let .ok event := OrbBin.Json.parse trimmed | return { errorMsg? := antigravityAccountError? trimmed }
     match event.fieldStr? "event" with

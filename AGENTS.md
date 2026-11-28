@@ -262,6 +262,15 @@ execution context:
 
 ## Harnesses
 
+### Pi
+
+- Runs **per workspace** via `sandboxed-node pi-rpc` (driving `pi --mode rpc --session <mission_session.jsonl>`).
+- Configuration is written to a per-mission `0700` `PI_CODING_AGENT_DIR`:
+  - `models.json` (`0600`) registering the full routable Orb Core catalog against `{proxyBase}/v1` (`apiKey: "SANDBOXED_PROXY_API_KEY"`, never in `argv`).
+  - `.pi/skills/<name>/SKILL.md` (native Pi skills with YAML frontmatter; Pi also reads `AGENTS.md` and `CLAUDE.md`).
+  - Minimal TypeScript bridge `pi/orb-extension/index.ts` connecting `sandboxed` (Streamable HTTP) and `turbo-lean mcp` (stdio), enabling `grep`/`find`/`ls`, and enforcing `/plan`/`readonly` and `lake build` → `turbo-lean` guardrails.
+- See [`docs/harnesses/pi.md`](docs/harnesses/pi.md) and [`docs/spec-cards/pi-harness.md`](docs/spec-cards/pi-harness.md).
+
 ### OpenCode
 
 - Runs **per workspace** using the `opencode run` CLI.

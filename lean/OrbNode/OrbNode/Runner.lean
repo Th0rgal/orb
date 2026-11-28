@@ -611,11 +611,12 @@ private def isHarnessProc (e : ProcStatEntry) : Bool :=
   let c := e.comm
   let cmd := e.cmdline
   if c == "opencode" || c == "claude" || c == "codex" || c == "grok" ||
-     c == "agy" || c == "antigravity" || c == "vibe-acp" then true
+     c == "agy" || c == "antigravity" || c == "vibe-acp" || c == "pi" then true
   else if c == "node" || c == "bun" then
     (cmd.splitOn "opencode").length > 1 || (cmd.splitOn "claude").length > 1 ||
     (cmd.splitOn "codex").length > 1 || (cmd.splitOn "grok").length > 1 ||
-    (cmd.splitOn "antigravity").length > 1 || (cmd.splitOn "agy").length > 1
+    (cmd.splitOn "antigravity").length > 1 || (cmd.splitOn "agy").length > 1 ||
+    (cmd.splitOn "pi-coding-agent").length > 1 || (cmd.splitOn "--mode rpc").length > 1
   else false
 
 private def isAuxHarnessHelper (e : ProcStatEntry) : Bool :=
@@ -623,6 +624,7 @@ private def isAuxHarnessHelper (e : ProcStatEntry) : Bool :=
   let cmd := e.cmdline
   (c.splitOn "mcp").length > 1 ||
   (cmd.splitOn "sandboxed-mcp").length > 1 ||
+  (cmd.splitOn "turbo-lean mcp").length > 1 ||
   (cmd.splitOn "control_mcp").length > 1 ||
   (cmd.splitOn "mcp-stdio").length > 1 ||
   (cmd.splitOn "--mcp").length > 1 ||

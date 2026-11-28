@@ -315,7 +315,7 @@
   # so its source holds OrbNode too and it reuses the Node layer's build tree.
   leanCore = mkLeanLayer {
     pname = "orb-lean-core";
-    src = leanSource [../lean/OrbNode ../lean/OrbCore];
+    src = leanSource [../lean/OrbNode ../lean/OrbCore ../pi/orb-extension/index.ts];
     bins = ["orb-core"];
     deps = [leanBase leanNode];
   };

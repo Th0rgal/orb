@@ -2921,7 +2921,7 @@ def resolveLocalCoreHarnessSetup
   let normHarness := if hLow == "claude" then "claudecode" else hLow
   let cleanModel := rawModel.trimAscii.toString
   let model? := if cleanModel.isEmpty then none else some cleanModel
-  if normHarness == "opencode" || normHarness == "claudecode" || normHarness == "codex" || normHarness == "grok" then
+  if normHarness == "opencode" || normHarness == "pi" || normHarness == "claudecode" || normHarness == "codex" || normHarness == "grok" then
     if boundPort > 0 then
       match ← mintMissionProxyToken st.store missionId ownerUserId (nowSec + 86400) with
       | .error e => return .error s!"failed to mint mission proxy token: {e}"
@@ -3444,7 +3444,7 @@ private def launchBtwSideAgent (st : CoreAppState) (caller : CallerPrincipal) (s
             effRemoteNodeId? := some resolvedNode
             effTagsJson ← updateMissionBoundManagedNode st.store out.missionId resolvedNode nowIso
           let effModel :=
-            if out.backend == "opencode" && out.modelOverride.trimAscii.toString.isEmpty then "builtin/smart"
+            if (out.backend == "opencode" || out.backend == "pi") && out.modelOverride.trimAscii.toString.isEmpty then "builtin/smart"
             else out.modelOverride
           let spec : RemoteTurnSpec := {
             missionId        := out.missionId
@@ -3483,7 +3483,7 @@ private def launchBtwSideAgent (st : CoreAppState) (caller : CallerPrincipal) (s
       | none =>
         if st.warmMgr?.isSome then
           let effModel :=
-            if out.backend == "opencode" && out.modelOverride.trimAscii.toString.isEmpty then "builtin/smart"
+            if (out.backend == "opencode" || out.backend == "pi") && out.modelOverride.trimAscii.toString.isEmpty then "builtin/smart"
             else out.modelOverride
           match ← launchLocalCoreMissionTurn st out.missionId out.backend out.workingDirectory turnPrompt effModel out.modelEffort "bypassPermissions" none "local" false with
           | .ok _ => effStatus := "active"
@@ -6575,7 +6575,7 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
                 missionId        := mid
                 targetNodeId     := resolvedNode
                 backend          := backend
-                modelOverride    := if backend == "opencode" && modelOverride.isEmpty then "builtin/smart" else modelOverride
+                modelOverride    := if (backend == "opencode" || backend == "pi") && modelOverride.isEmpty then "builtin/smart" else modelOverride
                 modelEffort      := normEffort
                 workingDirectory := safeWorkDir
                 project          := projSlug
@@ -6922,6 +6922,21 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
         | .error (code, errBody) => return .ok (mkJson code errBody)
       if let some evPayload := sseEv? then
         publishControlEvent st.broadcastHub? "mission_placement_changed" evPayload
+      if settings.modelOverride != existing.modelOverride then
+        let prevM := if existing.modelOverride.trimAscii.toString.isEmpty then "default" else existing.modelOverride.trimAscii.toString
+        let nextM := if settings.modelOverride.trimAscii.toString.isEmpty then "default" else settings.modelOverride.trimAscii.toString
+        let noticeText := s!"Modèle changé : {prevM} → {nextM}"
+        let mcPayload := renderCompact (.obj #[
+          ("type", .str "model_changed"),
+          ("mission_id", .str mid),
+          ("backend", .str settings.backend),
+          ("previous_model", .str prevM),
+          ("model_override", .str nextM),
+          ("model_effort", .str settings.modelEffort),
+          ("message", .str noticeText)
+        ])
+        discard <| appendMissionEvent st.store mid "model_changed" mcPayload nowIso
+        publishControlEvent st.broadcastHub? "model_changed" mcPayload (some mid)
       let callerOpt := if caller.isLegacyUnscoped then none else some caller.userId
       match ← missionDetailJson st.store mid callerOpt st.bootstrapAdminId with
       | .ok (some body) => return .ok (mkJson 200 body)
@@ -7015,7 +7030,7 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
               missionId        := mid
               targetNodeId     := resolvedNode
               backend          := mRec.backend
-              modelOverride    := if mRec.backend == "opencode" && mRec.modelOverride.isEmpty then "builtin/smart" else mRec.modelOverride
+              modelOverride    := if (mRec.backend == "opencode" || mRec.backend == "pi") && mRec.modelOverride.isEmpty then "builtin/smart" else mRec.modelOverride
               modelEffort      := mRec.modelEffort
               workingDirectory := mRec.workingDirectory
               project          := mRec.project
@@ -7370,6 +7385,7 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
       "{\"id\":\"claudecode\",\"name\":\"Claude Code\",\"native_plan\":true}," ++
       "{\"id\":\"codex\",\"name\":\"Codex\",\"native_plan\":true}," ++
       "{\"id\":\"grok\",\"name\":\"Grok\",\"native_plan\":false}," ++
+      "{\"id\":\"pi\",\"name\":\"Pi\",\"native_plan\":true}," ++
       "{\"id\":\"opencode\",\"name\":\"OpenCode\",\"native_plan\":false}," ++
       "{\"id\":\"antigravity\",\"name\":\"Antigravity CLI\",\"native_plan\":true}," ++
       "{\"id\":\"vibe\",\"name\":\"Mistral Vibe\",\"native_plan\":true}" ++
@@ -7462,6 +7478,7 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
       s!"\"claudecode\":{renderArr claudeModels}," ++
       s!"\"codex\":{renderArr codexModels}," ++
       s!"\"grok\":{renderArr grokModels}," ++
+      s!"\"pi\":{renderArr opencodeModels}," ++
       s!"\"opencode\":{renderArr opencodeModels}," ++
       s!"\"antigravity\":{renderArr agyModels}," ++
       s!"\"vibe\":{renderArr vibeModels}" ++
@@ -8429,7 +8446,7 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
               missionId        := mid
               targetNodeId     := resolvedNode
               backend          := m.backend
-              modelOverride    := if m.backend == "opencode" && m.modelOverride.isEmpty then "builtin/smart" else m.modelOverride
+              modelOverride    := if (m.backend == "opencode" || m.backend == "pi") && m.modelOverride.isEmpty then "builtin/smart" else m.modelOverride
               modelEffort      := m.modelEffort
               workingDirectory := m.workingDirectory
               project          := m.project
@@ -8633,7 +8650,7 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
             missionId        := mid
             targetNodeId     := resolvedNode
             backend          := m.backend
-            modelOverride    := if m.backend == "opencode" && m.modelOverride.isEmpty then "builtin/smart" else m.modelOverride
+            modelOverride    := if (m.backend == "opencode" || m.backend == "pi") && m.modelOverride.isEmpty then "builtin/smart" else m.modelOverride
             modelEffort      := m.modelEffort
             workingDirectory := m.workingDirectory
             project          := m.project

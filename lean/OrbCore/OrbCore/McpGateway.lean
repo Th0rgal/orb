@@ -1563,7 +1563,7 @@ def dispatchMcpToolCall
           return ← settleReservedMcpAction store claims callerUserId toolName idemKeyTop "failed" pErr nowIso "invalid_arguments"
     let mid ← newUuidV4
     -- The model name the turn is launched with. Empty means the harness's own default.
-    let sentModel := if backend == "opencode" && modelOv.isEmpty then "builtin/smart" else modelOv
+    let sentModel := if (backend == "opencode" || backend == "pi") && modelOv.isEmpty then "builtin/smart" else modelOv
     let initRev : UInt64 := if effProj.isEmpty && folder.isEmpty then 0 else 1
     let initStatus := if !prompt.isEmpty then "active" else "awaiting_user"
     let insSql :=
@@ -2152,7 +2152,7 @@ def dispatchMcpToolCall
     if title.isEmpty then return ← failReservedOrErr store claims callerUserId toolName idemKeyTop "invalid_arguments" "missing title" nowIso
     if sessionId.isEmpty then return ← failReservedOrErr store claims callerUserId toolName idemKeyTop "invalid_arguments" "missing session_id" nowIso
     let backend := ((args.fieldStr? "backend").getD "antigravity").trimAscii.toString
-    if !(#["opencode", "claudecode", "codex", "grok", "antigravity", "vibe"].contains backend) then
+    if !(#["opencode", "pi", "claudecode", "codex", "grok", "antigravity", "vibe"].contains backend) then
       return ← failReservedOrErr store claims callerUserId toolName idemKeyTop "invalid_arguments" s!"unsupported backend: {backend}" nowIso
     let rawProj := (args.fieldStr? "project").orElse (fun _ => args.fieldStr? "slug") |>.getD ""
     let effProj ← match checkProjectScope claims rawProj with
