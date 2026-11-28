@@ -170,7 +170,7 @@ def buildNewAgentBody (st : DesktopState) (mainW bodyH : SubPx) : WidgetNode :=
     let toastBg : Color := if theme.isDark then 0x191919FF else 0xFAFAFAFF
     let toastBdr : Color := if theme.isDark then 0x333333FF else 0xD8D8D8FF
     let hasWarnIcon := t.kind == .warning
-    let textW := w - pxToSub (if hasWarnIcon then 72 else 52)
+    let textW := w - pxToSub (if hasWarnIcon then 76 else 52)
     let textCol : WidgetNode :=
       WidgetNode.box
         (BoxStyle.col (pxToSub 2) |>.withFixedSize textW (h - pxToSub 18))
@@ -306,7 +306,7 @@ def buildReferenceTurnWidget (theme : Theme) (colW : SubPx) (stepNum : Nat) : Wi
   let codeCard : WidgetNode :=
     WidgetNode.rrect
       (BoxStyle.col (pxToSub 4)
-        |>.withPadding (Edges.all (pxToSub 12))
+        |>.withPadding (Edges.xy (pxToSub 12) (pxToSub 11))
         |>.withFixedSize innerW (pxToSub 81))
       codeBgCol
       (CornerRadii.uniform (pxToSub 8))
@@ -663,11 +663,12 @@ def buildMachineRow (theme : Theme) (w h : SubPx) (title desc rightText : String
     (iconName : Option String := none) (badge : Option String := none) : WidgetNode :=
   let pal := theme.palette
   let bdr := theme.borderWidth
+  let textColW := w - pxToSub 160
   let titleNode : WidgetNode :=
     match badge with
     | some b =>
       let tw := pxToSub (title.length * 7 + 8)
-      WidgetNode.box (BoxStyle.row (pxToSub 6) |>.withAlign .center |>.withFixedSize (w - pxToSub 150) (pxToSub 18))
+      WidgetNode.box (BoxStyle.row (pxToSub 6) |>.withAlign .center |>.withFixedSize textColW (pxToSub 18))
         [ screenTextLine theme tw (pxToSub 18) (pxToSub 13) (pxToSub 18) pal.textPrimary title
         , WidgetNode.rrect
             (BoxStyle.row 0 |>.withAlign .center |>.withJustify .center |>.withPadding (Edges.xy (pxToSub 5) 0) |>.withFixedSize (pxToSub 56) (pxToSub 15))
@@ -675,12 +676,12 @@ def buildMachineRow (theme : Theme) (w h : SubPx) (title desc rightText : String
             [screenTextLine theme (pxToSub 44) (pxToSub 13) (pxToSub 10) (pxToSub 13) pal.textMuted b 500]
         ]
     | none =>
-      screenTextLine theme (w - pxToSub 150) (pxToSub 18) (pxToSub 13) (pxToSub 18) pal.textPrimary title
+      screenTextLine theme textColW (pxToSub 18) (pxToSub 13) (pxToSub 18) pal.textPrimary title
   let textCol : WidgetNode :=
     WidgetNode.box
-      (BoxStyle.col (pxToSub 2) |>.withFixedSize (w - pxToSub 150) (pxToSub 36))
+      (BoxStyle.col (pxToSub 2) |>.withFixedSize textColW (pxToSub 36))
       [ titleNode
-      , screenTextLine theme (w - pxToSub 150) (pxToSub 16) (pxToSub 12) (pxToSub 16) pal.textSecondary desc
+      , screenTextLine theme textColW (pxToSub 16) (pxToSub 12) (pxToSub 16) pal.textSecondary desc
       ]
   let leftNode : WidgetNode :=
     match iconName with
@@ -1174,7 +1175,7 @@ def buildSettingsGeneralBody (st : DesktopState) (mainW bodyH : SubPx) : WidgetN
 
   let innerCol : WidgetNode :=
     WidgetNode.box
-      (BoxStyle.col 0 |>.withFixedSize colW (bodyH - pxToSub 32))
+      (BoxStyle.col 0 |>.withFixedSize colW (pxToSub 864))
       [ headerBlock
       , WidgetNode.box
           (BoxStyle.row 0 |>.withPadding (Edges.trbl (pxToSub 26) (pxToSub 8) (pxToSub 9) (pxToSub 8)) |>.withFixedSize colW (pxToSub 52))
@@ -1190,13 +1191,18 @@ def buildSettingsGeneralBody (st : DesktopState) (mainW bodyH : SubPx) : WidgetN
       , aboutCard
       ]
 
-  WidgetNode.box
-    (BoxStyle.col 0
-      |>.withAlign .center
-      |>.withPadding (Edges.trbl (pxToSub 32) 0 0 0)
-      |>.withFixedSize mainW bodyH
-      |>.withBg pal.canvas)
-    [innerCol]
+  let scrollContent :=
+    WidgetNode.box
+      (BoxStyle.col 0
+        |>.withAlign .center
+        |>.withPadding (Edges.trbl (pxToSub 32) 0 0 0))
+      [innerCol]
+  WidgetNode.scrollClip
+    (BoxStyle.col 0 |>.withFixedSize mainW bodyH |>.withBg pal.canvas)
+    { offsetY := 0, showScrollbar := false }
+    scrollContent
+    none
+    (hitTestable := false)
 
 /-! ## 7. Search Dialog Overlay (`07_search_dialog`) -/
 
@@ -1719,23 +1725,25 @@ def buildDesktopScreen (st : DesktopState) (availW availH : SubPx)
           pal.header
           CornerRadii.zero
           { widths := Edges.trbl 0 0 theme.borderWidth 0, color := pal.borderSubtle }
-          [ chromeIcon "expand" pal.textMuted 13
-          , chromeIcon "split-pane" pal.textMuted 14
-          , chromeIcon "sidebar" pal.textMuted 14
-          , chromeIcon "search" pal.textMuted 13
+          [ WidgetNode.focusable splitHeaderExpandId (chromeIcon "expand" pal.textMuted 13)
+          , WidgetNode.focusable splitHeaderSplitId (chromeIcon "split-pane" pal.textMuted 14)
+          , WidgetNode.focusable splitHeaderSidebarId (chromeIcon "sidebar" pal.textMuted 14)
+          , WidgetNode.focusable splitHeaderSearchId (chromeIcon "search" pal.textMuted 13)
           , WidgetNode.rrect
               (BoxStyle.row 0 |>.withAlign .center |>.withFixedSize (pxToSub 110) (pxToSub 24))
               0x00000000 (CornerRadii.uniform (pxToSub 6)) (BorderStyle.uniform theme.borderWidth pal.border)
-              [ WidgetNode.rrect (BoxStyle.row 0 |>.withAlign .center |>.withJustify .center |>.withFixedSize (pxToSub 46) (pxToSub 22))
-                  0x00000000 CornerRadii.zero BorderStyle.none
-                  [screenTextLine theme (pxToSub 28) (pxToSub 16) (pxToSub 12) (pxToSub 16) pal.textMuted "Files"]
-              , WidgetNode.rrect (BoxStyle.row 0 |>.withAlign .center |>.withJustify .center |>.withFixedSize (pxToSub 62) (pxToSub 22))
-                  pal.elevatedSurface CornerRadii.zero BorderStyle.none
-                  [screenTextLine theme (pxToSub 50) (pxToSub 16) (pxToSub 12) (pxToSub 16) pal.textStrong "Changes" 500]
+              [ WidgetNode.focusable splitHeaderFilesTabId <|
+                  WidgetNode.rrect (BoxStyle.row 0 |>.withAlign .center |>.withJustify .center |>.withFixedSize (pxToSub 46) (pxToSub 22))
+                    0x00000000 CornerRadii.zero BorderStyle.none
+                    [screenTextLine theme (pxToSub 28) (pxToSub 16) (pxToSub 12) (pxToSub 16) pal.textMuted "Files"]
+              , WidgetNode.focusable splitHeaderChangesTabId <|
+                  WidgetNode.rrect (BoxStyle.row 0 |>.withAlign .center |>.withJustify .center |>.withFixedSize (pxToSub 62) (pxToSub 22))
+                    pal.elevatedSurface CornerRadii.zero BorderStyle.none
+                    [screenTextLine theme (pxToSub 50) (pxToSub 16) (pxToSub 12) (pxToSub 16) pal.textStrong "Changes" 500]
               ]
           , WidgetNode.box { BoxStyle.row 0 with grow := 1 } []
-          , chromeIcon "refresh" pal.textMuted 13
-          , chromeIcon "close" pal.textMuted 13
+          , WidgetNode.focusable splitHeaderRefreshId (chromeIcon "refresh" pal.textMuted 13)
+          , WidgetNode.focusable splitHeaderCloseId (chromeIcon "close" pal.textMuted 13)
           ]
       let rightBody :=
         buildSplitDiffRightPane st.theme rightW splitH runs.diffDelRuns runs.diffAddRuns

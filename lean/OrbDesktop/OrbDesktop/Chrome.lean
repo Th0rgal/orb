@@ -484,27 +484,40 @@ def buildHeaderChrome (st : DesktopState) (mainW : SubPx)
         ]
       else
         let mutedSt : TextStyle := { (Theme.mutedText theme) with sizeSub := pxToSub 12, lineHeightSub := pxToSub 16 }
-        let fileBtn :=
-          if st.screen == .missionSplitDiff then
+        if st.screen == .missionSplitDiff then
+          let fileBtn :=
             WidgetNode.focusable sidePanelFilesId <|
               WidgetNode.rrect
                 (BoxStyle.row 0 |>.withAlign .center |>.withJustify .center |>.withFixedSize (pxToSub 26) (pxToSub 26))
                 pal.rowActive (CornerRadii.uniform (pxToSub 6)) BorderStyle.none
                 [chromeIcon "file" pal.textPrimary 14] (some sidePanelFilesId)
-          else
-            WidgetNode.focusable sidePanelFilesId (chromeIcon "file" pal.textSecondary 14)
-        [ WidgetNode.box
-            (BoxStyle.row (pxToSub 10) |>.withAlign .center |>.withFixedSize (pxToSub 126) (pxToSub 26))
-            [ WidgetNode.focusable sidePanelDiffId <|
-                WidgetNode.rrect
-                  (BoxStyle.row (pxToSub 5) |>.withAlign .center |>.withJustify .center |>.withFixedSize (pxToSub 54) (pxToSub 26))
-                  0 (CornerRadii.uniform (pxToSub 13)) (BorderStyle.uniform theme.borderWidth pal.borderSubtle)
-                  [chromeIcon "list" pal.textMuted 12, chromeLabel (pxToSub 16) [overlaySynthRun mutedSt "20"]]
-                  (some sidePanelDiffId)
-            , fileBtn
-            , WidgetNode.focusable sidePanelChatId (chromeIcon "chat" pal.textSecondary 14)
-            ]
-        ]
+          [ WidgetNode.box
+              (BoxStyle.row (pxToSub 10) |>.withAlign .center |>.withJustify .end_ |>.withFixedSize (pxToSub 122) (pxToSub 26))
+              [ WidgetNode.focusable sidePanelDiffId <|
+                  WidgetNode.rrect
+                    (BoxStyle.row (pxToSub 5) |>.withAlign .center |>.withJustify .center |>.withFixedSize (pxToSub 54) (pxToSub 26))
+                    0 (CornerRadii.uniform (pxToSub 13)) (BorderStyle.uniform theme.borderWidth pal.borderSubtle)
+                    [chromeIcon "list" pal.textMuted 12, chromeLabel (pxToSub 16) [overlaySynthRun mutedSt "20"]]
+                    (some sidePanelDiffId)
+              , fileBtn
+              , WidgetNode.focusable sidePanelChatId (chromeIcon "chat" pal.textSecondary 14)
+              ]
+          ]
+        else
+          let filesActive := st.sidePanelOpen && st.sidePanelTab == "files"
+          let chatActive := st.sidePanelOpen && st.sidePanelTab == "chat"
+          [ WidgetNode.box
+              (BoxStyle.row (pxToSub 14) |>.withAlign .center |>.withFixedSize (pxToSub 122) (pxToSub 26))
+              [ WidgetNode.focusable sidePanelDiffId <|
+                  WidgetNode.rrect
+                    (BoxStyle.row (pxToSub 5) |>.withAlign .center |>.withJustify .center |>.withFixedSize (pxToSub 54) (pxToSub 26))
+                    0 (CornerRadii.uniform (pxToSub 13)) (BorderStyle.uniform theme.borderWidth pal.borderSubtle)
+                    [chromeIcon "list" pal.textMuted 12, chromeLabel (pxToSub 16) [overlaySynthRun mutedSt "20"]]
+                    (some sidePanelDiffId)
+              , WidgetNode.focusable sidePanelFilesId (chromeIcon "file" (if filesActive then pal.textPrimary else pal.textSecondary) 14)
+              , WidgetNode.focusable sidePanelChatId (chromeIcon "chat" (if chatActive then pal.textPrimary else pal.textSecondary) 14)
+              ]
+          ]
     | _ => []
   WidgetNode.rrect
     (BoxStyle.row 0

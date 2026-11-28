@@ -120,6 +120,8 @@ private def verifyNineScreenControls : IO Unit := do
   assertHitTargets "04_mission_split_diff" (DesktopState.forScreen .missionSplitDiff)
     [sidebarToggleId, sidebarSearchId, sidebarBackId, sidebarForwardId,
      sidePanelDiffId, sidePanelFilesId, sidePanelChatId,
+     splitHeaderExpandId, splitHeaderSplitId, splitHeaderSidebarId, splitHeaderSearchId,
+     splitHeaderFilesTabId, splitHeaderChangesTabId, splitHeaderRefreshId, splitHeaderCloseId,
      101, 102, 111, 112, 113, 114, 104, 120, 121, 122, 123, 105, 131, 103,
      1, 3, 2, 720, 721, 722, 723, 724, diffRefId, diffUnifiedId, diffSplitId, diffRefreshId, diffFileChipId]
 

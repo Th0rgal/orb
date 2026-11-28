@@ -48,9 +48,9 @@ after U2 (`#1822`) and U5a–U8 (`#2246`, `#2255`, `#2270`, `#2226`, `#2271`) la
 
 - **Overall:** **4.40%** mean raw mismatch (down from **4.91%** on pre-U3 `master`
   `885932336` and **5.01%** on verified baseline
-  [43802006749](https://github.com/Th0rgal/orb/actions/runs/43802006749)), **2.18%**
-  above tolerance (`tol = 8`, down from **2.58%**), mean local RGB SSIM **0.9682**
-  (up from **0.9615**, min **0.9040**, max **0.9903**).
+  [43802006749](https://github.com/Th0rgal/orb/actions/runs/43802006749)), **2.17%**
+  above tolerance (`tol = 8`, down from **2.58%**), mean local RGB SSIM **0.9686**
+  (up from **0.9615**, min **0.9055**, max **0.9903**).
 - **Determinism:** LeanUI **36/36** images pixel-identical across repeated captures;
   pinned SolidJS reference (`6d1e7a27174b681f558285d673938880ddcc2706`) verified
   **36/36** against `docs/ui/leanui-parity-reference.sha256` with zero hash changes.
@@ -61,8 +61,8 @@ after U2 (`#1822`) and U5a–U8 (`#2246`, `#2255`, `#2270`, `#2226`, `#2271`) la
   corner rounding).
 - **U7 & U8 non-regression:** `--verify-repaint --bench 20` and `--bench-long 60` pass
   with `error_count = 0`; `scripts/bench_desktop.sh` passes the 60fps U7 gate
-  (`frame_p50_ms = 2.09 ms <= 2.5 ms`, `frame_p99_ms = 5.93 ms <= 8.33 ms`,
-  `long_transcript` `p50 = 1.56 ms`); Lavapipe GPU differential parity passes across all
+  (`frame_p50_ms = 2.04 ms <= 2.5 ms`, `frame_p99_ms = 5.91 ms <= 8.33 ms`,
+  `long_transcript` `p50 = 1.52 ms`); Lavapipe GPU differential parity passes across all
   36 canonical screens and all 8 primitives.
 
 The table and all 72 lossless crops (`<= 5 KB` each) below were regenerated directly by
@@ -152,14 +152,14 @@ Reference: SolidJS desktop. Candidate: LeanUI. 36 pairs, 0 errors, tolerance 8.
 | 02_control_populated | dark | 2x | 1.10 | 0.84 | 0.9885 | 4.60 / 0.9657 | 0.53 / 0.9915 | 0.00 / 1.0000 |
 | 02_control_populated | light | 1x | 2.08 | 1.65 | 0.9867 | 9.70 / 0.9680 | 0.81 / 0.9882 | 0.00 / 1.0000 |
 | 02_control_populated | light | 2x | 1.53 | 1.27 | 0.9877 | 7.45 / 0.9616 | 0.53 / 0.9913 | 0.00 / 1.0000 |
-| 03_mission_transcript | dark | 1x | 5.56 | 3.22 | 0.9464 | 8.18 / 0.9636 | 3.78 / 0.9439 | 15.55 / 0.9347 |
-| 03_mission_transcript | dark | 2x | 4.70 | 2.61 | 0.9510 | 5.66 / 0.9540 | 3.20 / 0.9506 | 15.07 / 0.9488 |
-| 03_mission_transcript | light | 1x | 5.06 | 3.67 | 0.9452 | 11.01 / 0.9565 | 3.41 / 0.9439 | 8.77 / 0.9325 |
-| 03_mission_transcript | light | 2x | 4.14 | 3.07 | 0.9504 | 8.45 / 0.9495 | 2.83 / 0.9507 | 7.66 / 0.9476 |
-| 04_mission_split_diff | dark | 1x | 7.35 | 4.99 | 0.9072 | 8.18 / 0.9636 | 6.28 / 0.8937 | 13.04 / 0.9337 |
-| 04_mission_split_diff | dark | 2x | 5.94 | 3.86 | 0.9233 | 5.66 / 0.9540 | 5.00 / 0.9151 | 12.56 / 0.9483 |
-| 04_mission_split_diff | light | 1x | 7.82 | 5.60 | 0.9040 | 11.01 / 0.9565 | 7.03 / 0.8913 | 7.82 / 0.9325 |
-| 04_mission_split_diff | light | 2x | 6.41 | 4.49 | 0.9213 | 8.45 / 0.9495 | 5.83 / 0.9136 | 6.81 / 0.9477 |
+| 03_mission_transcript | dark | 1x | 5.52 | 3.18 | 0.9489 | 8.18 / 0.9636 | 3.73 / 0.9467 | 15.55 / 0.9347 |
+| 03_mission_transcript | dark | 2x | 4.65 | 2.57 | 0.9530 | 5.66 / 0.9540 | 3.15 / 0.9530 | 15.07 / 0.9488 |
+| 03_mission_transcript | light | 1x | 5.02 | 3.63 | 0.9476 | 11.01 / 0.9565 | 3.36 / 0.9467 | 8.77 / 0.9325 |
+| 03_mission_transcript | light | 2x | 4.10 | 3.03 | 0.9523 | 8.45 / 0.9495 | 2.78 / 0.9531 | 7.66 / 0.9476 |
+| 04_mission_split_diff | dark | 1x | 7.34 | 4.98 | 0.9088 | 8.18 / 0.9636 | 6.23 / 0.8965 | 13.04 / 0.9337 |
+| 04_mission_split_diff | dark | 2x | 5.93 | 3.85 | 0.9248 | 5.66 / 0.9540 | 4.95 / 0.9175 | 12.56 / 0.9483 |
+| 04_mission_split_diff | light | 1x | 7.80 | 5.60 | 0.9055 | 11.01 / 0.9565 | 6.99 / 0.8940 | 7.82 / 0.9325 |
+| 04_mission_split_diff | light | 2x | 6.39 | 4.48 | 0.9229 | 8.45 / 0.9495 | 5.78 / 0.9160 | 6.81 / 0.9477 |
 | 05_machines_fleet | dark | 1x | 2.57 | 2.07 | 0.9760 | 6.82 / 0.9744 | 2.10 / 0.9719 | 0.00 / 1.0000 |
 | 05_machines_fleet | dark | 2x | 2.39 | 2.09 | 0.9670 | 4.59 / 0.9658 | 2.33 / 0.9617 | 0.00 / 1.0000 |
 | 05_machines_fleet | light | 1x | 3.00 | 2.49 | 0.9748 | 9.72 / 0.9681 | 2.09 / 0.9717 | 0.00 / 1.0000 |
@@ -181,7 +181,7 @@ Reference: SolidJS desktop. Candidate: LeanUI. 36 pairs, 0 errors, tolerance 8.
 | 09_toast_notifications | light | 1x | 6.49 | 2.48 | 0.9696 | 9.70 / 0.9680 | 4.04 / 0.9740 | 21.69 / 0.9395 |
 | 09_toast_notifications | light | 2x | 5.74 | 1.94 | 0.9736 | 7.45 / 0.9616 | 3.62 / 0.9794 | 20.67 / 0.9484 |
 
-Mean over 36 measured pairs: mismatch 4.40 %, above tolerance 2.18 %, SSIM 0.9682 (min 0.9040, max 0.9903).
+Mean over 36 measured pairs: mismatch 4.40 %, above tolerance 2.17 %, SSIM 0.9686 (min 0.9055, max 0.9903).
 
 Determinism (each renderer compared with a second capture of itself):
 
@@ -189,18 +189,23 @@ Determinism (each renderer compared with a second capture of itself):
 - LeanUI: 36/36 images pixel-identical
 <!-- parity:end -->
 
-## U3 final parity pass and acceptance
+## U3 final parity pass and status
 
-On Linux, LeanUI is now the default desktop (`orb-desktop-native`); the legacy
-SolidJS/WebKitGTK desktop remains available only with the explicit `--webkit`
-flag. macOS keeps its existing WebKit shell.
+LeanUI (`orb-desktop-native`) remains opt-in (`--leanui`, with default Linux desktop
+cutover tracked separately under `U4`); macOS keeps its existing WebKit shell.
 
-The per-variant U3 gate is satisfied by either `<1%` mismatch or a documented
-improvement / intentional craft refinement with lossless paired reference/candidate
-crops (`<= 5 KB` each). This final post-U2/U5a–U8 pass fixes concrete parity defects
-across all affected screens while preserving `#2192` (light-mode sidebar contrast),
-`#2201` (squircle corners), U6 interactive controls, U7 60fps partial-repaint/scroll
-reuse, and U8 window effects:
+This post-U2/U5a–U8 measurement records `01_control_empty_dark_2x` at **0.79%** (`< 1%`)
+and improves or holds steady on all 36 variants (`4.91% → 4.40%` mean mismatch,
+`2.58% → 2.17%` `> tol`, `0.9615 → 0.9686` SSIM, zero regressions vs pre-U3 `master`
+`885932336`), with lossless paired reference/candidate crops (`<= 5 KB` each) for all 36
+variants. Remaining differences `>= 1%` reflect a mix of **intentional post-baseline
+craft refinements** (`#2192` light-mode sidebar contrast and `#2201` squircle corners)
+and **open renderer/rasterization differences** (FreeType grayscale glyph coverage vs
+Skia, 3-pass box blur/shadow vs Skia Gaussian on `03`/`07`/`09`, and mono line-wrap
+breaks on `04`) that remain honestly documented rather than masked or waived. This pass
+fixes concrete parity defects across all affected screens while preserving `#2192`,
+`#2201`, U6 interactive controls, U7 60fps partial-repaint/scroll reuse, and U8 window
+effects:
 
 - **Transcript (`03_mission_transcript`):** added the 14px top canvas fade gradient
   (with fast row-wise `FFI.blendRect` rasterization and `scrollBand` top-fade preservation
@@ -260,14 +265,14 @@ renderer region and are not masked scores.
 | `02_control_populated_dark_2x` | 1.11% → **1.10%** | +0.01 pp | [ref](crops/02_control_populated_dark_2x_ref_crop.png) / [LeanUI](crops/02_control_populated_dark_2x_leanui_crop.png) |
 | `02_control_populated_light_1x` | 2.08% → **2.08%** | +0.00 pp | [ref](crops/02_control_populated_light_1x_ref_crop.png) / [LeanUI](crops/02_control_populated_light_1x_leanui_crop.png) |
 | `02_control_populated_light_2x` | 1.53% → **1.53%** | +0.00 pp | [ref](crops/02_control_populated_light_2x_ref_crop.png) / [LeanUI](crops/02_control_populated_light_2x_leanui_crop.png) |
-| `03_mission_transcript_dark_1x` | 6.88% → **5.56%** | +1.32 pp | [ref](crops/03_mission_transcript_dark_1x_ref_crop.png) / [LeanUI](crops/03_mission_transcript_dark_1x_leanui_crop.png) |
-| `03_mission_transcript_dark_2x` | 5.94% → **4.70%** | +1.24 pp | [ref](crops/03_mission_transcript_dark_2x_ref_crop.png) / [LeanUI](crops/03_mission_transcript_dark_2x_leanui_crop.png) |
-| `03_mission_transcript_light_1x` | 6.58% → **5.06%** | +1.52 pp | [ref](crops/03_mission_transcript_light_1x_ref_crop.png) / [LeanUI](crops/03_mission_transcript_light_1x_leanui_crop.png) |
-| `03_mission_transcript_light_2x` | 5.53% → **4.14%** | +1.39 pp | [ref](crops/03_mission_transcript_light_2x_ref_crop.png) / [LeanUI](crops/03_mission_transcript_light_2x_leanui_crop.png) |
-| `04_mission_split_diff_dark_1x` | 8.67% → **7.35%** | +1.32 pp | [ref](crops/04_mission_split_diff_dark_1x_ref_crop.png) / [LeanUI](crops/04_mission_split_diff_dark_1x_leanui_crop.png) |
-| `04_mission_split_diff_dark_2x` | 7.20% → **5.94%** | +1.26 pp | [ref](crops/04_mission_split_diff_dark_2x_ref_crop.png) / [LeanUI](crops/04_mission_split_diff_dark_2x_leanui_crop.png) |
-| `04_mission_split_diff_light_1x` | 9.28% → **7.82%** | +1.46 pp | [ref](crops/04_mission_split_diff_light_1x_ref_crop.png) / [LeanUI](crops/04_mission_split_diff_light_1x_leanui_crop.png) |
-| `04_mission_split_diff_light_2x` | 7.77% → **6.41%** | +1.36 pp | [ref](crops/04_mission_split_diff_light_2x_ref_crop.png) / [LeanUI](crops/04_mission_split_diff_light_2x_leanui_crop.png) |
+| `03_mission_transcript_dark_1x` | 6.88% → **5.52%** | +1.36 pp | [ref](crops/03_mission_transcript_dark_1x_ref_crop.png) / [LeanUI](crops/03_mission_transcript_dark_1x_leanui_crop.png) |
+| `03_mission_transcript_dark_2x` | 5.94% → **4.65%** | +1.29 pp | [ref](crops/03_mission_transcript_dark_2x_ref_crop.png) / [LeanUI](crops/03_mission_transcript_dark_2x_leanui_crop.png) |
+| `03_mission_transcript_light_1x` | 6.58% → **5.02%** | +1.56 pp | [ref](crops/03_mission_transcript_light_1x_ref_crop.png) / [LeanUI](crops/03_mission_transcript_light_1x_leanui_crop.png) |
+| `03_mission_transcript_light_2x` | 5.53% → **4.10%** | +1.43 pp | [ref](crops/03_mission_transcript_light_2x_ref_crop.png) / [LeanUI](crops/03_mission_transcript_light_2x_leanui_crop.png) |
+| `04_mission_split_diff_dark_1x` | 8.67% → **7.34%** | +1.33 pp | [ref](crops/04_mission_split_diff_dark_1x_ref_crop.png) / [LeanUI](crops/04_mission_split_diff_dark_1x_leanui_crop.png) |
+| `04_mission_split_diff_dark_2x` | 7.20% → **5.93%** | +1.27 pp | [ref](crops/04_mission_split_diff_dark_2x_ref_crop.png) / [LeanUI](crops/04_mission_split_diff_dark_2x_leanui_crop.png) |
+| `04_mission_split_diff_light_1x` | 9.28% → **7.80%** | +1.48 pp | [ref](crops/04_mission_split_diff_light_1x_ref_crop.png) / [LeanUI](crops/04_mission_split_diff_light_1x_leanui_crop.png) |
+| `04_mission_split_diff_light_2x` | 7.77% → **6.39%** | +1.38 pp | [ref](crops/04_mission_split_diff_light_2x_ref_crop.png) / [LeanUI](crops/04_mission_split_diff_light_2x_leanui_crop.png) |
 | `05_machines_fleet_dark_1x` | 3.63% → **2.57%** | +1.06 pp | [ref](crops/05_machines_fleet_dark_1x_ref_crop.png) / [LeanUI](crops/05_machines_fleet_dark_1x_leanui_crop.png) |
 | `05_machines_fleet_dark_2x` | 2.74% → **2.39%** | +0.35 pp | [ref](crops/05_machines_fleet_dark_2x_ref_crop.png) / [LeanUI](crops/05_machines_fleet_dark_2x_leanui_crop.png) |
 | `05_machines_fleet_light_1x` | 4.05% → **3.00%** | +1.05 pp | [ref](crops/05_machines_fleet_light_1x_ref_crop.png) / [LeanUI](crops/05_machines_fleet_light_1x_leanui_crop.png) |
@@ -301,8 +306,8 @@ metrics above include every pixel: no masks, excluded icons, or crop-only scores
 |---|---|
 | 01_control_empty | `01_control_empty_dark_2x` is **0.79%** (`< 1%`); remaining dark diff (`1.14%` 1x) is FreeType grayscale glyph coverage vs Skia and `#2201` squircle corners; light-mode sidebar delta (`1.20%` 2x / `1.54%` 1x) is intentional `#2192` light-mode sidebar contrast (`#dcdcd7` selection, `#c8c7c0` border, `#c6c5be` tree rails). |
 | 02_control_populated | Populated sidebar tree connectors, status rings, Inbox count, and ellipsis truncation (`1.10%` dark 2x / `1.65%` dark 1x, SSIM `0.9885`); residual diff is FreeType vs Skia text/stroke rasterization down the 30-row sidebar, `#2201` squircle corners, and intentional `#2192` light-mode contrast. |
-| 03_mission_transcript | Reduced by **1.24–1.52 pp** (`5.56%` dark 1x / `4.70%` dark 2x / `4.14%` light 2x, SSIM `0.9510`) via 14px top fade mask, exact 370px turn pitch, bold `module N`, inline `<code>` chips, `"see docs"` link split, code-block Copy icon, and composer under-row cloud + `○ 3%` meter; residual diff is 1-LSB box-shadow quantization around the dock (`d=1..2`), FreeType vs Skia glyph coverage, and `#2192`/`#2201`. |
-| 04_mission_split_diff | Reduced by **1.26–1.46 pp** (`7.35%` dark 1x / `5.94%` dark 2x, SSIM `0.9233`) via full-height split divider, 35px right pane header + `Files \| Changes` toggle, toolbar select chevron & colored `+1 -1`, 299px files chip with `M` badge, centered gutter line numbers, and `rt.monoFont` diff shaping; residual diff is line-wrap breaks, FreeType vs Skia mono glyph coverage, and `#2192`/`#2201`. |
+| 03_mission_transcript | Reduced by **1.29–1.56 pp** (`5.52%` dark 1x / `4.65%` dark 2x / `4.10%` light 2x, SSIM `0.9530`) via 14px top fade mask, exact 370px turn pitch, bold `module N`, inline `<code>` chips, `"see docs"` link split, code-block Copy icon, and composer under-row cloud + `○ 3%` meter; residual diff is 1-LSB box-shadow quantization around the dock (`d=1..2`), FreeType vs Skia glyph coverage, and `#2192`/`#2201`. |
+| 04_mission_split_diff | Reduced by **1.27–1.48 pp** (`7.34%` dark 1x / `5.93%` dark 2x, SSIM `0.9248`) via full-height split divider, 35px right pane header + `Files \| Changes` toggle, toolbar select chevron & colored `+1 -1`, 299px files chip with `M` badge, centered gutter line numbers, and `rt.monoFont` diff shaping; residual diff is line-wrap breaks, FreeType vs Skia mono glyph coverage, and `#2192`/`#2201`. |
 | 05_machines_fleet | Reduced by **0.35–1.06 pp** (`2.57%` dark 1x / `2.39%` dark 2x, SSIM `0.9760`) via exact subtitle copy, row left icons, `"MANAGED (BOAT.DEV)"` header + chevron, `Managed` pills, exact card heights, and borderless key card/`Copy`; residual diff is FreeType vs Skia text/icon rasterization and `#2192`/`#2201`. |
 | 06_settings_general | Reduced by **0.71–0.80 pp** (`3.14%` dark 1x / `1.92%` dark 2x, SSIM `0.9765`) via exact header/tab/card heights, multi-line `\n` description wrapping on `Connected services`, muted `Connect GitHub`, `<select>` double chevrons, and transparent commit codes; residual diff is FreeType vs Skia glyph coverage and `#2192`/`#2201`. |
 | 07_search_dialog | Reduced to `10.55%` / `10.30%` dark (`> tol` `1.44%` / `1.26%`, SSIM `0.9750`) and `14.50%` / `14.28%` light (`> tol` `1.84%` / `1.65%`, SSIM `0.9750`) via `#1f1f1f` `Open ↵` fill and exact tab/filter/timestamp/footer alignment; `~8–11%` of raw mismatch is `d=1..2` from 3-pass box blur vs Skia Gaussian backdrop filtering (`0.00% > tol` in dark sidebar). |

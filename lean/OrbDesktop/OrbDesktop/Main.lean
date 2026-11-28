@@ -790,7 +790,7 @@ def renderDesktopView (rt : Runtime.RuntimeState DesktopState) :
   let clipOverlay (prims : Scene) : Scene :=
     if liveWindow then #[.clipPushRounded winClipRect winRadii] ++ prims ++ #[.clipPop] else prims
   let scenePrims : Scene :=
-    if !liveWindow && (st.screen == .missionTranscript || st.screen == .missionSplitDiff) then
+    if st.screen == .missionTranscript || st.screen == .missionSplitDiff then
       let mainW := availW - st.sidebarWidth
       let paneW :=
         if st.screen == .missionSplitDiff then pxToSub 688 - theme.borderWidth
