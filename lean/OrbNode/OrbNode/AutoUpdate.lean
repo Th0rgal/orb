@@ -243,10 +243,7 @@ def AutoUpdateState.fromJson (v : JVal) : AutoUpdateState :=
 def defaultStateDir (workDir : String) : IO String := do
   if let some override ← getEnvNonEmpty "SANDBOXED_NODE_UPDATE_STATE_DIR" then
     return override
-  let wp := System.FilePath.mk workDir
-  return match wp.parent with
-    | some par => (par / "auto-update").toString
-    | none => (wp / ".auto-update").toString
+  return (System.FilePath.mk workDir / ".auto-update").toString
 
 def stateFilePath (stateDir : String) : System.FilePath :=
   System.FilePath.mk stateDir / "auto_update_state.json"
@@ -573,7 +570,8 @@ def downloadAndStageBinaryUpdate
   let mut hdrs : Array (String × String) := #[("Authorization", s!"Bearer {nodeToken}")]
   if let some mid := machineId? then
     if !mid.isEmpty then hdrs := hdrs.push ("x-orb-machine-id", mid)
-  match ← sendRequest "GET" dlUrl hdrs ByteArray.empty 60000 (128 * 1024 * 1024) with
+  let maxBytes := if dlUrl.startsWith "https://" then 64 * 1024 * 1024 else 128 * 1024 * 1024
+  match ← sendRequest "GET" dlUrl hdrs ByteArray.empty 60000 maxBytes with
   | .error e => return .error s!"binary download failed: {e}"
   | .ok resp =>
     if resp.status < 200 || resp.status ≥ 300 then
@@ -686,7 +684,8 @@ def syncCliBundleIfDrifted
         hdrs := hdrs.push ("Authorization", s!"Bearer {nodeToken}")
         if let some mid := machineId? then
           if !mid.isEmpty then hdrs := hdrs.push ("x-orb-machine-id", mid)
-      match ← sendRequestFollowingRedirects "GET" dlUrl hdrs ByteArray.empty 180000 (512 * 1024 * 1024) 5 with
+      let cliMaxBytes := if dlUrl.startsWith "https://" then 64 * 1024 * 1024 else 512 * 1024 * 1024
+      match ← sendRequestFollowingRedirects "GET" dlUrl hdrs ByteArray.empty 180000 cliMaxBytes 5 with
       | .error e => return .error s!"cli {spec.name} download failed: {e}"
       | .ok resp =>
         if resp.status < 200 || resp.status ≥ 300 then
