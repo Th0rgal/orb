@@ -11,7 +11,7 @@ android {
     compileSdk = 36
 
     defaultConfig {
-        applicationId = "sh.sandboxed.dashboard"
+        applicationId = "md.thomas.orb"
         minSdk = 33
         targetSdk = 36
         // Single source: android_dashboard/gradle.properties. CI may override
@@ -48,7 +48,7 @@ android {
         }
         debug {
             // Debug builds always install side by side with the release app
-            // (sh.sandboxed.dashboard) so a dev APK never overwrites the
+            // (md.thomas.orb) so a dev APK never overwrites the
             // user's real install or its data.
             applicationIdSuffix = ".preview"
             versionNameSuffix = "-dev"
