@@ -923,6 +923,75 @@ private def verifyWaylandImeSerialGuard : IO Unit := do
   unless acctNoopDmg.isNone do
     throw <| IO.userError "Clicking already-selected Settings Account (102) produced redundant damage"
 
+  -- Spacebar activation (0x20 followed by .text " ") on a focused non-text button that triggers focusChange
+  -- to a text input (e.g. Search Clear 706 or toolbar Search 351) must suppress the trailing space character.
+  let rtSearchClearSpace : Runtime.RuntimeState DesktopState := {
+    app := searchSt0
+    focus := { owner := some searchClearId, traps := desktopFocusTraps searchSt0 }
+    focusableOrder := [701, searchClearId, searchEscId, searchOpenId]
+  }
+  let rtClearedBySpace := Runtime.applyEventBatch rtSearchClearSpace
+    #[.key 0x20 0 .pressed, .text " ", .text "x"]
+    (fun _ st ev => stepDesktopEvent 120 vpDev st ev) desktopFocusChange desktopFocusTraps desktopImeSessionKey
+    DesktopState.clearAllPreeditChecked
+  unless rtClearedBySpace.focus.owner == some 701 && rtClearedBySpace.app.searchBuffer.text == "x" do
+    throw <| IO.userError s!"Spacebar on Search Clear leaked space into 701: {repr rtClearedBySpace.app.searchBuffer.text}"
+  let rtToolbarSearchSpace : Runtime.RuntimeState DesktopState := {
+    app := livePop
+    focus := { owner := some sidebarSearchId }
+    focusableOrder := [sidebarSearchId, 1, 2, 3]
+  }
+  let rtOpenedBySpace := Runtime.applyEventBatch rtToolbarSearchSpace
+    #[.key 0x20 0 .pressed, .text " "]
+    (fun _ st ev => stepDesktopEvent 120 vpDev st ev) desktopFocusChange desktopFocusTraps desktopImeSessionKey
+    DesktopState.clearAllPreeditChecked
+  unless rtOpenedBySpace.focus.owner == some 701 && rtOpenedBySpace.app.searchBuffer.text.isEmpty do
+    throw <| IO.userError s!"Spacebar on toolbar Search leaked space into searchBuffer: {repr rtOpenedBySpace.app.searchBuffer.text}"
+
+  -- Fixture early-return shortcuts (Ctrl+N, Search openItem 702/703/705) and restoreNavEntry onto missionSplitDiff
+  -- must normalize openMission, composer.isRunning, composer.placeholder, and sidePanelOpen.
+  let txCtrlN := (stepDesktopEvent 120 vpDev txM80 (.key 0x6e 2 .pressed)).1
+  unless txCtrlN.screen == .controlEmpty && txCtrlN.openMission.isNone && !txCtrlN.composer.isRunning &&
+      txCtrlN.composer.placeholder == "Describe a task, / for commands, @ for context" do
+    throw <| IO.userError "Ctrl+N from fixture mission left stale openMission/isRunning/placeholder"
+  let searchOpen702 := (stepDesktopEvent 120 vpDev searchSt0 (.activate searchOpenId)).1
+  unless searchOpen702.screen == .missionTranscript && searchOpen702.composer.isRunning && searchOpen702.composer.placeholder == "Send follow-up" do
+    throw <| IO.userError "Search openItem 702 did not set running mission composer state"
+  let searchSel703 := (stepDesktopEvent 120 vpDev searchSt0 (.key 0xff54 0 .pressed)).1
+  let searchOpen703 := (stepDesktopEvent 120 vpDev searchSel703 (.activate searchOpenId)).1
+  let search703Esc := (stepDesktopEvent 120 vpDev searchOpen703 (.key 0xff1b 0 .pressed)).1
+  unless searchOpen703.screen == .missionSplitDiff && searchOpen703.sidePanelOpen && searchOpen703.sidePanelTab == "diff" &&
+      search703Esc.screen == .missionTranscript && !search703Esc.sidePanelOpen do
+    throw <| IO.userError "Search openItem 703 did not set sidePanelOpen/diff for Escape dismissal"
+  let split0 := DesktopState.forScreen .missionSplitDiff
+  let splitTo120 := (stepDesktopEvent 120 vpDev split0 (.activate 120)).1
+  let splitBack := (stepDesktopEvent 120 vpDev splitTo120 (.activate sidebarBackId)).1
+  let splitBackEsc := (stepDesktopEvent 120 vpDev splitBack (.key 0xff1b 0 .pressed)).1
+  unless splitBack.screen == .missionSplitDiff && splitBack.sidePanelOpen && splitBack.sidePanelTab == "diff" &&
+      splitBackEsc.screen == .missionTranscript do
+    throw <| IO.userError "Back to missionSplitDiff failed to restore sidePanelOpen/diff"
+
+  -- Fixture Ctrl+N with active IME preedit must bump imeResetGen so desktopImeSessionKey changes and drops stale IME;
+  -- fixture .activate navigation (e.g. 103) must not resurrect cleared preedit text.
+  let popPre := { cPop with composer := cPop.composer.setPreedit "にほん" }
+  let rtPopPre : Runtime.RuntimeState DesktopState := {
+    app := popPre
+    focus := { owner := some 1 }
+    focusableOrder := [1, 2, 3]
+    lastImeOwner := some 1
+    lastImeContext := desktopImeSessionKey popPre
+  }
+  let rtPopCtrlN := Runtime.applyEventBatch rtPopPre
+    #[.key 0x6e 2 .pressed, .imeBatch 0 0 "STALE_PREEDIT" "" 0 0]
+    (fun _ st ev => stepDesktopEvent 120 vpDev st ev) desktopFocusChange desktopFocusTraps desktopImeSessionKey
+    DesktopState.clearAllPreeditChecked
+  unless desktopImeSessionKey rtPopCtrlN.app != desktopImeSessionKey popPre &&
+      rtPopCtrlN.app.composer.imePreeditText.isEmpty && rtPopCtrlN.app.composer.text.isEmpty do
+    throw <| IO.userError "Fixture Ctrl+N with active preedit failed to cycle desktopImeSessionKey and drop stale IME"
+  let popToSettings := (stepDesktopEvent 120 vpDev popPre (.activate 103)).1
+  unless popToSettings.composer.imePreeditText.isEmpty do
+    throw <| IO.userError "Fixture .activate 103 clobbered cleared composer preedit back to non-empty"
+
 def main : IO UInt32 := do
   verifyOrbScrollEquivalence
   verifyNineScreenControls

@@ -491,17 +491,28 @@ def applyEventBatch {σ : Type} (rt : RuntimeState σ) (evs : Array Event)
   let mut st := rt
   let mut imeContextSwitched :=
     rt.lastImeOwner.isSome && (rt.focus.owner != rt.lastImeOwner || imeSessionKey rt.app != rt.lastImeContext)
+  let mut suppressActivatedSpaceText := false
   for ev in evs do
     if imeContextSwitched && isImeEvent ev then
       continue
+    if suppressActivatedSpaceText then
+      suppressActivatedSpaceText := false
+      if ev matches .text " " then
+        continue
     let before := st.app
     let prevOwner := st.focus.owner
     let prevCtx := imeSessionKey before
     let dispatched := st.effectiveEvent ev
+    let spaceActivated : Bool :=
+      match ev, dispatched with
+      | .key 0x20 _ .pressed, .activate _ => true
+      | _, _ => false
     st := st.stepEvent (onEvent st) ev
     st := st.applyFocusTraps (focusTraps st.app)
     if let some target := focusChange before st.app dispatched then
       st := { st.requestFocus target st.viewportDeviceRect with pendingFocusTarget := some target }
+    if spaceActivated then
+      suppressActivatedSpaceText := true
     let switched := st.focus.owner != prevOwner || imeSessionKey st.app != prevCtx
     if switched then
       imeContextSwitched := true

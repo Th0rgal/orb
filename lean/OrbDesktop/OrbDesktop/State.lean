@@ -1147,12 +1147,6 @@ private def closeSearchModal (st : DesktopState) : DesktopState :=
     modal := .none
     screen := nextScreen }
 
-/-- Record current `(screen, openMission)` in `navHistory` before navigating to `next`. -/
-def pushNavScreen (st : DesktopState) (next : ScreenId) (nextMission : Option String := none) : DesktopState :=
-  let cur : NavEntry := { screen := st.screen, missionId := st.openMission }
-  if st.screen == next && st.openMission == nextMission then st
-  else { st.clearAllPreedit with screen := next, navHistory := cur :: st.navHistory.take 15, navForward := [] }
-
 private def fixtureMissionRunning (mid : Option String) : Bool :=
   mid.isNone || mid == some "m:0"
 
@@ -1160,9 +1154,47 @@ private def fixtureScreenPlaceholder (scr : ScreenId) : String :=
   if scr == .missionTranscript || scr == .missionSplitDiff then "Send follow-up"
   else "Describe a task, / for commands, @ for context"
 
+private def normalizeFixtureScreen (st : DesktopState) (targetMission : Option String := none)
+    (prevScreen : Option ScreenId := none) : DesktopState :=
+  let isMission := st.screen == .missionTranscript || st.screen == .missionSplitDiff
+  let nextMission := if isMission then targetMission else none
+  let nextSidePanelOpen :=
+    if st.screen == .missionSplitDiff then true
+    else if !isMission || prevScreen == some .missionSplitDiff then false
+    else st.sidePanelOpen
+  let nextSidePanelTab :=
+    if st.screen == .missionSplitDiff then "diff" else st.sidePanelTab
+  { st with
+    openMission := nextMission
+    sidePanelOpen := nextSidePanelOpen
+    sidePanelTab := nextSidePanelTab
+    composer := { st.composer with
+      isRunning := isMission && fixtureMissionRunning nextMission
+      placeholder := fixtureScreenPlaceholder st.screen } }
+
+/-- Record current `(screen, openMission)` in `navHistory` before navigating to `next`.
+    Bumps `imeResetGen` whenever an active IME preedit is cleared so Wayland `zwp_text_input_v3`
+    cycles cleanly even across same-bucket draft transitions. -/
+def pushNavScreen (st : DesktopState) (next : ScreenId) (nextMission : Option String := none) : DesktopState :=
+  let (cleared, hadPreedit) := st.clearAllPreeditChecked
+  let bumpedGen := if hadPreedit then cleared.imeResetGen + 1 else cleared.imeResetGen
+  let cur : NavEntry := { screen := st.screen, missionId := st.openMission }
+  if st.screen == next && st.openMission == nextMission then
+    if hadPreedit then { cleared with imeResetGen := bumpedGen } else st
+  else
+    let base := { cleared with
+      screen := next
+      imeResetGen := bumpedGen
+      navHistory := cur :: cleared.navHistory.take 15
+      navForward := [] }
+    if st.liveData then base
+    else normalizeFixtureScreen base nextMission (some st.screen)
+
 /-- Restore a `NavEntry` cleanly while preserving `openMission`, `sidebarRows.selected`, and live invariants. -/
 def restoreNavEntry (st : DesktopState) (entry : NavEntry) (hist fwd : List NavEntry) : DesktopState :=
-  let st := st.clearAllPreedit
+  let (cleared, hadPreedit) := st.clearAllPreeditChecked
+  let prevScreen := st.screen
+  let st := { cleared with imeResetGen := if hadPreedit then cleared.imeResetGen + 1 else cleared.imeResetGen }
   if st.liveData then
     let base := { st with modal := .none, multiRows := [], selectionAnchor := none, navHistory := hist, navForward := fwd }
     if entry.screen == .missionTranscript then
@@ -1184,18 +1216,14 @@ def restoreNavEntry (st : DesktopState) (entry : NavEntry) (hist fwd : List NavE
         | _ => none
       { cleared with sidebarRows := cleared.sidebarRows.map fun r => { r with selected := activeWid == some r.widgetId } }
   else
-    let isMission := entry.screen == .missionTranscript || entry.screen == .missionSplitDiff
-    let restoredMission := if isMission then entry.missionId else none
-    { st with
-      screen := entry.screen
-      openMission := restoredMission
-      modal := .none
-      navHistory := hist
-      navForward := fwd
-      composer := { st.composer with
-        isRunning := isMission && fixtureMissionRunning restoredMission
-        placeholder := fixtureScreenPlaceholder entry.screen }
-      sidebarRows := defaultSidebarRows entry.screen }
+    normalizeFixtureScreen
+      { st with
+        screen := entry.screen
+        modal := .none
+        navHistory := hist
+        navForward := fwd
+        sidebarRows := defaultSidebarRows entry.screen }
+      entry.missionId (some prevScreen)
 
 private def toggleSidePanel (st : DesktopState) (tab : String) : DesktopState :=
   if st.sidePanelOpen && st.sidePanelTab == tab then
@@ -1466,9 +1494,9 @@ private def stepDesktopInput (scale120 : Nat) (viewport : Rect) (st : DesktopSta
     | _ => st
   let next :=
     match ev with
-    | .activate 2 | .composerReturn false | .activate 105 => actionState
-    | .activate id => if id >= 120 && id <= 123 then actionState else { actionState with composer := composer }
-    | _ => { actionState with composer := composer }
+    | .text _ | .preedit .. | .imeBatch .. | .composerReturn true =>
+      { actionState with composer := composer }
+    | _ => actionState
   let activeSettingsSec := if st.settingsSection.isEmpty then "Account" else st.settingsSection
   let actionChanged :=
     match ev with
@@ -1490,16 +1518,8 @@ private def stepDesktopInput (scale120 : Nat) (viewport : Rect) (st : DesktopSta
     -- the editor; without its layout bounds use the full viewport.
     let dmg := if composer != st.composer && st.screen == .missionTranscript then composerDamageRect scale120 viewport st.sidebarWidth else viewport
     let next :=
-      if next.screen != .missionTranscript && next.screen != .missionSplitDiff then
-        if next.liveData then
-          if next.openMission.isSome then resetSelection next none else next
-        else
-          { next with
-            openMission := none
-            composer := { next.composer with isRunning := false, placeholder := fixtureScreenPlaceholder next.screen } }
-      else if !next.liveData && st.screen != .missionTranscript && st.screen != .missionSplitDiff then
-        { next with
-          composer := { next.composer with isRunning := fixtureMissionRunning next.openMission, placeholder := "Send follow-up" } }
+      if next.liveData && next.openMission.isSome && next.screen != .missionTranscript && next.screen != .missionSplitDiff then
+        resetSelection next none
       else next
     return (next, Damage.add none dmg)
 
