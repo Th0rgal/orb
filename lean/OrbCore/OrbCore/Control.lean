@@ -3234,7 +3234,13 @@ def updateMissionBoundManagedNode (store : CoreStore) (missionId concreteNode no
     Shared by `POST /api/control/missions/:id/btw/agent` and the `ask_mission` MCP tool.
     The caller has already been authorized for `srcMid`. Returns (HTTP status, JSON body). -/
 private def remoteDispatchHttpStatus (error : String) : Nat :=
-  if error == "node_owner_required" then 403 else 502
+  if error == "node_owner_required" then 403
+  else if error.startsWith "REMOTE_HARNESS_UNSUPPORTED:" ||
+          error.startsWith "REMOTE_PROMPT_REQUIRED:" ||
+          error.startsWith "REMOTE_GOAL_UNSUPPORTED:" ||
+          error.startsWith "remote_goal_unsupported" ||
+          error.startsWith "REMOTE_AUTH_REQUIRED:" then 400
+  else 502
 
 private def launchBtwSideAgent (st : CoreAppState) (caller : CallerPrincipal) (srcMid : String)
     (jv : JVal) (hdrIdemKey : String) (nowEpochSec : UInt64) : IO (Nat × String) := do
@@ -4212,10 +4218,6 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
     let unitsRaw := if lease.allowedUnitsJson.startsWith "[" then lease.allowedUnitsJson else "[]"
     return .ok (mkJson 200 s!"\{\"allow_exec\":true,\"allowed\":true,\"grant_id\":{jsonEscape lease.grantId},\"scope\":{jsonEscape lease.scope},\"allowed_units\":{unitsRaw},\"require_force_cmd\":{rfStr},\"bunker_state\":{bunkerState.toNat},\"expires_at\":{lease.expiresAtEpoch},\"lease_epoch\":{liveLeaseEp}}")
 
-  -- 5b0. Retired dynamic MCP management surface: explicit unsupported, never fabricated.
-  if cleanPath == "/api/mcp" || cleanPath == "/api/tools" || cleanPath.startsWith "/api/tools/" then
-    return .ok (mkJson 501 "{\"ok\":false,\"error\":\"unsupported\",\"message\":\"Dynamic MCP server management and configured HTTP transport are not implemented; stdio servers from SANDBOXED_MCP_STDIO_SERVERS remain available.\"}")
-
   -- 5b. Unified Control-Plane MCP Gateway (`/api/mcp/session`, `/api/mcp/external-sessions`, `/api/mcp/renew`, `/api/mcp/capabilities`, `/api/mcp/call`)
   if cleanPath.startsWith "/api/mcp/" then
     let bearerTok? := extractBearerToken? req.headers nowEpochSec
@@ -4803,6 +4805,10 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
   let some caller ← resolveCallerPrincipal? st req.headers nowEpochSec
     | return .ok (mkJson 401 "{\"error\":\"unauthorized\"}")
   let utcDay := currentUtcDay nowEpochSec
+
+  -- Retired dynamic MCP server management & `/api/tools` surface: explicit 501 after auth (`MCP-18`).
+  if cleanPath == "/api/mcp" || cleanPath == "/api/tools" || cleanPath.startsWith "/api/tools/" then
+    return .ok (mkJson 501 "{\"ok\":false,\"error\":\"unsupported\",\"message\":\"Dynamic MCP server management and configured HTTP transport are not implemented; stdio servers from SANDBOXED_MCP_STDIO_SERVERS remain available.\"}")
 
   if cleanPath == "/api/native-owner-enrollments" || cleanPath.startsWith "/api/native-owner-enrollments/" then
     unless st.cfg.nativeSubscriptionEnabled do return .ok (mkJson 404 "{}")
@@ -6168,6 +6174,18 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
           abortIdem
           return .ok (mkJson 400 "{\"error\":\"remote_goal_unsupported: This remote harness cannot continue a Goal. Choose a Goal-capable harness or send a standard turn.\"}")
         | .ok _ => pure ()
+      -- `FLT-14`: validate remote harness & proxy preconditions BEFORE inserting a mission
+      -- or provisioning any paid `auto-managed` VM (including empty-prompt creates).
+      if !clientPlaced && !isCloudBackendName backend && remoteNodeId?.isSome then
+        if let .error hErr := validateRemoteHarness backend then
+          abortIdem
+          return .ok (mkJson (remoteDispatchHttpStatus hErr) s!"\{\"error\":{jsonEscape hErr}}")
+        if let (some sup, some targetNode, some rawPrompt) := (st.remoteSup?, remoteNodeId?, prompt?) then
+          if !rawPrompt.trimAscii.toString.isEmpty then
+            let (_, proxyBase) ← resolveRemoteCallbackUrls sup targetNode
+            if let .error pErr := validateRemoteLaunchPlan backend rawPrompt proxyBase then
+              abortIdem
+              return .ok (mkJson (remoteDispatchHttpStatus pErr) s!"\{\"error\":{jsonEscape pErr}}")
       let mut selectedSkills : Array SelectedSkill := #[]
       if !clientPlaced then
         if let some prompt := prompt? then
@@ -6870,6 +6888,9 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
       let rawBody := String.fromUTF8? req.bodySlice.toByteArray |>.getD ""
       let .ok jv := OrbBin.Json.parse rawBody
         | return .ok (mkJson 400 "{\"error\":\"invalid_json\"}")
+      if let some arVal := jv.field? "auto_reset_on_limit" then
+        if arVal != .null && arVal != .bool false then
+          return .ok (mkJson 501 "{\"ok\":false,\"error\":\"unsupported\",\"field\":\"auto_reset_on_limit\",\"message\":\"Automatic vendor usage reset redemption is not implemented; auto_reset_on_limit cannot be enabled.\"}")
       let defPid ← nextUniqueId st "prov" nowEpochSec
       let pid := if isAdm then ((jv.fieldStr? "id").getD defPid).trimAscii.toString else defPid
       let pType := ((jv.fieldStr? "provider_type").getD "custom").trimAscii.toString

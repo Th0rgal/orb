@@ -279,7 +279,16 @@ def updateProjectColor
     return .error e
   return .ok (.obj #[("slug", .str clientSlug), ("color", optStrJVal color)])
 
-def validateProjectGrantPatch (jv : JVal) : Except String Unit := do
+def projectGrantPatchFields : Array String :=
+  #["autonomy_level", "parallel_missions", "merge_authority", "budget_per_tick",
+    "pause_reason", "resume_condition", "material_bar"]
+
+def validateProjectGrantPatch (jv : JVal) (extraAllowed : Array String := #[]) : Except String Unit := do
+  let .obj kvs := jv
+    | throw "project grant patch must be a JSON object"
+  for (k, _) in kvs do
+    if !projectGrantPatchFields.contains k && !extraAllowed.contains k then
+      throw s!"unknown project grant field `{k}`"
   if let some v := jv.field? "autonomy_level" then
     if v != .null then
       match v.asStr? with
@@ -332,8 +341,9 @@ def getProjectGrantJVal (store : CoreStore) (scopedSlug clientSlug : String) : I
   | .error _ =>
     return .obj #[("slug", .str clientSlug)]
 
-def upsertProjectGrantJVal (store : CoreStore) (scopedSlug clientSlug : String) (jv : JVal) (nowIso : String) : IO (Except String JVal) := do
-  if let .error e := validateProjectGrantPatch jv then
+def upsertProjectGrantJVal (store : CoreStore) (scopedSlug clientSlug : String) (jv : JVal) (nowIso : String)
+    (extraAllowed : Array String := #[]) : IO (Except String JVal) := do
+  if let .error e := validateProjectGrantPatch jv extraAllowed then
     return .error e
   let mergeAuth := (jv.fieldStr? "merge_authority").getD ""
   let budget := (jv.fieldStr? "budget_per_tick").getD ""
@@ -805,11 +815,17 @@ def dispatchProjectAndControllerRoutes?
   if segs.length ≥ 3 && segs[0]? == some "api" && segs[1]? == some "projects" then
     let some clientSlug := percentDecodeStrict segs[2]!
       | return some (jsonErr 400 "invalid_project")
-    if !validProjectSlug clientSlug then
-      return some (jsonErr 400 "invalid_project")
-    let mut scopedSlug :=
-      if isLegacyUnscoped then clientSlug
-      else (scopeProjectSlug callerUserId bootstrapAdminId clientSlug).getD clientSlug
+    if isLegacyUnscoped then
+      if !validProjectSlug clientSlug then
+        return some (jsonErr 400 "invalid_project")
+    else
+      if !validRawProjectSlug clientSlug then
+        return some (jsonErr 400 "invalid_project")
+    let mut scopedSlug : String := clientSlug
+    if !isLegacyUnscoped then
+      let some s := scopeProjectSlug callerUserId bootstrapAdminId clientSlug
+        | return some (jsonErr 400 "invalid_project")
+      scopedSlug := s
     let tail := segs.drop 3
     -- Remove these two compatibility GETs once iOS/Android < 1.77.0 are retired.
     if method == "GET" && tail == ["controller"] then
@@ -819,6 +835,13 @@ def dispatchProjectAndControllerRoutes?
     if ["controller", "crons", "track", "tracks", "tasks", "task-board",
         "decision", "decisions", "steers", "state", "situation"].contains (tail.headD "") then
       return some (jsonErr 410 "removed")
+    if !isLegacyUnscoped && !isAdmin then
+      let .ok ownerRows ← execParamQuery store.projectsDb
+          "SELECT slug FROM project_owners WHERE (slug=?1 OR slug=?2) AND owner_user_id=?3 ORDER BY (slug=?1) DESC LIMIT 1;"
+          #[scopedSlug, clientSlug, callerUserId]
+        | return some (jsonErr 500 "db_error")
+      if ownerRows.size ≤ 1 then return some (jsonErr 404 "not_found")
+      scopedSlug := cell ownerRows[1]! 0
     if tail == ["board"] || tail == ["controller-mission"] || (tail.isEmpty && method == "GET") then
       let .ok rows ← execParamQuery store.projectsDb
           "SELECT p.slug FROM projects p LEFT JOIN project_owners o ON o.slug=p.slug WHERE (p.slug=?1 OR p.slug=?2) AND (?3='1' OR o.owner_user_id=?4) ORDER BY (p.slug=?1) DESC LIMIT 1;"
@@ -931,21 +954,35 @@ def dispatchProjectAndControllerRoutes?
 
     -- `POST /api/projects/:slug/status`
     if method == "POST" && tail == ["status"] then
-      let jv := (OrbBin.Json.parseBytes bodyBytes).toOption.getD (.obj #[])
-      if let some v := jv.field? "consumed_steer_ids" then
-        if v != .null then
+      let .ok jv := OrbBin.Json.parseBytes bodyBytes
+        | return some (jsonErr 400 "invalid_json")
+      let .obj kvs := jv
+        | return some (jsonErr 400 "invalid_json")
+      for (k, v) in kvs do
+        if v != .null && #["consumed_steer_ids", "mode", "next_action", "blocker"].contains k then
           return some (jsonResp 501 (.obj #[
             ("ok", .bool false),
             ("error", .str "unsupported"),
-            ("message", .str "Project steers were retired; consumed_steer_ids is not accepted or acknowledged.")
+            ("message", .str s!"Project field `{k}` was retired and is not accepted or acknowledged.")
           ]))
-      let stVal := (jv.fieldStr? "status").getD "active"
-      discard <| upsertProjectRecord store scopedSlug clientSlug "" "" stVal "" nowIso
-        (if isLegacyUnscoped then none else some callerUserId)
-      discard <| execParamQuery store.projectsDb
-        "UPDATE projects SET status=?2, updated_at=?3 WHERE slug=?1;"
-        #[scopedSlug, stVal, nowIso]
-      return some (jsonResp 200 (← getProjectJVal store scopedSlug clientSlug))
+        if !#["status", "consumed_steer_ids", "mode", "next_action", "blocker"].contains k then
+          return some (jsonErr 400 s!"unknown_field:{k}")
+      let some rawStatus := jv.fieldStr? "status"
+        | return some (jsonErr 400 "missing_status")
+      let stVal := rawStatus.trimAscii.toString
+      if !["active", "paused", "completed", "archived"].contains stVal then
+        return some (jsonErr 400 "invalid_status")
+      let .ok projRows ← execParamQuery store.projectsDb
+          "SELECT p.slug FROM projects p LEFT JOIN project_owners o ON o.slug=p.slug WHERE (p.slug=?1 OR p.slug=?2) AND (?3='1' OR o.owner_user_id=?4) ORDER BY (p.slug=?1) DESC LIMIT 1;"
+          #[scopedSlug, clientSlug, if isAdmin then "1" else "0", callerUserId]
+        | return some (jsonErr 500 "db_error")
+      if projRows.size ≤ 1 then return some (jsonErr 404 "not_found")
+      let resolvedSlug := cell projRows[1]! 0
+      if let .error e ← execParamQuery store.projectsDb
+          "UPDATE projects SET status=?2, updated_at=?3 WHERE slug=?1;"
+          #[resolvedSlug, stVal, nowIso] then
+        return some (jsonErr 500 e)
+      return some (jsonResp 200 (← getProjectJVal store resolvedSlug clientSlug))
 
     -- `GET|POST /api/projects/:slug/grant`
     if tail == ["grant"] then
@@ -954,7 +991,8 @@ def dispatchProjectAndControllerRoutes?
           #[scopedSlug, clientSlug, if isAdmin then "1" else "0", callerUserId]
         | return some (jsonErr 500 "db_error")
       if method == "GET" then
-        let resolvedSlug := if projRows.size > 1 then cell projRows[1]! 0 else scopedSlug
+        if projRows.size ≤ 1 then return some (jsonErr 404 "not_found")
+        let resolvedSlug := cell projRows[1]! 0
         return some (jsonResp 200 (← getProjectGrantJVal store resolvedSlug clientSlug))
       else if method == "POST" || method == "PUT" then
         let .ok jv := OrbBin.Json.parseBytes bodyBytes

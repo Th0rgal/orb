@@ -727,7 +727,7 @@ structure PreparedRemoteCommand where
   antigravityAccountId? : Option String := none
   antigravityOauthFile? : Option String := none
 
-private def resolveRemoteCallbackUrls (sup : RemoteJobSupervisor) (targetNodeId : String) : IO (String × String) := do
+def resolveRemoteCallbackUrls (sup : RemoteJobSupervisor) (targetNodeId : String) : IO (String × String) := do
   let pubApiRaw := trimTrailingSlashes ((← lookupEnvWithFiles? "SANDBOXED_PUBLIC_URL").getD "")
   let apiBase ←
     if !pubApiRaw.isEmpty then
@@ -2057,7 +2057,7 @@ def cancelActiveRemoteJobForMission
   ]
   match ← callRemoteNodeHttpOpt relayHub? mc? effNode "POST" s!"/jobs/{jobId}/cancel" (some (.obj #[])) hdrs 10000 with
   | .ok (st, respTxt, _, _, _) =>
-    let confirmed := (200 ≤ st && st < 300) || (st == 404 && respTxt.trimAscii.toString == "job not found")
+    let confirmed := (200 ≤ st && st < 300) || isOrbNodeJobNotFound st respTxt jobId
     if confirmed then
       markCancelState jobId "cancelled"
     return confirmed
@@ -2281,7 +2281,7 @@ partial def spawnRemoteJobPoller
             -- during a partition, keep `cancelSent = false` so later ticks retry `/cancel`.
             match ← callRemoteNodeHttpOpt relayHub? mc? effNodeId "POST" s!"/jobs/{jobId}/cancel" (some (.obj #[])) hdrs 8000 with
             | .ok (cSt, cBody, _, _, _) =>
-              if (200 ≤ cSt && cSt < 300) || (cSt == 404 && cBody.trimAscii.toString == "job not found") then
+              if (200 ≤ cSt && cSt < 300) || isOrbNodeJobNotFound cSt cBody jobId then
                 cancelSent := true
                 discard <| execParamQuery store.missionsDb
                   "UPDATE remote_node_jobs SET state='cancelled', updated_at=?2 WHERE job_id=?1 AND state NOT IN ('succeeded','failed','lost','terminal','completed','aborted');"
@@ -3235,7 +3235,7 @@ def reattachActiveRemoteJobsOnStartup
           let hdrs := #[("x-sandboxed-cancel-actor", "core"), ("x-sandboxed-cancel-reason", "Mission inactive on Core startup")]
           match ← callRemoteNodeHttpOpt relayHub? mc? effNode "POST" s!"/jobs/{sjid}/cancel" (some (.obj #[])) hdrs 6000 with
           | .ok (cSt, cBody, _, _, _) =>
-            confirmed := (200 ≤ cSt && cSt < 300) || (cSt == 404 && cBody.trimAscii.toString == "job not found")
+            confirmed := (200 ≤ cSt && cSt < 300) || isOrbNodeJobNotFound cSt cBody sjid
           | .error _ => confirmed := false
         let nextSt := if confirmed then "cancelled" else "cancel_requested"
         discard <| execParamQuery store.missionsDb

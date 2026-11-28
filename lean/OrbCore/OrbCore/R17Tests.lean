@@ -134,7 +134,11 @@ private def runExtendedChecks
     (missingRec?.bind (·.fieldStr? "state")) == some "not_found" &&
     (missingRec?.bind (·.fieldStr? "accepted")) == some "no")
     "MCP-02 wait_actions marks unknown IDs not_found with accepted=no and all_succeeded=false"
-  let cancelSettled ← call operator "cancel_action" (.obj #[("action_id", .str "r17-act-ok")])
+  let cancelNoKey ← call operator "cancel_action" (.obj #[("action_id", .str "r17-act-ok")])
+  check (cancelNoKey.fieldBool? "ok" == some false &&
+    (cancelNoKey.fieldOrNull "error").fieldStr? "code" == some "invalid_arguments")
+    "MCP-02 cancel_action requires idempotency_key"
+  let cancelSettled ← call operator "cancel_action" (.obj #[("action_id", .str "r17-act-ok"), ("idempotency_key", .str "r17-can-settled")])
   let csRes := cancelSettled.fieldOrNull "result"
   check (cancelSettled.fieldBool? "ok" == some true &&
     csRes.fieldBool? "cancelled" == some false &&
@@ -142,14 +146,29 @@ private def runExtendedChecks
     csRes.fieldStr? "accepted" == some "no")
     "MCP-02 cancel_action refuses to cancel settled receipt and reports accepted=no"
   insertAction "r17-act-queued" "queued" "{}"
-  let cancelQueued ← call operator "cancel_action" (.obj #[("action_id", .str "r17-act-queued")])
+  let cancelQueued ← call operator "cancel_action" (.obj #[("action_id", .str "r17-act-queued"), ("idempotency_key", .str "r17-can-q1")])
   let cqRes := cancelQueued.fieldOrNull "result"
   check (cancelQueued.fieldBool? "ok" == some true &&
     cqRes.fieldBool? "cancelled" == some true &&
     cqRes.fieldStr? "state" == some "cancelled" &&
     cqRes.fieldStr? "accepted" == some "yes")
     "MCP-02 cancel_action atomically cancels queued receipt"
-  let cancelMissing ← call operator "cancel_action" (.obj #[("action_id", .str "r17-act-does-not-exist")])
+  let cancelQueuedReplay ← call operator "cancel_action" (.obj #[("action_id", .str "r17-act-queued"), ("idempotency_key", .str "r17-can-q1")])
+  check (cancelQueuedReplay == cancelQueued)
+    "MCP-02 cancel_action replays identical receipt on retry with same idempotency_key"
+  let cancelQueuedConflict ← call operator "cancel_action" (.obj #[("action_id", .str "r17-act-ok"), ("idempotency_key", .str "r17-can-q1")])
+  check (cancelQueuedConflict.fieldBool? "ok" == some false &&
+    (cancelQueuedConflict.fieldOrNull "error").fieldStr? "code" == some "conflict")
+    "MCP-02 cancel_action rejects conflicting action_id for reused idempotency_key"
+  insertAction "r17-act-accepted" "accepted" "{}"
+  let cancelAccepted ← call operator "cancel_action" (.obj #[("action_id", .str "r17-act-accepted"), ("idempotency_key", .str "r17-can-acc1")])
+  let caRes := cancelAccepted.fieldOrNull "result"
+  check (cancelAccepted.fieldBool? "ok" == some true &&
+    caRes.fieldBool? "cancelled" == some true &&
+    caRes.fieldStr? "state" == some "cancelled" &&
+    caRes.fieldStr? "accepted" == some "yes")
+    "MCP-02 cancel_action atomically cancels accepted receipt"
+  let cancelMissing ← call operator "cancel_action" (.obj #[("action_id", .str "r17-act-does-not-exist"), ("idempotency_key", .str "r17-can-miss")])
   check (cancelMissing.fieldBool? "ok" == some false &&
     (cancelMissing.fieldOrNull "error").fieldStr? "code" == some "not_found")
     "MCP-02 cancel_action returns not_found for unknown action_id"
@@ -311,6 +330,7 @@ private def runFleetProvSecChecks
     advHarnesses.contains (.str "opencode") &&
     advPrefixes.contains (.str "REMOTE_HARNESS_UNSUPPORTED") &&
     advPrefixes.contains (.str "REMOTE_PROMPT_REQUIRED") &&
+    advPrefixes.contains (.str "remote_goal_unsupported") &&
     advPrefixes.contains (.str "REMOTE_AUTH_REQUIRED") &&
     !advPrefixes.contains (.str "REMOTE_MODEL_REQUIRED"))
     "FLT-14 buildRemoteLaunchCapabilitiesJVal advertises only implemented harnesses and enforced prefixes"
@@ -398,6 +418,297 @@ private def runFleetProvSecChecks
   check (batchAppSt == 409 && batchAppBody.contains "unsupported_secret_tier" &&
     ((brokerAfterApprove.fieldArr? "grants").getD #[]).isEmpty)
     s!"SEC-06 batch approve refuses legacy pending secret_put and creates zero read grants (st={batchAppSt} body={batchAppBody})"
+
+private def serveMockOrbNodeOnce (listenFd : LeanSys.Posix.Fd) (status : Nat) (ctype body : String) : IO (Task (Except IO.Error Unit)) :=
+  IO.asTask (prio := .dedicated) do
+    let .ok clientFd ← LeanSys.Posix.tcpAcceptPoll listenFd 5000 | return ()
+    try
+      discard <| readCoreHttpRequestFromFd clientFd
+      let resp := s!"HTTP/1.1 {status} OK\r\nContent-Type: {ctype}\r\nContent-Length: {body.utf8ByteSize}\r\nConnection: close\r\n\r\n{body}"
+      discard <| LeanSys.Posix.writeAll clientFd resp.toUTF8
+    finally
+      discard <| LeanSys.Posix.closeFd clientFd
+
+private def runCarbonRegressionChecks
+    (root : String) (store : CoreStore) (mStore : ManagedComputeStore) (cfg : CoreConfig) (app : CoreAppState)
+    (now : UInt64) (jwt : String) (operator : McpSessionClaims) : IO Unit := do
+  let sql (q : String) (params : Array String := #[]) := do
+    let .ok rows ← execParamQuery store.projectsDb q params
+      | throw (IO.userError "R17 regression projects query failed")
+    return rows
+  let msql (q : String) (params : Array String := #[]) := do
+    let .ok rows ← execParamQuery store.missionsDb q params
+      | throw (IO.userError "R17 regression missions query failed")
+    return rows
+  let call (c : McpSessionClaims) (tool : String) (args : JVal) (sup? : Option OrbCore.RemoteDispatch.RemoteJobSupervisor := none) := do
+    let raw ← OrbCore.McpGateway.dispatchMcpToolCall store (some mStore) none none {} root c tool args now (remoteSup? := sup?)
+    let .ok value := OrbBin.Json.parse raw | throw (IO.userError "R17 regression MCP JSON")
+    return value
+  let restRaw (tok? : Option String) (method path body : String) (appOverride : CoreAppState := app) := do
+    let authHdr := match tok? with | some t => s!"Authorization: Bearer {t}\r\n" | none => ""
+    let raw := s!"{method} {path} HTTP/1.1\r\nHost: 127.0.0.1\r\n{authHdr}Content-Type: application/json\r\nContent-Length: {body.toUTF8.size}\r\n\r\n{body}"
+    let .ok req := parseRequest raw.toUTF8 none | throw (IO.userError "R17 regression REST parse")
+    let .ok response ← dispatchCoreRequest appOverride req now | throw (IO.userError "R17 regression REST dispatch")
+    return (response.status, (String.fromUTF8? response.body).getD "")
+
+  -- Finding #1: Cross-tenant user:slug bypass, unknown GET /grant 404, strict REST POST /status
+  discard <| msql
+    "INSERT INTO users(id,username,password_hash,role) VALUES('r17-member-b','r17memberb','synthetic-hash','member');"
+  let memberAJwt := mintSessionTokenV2 cfg.jwtSecret "r17-member" "member" 1 (now + 3600)
+  let memberBJwt := mintSessionTokenV2 cfg.jwtSecret "r17-member-b" "member" 1 (now + 3600)
+  let (mkProjSt, _) ← restRaw (some memberAJwt) "POST" "/api/projects" "{\"slug\":\"secret-proj\",\"title\":\"Alice Secret\",\"status\":\"paused\"}"
+  check (mkProjSt == 200) "R17-F1 member-a creates scoped project"
+  let (setGrantASt, _) ← restRaw (some memberAJwt) "PUT" "/api/projects/secret-proj/grant" "{\"autonomy_level\":\"observe\",\"parallel_missions\":2}"
+  check (setGrantASt == 200) "R17-F1 member-a sets own project grant"
+  let (crossGrantSt, crossGrantBody) ← restRaw (some memberBJwt) "GET" "/api/projects/r17-member:secret-proj/grant" ""
+  check (crossGrantSt == 400 && !crossGrantBody.contains "observe")
+    s!"R17-F1 member-b cannot read member-a grant via user:slug (st={crossGrantSt})"
+  let (crossStatusSt, crossStatusBody) ← restRaw (some memberBJwt) "POST" "/api/projects/r17-member:secret-proj/status" "{\"status\":\"archived\"}"
+  let aliceStatusAfter ← sql "SELECT status FROM projects WHERE slug='r17-member:secret-proj';"
+  check (crossStatusSt == 400 && !crossStatusBody.contains "Alice Secret" &&
+    aliceStatusAfter.size > 1 && aliceStatusAfter[1]![0]? == some "paused")
+    s!"R17-F1 member-b cannot overwrite member-a status via user:slug (st={crossStatusSt})"
+  let (unknownGrantSt, _) ← restRaw (some jwt) "GET" "/api/projects/definitely-missing-proj/grant" ""
+  check (unknownGrantSt == 404) "R17-F1 GET /api/projects/:slug/grant returns 404 for unknown project"
+  let (badJsonSt, _) ← restRaw (some jwt) "POST" "/api/projects/r17-project/status" "{not-json"
+  let (omitStatusSt, _) ← restRaw (some jwt) "POST" "/api/projects/r17-project/status" "{}"
+  let (bogusStatusSt, _) ← restRaw (some jwt) "POST" "/api/projects/r17-project/status" "{\"status\":\"made_up\"}"
+  let (modeStatusSt, _) ← restRaw (some jwt) "POST" "/api/projects/r17-project/status" "{\"status\":\"paused\",\"mode\":\"autonomous\"}"
+  let (missingProjStatusSt, _) ← restRaw (some jwt) "POST" "/api/projects/never-created-proj/status" "{\"status\":\"paused\"}"
+  let createdCheck ← sql "SELECT COUNT(*) FROM projects WHERE slug='never-created-proj';"
+  check (badJsonSt == 400 && omitStatusSt == 400 && bogusStatusSt == 400 &&
+    modeStatusSt == 501 && missingProjStatusSt == 404 &&
+    createdCheck.size > 1 && createdCheck[1]![0]? == some "0")
+    s!"R17-F1 REST POST /status enforces strict JSON/enum/retired fields and never auto-creates (bad={badJsonSt},omit={omitStatusSt},bogus={bogusStatusSt},mode={modeStatusSt},missing={missingProjStatusSt})"
+
+  -- Finding #2: FLT-04 live mock OrbNode cancel wire contract + settled-receipt immutability
+  let .ok (mockFd, mockPort) ← LeanSys.Posix.tcpListen "127.0.0.1" 0 8
+    | throw (IO.userError "R17-F2 mock OrbNode listen failed")
+  try
+    let prevRemoteNodes ← IO.getEnv "SANDBOXED_REMOTE_NODES"
+    let prevMockTok ← IO.getEnv "R17_MOCK_NODE_TOK"
+    setenvVar "R17_MOCK_NODE_TOK" "r17-mock-secret"
+    setenvVar "SANDBOXED_REMOTE_NODES" s!"r17mock=http://127.0.0.1:{mockPort}|R17_MOCK_NODE_TOK"
+    try
+      -- (a) 404 "job <id> not found" confirms cancel
+      discard <| msql
+        "INSERT INTO remote_node_jobs(job_id,mission_id,node_id,state,payload_json,created_at,updated_at) VALUES('r17-dj-404','m-r17-settings','r17mock','running','{}','2026-11-18T00:00:00Z','2026-11-18T00:00:00Z');"
+      let t1 ← serveMockOrbNodeOnce mockFd 404 "text/plain" "job r17-dj-404 not found"
+      let (c404St, c404Body) ← restRaw (some jwt) "POST" "/api/durable-jobs/r17-dj-404/cancel" "{}"
+      let _ := t1.get
+      let .ok c404Jv := OrbBin.Json.parse c404Body | throw (IO.userError "R17-F2 c404 JSON")
+      let st404 ← msql "SELECT state FROM remote_node_jobs WHERE job_id='r17-dj-404';"
+      check (c404St == 200 && c404Jv.fieldBool? "confirmed" == some true && st404[1]![0]? == some "cancelled")
+        s!"R17-F2 OrbNode 404 'job <id> not found' confirms cancel (st={c404St}, body={c404Body})"
+      -- (b) Re-cancelling an already-cancelled job is idempotent 200 confirmed=true (no node call needed)
+      let (cIdemSt, cIdemBody) ← restRaw (some jwt) "POST" "/api/durable-jobs/r17-dj-404/cancel" "{}"
+      let .ok cIdemJv := OrbBin.Json.parse cIdemBody | throw (IO.userError "R17-F2 cIdem JSON")
+      check (cIdemSt == 200 && cIdemJv.fieldBool? "confirmed" == some true && cIdemJv.fieldStr? "state" == some "cancelled")
+        "R17-F2 retrying cancel on already-cancelled durable job returns idempotent 200 confirmed=true"
+      -- (c) OrbNode 200 {state:"cancelled", cancel_requested:false} confirms cancel
+      discard <| msql
+        "INSERT INTO remote_node_jobs(job_id,mission_id,node_id,state,payload_json,created_at,updated_at) VALUES('r17-dj-alcan','m-r17-settings','r17mock','running','{}','2026-11-18T00:00:00Z','2026-11-18T00:00:00Z');"
+      let t2 ← serveMockOrbNodeOnce mockFd 200 "application/json" "{\"job_id\":\"r17-dj-alcan\",\"state\":\"cancelled\",\"cancel_requested\":false}"
+      let (cAlCanSt, cAlCanBody) ← restRaw (some jwt) "POST" "/api/durable-jobs/r17-dj-alcan/cancel" "{}"
+      let _ := t2.get
+      let .ok cAlCanJv := OrbBin.Json.parse cAlCanBody | throw (IO.userError "R17-F2 cAlCan JSON")
+      check (cAlCanSt == 200 && cAlCanJv.fieldBool? "confirmed" == some true && cAlCanJv.fieldStr? "state" == some "cancelled")
+        "R17-F2 OrbNode 200 {state:'cancelled',cancel_requested:false} returns 200 confirmed=true"
+      -- (d) OrbNode 200 {state:"succeeded", cancel_requested:false} reconciles to succeeded & refuses cancel (409)
+      discard <| msql
+        "INSERT INTO remote_node_jobs(job_id,mission_id,node_id,state,payload_json,created_at,updated_at) VALUES('r17-dj-done','m-r17-settings','r17mock','running','{}','2026-11-18T00:00:00Z','2026-11-18T00:00:00Z');"
+      let t3 ← serveMockOrbNodeOnce mockFd 200 "application/json" "{\"job_id\":\"r17-dj-done\",\"state\":\"succeeded\",\"cancel_requested\":false}"
+      let (cDoneSt, cDoneBody) ← restRaw (some jwt) "POST" "/api/durable-jobs/r17-dj-done/cancel" "{}"
+      let _ := t3.get
+      let .ok cDoneJv := OrbBin.Json.parse cDoneBody | throw (IO.userError "R17-F2 cDone JSON")
+      let stDone ← msql "SELECT state FROM remote_node_jobs WHERE job_id='r17-dj-done';"
+      check (cDoneSt == 409 && cDoneJv.fieldBool? "confirmed" == some false &&
+        cDoneJv.fieldStr? "state" == some "succeeded" && stDone[1]![0]? == some "succeeded")
+        s!"R17-F2 OrbNode 200 terminal succeeded reconciles and refuses to rewrite to cancelled (st={cDoneSt}, body={cDoneBody})"
+      -- (e) Settled local/remote job refuses cancel without rewriting DB
+      discard <| msql
+        "INSERT INTO remote_node_jobs(job_id,mission_id,node_id,state,payload_json,created_at,updated_at) VALUES('r17-dj-local-ok','m-r17-settings','local','succeeded','{}','2026-11-18T00:00:00Z','2026-11-18T00:00:00Z');"
+      let (cLocSt, _) ← restRaw (some jwt) "POST" "/api/durable-jobs/r17-dj-local-ok/cancel" "{}"
+      let stLoc ← msql "SELECT state FROM remote_node_jobs WHERE job_id='r17-dj-local-ok';"
+      check (cLocSt == 409 && stLoc[1]![0]? == some "succeeded")
+        "R17-F2 settled local durable job refuses rewrite to cancelled"
+
+      -- Finding #3: HTTP-05 remote-targeted ?node=<remote> must return 501 BEFORE relaying to OrbNode
+      let (remUpdSt, remUpdBody) ← restRaw (some jwt) "POST" "/api/software/updates?node=r17mock" "{}"
+      let (remCanSt, remCanBody) ← restRaw (some jwt) "POST" "/api/software/updates/cancel?node=r17mock" "{}"
+      check (remUpdSt == 501 && remUpdBody.contains "unsupported" &&
+        remCanSt == 501 && remCanBody.contains "unsupported")
+        s!"R17-F3 remote-targeted /api/software/updates* returns 501 before node relay (upd={remUpdSt}, can={remCanSt})"
+    finally
+      match prevRemoteNodes with | some v => setenvVar "SANDBOXED_REMOTE_NODES" v | none => unsetenvVar "SANDBOXED_REMOTE_NODES"
+      match prevMockTok with | some v => setenvVar "R17_MOCK_NODE_TOK" v | none => unsetenvVar "R17_MOCK_NODE_TOK"
+  finally
+    discard <| LeanSys.Posix.closeFd mockFd
+
+  -- Finding #4: MCP-18 unauthenticated /api/mcp and /api/tools* must return 401 (never 501)
+  for (mth, pth) in #[("GET", "/api/mcp"), ("POST", "/api/mcp"), ("GET", "/api/mcp/srv-1"),
+      ("GET", "/api/tools"), ("POST", "/api/tools/x/toggle")] do
+    let (st, _) ← restRaw none mth pth "{}"
+    check (st == 401) s!"R17-F4 unauthenticated {mth} {pth} returns 401 (got {st})"
+
+  -- Finding #5: FLT-14 end-to-end REST & MCP remote launch preflight BEFORE auto-managed VM rental + 400 status
+  let sup ← OrbCore.RemoteDispatch.newRemoteJobSupervisor cfg.jwtSecret false
+  let appWithSup : CoreAppState := { app with remoteSup? := some sup }
+  let beforeRestMissions ← msql "SELECT COUNT(*) FROM missions;"
+  let (restVibeEmptySt, restVibeEmptyBody) ← restRaw (some jwt) "POST" "/api/control/missions"
+    "{\"title\":\"Vibe Empty\",\"backend\":\"vibe\",\"remote_node_id\":\"auto-managed:boat:small\"}" appWithSup
+  let afterRestVibe ← msql "SELECT COUNT(*) FROM missions;"
+  check (restVibeEmptySt == 400 && restVibeEmptyBody.contains "REMOTE_HARNESS_UNSUPPORTED" && beforeRestMissions == afterRestVibe)
+    s!"R17-F5 REST empty-prompt remote vibe rejected 400 before mission insert/VM rental (st={restVibeEmptySt}, body={restVibeEmptyBody})"
+  let prevPub ← IO.getEnv "SANDBOXED_PUBLIC_URL"
+  let prevProxy ← IO.getEnv "SANDBOXED_PROXY_PUBLIC_URL"
+  unsetenvVar "SANDBOXED_PUBLIC_URL"
+  unsetenvVar "SANDBOXED_PROXY_PUBLIC_URL"
+  try
+    let (restNoProxySt, restNoProxyBody) ← restRaw (some jwt) "POST" "/api/control/missions"
+      "{\"title\":\"No Proxy\",\"backend\":\"opencode\",\"remote_node_id\":\"auto-managed:boat:small\",\"prompt\":\"hello\"}" appWithSup
+    check (restNoProxySt == 400 && restNoProxyBody.contains "REMOTE_AUTH_REQUIRED")
+      s!"R17-F5 REST missing proxy URL returns 400 REMOTE_AUTH_REQUIRED (not 502) (st={restNoProxySt}, body={restNoProxyBody})"
+  finally
+    match prevPub with | some v => setenvVar "SANDBOXED_PUBLIC_URL" v | none => pure ()
+    match prevProxy with | some v => setenvVar "SANDBOXED_PROXY_PUBLIC_URL" v | none => pure ()
+  let mcpVibeEmpty ← call operator "start_mission" (.obj #[
+    ("title", .str "MCP Vibe Empty"), ("backend", .str "vibe"),
+    ("remote_node_id", .str "auto-managed:boat:small"), ("idempotency_key", .str "r17-f5-mcp-vibe")]) (some sup)
+  let mcpGoalVibe ← call operator "start_mission" (.obj #[
+    ("title", .str "MCP Goal Vibe"), ("backend", .str "vibe"), ("prompt", .str "/goal Ship it"),
+    ("remote_node_id", .str "auto-managed:boat:small"), ("idempotency_key", .str "r17-f5-mcp-goal")]) (some sup)
+  let afterMcpVibe ← msql "SELECT COUNT(*) FROM missions;"
+  let managedCount ← execParamQuery mStore.db "SELECT COUNT(*) FROM managed_machines;" #[]
+  let mcpVibeMsg := ((mcpVibeEmpty.fieldOrNull "error").fieldStr? "message").getD ""
+  let mcpGoalMsg := ((mcpGoalVibe.fieldOrNull "error").fieldStr? "message").getD ""
+  check (mcpVibeEmpty.fieldBool? "ok" == some false &&
+    mcpVibeMsg.contains "REMOTE_HARNESS_UNSUPPORTED" &&
+    mcpGoalVibe.fieldBool? "ok" == some false &&
+    mcpGoalMsg.contains "remote_goal_unsupported" &&
+    beforeRestMissions == afterMcpVibe &&
+    (managedCount.toOption.bind (fun rs => rs[1]?.bind (·[0]?))) == some "0")
+    "R17-F5 MCP start_mission rejects unsupported harness & /goal before renting any auto-managed VM"
+
+  -- Finding #6: MCP-02 ManagedSpawnActions accepted truth on running/uncertain/rejected receipts
+  discard <| sql
+    ("INSERT INTO mcp_actions_v1(id,owner,scope,retry_key,fingerprint,principal,tool,arguments,state,result,created_at,updated_at) " ++
+     "VALUES('r17-spawn-run','m-r17-settings','s','rk-sr','{}','admin','spawn_managed_machine','{}','running','{}','2026-11-18T00:00:00Z','2026-11-18T00:00:00Z')," ++
+     "('r17-spawn-unc','m-r17-settings','s','rk-su','{}','admin','spawn_managed_machine','{}','uncertain','{}','2026-11-18T00:00:00Z','2026-11-18T00:00:00Z');")
+  let cancelRunSpawn ← call operator "cancel_action" (.obj #[("action_id", .str "r17-spawn-run"), ("idempotency_key", .str "r17-f6-can-run")])
+  let crsRes := cancelRunSpawn.fieldOrNull "result"
+  check (cancelRunSpawn.fieldBool? "ok" == some true &&
+    crsRes.fieldBool? "cancelled" == some false &&
+    crsRes.fieldStr? "accepted" == some "no")
+    s!"R17-F6 cancel_action on running ManagedSpawnAction returns cancelled=false, accepted=no ({renderCompact cancelRunSpawn})"
+  let recRejSpawn ← call operator "reconcile_action" (.obj #[
+    ("action_id", .str "r17-spawn-unc"), ("resolution", .str "rejected"),
+    ("evidence", .str "verified no VM rented"), ("idempotency_key", .str "r17-f6-rec-rej")])
+  let recTarget := (recRejSpawn.fieldOrNull "result").fieldOrNull "receipt"
+  check (recRejSpawn.fieldBool? "ok" == some true &&
+    recTarget.fieldStr? "state" == some "rejected" &&
+    recTarget.fieldStr? "accepted" == some "no")
+    s!"R17-F6 reconcile_action(rejected) on uncertain ManagedSpawnAction reports accepted=no ({renderCompact recRejSpawn})"
+
+  -- Finding #7: PROV08 POST /api/ai/providers rejects auto_reset_on_limit=true; all DTOs emit auto_reset_on_limit=false
+  let (arPostSt, arPostBody) ← restRaw (some jwt) "POST" "/api/ai/providers"
+    "{\"provider_type\":\"anthropic\",\"name\":\"R17 Bad Reset\",\"api_key\":\"sk-ant-r17-bad\",\"auto_reset_on_limit\":true}"
+  check (arPostSt == 501 && arPostBody.contains "unsupported")
+    s!"R17-F7 POST /api/ai/providers rejects auto_reset_on_limit=true with 501 (st={arPostSt})"
+  let (goodPostSt, goodPostBody) ← restRaw (some jwt) "POST" "/api/ai/providers"
+    "{\"id\":\"r17-prov-2\",\"provider_type\":\"anthropic\",\"name\":\"R17 Good\",\"api_key\":\"sk-ant-r17-good\"}"
+  let .ok goodPostJv := OrbBin.Json.parse goodPostBody | throw (IO.userError "R17-F7 post prov JSON")
+  let (goodPutSt, goodPutBody) ← restRaw (some jwt) "PUT" "/api/ai/providers/r17-prov-2" "{\"name\":\"R17 Good Renamed\"}"
+  let .ok goodPutJv := OrbBin.Json.parse goodPutBody | throw (IO.userError "R17-F7 put prov JSON")
+  let (memListSt, memListBody) ← restRaw (some memberAJwt) "GET" "/api/ai/providers" ""
+  let .ok (.arr memProvArr) := OrbBin.Json.parse memListBody | throw (IO.userError "R17-F7 member prov JSON")
+  check (goodPostSt == 201 && goodPostJv.fieldBool? "auto_reset_on_limit" == some false &&
+    goodPutSt == 200 && goodPutJv.fieldBool? "auto_reset_on_limit" == some false &&
+    memListSt == 200 && memProvArr.any (fun p => p.fieldBool? "auto_reset_on_limit" == some false))
+    "R17-F7 POST, PUT, and member GET /api/ai/providers all emit auto_reset_on_limit=false"
+
+  -- Finding #8: MCP-16 get_cloud_execution read-access enforcement + paging/prompt redaction
+  let execOtherClaims : McpSessionClaims := {
+    sessionId := "r17-exec-other", missionId := "m-unrelated-exec", role := "executor",
+    project := "", isExternal := false, expiresAt := now + 3600
+  }
+  let cloudForbidden ← call execOtherClaims "get_cloud_execution" (.obj #[("mission_id", .str "m-r17-settings")])
+  check (cloudForbidden.fieldBool? "ok" == some false &&
+    (cloudForbidden.fieldOrNull "error").fieldStr? "code" == some "forbidden")
+    s!"R17-F8 get_cloud_execution enforces checkMissionReadAccess in single-tenant mode ({renderCompact cloudForbidden})"
+  let multiTurnData := renderCompact (.obj #[
+    ("mission_id", .str "m-r17-settings"),
+    ("turns", .arr #[
+      .obj #[("key", .str "t1"), ("prompt", .str "SECRET_PROMPT_1"), ("result", .str "abcdefghij"), ("detail", .str "d1"), ("artifacts", .arr #[.str "a1"]), ("branches", .arr #[])],
+      .obj #[("key", .str "t2"), ("prompt", .str "SECRET_PROMPT_2"), ("result", .str "0123456789"), ("detail", .str "d2"), ("artifacts", .arr #[.str "a2", .str "a3"]), ("branches", .arr #[.str "b1"])]
+    ])
+  ])
+  discard <| msql "UPDATE cloud_executions SET data=?1, revision=3 WHERE mission_id='m-r17-settings';" #[multiTurnData]
+  let cloudDefault ← call operator "get_cloud_execution" (.obj #[("mission_id", .str "m-r17-settings")])
+  let cdTurns := (((cloudDefault.fieldOrNull "result").fieldOrNull "execution").fieldArr? "turns").getD #[]
+  check (cloudDefault.fieldBool? "ok" == some true && cdTurns.size == 1 &&
+    cdTurns[0]!.fieldStr? "key" == some "t2" &&
+    (cdTurns[0]!.field? "prompt").isNone &&
+    (cdTurns[0]!.field? "artifacts").isNone &&
+    cdTurns[0]!.fieldNat? "artifact_count" == some 2 &&
+    cdTurns[0]!.fieldNat? "branch_count" == some 1)
+    s!"R17-F8 get_cloud_execution defaults to latest 1 turn, omits prompt & raw artifacts/branches ({renderCompact cloudDefault})"
+  let cloudPaged ← call operator "get_cloud_execution" (.obj #[
+    ("mission_id", .str "m-r17-settings"), ("include_prompt", .bool true),
+    ("offset", .nat 0), ("limit", .nat 2), ("text_offset", .nat 2), ("text_limit", .nat 4)])
+  let cpTurns := (((cloudPaged.fieldOrNull "result").fieldOrNull "execution").fieldArr? "turns").getD #[]
+  check (cloudPaged.fieldBool? "ok" == some true && cpTurns.size == 2 &&
+    cpTurns[0]!.fieldStr? "prompt" == some "CRET" &&
+    cpTurns[0]!.fieldStr? "result" == some "cdef")
+    s!"R17-F8 get_cloud_execution honors include_prompt/offset/limit/text_offset/text_limit ({renderCompact cloudPaged})"
+
+  -- Finding #9: MCP-10 & MCP-15 strict field validation on set_project_grant and update_mission_settings
+  let badGrantMcp ← call operator "set_project_grant" (.obj #[
+    ("slug", .str "r17-project"), ("max_parallel", .nat 2), ("idempotency_key", .str "r17-f9-badgrant")])
+  let (badGrantRestSt, _) ← restRaw (some jwt) "PUT" "/api/projects/r17-project/grant" "{\"max_parallel\":2}"
+  check (badGrantMcp.fieldBool? "ok" == some false &&
+    (badGrantMcp.fieldOrNull "error").fieldStr? "code" == some "invalid_arguments" &&
+    badGrantRestSt == 400)
+    "R17-F9 set_project_grant and REST PUT /grant reject unknown fields"
+  let umsNullAgent ← call operator "update_mission_settings" (.obj #[
+    ("mission_id", .str "m-r17-settings"), ("agent", .null), ("idempotency_key", .str "r17-f9-nullagent")])
+  let umsUnknownKey ← call operator "update_mission_settings" (.obj #[
+    ("mission_id", .str "m-r17-settings"), ("model", .str "gpt-5"), ("idempotency_key", .str "r17-f9-unkkey")])
+  let umsBadTitle ← call operator "update_mission_settings" (.obj #[
+    ("mission_id", .str "m-r17-settings"), ("title", .nat 123), ("idempotency_key", .str "r17-f9-badtitle")])
+  let umsBogusBackend ← call operator "update_mission_settings" (.obj #[
+    ("mission_id", .str "m-r17-settings"), ("backend", .str "bogus"), ("idempotency_key", .str "r17-f9-bogus")])
+  discard <| msql "UPDATE missions SET placement_kind='remote_node' WHERE id='m-r17-settings';"
+  let umsRemoteVibe ← call operator "update_mission_settings" (.obj #[
+    ("mission_id", .str "m-r17-settings"), ("backend", .str "vibe"), ("idempotency_key", .str "r17-f9-remvibe")])
+  check ((umsNullAgent.fieldOrNull "error").fieldStr? "code" == some "unsupported" &&
+    (umsUnknownKey.fieldOrNull "error").fieldStr? "code" == some "invalid_arguments" &&
+    (umsBadTitle.fieldOrNull "error").fieldStr? "code" == some "invalid_arguments" &&
+    (umsBogusBackend.fieldOrNull "error").fieldStr? "code" == some "invalid_arguments" &&
+    (umsRemoteVibe.fieldOrNull "error").fieldStr? "code" == some "invalid_arguments")
+    "R17-F9 update_mission_settings rejects null unsupported fields, unknown keys, wrong types, bogus & remote-incompatible backends"
+
+  -- Finding #10: McpCatalog containment & secret_* mutating classification
+  for role in #["executor", "coordinator", "operator"] do
+    let some rawCat := OrbBin.McpCatalog.catalogPrettyJsonForRole role
+      | throw (IO.userError s!"R17-F10 missing catalog for {role}")
+    let .ok (.arr catTools) := OrbBin.Json.parse rawCat
+      | throw (IO.userError s!"R17-F10 invalid catalog JSON for {role}")
+    for unimpl in #["secret_put", "secret_delete", "secret_move", "start_workspace_job", "get_workspace_job", "cancel_workspace_job",
+        "create_worktree", "remove_worktree", "merge_branch", "create_workspace", "update_workspace", "delete_workspace",
+        "get_backend_auth_status", "deploy_sandboxed_sh", "list_cloud_models"] do
+      check (!(catTools.any (fun t => t.fieldStr? "name" == some unimpl)))
+        s!"R17-F10 {role} catalog omits unimplemented `{unimpl}`"
+    if let some stTool := catTools.find? (fun t => t.fieldStr? "name" == some "start_mission") then
+      check ((((stTool.fieldOrNull "inputSchema").fieldOrNull "properties").field? "cloud").isNone)
+        s!"R17-F10 {role} start_mission omits unimplemented cloud schema"
+    if let some umsTool := catTools.find? (fun t => t.fieldStr? "name" == some "update_mission_settings") then
+      check (((((umsTool.fieldOrNull "inputSchema").fieldOrNull "properties").fieldOrNull "model_override").fieldStr? "type") == some "string")
+        s!"R17-F10 {role} update_mission_settings model_override uses portable string type"
+  check (OrbBin.McpCatalog.isMutatingControlTool "secret_put" &&
+    OrbBin.McpCatalog.isMutatingControlTool "secret_delete" &&
+    OrbBin.McpCatalog.isMutatingControlTool "secret_move")
+    "R17-F10 secret_put/secret_delete/secret_move are classified mutating"
 
 def run (root : String) : IO Unit := do
   let .ok store ← openCoreStore s!"{root}/r17"
@@ -839,6 +1150,7 @@ def run (root : String) : IO Unit := do
 
     runExtendedChecks root store cfg app now jwt operator cap
     runFleetProvSecChecks root store app now jwt operator
+    runCarbonRegressionChecks root store mStore cfg app now jwt operator
   finally
     closeManagedComputeStore mStore
     closeCoreStore store

@@ -39,8 +39,13 @@ def canonicalRequest (args : JVal) : JVal := .obj #[
   ("ram_gb", (args.fieldUInt64? "ram_gb").map JVal.uint64 |>.getD .null)
 ]
 
+private def acceptedForState (state : String) : String :=
+  if state == "succeeded" || state == "completed" then "yes"
+  else if #["accepted", "running", "queued", "pending", "uncertain", "reconciliation_required"].contains state then "unknown"
+  else "no"
+
 private def receipt (id state : String) (result : JVal) : JVal := .obj #[
-  ("action_id", .str id), ("accepted", .str "yes"), ("state", .str state),
+  ("action_id", .str id), ("accepted", .str (acceptedForState state)), ("state", .str state),
   ("status", .str (if state == "succeeded" then "completed" else state)),
   ("tool_name", .str "spawn_managed_machine"), ("result", result),
   ("next_tool", .str "get_action"),
@@ -67,13 +72,14 @@ def cancel (store : CoreStore) (id : String) (owner : Owner)
   let .ok (some _) ← read? store id owner operator
     | return .error "managed_action_not_found"
   let now := formatEpochIso8601Utc (← coreEpochSec)
-  let .ok _ ← execParamQuery store.projectsDb
-      "UPDATE mcp_actions_v1 SET state='cancelled',updated_at=?2 WHERE id=?1 AND tool='spawn_managed_machine' AND state='accepted';"
+  let .ok updated ← execParamQuery store.projectsDb
+      "UPDATE mcp_actions_v1 SET state='cancelled',updated_at=?2 WHERE id=?1 AND tool='spawn_managed_machine' AND state='accepted' RETURNING id;"
       #[id, now]
     | return .error "managed_action_store_unavailable"
+  let didCancel := updated.size > 1
   let .ok (some value) ← read? store id owner operator
     | return .error "managed_action_not_found"
-  return .ok (value.setField "cancelled" (.bool (value.fieldStr? "state" == some "cancelled")))
+  return .ok ((value.setField "cancelled" (.bool didCancel)).setField "accepted" (.str (if didCancel then "yes" else "no")))
 
 private def settle (store : CoreStore) (id state : String) (result : JVal) : IO Unit := do
   let now := formatEpochIso8601Utc (← coreEpochSec)

@@ -299,32 +299,109 @@ private def toolStopSession (args : JVal) : IO (Except String String) := do
   let killedJson := renderCompact (.arr (killed.map JVal.int))
   return .ok s!"\{\"success\": true, \"display\": {escapeJsonString displayId}, \"killed_pids\": {killedJson}}"
 
+def maxWaitMillis : Nat := 30000
+
+private def parsePow10 (n : Nat) : Nat :=
+  Nat.pow 10 n
+
+/-- Parse a non-negative JSON number (`0.5`, `1.25`, `1e0`, `5e-1`) into bounded milliseconds (`≤ 30_000`). -/
 def parseWaitMillis (v : JVal) : Option Nat :=
   match v with
   | .num raw =>
     let s := raw.trimAscii.toString
     if s.isEmpty || s.startsWith "-" then none
     else
-      let parts := s.splitOn "."
-      match parts with
-      | [whole] => (if whole.isEmpty then some 0 else String.toNat? whole) |>.map (· * 1000)
-      | [whole, frac] =>
-        let w? := if whole.isEmpty then some 0 else String.toNat? whole
-        let fText := ((frac ++ "000").take 3).toString
-        if frac.isEmpty || !frac.all (fun c => c >= '0' && c <= '9') then none
-        else
-          match w?, String.toNat? fText with
-          | some w, some f => some (w * 1000 + f)
-          | _, _ => none
-      | _ => none
+      let eSplit := if s.contains 'e' then s.splitOn "e" else s.splitOn "E"
+      let (mantStr, expInt?) :=
+        match eSplit with
+        | [m] => (m, some (0 : Int))
+        | [m, eStr] =>
+          if eStr.isEmpty then (m, none)
+          else
+            let (negE, digStr) :=
+              if eStr.startsWith "-" then (true, (eStr.drop 1).toString)
+              else if eStr.startsWith "+" then (false, (eStr.drop 1).toString)
+              else (false, eStr)
+            if digStr.isEmpty || !digStr.all (fun c => c >= '0' && c <= '9') then (m, none)
+            else
+              match String.toNat? digStr with
+              | some n =>
+                if n > 100 then (m, none)
+                else (m, some (if negE then -(Int.ofNat n) else Int.ofNat n))
+              | none => (m, none)
+        | _ => ("", none)
+      match expInt? with
+      | none => none
+      | some expInt =>
+        let parts := mantStr.splitOn "."
+        let parsedDigits? : Option (String × Nat) :=
+          match parts with
+          | [whole] =>
+            if whole.isEmpty || !whole.all (fun c => c >= '0' && c <= '9') then none
+            else some (whole, 0)
+          | [whole, frac] =>
+            if whole.isEmpty || frac.isEmpty ||
+               !whole.all (fun c => c >= '0' && c <= '9') ||
+               !frac.all (fun c => c >= '0' && c <= '9') then none
+            else some (whole ++ frac, frac.length)
+          | _ => none
+        match parsedDigits? with
+        | none => none
+        | some (allDigits, fracLen) =>
+          let trimmedDigits := (allDigits.dropWhile (· == '0')).toString
+          if trimmedDigits.isEmpty then some 0
+          else
+            -- value in milliseconds = trimmedDigits * 10^(expInt + 3 - fracLen)
+            let shift : Int := expInt + 3 - Int.ofNat fracLen
+            let msOpt : Option Nat :=
+              if shift ≥ 0 then
+                let z := shift.toNat
+                if trimmedDigits.length + z > 6 then none
+                else (String.toNat? trimmedDigits).map (fun n => n * parsePow10 z)
+              else
+                let dropN := (-shift).toNat
+                if dropN ≥ trimmedDigits.length then some 0
+                else String.toNat? ((trimmedDigits.take (trimmedDigits.length - dropN)).toString)
+            match msOpt with
+            | some ms => if ms ≤ maxWaitMillis then some ms else none
+            | none => none
   | _ => none
 
-private def toolScreenshot (args : JVal) : IO (Except String (String × Option String)) := do
-  let some displayId := args.fieldStr? "display" | return .error "Missing 'display' argument"
-  if let some waitVal := args.field? "wait_seconds" then
-    let some waitMs := parseWaitMillis waitVal
-      | return .error "wait_seconds must be a non-negative number of seconds (e.g. 0.5)"
-    if waitMs > 0 then IO.sleep waitMs.toUInt32
+def validateScreenshotArgs (args : JVal) : Except String (String × Nat × Option (Int × Int × Int × Int)) := do
+  let .obj _ := args
+    | throw "Arguments must be a JSON object"
+  let some displayId := args.fieldStr? "display"
+    | throw "Missing 'display' argument"
+  let waitMs ← match args.field? "wait_seconds" with
+    | none | some .null => pure 0
+    | some waitVal =>
+      match parseWaitMillis waitVal with
+      | some ms => pure ms
+      | none => throw "wait_seconds must be a non-negative number between 0 and 30 seconds"
+  let region? ← match args.field? "region" with
+    | none | some .null => pure none
+    | some (.obj kvs) =>
+      for (k, _) in kvs do
+        if !#["x", "y", "width", "height"].contains k then
+          throw s!"Unknown region argument: {k}"
+      let some rx := (JVal.obj kvs).fieldInt? "x"
+        | throw "region.x must be an integer"
+      let some ry := (JVal.obj kvs).fieldInt? "y"
+        | throw "region.y must be an integer"
+      let some rw := (JVal.obj kvs).fieldInt? "width"
+        | throw "region.width must be a positive integer"
+      let some rh := (JVal.obj kvs).fieldInt? "height"
+        | throw "region.height must be a positive integer"
+      if rw ≤ 0 || rh ≤ 0 then
+        throw "region.width and region.height must be positive integers"
+      pure (some (rx, ry, rw, rh))
+    | some _ =>
+      throw "region must be an object with integer x, y, width, height"
+  return (displayId, waitMs, region?)
+
+private def toolScreenshotWithValidated
+    (args : JVal) (displayId : String) (region? : Option (Int × Int × Int × Int)) :
+    IO (Except String (String × Option String)) := do
   let epoch ← nowEpoch
   let shotId ← newUuidV4
   let filename := (args.fieldStr? "filename").getD s!"screenshot_{epoch}_{shotId}.png"
@@ -336,13 +413,8 @@ private def toolScreenshot (args : JVal) : IO (Except String (String × Option S
     | .ok e => pure e
     | .error err => return .error err
   let mut grimArgs : Array String := #[]
-  if let some reg := args.field? "region" then
-    if reg.asObj?.isSome then
-      let rx := (reg.fieldInt? "x").getD 0
-      let ry := (reg.fieldInt? "y").getD 0
-      let rw := (reg.fieldInt? "width").getD 100
-      let rh := (reg.fieldInt? "height").getD 100
-      grimArgs := grimArgs ++ #["-g", s!"{rx},{ry} {rw}x{rh}"]
+  if let some (rx, ry, rw, rh) := region? then
+    grimArgs := grimArgs ++ #["-g", s!"{rx},{ry} {rw}x{rh}"]
   grimArgs := grimArgs.push filepath.toString
   match (← runWithWayland wenv "grim" grimArgs) with
   | .error e => return .error e
@@ -444,6 +516,14 @@ private def toolI3Command (args : JVal) : IO (Except String String) := do
     return .ok s!"\{\"success\": true, \"output\": {escapeJsonString trimmed}}"
 
 def validateGetTextArgs (args : JVal) : Except String Unit := do
+  let .obj kvs := args
+    | throw "Arguments must be a JSON object"
+  for (k, v) in kvs do
+    if k == "max_depth" then
+      if v != .null then
+        throw "unsupported desktop_get_text argument: max_depth requires accessibility mode, which is not implemented"
+    else if k != "display" && k != "method" then
+      throw s!"unsupported desktop_get_text argument: {k}"
   match args.field? "method" with
   | none | some .null => pure ()
   | some (.str raw) =>
@@ -452,9 +532,6 @@ def validateGetTextArgs (args : JVal) : Except String Unit := do
       throw s!"unsupported desktop_get_text method: {method}; only 'ocr' is implemented"
   | some _ =>
     throw "unsupported desktop_get_text method: expected 'ocr'; only 'ocr' is implemented"
-  if let some md := args.field? "max_depth" then
-    if md != .null then
-      throw "unsupported desktop_get_text argument: max_depth requires accessibility mode, which is not implemented"
 
 private def toolGetText (args : JVal) : IO (Except String String) := do
   let some displayId := args.fieldStr? "display" | return .error "Missing 'display' argument"
@@ -520,7 +597,12 @@ def toolDefinitions : Array JVal := #[
       ("type", .str "object"),
       ("properties", .obj #[
         ("display", mkProp "string" "The display identifier (e.g., ':99')"),
-        ("wait_seconds", mkProp "number" "Seconds to wait before taking screenshot (default: 0)"),
+        ("wait_seconds", .obj #[
+          ("type", .str "number"),
+          ("minimum", .nat 0),
+          ("maximum", .nat 30),
+          ("description", .str "Seconds to wait before taking screenshot (0..30, default: 0)")
+        ]),
         ("return_image", mkProp "boolean" "If true, return the image data as base64 for vision analysis (default: false)"),
         ("filename", mkProp "string" "Optional filename for the screenshot"),
         ("region", .obj #[
@@ -652,12 +734,21 @@ private def withDisplayLock {α : Type}
     | none => act
     | some m => m.atomically act
 
-private def dispatchTool
+def dispatchTool
     (counterLock : Std.Mutex Nat)
     (displayLocks : Std.Mutex (Array (Nat × Std.Mutex Unit)))
     (name : String) (args : JVal) : IO JVal := do
   if name == "desktop_screenshot" then
-    match (← withDisplayLock displayLocks args (toolScreenshot args)) with
+    let (displayId, waitMs, region?) ← match validateScreenshotArgs args with
+      | .ok v => pure v
+      | .error e =>
+        return .obj #[
+          ("content", .arr #[.obj #[("type", .str "text"), ("text", .str e)]]),
+          ("isError", .bool true)
+        ]
+    -- Wait outside the display mutex so bounded waits never wedge concurrent display calls.
+    if waitMs > 0 then IO.sleep waitMs.toUInt32
+    match (← withDisplayLock displayLocks args (toolScreenshotWithValidated args displayId region?)) with
     | .ok (txt, some b64) =>
       return .obj #[
         ("content", .arr #[

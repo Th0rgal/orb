@@ -1264,6 +1264,14 @@ def runAllTests : IO UInt32 := do
       for removed in ["accept_project_track", "accept_project_track_evidence", "accept_task", "add_project_steer", "answer_project_decision", "board_status", "cancel_project_task", "get_project_tasks", "get_situation", "invalidate_project_track_evidence", "plan_project_tasks", "plan_tasks", "record_project_decision", "reject_task", "reopen_project_track", "review_task", "set_project_track", "update_project_task"] do
         assertTrue s!"Catalog {role} omits retired {removed}" (!(tools.any (·.fieldStr? "name" == some removed)))
         assertTrue s!"Retired {removed} is not mutating" (!OrbBin.McpCatalog.isMutatingControlTool removed)
+      for unimpl in ["secret_put", "secret_delete", "secret_move", "start_workspace_job", "get_workspace_job", "cancel_workspace_job", "create_worktree", "remove_worktree", "merge_branch", "create_workspace", "update_workspace", "delete_workspace", "get_backend_auth_status", "deploy_sandboxed_sh", "list_cloud_models"] do
+        assertTrue s!"Catalog {role} omits unimplemented {unimpl}" (!(tools.any (·.fieldStr? "name" == some unimpl)))
+      for secMut in ["secret_put", "secret_delete", "secret_move"] do
+        assertTrue s!"{secMut} is classified mutating" (OrbBin.McpCatalog.isMutatingControlTool secMut)
+      if let some ums := tools.find? (·.fieldStr? "name" == some "update_mission_settings") then
+        let mo := ((ums.fieldOrNull "inputSchema").fieldOrNull "properties").fieldOrNull "model_override"
+        assertEq s!"Catalog {role} update_mission_settings model_override type is portable string"
+          (mo.fieldStr? "type") (some "string")
       let some spawn := tools.find? (·.fieldStr? "name" == some "spawn_managed_machine")
         | throw <| IO.userError s!"Missing spawn_managed_machine for {role}"
       let schema := spawn.fieldOrNull "inputSchema"
@@ -1305,6 +1313,8 @@ def runAllTests : IO UInt32 := do
         | throw <| IO.userError s!"Missing start_mission for {role}"
       assertEq s!"Catalog {role} controller is optional boolean"
         ((((start.fieldOrNull "inputSchema").fieldOrNull "properties").fieldOrNull "controller").fieldStr? "type") (some "boolean")
+      assertTrue s!"Catalog {role} start_mission omits unimplemented cloud property"
+        ((((start.fieldOrNull "inputSchema").fieldOrNull "properties").field? "cloud").isNone)
       for name in ["read_project_board", "write_project_board"] do
         assertTrue s!"Catalog {role} includes {name}" (tools.any (·.fieldStr? "name" == some name))
       assertTrue "Project board writes are mutating" (OrbBin.McpCatalog.isMutatingControlTool "write_project_board")
@@ -1351,12 +1361,24 @@ def runAllTests : IO UInt32 := do
   let insecurePreflight ← insecureClient.preflight
   assertTrue "preflight-cache fails closed when mode != 0600" (isErr insecurePreflight)
 
-  -- 7c. MCP-17 desktop_mcp fractional wait_seconds & strict desktop_get_text validation
+  -- 7c. MCP-17 desktop_mcp fractional/scientific wait_seconds bounds, region & strict desktop_get_text validation + dispatchTool
   assertEq "MCP-17 parseWaitMillis 0.5" (OrbBin.DesktopMcp.parseWaitMillis (.num "0.5")) (some 500)
   assertEq "MCP-17 parseWaitMillis 1.25" (OrbBin.DesktopMcp.parseWaitMillis (.num "1.25")) (some 1250)
   assertEq "MCP-17 parseWaitMillis 2" (OrbBin.DesktopMcp.parseWaitMillis (.num "2")) (some 2000)
+  assertEq "MCP-17 parseWaitMillis 1e0" (OrbBin.DesktopMcp.parseWaitMillis (.num "1e0")) (some 1000)
+  assertEq "MCP-17 parseWaitMillis 5e-1" (OrbBin.DesktopMcp.parseWaitMillis (.num "5e-1")) (some 500)
+  assertEq "MCP-17 parseWaitMillis 30" (OrbBin.DesktopMcp.parseWaitMillis (.num "30")) (some 30000)
+  assertEq "MCP-17 parseWaitMillis rejects above 30s cap" (OrbBin.DesktopMcp.parseWaitMillis (.num "30.001")) none
+  assertEq "MCP-17 parseWaitMillis rejects DoS/wraparound 86400" (OrbBin.DesktopMcp.parseWaitMillis (.num "86400")) none
+  assertEq "MCP-17 parseWaitMillis rejects 5000000" (OrbBin.DesktopMcp.parseWaitMillis (.num "5000000")) none
   assertEq "MCP-17 parseWaitMillis rejects negative" (OrbBin.DesktopMcp.parseWaitMillis (.num "-1")) none
   assertEq "MCP-17 parseWaitMillis rejects non-number" (OrbBin.DesktopMcp.parseWaitMillis (.str "0.5")) none
+  assertTrue "MCP-17 validateScreenshotArgs accepts wait_seconds=null"
+    (OrbBin.DesktopMcp.validateScreenshotArgs (.obj #[("display", .str ":99"), ("wait_seconds", .null)]) |>.isOk)
+  assertTrue "MCP-17 validateScreenshotArgs rejects non-object region"
+    (!(OrbBin.DesktopMcp.validateScreenshotArgs (.obj #[("display", .str ":99"), ("region", .str "full")]) |>.isOk))
+  assertTrue "MCP-17 validateScreenshotArgs rejects non-positive region width"
+    (!(OrbBin.DesktopMcp.validateScreenshotArgs (.obj #[("display", .str ":99"), ("region", .obj #[("x", .nat 0), ("y", .nat 0), ("width", .nat 0), ("height", .nat 10)])]) |>.isOk))
   assertTrue "MCP-17 desktop_get_text accepts omitted method"
     (OrbBin.DesktopMcp.validateGetTextArgs (.obj #[("display", .str ":99")]) |>.isOk)
   assertTrue "MCP-17 desktop_get_text accepts method=ocr"
@@ -1367,6 +1389,22 @@ def runAllTests : IO UInt32 := do
     (!(OrbBin.DesktopMcp.validateGetTextArgs (.obj #[("display", .str ":99"), ("method", .nat 1)]) |>.isOk))
   assertTrue "MCP-17 desktop_get_text rejects unsupported max_depth"
     (!(OrbBin.DesktopMcp.validateGetTextArgs (.obj #[("display", .str ":99"), ("method", .str "ocr"), ("max_depth", .nat 4)]) |>.isOk))
+  assertTrue "MCP-17 desktop_get_text rejects unknown element_id"
+    (!(OrbBin.DesktopMcp.validateGetTextArgs (.obj #[("display", .str ":99"), ("element_id", .str "btn-1")]) |>.isOk))
+  let dmCounterLock ← Std.Mutex.new (99 : Nat)
+  let dmDisplayLocks ← Std.Mutex.new (#[] : Array (Nat × Std.Mutex Unit))
+  let dmCapErr ← OrbBin.DesktopMcp.dispatchTool dmCounterLock dmDisplayLocks "desktop_screenshot"
+    (.obj #[("display", .str ":99"), ("wait_seconds", .num "86400")])
+  assertEq "MCP-17 dispatchTool desktop_screenshot rejects unbounded wait_seconds immediately"
+    (dmCapErr.fieldBool? "isError") (some true)
+  let dmRegErr ← OrbBin.DesktopMcp.dispatchTool dmCounterLock dmDisplayLocks "desktop_screenshot"
+    (.obj #[("display", .str ":99"), ("region", .str "full")])
+  assertEq "MCP-17 dispatchTool desktop_screenshot rejects non-object region"
+    (dmRegErr.fieldBool? "isError") (some true)
+  let dmTxtErr ← OrbBin.DesktopMcp.dispatchTool dmCounterLock dmDisplayLocks "desktop_get_text"
+    (.obj #[("display", .str ":99"), ("role", .str "button")])
+  assertEq "MCP-17 dispatchTool desktop_get_text rejects unknown role arg"
+    (dmTxtErr.fieldBool? "isError") (some true)
 
   let srvDummy := JVal.obj #[("name", .str "sandboxed"), ("command", .str "/bin/sandboxed-mcp"), ("args", .arr #[]), ("env", .arr #[])]
   let acpNew := "{\"id\":2,\"method\":\"session/new\",\"params\":{\"cwd\":\"/work\",\"mcpServers\":[{\"name\":\"other\"},{\"name\":\"sandboxed\",\"command\":\"stale\"}]}}".toUTF8

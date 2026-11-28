@@ -915,6 +915,7 @@ def renderMemberHydratedProviderJv (hp : HydratedProvider) (displayName : String
     ("has_api_key", .bool hp.hasApiKey),
     ("has_oauth", .bool hp.hasOAuth),
     ("uses_oauth", .bool metaInfo.usesOAuth),
+    ("auto_reset_on_limit", .bool false),
     ("status", statusObj),
     ("custom_models", .arr (hp.customModels.map fun model =>
       .obj ((#["id", "name", "context_limit", "output_limit"] : Array String).filterMap fun key =>

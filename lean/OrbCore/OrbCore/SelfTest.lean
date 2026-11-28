@@ -5780,7 +5780,7 @@ private def runMultiUserCoreTests (prodValid : CoreConfig) : IO UInt32 := do
   if delAutoVmSt != 200 then
     return (← fail s!"cleanup provisioned auto-managed VM failed: {delAutoVmSt}")
   -- HTTP `POST /api/control/missions` with `remoteSup?` set, `remote_node_id: "auto-managed:leanci:small"` and a prompt:
-  -- when the dial-out relay is not connected (`502`), Core rolls back the unborn mission AND destroys the freshly rented VM!
+  -- when launch preflight fails (`REMOTE_AUTH_REQUIRED`, `400`), Core rejects BEFORE inserting a mission or renting any VM (`FLT-14`)!
   let .ok beforeAutoRollbackRows ← execParamQuery mStore.db
       "SELECT COUNT(*) FROM managed_machines WHERE owner_user_id=?1 AND phase_code<>3;" #[bobId]
     | return (← fail "query beforeAutoRollbackRows failed")
@@ -5793,14 +5793,28 @@ private def runMultiUserCoreTests (prodValid : CoreConfig) : IO UInt32 := do
      "{\"title\":\"Bob Auto Rollback\",\"backend\":\"opencode\",\"remote_node_id\":\"auto-managed:leanci:small\",\"prompt\":\"hi\"}").toUTF8
   let .ok autoCreateReq := parseRequest rawAutoCreate none
     | return (← fail "parse autoCreateReq failed")
-  let .ok autoCreateResp ← dispatchCoreRequest appWithSup autoCreateReq nowSec
-    | return (← fail "dispatch autoCreateReq failed")
+  let prevMuPubUrl ← IO.getEnv "SANDBOXED_PUBLIC_URL"
+  let prevMuProxyUrl ← IO.getEnv "SANDBOXED_PROXY_PUBLIC_URL"
+  OrbBin.PosixExt.unsetenvVar "SANDBOXED_PUBLIC_URL"
+  OrbBin.PosixExt.unsetenvVar "SANDBOXED_PROXY_PUBLIC_URL"
+  let autoCreateResp ← try
+    let .ok resp ← dispatchCoreRequest appWithSup autoCreateReq nowSec
+      | return (← fail "dispatch autoCreateReq failed")
+    pure resp
+  finally
+    match prevMuPubUrl with
+    | some v => OrbBin.PosixExt.setenvVar "SANDBOXED_PUBLIC_URL" v
+    | none => pure ()
+    match prevMuProxyUrl with
+    | some v => OrbBin.PosixExt.setenvVar "SANDBOXED_PROXY_PUBLIC_URL" v
+    | none => pure ()
   let .ok leakedAutoRows ← execParamQuery mStore.db
       "SELECT COUNT(*) FROM managed_machines WHERE owner_user_id=?1 AND phase_code<>3;" #[bobId]
     | return (← fail "query leakedAutoRows failed")
   let leakedAutoCnt := ((leakedAutoRows[1]?.bind (·[0]?)).bind String.toNat?).getD 99
-  if autoCreateResp.status != 502 || leakedAutoCnt != beforeAutoRollbackCnt then
-    return (← fail s!"auto-managed HTTP create rollback leaked VM or wrong status: st={autoCreateResp.status} before={beforeAutoRollbackCnt} after={leakedAutoCnt}")
+  let autoCreateBody := (String.fromUTF8? autoCreateResp.body).getD ""
+  if autoCreateResp.status != 400 || !autoCreateBody.contains "REMOTE_AUTH_REQUIRED" || leakedAutoCnt != beforeAutoRollbackCnt then
+    return (← fail s!"auto-managed HTTP create preflight leaked VM or wrong status: st={autoCreateResp.status} body={autoCreateBody} before={beforeAutoRollbackCnt} after={leakedAutoCnt}")
 
   -- 7. Multi-user Opt-In Usage Telemetry & Speaker-Attributed Voice Relay (`/api/usage-telemetry/*`, `/api/voice/transcribe`)
   -- 7a. `scrubSecrets` covers API keys, hub tokens, GitHub tokens, Bearer headers, and password pairs without mangling prose
@@ -9613,7 +9627,10 @@ def main (args : List String) : IO UInt32 := do
     let nonce ← IO.monoNanosNow
     let tmpRoot := s!"/tmp/orb-core-r17-only-{nonce}"
     IO.FS.createDirAll tmpRoot
-    OrbCore.R17Tests.run tmpRoot
+    try
+      OrbCore.R17Tests.run tmpRoot
+    finally
+      try IO.FS.removeDirAll tmpRoot catch _ => pure ()
     return 0
   if args.contains "--suite-only" then
     return ← OrbCore.SelfTest.runSuite (OrbCore.SelfTest.findFlag? args "--emit-evidence-log")
