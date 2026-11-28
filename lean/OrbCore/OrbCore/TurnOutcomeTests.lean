@@ -1311,7 +1311,7 @@ private def checkSidecarAuthFileDuplicated : IO Unit := do
 
 private def verifyConcurrentResumeFenced
     (store : CoreStore) (sup : RemoteJobSupervisor) (root : String)
-    (claims : OrbCore.McpGateway.McpSessionClaims) (startedMid : String) : IO Unit := do
+    (claims : McpSessionClaims) (startedMid : String) : IO Unit := do
   -- A second `resume_mission` while a live `running` remote job exists must fail closed
   -- (`mission_already_active`), never append a stray `user_message`, and never spawn a competing job.
   let db := store.missionsDb
@@ -1348,6 +1348,7 @@ private def verifyConcurrentResumeFenced
   | .ok jid =>
     throw (IO.userError s!"direct submitRemoteMissionTurn must not launch competing job {jid} while active job exists")
 
+set_option maxRecDepth 2000 in
 def run : IO Unit := do
   OrbCore.CloudHttpAndWorkerTests.run
   checkSidecarAuthFileDuplicated
