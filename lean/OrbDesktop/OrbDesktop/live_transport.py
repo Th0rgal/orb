@@ -466,6 +466,27 @@ def mutate(binding, action, mid, message_id=''):
         if row.get('id') != mid or row.get('user_enabled') is not enabled:
             raise ValueError('unconfirmed provider preference')
         return
+    if action == 'reorder-providers':
+        ids = [i for i in sys.stdin.buffer.read().decode().split('\n') if i]
+        if not ids or len(set(ids)) != len(ids):
+            raise ValueError('invalid provider reorder')
+        result = c.request('/api/ai/providers/reorder', body={'ids': ids}, method='POST')
+        if not isinstance(result, (list, dict)):
+            raise ValueError('unconfirmed provider reorder')
+        return
+    if action == 'clear-provider-health':
+        if not isinstance(mid, str) or not mid or mid in ('.', '..') or len(mid) > 256:
+            raise ValueError('invalid provider account')
+        c.request('/api/model-routing/health/' + urllib.parse.quote(mid, safe='') + '/clear', method='POST', body={})
+        return
+    if action == 'set-default-chain':
+        if not isinstance(mid, str) or not mid or mid in ('.', '..') or len(mid) > 256:
+            raise ValueError('invalid chain id')
+        row = c.request('/api/model-routing/chains/' + urllib.parse.quote(mid, safe=''),
+                        body={'is_default': True}, method='PUT')
+        if not isinstance(row, dict) or row.get('id') != mid or row.get('is_default') is not True:
+            raise ValueError('unconfirmed default chain')
+        return
     if action.startswith('bulk-'):
         return bulk_write(c, action.removeprefix('bulk-'), key)
     if action == 'create':
@@ -689,12 +710,62 @@ def launch_machines(binding, role, harness):
         print('\t'.join(map(label, row)))
 
 
+def order_accounts(accounts):
+    """Mirror orb/src/accountOrder.ts `orderAccounts`."""
+    groups = {}
+    for index, item in enumerate(accounts):
+        key = item.get('provider_type') or ''
+        groups.setdefault(key, []).append((item, index))
+    ordered = []
+    for group in groups.values():
+        group.sort(key=lambda pair: (pair[0].get('priority') if isinstance(pair[0].get('priority'), int) else 0, pair[1]))
+        ordered.extend(item for item, _ in group)
+    return ordered
+
+
+def project_health_row(row):
+    """Project one `/api/model-routing/health` row to `(account_id, state, cooldown_secs, detail)`."""
+    aid = row.get('account_id')
+    if not isinstance(aid, str) or not aid or label(aid) != aid:
+        return None
+    raw_cd = row.get('cooldown_remaining_secs')
+    if raw_cd is None:
+        raw_cd = row.get('cooldown_secs_remaining')
+    cooldown = int(raw_cd) if isinstance(raw_cd, (int, float)) and raw_cd > 0 else 0
+    acc_state = row.get('account_state') if isinstance(row.get('account_state'), str) else ''
+    disabled_by_provider = row.get('disabled_by_provider') is True or acc_state == 'disabled_by_provider'
+    if disabled_by_provider:
+        state = 'disabled_by_provider'
+        detail = row.get('disabled_by_provider_message') or 'Provider disabled this account'
+    elif acc_state == 'disabled':
+        state = 'disabled'
+        detail = ''
+    elif cooldown > 0:
+        state = 'cooldown'
+        detail = row.get('parked_reason') or row.get('last_failure_reason') or ''
+    elif row.get('login_status') == 'needs_reauth':
+        state = 'needs_reauth'
+        detail = row.get('login_message') or 'Sign in again'
+    elif row.get('is_degraded') is True or row.get('is_healthy') is False:
+        state = 'degraded'
+        detail = row.get('last_failure_reason') or row.get('parked_reason') or ''
+    elif row.get('is_healthy') is True:
+        state = 'healthy'
+        detail = ''
+    else:
+        state = ''
+        detail = ''
+    return ('H', aid, state, str(cooldown), detail if isinstance(detail, str) else '')
+
+
 def resource_inventory(binding, window):
     c = Connection()
     if c.binding != binding:
         return
     overview = c.request('/api/resources/overview?' + urllib.parse.urlencode({'range': window}), deadline=30)
     rows = []
+    source_labels = {}
+    mission_labels = {}
     for kind, items in (('Inference', overview['inference']['pools']),
                         ('Compute', overview['compute']['sources']),
                         ('Mission', overview['missions'])):
@@ -707,18 +778,63 @@ def resource_inventory(binding, window):
                 if not mission or label(mission) != mission:
                     raise ValueError('invalid mission identifier')
                 name = item['title'] or mission
+                mission_labels[mission] = name
                 usage = f"{item['status']} · {item['vcpu']:g} vCPU · {item['b_tok_per_h']:g} B tok/h"
             elif kind == 'Compute':
                 name = item['label']
+                if isinstance(item.get('id'), str):
+                    source_labels[item['id']] = name
                 usage = f"{item['active_vcpu']:g}/{item['total_vcpu']:g} vCPU · ${item['est_usd_per_h']:g}/h"
+                health = item.get('health')
+                if isinstance(health, str) and health and health != 'ok':
+                    usage += f" · {health}"
             else:
                 name = item['label']
+                if isinstance(item.get('id'), str):
+                    source_labels[item['id']] = name
                 usage = f"{item['current_b_tok_per_h']:g} B tok/h · ${item['est_usd_per_h']:g}/h"
+                quota = item.get('quota_pct_remaining')
+                if isinstance(quota, (int, float)):
+                    usage += f" · {quota:g}% quota"
+                health = item.get('health')
+                if isinstance(health, str) and health and health != 'ok':
+                    usage += f" · {health}"
             rows.append(('R', mission, f'{kind} · {name}', usage))
+    flow_rows = []
+    links = overview.get('links')
+    if isinstance(links, list):
+        for link in links:
+            if not isinstance(link, dict):
+                continue
+            lens = link.get('kind') or link.get('lens') or ''
+            if lens not in ('inference', 'compute'):
+                continue
+            src_id = link.get('source_id') or ''
+            tgt_id = link.get('mission_id') or link.get('target_id') or ''
+            val = link.get('value')
+            if not isinstance(val, (int, float)) or val <= 0:
+                continue
+            src_lbl = source_labels.get(src_id, src_id)
+            tgt_lbl = mission_labels.get(tgt_id, tgt_id)
+            degraded = '1' if link.get('degraded') is True else '0'
+            flow_rows.append(('F', lens, src_lbl, tgt_lbl, f'{val:g}', degraded))
+    summary_row = None
+    inf = overview.get('inference') if isinstance(overview.get('inference'), dict) else {}
+    comp = overview.get('compute') if isinstance(overview.get('compute'), dict) else {}
+    if isinstance(inf.get('current_b_tok_per_h'), (int, float)) or isinstance(inf.get('throttled_429_count'), int):
+        throttled = int(inf.get('throttled_429_count') or 0)
+        b_tok = float(inf.get('current_b_tok_per_h') or 0)
+        act_v = float(comp.get('active_vcpu') or 0)
+        tot_v = float(comp.get('total_vcpu') or 0)
+        summary_row = ('S', str(throttled), f'{b_tok:g}', f'{act_v:g}', f'{tot_v:g}')
     c.check()
     print('resources')
     for row in rows:
         print('\t'.join(map(label, row)))
+    for row in flow_rows:
+        print('\t'.join(map(label, row)))
+    if summary_row is not None:
+        print('\t'.join(map(label, summary_row)))
 
 
 def provider_inventory(binding):
@@ -730,8 +846,9 @@ def provider_inventory(binding):
         accounts = accounts['providers']
     if not isinstance(accounts, list):
         raise ValueError('invalid providers')
+    ordered = order_accounts(accounts)
     rows = []
-    for account in accounts:
+    for account in ordered:
         ident = account['id']
         if not isinstance(ident, str) or not ident or label(ident) != ident:
             raise ValueError('invalid account identifier')
@@ -739,10 +856,65 @@ def provider_inventory(binding):
         category = account.get('provider_type_name') or account.get('provider_type')
         rows.append(('A', ident, name, category, str(int(account.get('user_enabled', True))),
                      str(int(account.get('globally_enabled', account['enabled']))), account.get('provider_type', '')))
+    can_admin = None
+    try:
+        me = c.get('/api/auth/me')
+        if isinstance(me, dict):
+            user = me.get('user') if isinstance(me.get('user'), dict) else {}
+            role = user.get('role') or me.get('role')
+            if isinstance(me.get('is_admin'), bool):
+                can_admin = me['is_admin']
+            elif isinstance(role, str) and role:
+                can_admin = (role == 'admin')
+            elif me.get('auth_required') is False:
+                can_admin = True
+    except (urllib.error.HTTPError, urllib.error.URLError, OSError, ValueError):
+        pass
+    health_rows = []
+    try:
+        health = c.get('/api/model-routing/health')
+        if isinstance(health, list):
+            for entry in health:
+                if isinstance(entry, dict):
+                    projected = project_health_row(entry)
+                    if projected is not None:
+                        health_rows.append(projected)
+    except (urllib.error.HTTPError, urllib.error.URLError, OSError, ValueError):
+        pass
+    chain_rows = []
+    chains_ok = False
+    try:
+        chains = c.get('/api/model-routing/chains')
+        if isinstance(chains, list):
+            chains_ok = True
+            for chain in chains:
+                if not isinstance(chain, dict):
+                    continue
+                cid = chain.get('id')
+                entries = chain.get('entries')
+                if not isinstance(cid, str) or not cid or not isinstance(entries, list):
+                    continue
+                cname = chain.get('name') or cid
+                is_def = '1' if chain.get('is_default') is True else '0'
+                summary = ' → '.join(
+                    f"{e.get('provider_id', '')}/{e.get('model_id', '')}"
+                    for e in entries if isinstance(e, dict) and e.get('provider_id') and e.get('model_id')
+                )
+                chain_rows.append(('C', cid, cname, is_def, summary))
+    except (urllib.error.HTTPError, urllib.error.URLError, OSError, ValueError):
+        pass
     c.check()
     print('accounts')
+    if can_admin is not None:
+        print(f"P\tadmin\t{int(can_admin)}")
     for row in rows:
         print('\t'.join(map(label, row)))
+    for row in health_rows:
+        print('\t'.join(map(label, row)))
+    if chains_ok:
+        print('CS\t1')
+        for row in chain_rows:
+            print('\t'.join(map(label, row)))
 
 
 INBOX_PATH = '/api/control/inbox-state'

@@ -458,13 +458,45 @@ def computeRollupSeries (store : CoreStore) (firstMin step nb : Nat) : IO (Array
       | none => out := out.push (id, (Array.replicate nb none).set! index (some value))
   return out
 
+/-- Live per-provider routing health/quota hint supplied by Control to `buildResourcesOverviewJson`
+    so `GET /api/resources/overview` reflects real Core cooldown/disabled/quota truth without
+    introducing circular imports. -/
+structure InferencePoolHealthHint where
+  provider           : String
+  health             : String := "ok"
+  quotaPctRemaining? : Option JVal := none
+  resetAt?           : Option String := none
+  deriving Inhabited
+
+private def poolHealthRank (h : String) : Nat :=
+  if h == "disabled_by_provider" || h == "disabled" then 3
+  else if h == "cooldown" then 2
+  else if h == "degraded" then 1
+  else 0
+
+private def jvalToFloat? (jv : JVal) : Option Float :=
+  match jv with
+  | .num raw =>
+    let s := raw.trimAscii.toString
+    match s.splitOn "." with
+    | [w] => w.toNat?.map Float.ofNat
+    | [w, f] =>
+      match w.toNat?, f.toNat? with
+      | some wn, some fn =>
+        let scale := Float.pow 10.0 (Float.ofNat f.length)
+        some (Float.ofNat wn + Float.ofNat fn / scale)
+      | _, _ => none
+    | _ => none
+  | _ => none
+
 /-- `GET /api/resources/overview`: the `ResourcesOverviewResponse` contract shared by desktop, iOS and Android.
-    Inference figures are aggregated from `proxy_usage`. Core keeps no compute history, so compute series
-    carry only the live sample in their last bucket. -/
+    Inference figures are aggregated from `proxy_usage` and `proxy_outcomes`, enriched with live routing
+    health/quota hints from Core's health tracker and cooldown state. -/
 def buildResourcesOverviewJson
     (store : CoreStore)
     (managedStore? : Option ManagedComputeStore)
-    (qMap : Array (String × String)) : IO JVal := do
+    (qMap : Array (String × String))
+    (poolHints : Array InferencePoolHealthHint := #[]) : IO JVal := do
   let nowSec := (← nowEpoch).toNat
   let (rangeId, minutes, step) := resourcesRangeSpec ((qParam? qMap "range").getD "6h").trimAscii.toString
   let nb := Nat.max 2 (minutes / step)
@@ -535,16 +567,62 @@ def buildResourcesOverviewJson
       ("series_usd_per_h", zeroSeries nb)
     ])
 
+  -- Windowed 429 / 503 model_cooldown telemetry from `proxy_outcomes`.
+  let mut throttled429Count : Nat := 0
+  let mut throttledByProvider : Array (String × Nat) := #[]
+  if let .ok oRows ← execParamQuery store.missionsDb
+      ("SELECT COALESCE(NULLIF(provider,''),'unknown'), COUNT(*) FROM proxy_outcomes " ++
+       "WHERE timestamp >= ?1 AND (http_status = 429 OR (http_status = 503 AND status IN ('model_cooldown','rate_limited_or_quota','overloaded'))) " ++
+       "GROUP BY 1;")
+      #[sinceIso] then
+    for i in [1:oRows.size] do
+      let r := oRows[i]!
+      let prov := (r[0]?).getD "unknown"
+      let cnt := ((r[1]?).bind String.toNat?).getD 0
+      throttled429Count := throttled429Count + cnt
+      if cnt > 0 then
+        throttledByProvider := throttledByProvider.push (prov, cnt)
+
+  let poolHealthMeta (poolId : String) : String × JVal × JVal := Id.run do
+    let baseProv := (poolId.splitOn ":").headD poolId
+    let isCustomPool := poolId.startsWith "custom:"
+    let matching := poolHints.filter fun h =>
+      h.provider == poolId || (!isCustomPool && h.provider == baseProv)
+    let mut worstHealth := "ok"
+    let mut minQuota? : Option (Float × JVal) := none
+    let mut soonestReset? : Option String := none
+    for h in matching do
+      if poolHealthRank h.health > poolHealthRank worstHealth then
+        worstHealth := h.health
+      if let some qv := h.quotaPctRemaining? then
+        if let some qf := jvalToFloat? qv then
+          match minQuota? with
+          | none => minQuota? := some (qf, qv)
+          | some (prevF, _) => if qf < prevF then minQuota? := some (qf, qv)
+      if let some rs := h.resetAt? then
+        if !rs.isEmpty then
+          soonestReset? := match soonestReset? with
+            | none => some rs
+            | some prev => if rs < prev then some rs else some prev
+    let hasThrottles := throttledByProvider.any fun (p, c) =>
+      c > 0 && (p == poolId || (!isCustomPool && p == baseProv))
+    if worstHealth == "ok" && hasThrottles then
+      worstHealth := "degraded"
+    let qJv := match minQuota? with | some (_, v) => v | none => .null
+    let rJv := match soonestReset? with | some s => .str s | none => .null
+    return (worstHealth, qJv, rJv)
+
   -- Inference pools, busiest first.
   let poolsSorted := pools.qsort fun a b => sumNat a.tok > sumNat b.tok
   let poolVals := poolsSorted.map fun p =>
+    let (pHealth, pQuota, pReset) := poolHealthMeta p.id
     .obj #[
       ("id", .str p.id), ("label", .str (inferencePoolLabel p.id)), ("sublabel", .str "metered"),
       ("provider", .str ((p.id.splitOn ":").headD p.id)),
-      ("quota_pct_remaining", .null), ("reset_at", .null),
+      ("quota_pct_remaining", pQuota), ("reset_at", pReset),
       ("current_b_tok_per_h", bTokPerHour (sumNat p.tok) windowSecs),
       ("est_usd_per_h", usdPerHour (sumNat p.cents) windowSecs),
-      ("health", .str "ok"),
+      ("health", .str pHealth),
       ("series_b_tok_per_h", rateSeries p.tok bucketSecs lastSecs bTokPerHour),
       ("series_usd_per_h", rateSeries p.cents bucketSecs lastSecs usdPerHour)
     ]
@@ -623,10 +701,11 @@ def buildResourcesOverviewJson
         ("value", numFixed vcpu 3), ("est_usd_per_h", .num "0.0"), ("degraded", .bool false)])
   for (pool, target, tok, cents) in infLinks do
     if shownIds.contains target then
+      let (pHealth, _, _) := poolHealthMeta pool
       linkVals := linkVals.push (.obj #[
         ("kind", .str "inference"), ("source_id", .str pool), ("mission_id", .str target),
         ("value", bTokPerHour tok windowSecs), ("est_usd_per_h", usdPerHour cents windowSecs),
-        ("degraded", .bool false)])
+        ("degraded", .bool (pHealth != "ok"))])
 
   return .obj #[
     ("as_of", .str (formatEpochIso8601Utc nowSec.toUInt64)),
@@ -642,7 +721,7 @@ def buildResourcesOverviewJson
       ("est_usd_per_h", usdPerHour winCents windowSecs),
       ("window_total_tokens", JVal.nat winTok),
       ("window_est_usd", numFixed (winCents * 10000) 6),
-      ("throttled_429_count", JVal.nat 0),
+      ("throttled_429_count", JVal.nat throttled429Count),
       ("pools", .arr poolVals)]),
     ("missions", .arr missionVals),
     ("links", .arr linkVals)
@@ -2170,14 +2249,15 @@ def dispatchResourcesAndSystemRoute
     (headers : Array (String × String))
     (bodyBytes : ByteArray)
     (callerUserId _callerUsername bootstrapAdminId : String)
-    (isAdmin isLegacyUnscoped : Bool) : IO (Option (Nat × String × ByteArray)) := do
+    (isAdmin isLegacyUnscoped : Bool)
+    (poolHints : Array InferencePoolHealthHint := #[]) : IO (Option (Nat × String × ByteArray)) := do
   let segs := (cleanPath.splitOn "/").filter (!·.isEmpty)
   let qMap := parseQueryMap rawTarget
   let effAdmin := isLegacyUnscoped || isAdmin
 
   -- 1. `GET /api/resources/overview` & `GET /api/resources/missions/:id`
   if method == "GET" && segs == ["api", "resources", "overview"] then
-    let jv ← buildResourcesOverviewJson store managedStore? qMap
+    let jv ← buildResourcesOverviewJson store managedStore? qMap poolHints
     if effAdmin then return some (jsonResp 200 jv)
     -- Members: only their own missions; no fleet sources or instance-wide inference totals.
     let mut mine : Array JVal := #[]

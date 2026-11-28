@@ -336,6 +336,61 @@ private fun OrbAdminCircleAction(
     }
 }
 
+internal fun routingHealthCooldownSecs(h: OrbRow): Int =
+    h.int("cooldown_remaining_secs") ?: h.int("cooldown_secs_remaining") ?: 0
+
+internal fun routingHealthNeedsAttention(h: OrbRow): Boolean {
+    val state = h.str("account_state").orEmpty()
+    return h.bool("is_healthy") == false ||
+        h.bool("is_degraded") == true ||
+        h.bool("disabled_by_provider") == true ||
+        state == "disabled_by_provider" ||
+        state == "disabled" ||
+        routingHealthCooldownSecs(h) > 0
+}
+
+internal fun routingChainCanDelete(chainId: String): Boolean = !chainId.startsWith("builtin/")
+
+internal fun routingChainCanCreate(chainId: String): Boolean =
+    chainId.trim().let { it.isNotEmpty() && !it.startsWith("builtin/") }
+
+internal fun routingHealthSummaryLine(h: OrbRow): String {
+    val parts = mutableListOf<String>()
+    val totalReq = h.int("total_requests")
+    if (totalReq != null) {
+        parts += "${h.int("total_successes") ?: 0}/$totalReq ok"
+    }
+    val rl = h.int("total_rate_limits") ?: 0
+    if (rl > 0) parts += "$rl rate limits"
+    val snap = h.dict("rate_limit_snapshot")
+    val keyRpm = OrbJSON.int(snap, "key_rpm_limit")
+    val reqLim = OrbJSON.int(snap, "requests_limit")
+    if (keyRpm != null) {
+        parts += "$keyRpm RPM"
+    } else if (reqLim != null) {
+        val reqRem = OrbJSON.int(snap, "requests_remaining")
+        parts += if (reqRem != null) "$reqRem/$reqLim req" else "$reqLim RPM"
+    }
+    h.double("avg_latency_ms")?.let { parts += "${it.roundToInt()} ms" }
+    val cd = routingHealthCooldownSecs(h)
+    if (cd > 0) parts += "cooldown ${OrbActivityCompaction.formatCooldown(cd)}"
+    val state = h.str("account_state").orEmpty()
+    if (h.bool("disabled_by_provider") == true || state == "disabled_by_provider") {
+        parts += "disabled by provider"
+        h.str("disabled_by_provider_message")?.takeIf { it.isNotEmpty() }?.let { parts += it }
+    } else if (state == "disabled") {
+        parts += "disabled"
+    }
+    val reason = h.str("last_failure_reason")?.takeIf { it.isNotEmpty() } ?: h.str("parked_reason")?.takeIf { it.isNotEmpty() }
+    if (reason != null && reason != "disabled_by_provider" && reason != "disabled") {
+        parts += reason
+    }
+    if (parts.isEmpty()) {
+        return if (h.bool("is_healthy") == true) "healthy" else "no requests yet"
+    }
+    return parts.joinToString(" · ")
+}
+
 // MARK: - 1. Fallback Chains (/api/model-routing)
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
@@ -419,8 +474,9 @@ fun OrbRoutingSettingsPage(core: OrbCore, onBack: () -> Unit) {
         }
     }
 
-    fun isAttentionHealth(h: OrbRow): Boolean =
-        h.bool("is_healthy") == false || h.bool("is_degraded") == true || (h.int("cooldown_remaining_secs") ?: 0) > 0
+    fun cooldownSecs(h: OrbRow): Int = routingHealthCooldownSecs(h)
+
+    fun isAttentionHealth(h: OrbRow): Boolean = routingHealthNeedsAttention(h)
 
     fun accountTitle(h: OrbRow): String {
         val pid = h.str("provider_id")?.takeIf { it.isNotEmpty() } ?: h.str("account_id").orEmpty()
@@ -435,29 +491,7 @@ fun OrbRoutingSettingsPage(core: OrbCore, onBack: () -> Unit) {
         return pid
     }
 
-    fun healthLine(h: OrbRow): String {
-        val parts = mutableListOf("${h.int("total_successes") ?: 0}/${h.int("total_requests") ?: 0} ok")
-        val rl = h.int("total_rate_limits") ?: 0
-        if (rl > 0) parts += "$rl rate limits"
-        val snap = h.dict("rate_limit_snapshot")
-        val keyRpm = OrbJSON.int(snap, "key_rpm_limit")
-        val reqLim = OrbJSON.int(snap, "requests_limit")
-        if (keyRpm != null) {
-            parts += "$keyRpm RPM"
-        } else if (reqLim != null) {
-            val reqRem = OrbJSON.int(snap, "requests_remaining")
-            parts += if (reqRem != null) "$reqRem/$reqLim req" else "$reqLim RPM"
-        }
-        h.double("avg_latency_ms")?.let { parts += "${it.roundToInt()} ms" }
-        val cd = h.int("cooldown_remaining_secs") ?: 0
-        if (cd > 0) parts += "cooldown ${OrbActivityCompaction.formatCooldown(cd)}"
-        if (h.bool("disabled_by_provider") == true) {
-            parts += "disabled by provider"
-            h.str("disabled_by_provider_message")?.takeIf { it.isNotEmpty() }?.let { parts += it }
-        }
-        h.str("last_failure_reason")?.takeIf { it.isNotEmpty() }?.let { parts += it }
-        return parts.joinToString(" · ")
-    }
+    fun healthLine(h: OrbRow): String = routingHealthSummaryLine(h)
 
     Column(modifier = Modifier.fillMaxSize().background(OrbStyle.background)) {
         OrbAdminHeader(
@@ -586,10 +620,12 @@ fun OrbRoutingSettingsPage(core: OrbCore, onBack: () -> Unit) {
                                         cm?.setPrimaryClip(ClipData.newPlainText("Model ID", chain.id))
                                         Toast.makeText(context, "Copied ${chain.id}", Toast.LENGTH_SHORT).show()
                                     })
-                                    DropdownMenuItem(text = { Text("Delete", color = OrbStyle.error) }, onClick = {
-                                        menuOpen = false
-                                        deletingChain = chain
-                                    })
+                                    if (routingChainCanDelete(chain.id)) {
+                                        DropdownMenuItem(text = { Text("Delete", color = OrbStyle.error) }, onClick = {
+                                            menuOpen = false
+                                            deletingChain = chain
+                                        })
+                                    }
                                 }
                             }
                             if (idx < chains.lastIndex) {
@@ -665,12 +701,15 @@ fun OrbRoutingSettingsPage(core: OrbCore, onBack: () -> Unit) {
                 item {
                     @Composable
                     fun HealthRowView(h: OrbRow) {
+                        val state = h.str("account_state").orEmpty()
+                        val disabledByProvider = h.bool("disabled_by_provider") == true || state == "disabled_by_provider"
+                        val sidecarDisabled = !disabledByProvider && state == "disabled"
+                        val cooldown = cooldownSecs(h)
                         val dotColor = when {
-                            h.bool("is_healthy") == false -> OrbStyle.error
+                            h.bool("is_healthy") == false || disabledByProvider || sidecarDisabled || cooldown > 0 -> OrbStyle.error
                             h.bool("is_degraded") == true -> OrbStyle.warning
                             else -> OrbStyle.success
                         }
-                        val cooldown = h.int("cooldown_remaining_secs") ?: 0
                         Row(
                             modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp),
                             verticalAlignment = Alignment.CenterVertically,
@@ -681,7 +720,7 @@ fun OrbRoutingSettingsPage(core: OrbCore, onBack: () -> Unit) {
                                 Text(accountTitle(h), color = Color.White, fontSize = 14.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                                 Text(healthLine(h), color = OrbStyle.textMuted, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                             }
-                            if (cooldown > 0 || h.bool("disabled_by_provider") == true) {
+                            if (disabledByProvider || (!sidecarDisabled && cooldown > 0)) {
                                 TextButton(enabled = !busy, onClick = {
                                     val aid = h.str("account_id").orEmpty()
                                     runAct { core.request("/api/model-routing/health/${core.encodeComponent(aid)}/clear", "POST") }
@@ -830,7 +869,7 @@ fun OrbRoutingSettingsPage(core: OrbCore, onBack: () -> Unit) {
                         },
                         enabled = existing == null && !busy,
                         singleLine = true,
-                        label = { Text("Chain ID (e.g. builtin/smart)") },
+                        label = { Text("Chain ID (e.g. fast-fallback)") },
                         modifier = Modifier.fillMaxWidth()
                     )
                     OutlinedTextField(
@@ -876,14 +915,17 @@ fun OrbRoutingSettingsPage(core: OrbCore, onBack: () -> Unit) {
                         Text("Strip <think> blocks", color = Color.White, fontSize = 13.sp, modifier = Modifier.weight(1f))
                         Switch(checked = stripThinking, onCheckedChange = { stripThinking = it }, enabled = !busy)
                     }
+                    val reservedBuiltin = existing == null && chainId.trim().startsWith("builtin/")
                     val validationError = editorError
+                        ?: (if (reservedBuiltin) "Chain IDs starting with \"builtin/\" are reserved." else null)
                         ?: invalidLines.firstOrNull()?.let { "Each non-empty line must be provider/model (invalid: $it)." }
                     validationError?.let { Text(it, color = OrbStyle.error, fontSize = 12.sp) }
                 }
             },
             confirmButton = {
                 TextButton(
-                    enabled = chainId.isNotBlank() && nonBlankLines.isNotEmpty() && invalidLines.isEmpty() && !busy,
+                    enabled = (if (existing != null) chainId.isNotBlank() else routingChainCanCreate(chainId)) &&
+                        nonBlankLines.isNotEmpty() && invalidLines.isEmpty() && !busy,
                     onClick = {
                         val trimmedId = chainId.trim()
                         if (existing == null && chains.any { it.id.equals(trimmedId, ignoreCase = true) }) {

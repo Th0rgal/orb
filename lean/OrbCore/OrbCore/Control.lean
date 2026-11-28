@@ -913,8 +913,8 @@ def parseChainTargetsJson
           let useCliProxy := !cliProxyKey.isEmpty && !cliProxyUrl.isEmpty && (isAg || (!hp.hasApiKey && hp.hasOAuth))
           let target : ProviderTarget :=
             if useCliProxy then
-              let credential? : Option SidecarCredential := if pinned then
-                some ⟨hp.providerType, accountRoutingFile hydratedProvs hp, hp.modelPrefix⟩ else none
+              let cred : SidecarCredential := ⟨hp.providerType, accountRoutingFile hydratedProvs hp, hp.modelPrefix⟩
+              let credential? : Option SidecarCredential := if pinned then some cred else none
               let rawModel := if isAg then mdl else OrbCore.ProxyModelRouting.cliProxyModelId effProvType mdl
               let routedModel := match credential? with
                 | some c => if c.modelPrefix.isEmpty || rawModel.isEmpty || rawModel.startsWith (c.modelPrefix ++ "/")
@@ -937,6 +937,8 @@ def parseChainTargetsJson
                 modelTpmLimit?         := inlineMdlTpm?.orElse (fun _ => matchedModel?.bind (·.tpmLimit?))
                 modelMaxConcurrency?   := inlineMdlConc?.orElse (fun _ => matchedModel?.bind (·.maxConcurrency?))
                 contextLimit           := inlineContextLimit
+                sourceAccountIds       := #[hp.id]
+                sourceCredentials      := #[(hp.id, cred)]
               }
             else
               let url :=
@@ -960,6 +962,7 @@ def parseChainTargetsJson
                   modelTpmLimit?         := inlineMdlTpm?.orElse (fun _ => matchedModel?.bind (·.tpmLimit?))
                   modelMaxConcurrency?   := inlineMdlConc?.orElse (fun _ => matchedModel?.bind (·.maxConcurrency?))
                   contextLimit           := inlineContextLimit
+                  sourceAccountIds       := #[hp.id]
                 }
               else
                 {
@@ -974,9 +977,15 @@ def parseChainTargetsJson
                   modelTpmLimit?         := inlineMdlTpm?.orElse (fun _ => matchedModel?.bind (·.tpmLimit?))
                   modelMaxConcurrency?   := inlineMdlConc?.orElse (fun _ => matchedModel?.bind (·.maxConcurrency?))
                   contextLimit           := inlineContextLimit
+                  sourceAccountIds       := #[hp.id]
                 }
-          if !entryTargets.any (fun t => t.accountId == target.accountId && t.baseUrl == target.baseUrl && t.modelId == target.modelId) then
-            entryTargets := entryTargets.push target
+          match entryTargets.findIdx? (fun t => t.accountId == target.accountId && t.baseUrl == target.baseUrl && t.modelId == target.modelId) with
+          | none => entryTargets := entryTargets.push target
+          | some idx =>
+            let prev := entryTargets[idx]!
+            let mergedIds := target.sourceAccountIds.foldl (fun acc sid => if acc.contains sid then acc else acc.push sid) prev.sourceAccountIds
+            let mergedCreds := target.sourceCredentials.foldl (fun acc pair => if acc.any (·.1 == pair.1) then acc else acc.push pair) prev.sourceCredentials
+            entryTargets := entryTargets.set! idx { prev with sourceAccountIds := mergedIds, sourceCredentials := mergedCreds }
         out := out ++ entryTargets
       else if inlineKey?.isNone && inlineUrl?.isNone && matchedHydratedList.isEmpty && !matchedRows.isEmpty then
         let mut entryTargets : Array ProviderTarget := #[]
@@ -1005,6 +1014,7 @@ def parseChainTargetsJson
                 modelTpmLimit?         := inlineMdlTpm?.orElse (fun _ => matchedModel?.bind (·.tpmLimit?))
                 modelMaxConcurrency?   := inlineMdlConc?.orElse (fun _ => matchedModel?.bind (·.maxConcurrency?))
                 contextLimit           := inlineContextLimit
+                sourceAccountIds       := #[p.id]
               }
             else
               {
@@ -1019,9 +1029,15 @@ def parseChainTargetsJson
                 modelTpmLimit?         := inlineMdlTpm?.orElse (fun _ => matchedModel?.bind (·.tpmLimit?))
                 modelMaxConcurrency?   := inlineMdlConc?.orElse (fun _ => matchedModel?.bind (·.maxConcurrency?))
                 contextLimit           := inlineContextLimit
+                sourceAccountIds       := #[p.id]
               }
-          if !entryTargets.any (fun t => t.accountId == target.accountId && t.baseUrl == target.baseUrl && t.modelId == target.modelId) then
-            entryTargets := entryTargets.push target
+          match entryTargets.findIdx? (fun t => t.accountId == target.accountId && t.baseUrl == target.baseUrl && t.modelId == target.modelId) with
+          | none => entryTargets := entryTargets.push target
+          | some idx =>
+            let prev := entryTargets[idx]!
+            let mergedIds := target.sourceAccountIds.foldl (fun acc sid => if acc.contains sid then acc else acc.push sid) prev.sourceAccountIds
+            let mergedCreds := target.sourceCredentials.foldl (fun acc pair => if acc.any (·.1 == pair.1) then acc else acc.push pair) prev.sourceCredentials
+            entryTargets := entryTargets.set! idx { prev with sourceAccountIds := mergedIds, sourceCredentials := mergedCreds }
         out := out ++ entryTargets
       else
       let effProvType :=
@@ -1050,6 +1066,10 @@ def parseChainTargetsJson
              | some hp => !hp.hasApiKey && hp.hasOAuth
              | none => false)
           )
+        let fallbackSourceIds : Array String :=
+          match matchedHydrated? with
+          | some hp => #[hp.id]
+          | none => match matchedProv? with | some p => #[p.id] | none => #[]
         if useCliProxy then
           let credential? : Option SidecarCredential := if pinned then matchedHydrated?.map (fun hp =>
             ⟨hp.providerType, accountRoutingFile hydratedProvs hp, hp.modelPrefix⟩) else none
@@ -1077,6 +1097,7 @@ def parseChainTargetsJson
             modelTpmLimit?         := inlineMdlTpm?.orElse (fun _ => matchedModel?.bind (·.tpmLimit?))
             modelMaxConcurrency?   := inlineMdlConc?.orElse (fun _ => matchedModel?.bind (·.maxConcurrency?))
             contextLimit          := inlineContextLimit
+            sourceAccountIds      := fallbackSourceIds
           }
         else
           let acct :=
@@ -1108,6 +1129,7 @@ def parseChainTargetsJson
               modelTpmLimit?         := inlineMdlTpm?.orElse (fun _ => matchedModel?.bind (·.tpmLimit?))
               modelMaxConcurrency?   := inlineMdlConc?.orElse (fun _ => matchedModel?.bind (·.maxConcurrency?))
               contextLimit          := inlineContextLimit
+              sourceAccountIds      := fallbackSourceIds
             }
           else
             out := out.push {
@@ -1123,6 +1145,7 @@ def parseChainTargetsJson
               modelTpmLimit?         := inlineMdlTpm?.orElse (fun _ => matchedModel?.bind (·.tpmLimit?))
               modelMaxConcurrency?   := inlineMdlConc?.orElse (fun _ => matchedModel?.bind (·.maxConcurrency?))
               contextLimit          := inlineContextLimit
+              sourceAccountIds      := fallbackSourceIds
             }
     return out
   | _ => return #[]
@@ -1152,21 +1175,23 @@ def loadRoutingChainsFromStore (st : CoreStore) (workingDir : String := "") : IO
   let cliKey := ((← lookupEnvWithFiles? "CLI_PROXY_API_KEY").getD "").trimAscii.toString
   let cliUrl ← resolveCliProxyBaseUrl
   let googleMax ← resolveGoogleMaxConcurrency st.rootDir
-  let .ok rows ← execParamQuery st.missionsDb "SELECT id,name,models_json,COALESCE(strip_thinking,-1) FROM model_routing_chains ORDER BY id ASC;" #[]
+  let .ok rows ← execParamQuery st.missionsDb "SELECT id,name,models_json,COALESCE(strip_thinking,-1),COALESCE(is_default,-1) FROM model_routing_chains ORDER BY id ASC;" #[]
     | throw (IO.userError "routing_chain_store_unavailable")
+  let dataRows := rows.extract 1 rows.size
+  let explicitDefault := dataRows.any (fun r => r[4]? == some "1")
   let mut out : Array RoutingChain := #[]
-  for i in [1:rows.size] do
-    let r := rows[i]!
+  for r in dataRows do
     let cid := (r[0]?).getD ""
     let nm := (r[1]?).getD cid
     let mj := (r[2]?).getD "[]"
     let strip := if r[3]? == some "-1" then cid == "builtin/assistant" else r[3]? == some "1"
-    out := out.push { id := cid, name := nm, targets := parseChainTargetsJson mj providers hydratedProvs cliUrl cliKey (some googleMax), stripThinking := strip }
+    let isDef := if explicitDefault then r[4]? == some "1" else cid == "builtin/smart"
+    out := out.push { id := cid, name := nm, targets := parseChainTargetsJson mj providers hydratedProvs cliUrl cliKey (some googleMax), stripThinking := strip, isDefault := isDef }
   -- Immutable defaults are a derived view, not a second mutable config store.
   -- Persisted ids (even empty/unavailable chains) always win over stock entries.
   for (id, name, entries) in OrbCore.ProxyModelRouting.stockChains do
     if !out.any (fun c => c.id == id) then
-      out := out.push { id := id, name := name, targets := parseChainTargetsJson (OrbCore.ProxyModelRouting.entriesJson entries) providers hydratedProvs cliUrl cliKey (some googleMax), stripThinking := (id == "builtin/assistant") }
+      out := out.push { id := id, name := name, targets := parseChainTargetsJson (OrbCore.ProxyModelRouting.entriesJson entries) providers hydratedProvs cliUrl cliKey (some googleMax), stripThinking := (id == "builtin/assistant"), isDefault := (!explicitDefault && id == "builtin/smart") }
   return out
 
 private def optU32Json (v? : Option UInt32) : String :=
@@ -1261,7 +1286,8 @@ private def selectRoutingChainForBody (chains : Array RoutingChain) (body : Byte
   match reqModel?.bind (findMatchingRoutingChain? chains) with
   | some matched => matched
   | none =>
-    (chains.find? (fun c => c.id == "default" || c.id == "builtin/smart")).getD
+    (chains.find? (·.isDefault)).orElse (fun _ =>
+      chains.find? (fun c => c.id == "default" || c.id == "builtin/smart")) |>.getD
       (chains[0]?.getD { id := "default", name := "default", targets := #[] })
 
 private def scopeRankOf? : String → Option UInt8
@@ -1835,12 +1861,18 @@ private def planChainState (st : CoreAppState) (chain : RoutingChain) (nowEpochS
   match st.healthTracker? with
   | some htr =>
     let hPlan ← planChainFromHealth htr chain nowEpochSec
-    let extra := activeCooldowns (← st.proxyCooldownsRef.get) nowEpochSec
+    let disabledIds ← snapshotDisabledHealthAccountIds htr
+    let extra := (activeCooldowns (← st.proxyCooldownsRef.get) nowEpochSec).filter fun c =>
+      !disabledIds.contains c.accountId && !hPlan.cooling.any (fun h => h.accountId == c.accountId)
     if extra.isEmpty then
       return hPlan
     else
-      let mergedCooling := coolingFor chain.targets (hPlan.cooling ++ extra)
-      return { eligible := capProxyTargets (eligibleTargets chain.targets mergedCooling), cooling := mergedCooling }
+      let extraCooling := coolingFor chain.targets extra
+      let mergedCooling := hPlan.cooling ++ extraCooling
+      return {
+        eligible := capProxyTargets (hPlan.eligible.filter (fun t => !extraCooling.any (fun c => c.accountId == t.accountId)))
+        cooling := mergedCooling
+      }
   | none =>
     let cooldowns ← st.proxyCooldownsRef.get
     return planChain chain cooldowns nowEpochSec
@@ -1851,13 +1883,14 @@ private def isMissionOwnedChain
   let some mRec ← getMission? st.store mid | return false
   let rawMissionModel := mRec.modelOverride.trimAscii.toString
   let bLow := mRec.backend.trimAscii.toString.toLower
+  let defaultChainId? := (chains.find? (·.isDefault)).map (·.id)
   let effMissionModel :=
     if !rawMissionModel.isEmpty then rawMissionModel
-    else if bLow == "opencode" then "builtin/smart"
     else if bLow == "codex" then defaultCodexModel
     else ""
   if effMissionModel.isEmpty then
-    return chainId == "default" || chainId == "builtin/smart" || chainId == "smart"
+    return chainId == "default" || chainId == "builtin/smart" || chainId == "smart" ||
+      defaultChainId? == some chainId
   match findMatchingRoutingChain? chains effMissionModel with
   | some mc => return mc.id == chainId
   | none =>
@@ -2083,7 +2116,7 @@ private def handleProxyRequest (st : CoreAppState) (req : HttpRequest) (cleanPat
   let expected? ← match enforceProxySelection selection? requestedModel headerProgram? bodyProgram? with
     | .ok p => pure p
     | .error e => return mkJson 400 s!"\{\"error\":\"unsupported_access_program\",\"detail\":{jsonEscape e}}"
-  let snapRouteGen? ← match st.healthTracker? with
+  let mut snapRouteGen? ← match st.healthTracker? with
     | some htr => some <$> currentRouteGeneration htr
     | none => pure none
   let mut proxyOwnerUserId? : Option String := none
@@ -2114,7 +2147,7 @@ private def handleProxyRequest (st : CoreAppState) (req : HttpRequest) (cleanPat
     userPrefs ← getUserProviderPrefs st.store ownerUid
     if let some denied ← proxySpendDenial? st ownerRec utcDay then return mkJson 429 denied
   let rawRequestedModel := (bodyJv.fieldStr? "model").getD defaultCodexModel
-  let chains ← st.chainsRef.get
+  let mut chains ← st.chainsRef.get
   -- A named model is served by its saved chain or by the provider owning that
   -- exact model. It is NEVER rewritten to another model: only a chain the caller
   -- named may fall back across models. Only a request with no `model` field
@@ -2135,7 +2168,9 @@ private def handleProxyRequest (st : CoreAppState) (req : HttpRequest) (cleanPat
         -- another process). Look at the store once before refusing a name.
         let fresh ← loadRoutingChainsFromStore st.store st.cfg.workingDir
         if let some matched := findMatchingRoutingChain? fresh rawRequestedModel then
-          discard <| publishRoutingChainsUpdate st fresh (forceBump := false)
+          let nextGen ← publishRoutingChainsUpdate st fresh (forceBump := false)
+          if st.healthTracker?.isSome then snapRouteGen? := some nextGen
+          chains := fresh
           routed? := some matched
           routeKind := "chain"
   let some rawActiveChain := routed?
@@ -2171,13 +2206,29 @@ private def handleProxyRequest (st : CoreAppState) (req : HttpRequest) (cleanPat
   if !headersAlreadyCommitted && plan.eligible.isEmpty then
     stopMissionTurnForUnavailableChain st stopMid? chains cleanPath activeChain.id plan.cooling nowEpochSec
     if !plan.cooling.isEmpty then
-      if plan.allUsageLimited then
-        let limit := (soonestCooldown? plan.cooling).getD
-          { accountId := "", untilEpoch := nowEpochSec + 60, reason := .usageLimit, label := "" }
-        let reply := usageLimitReply activeChain.id limit nowEpochSec
-        return mkJsonHdr reply.status reply.body reply.headers
-      let retryAfter := (plan.retryAfterSecs? nowEpochSec).getD 60
-      let reply := cooldownReply activeChain.id retryAfter
+      let chosenCd? := (soonestCooldown? plan.cooling).orElse (fun _ => plan.cooling[0]?)
+      let coolTarget? := (chosenCd?.bind fun c => activeChain.targets.find? (fun t => t.accountId == c.accountId)).orElse
+        (fun _ => activeChain.targets[0]?)
+      let coolProv := (coolTarget?.map (·.provider)).getD ""
+      let coolAcct := (chosenCd?.map (·.accountId)).orElse (fun _ => coolTarget?.map (·.accountId)) |>.getD ""
+      let coolModel := (coolTarget?.map (·.modelId)).filter (!·.isEmpty) |>.getD rawRequestedModel
+      let reply :=
+        if plan.allUsageLimited then
+          let limit := chosenCd?.getD
+            { accountId := "", untilEpoch := nowEpochSec + 60, reason := .usageLimit, label := "" }
+          usageLimitReply activeChain.id limit nowEpochSec
+        else
+          let retryAfter := (plan.retryAfterSecs? nowEpochSec).getD 60
+          cooldownReply activeChain.id retryAfter
+      let coolStatus := match chosenCd?.map (·.reason) with
+        | some .usageLimit | some .rateLimit => "rate_limited_or_quota"
+        | some .overloaded => "overloaded"
+        | _ => "error"
+      discard <| execParamQuery st.store.missionsDb
+        ("INSERT INTO proxy_outcomes(timestamp,chain_id,provider,account_id,model,requested_model,status,http_status,retries) " ++
+         "VALUES(?1,?2,?3,?4,?5,?6,?7,?8,0);")
+        #[formatEpochIso8601Utc nowEpochSec, (if routeKind == "chain" then activeChain.id else routeKind),
+          coolProv, coolAcct, coolModel, rawRequestedModel, coolStatus, toString reply.status]
       return mkJsonHdr reply.status reply.body reply.headers
   let effectiveChain ←
     if expected?.isSome then
@@ -2297,11 +2348,12 @@ private def handleProxyRequest (st : CoreAppState) (req : HttpRequest) (cleanPat
           (if postPlan.eligible.isEmpty then
             chainCooldownStopReason? activeChain.id postPlan.cooling nowEpochSec (allowUnconfigured := false)
           else none).orElse fun _ =>
-            let waitSecs := (retryAfterSecs? out.headers).getD 0
+            let waitSecs := (announcedRetryAfterSecs? out.headers rawOutBodyStr).getD 0
             if waitSecs > 60 then
               let returnIso := formatEpochIso8601Utc (nowEpochSec + waitSecs)
+              let exhaustedModelCooldown := lookupHeader? out.headers "x-orb-retry-reason" == some "model_cooldown"
               if (out.status == 503 || out.status == 429) &&
-                  (modelCooldownHint rawOutBodyStr || quotaHint rawOutBodyStr) then
+                  (exhaustedModelCooldown || modelCooldownHint rawOutBodyStr || quotaHint rawOutBodyStr) then
                 some ("remote_quota",
                   s!"Model '{activeChain.id}' is cooling down; soonest retry at {returnIso} (in {waitSecs}s). Stopping turn.")
               else if isAuthRejection out.status (upstreamErrorCode rawOutBodyStr) rawOutBodyStr then
@@ -2341,11 +2393,21 @@ private def handleProxyRequest (st : CoreAppState) (req : HttpRequest) (cleanPat
             discard <| writeReceipt st.cfg.workingDir mid {
               revision := sel.revision, requestedModel := requestedModel, program := confirmed, model := model
             }
-  let servedTarget? := dispatchChain.targets.find? (fun t => t.accountId == out.selectedAccount)
+  let servedTarget? := (dispatchChain.targets.find? (fun t => t.accountId == out.selectedAccount)).orElse
+    (fun _ => dispatchChain.targets[0]?)
   let effectiveModel := (servedTarget?.map (·.modelId)).filter (!·.isEmpty) |>.getD rawRequestedModel
+  let rawOutBodyForStatus := String.fromUTF8? out.body |>.getD ""
   let initOutcomeStatus :=
     if out.status ≥ 200 && out.status < 300 then "ok"
     else if out.exhaustionClass == "upstream_idle_timeout" then "upstream_idle_timeout"
+    else if out.exhaustionClass == "model_cooldown" ||
+            (out.status == 503 && (modelCooldownHint rawOutBodyForStatus || lookupHeader? out.headers "x-orb-retry-reason" == some "model_cooldown")) then
+      "model_cooldown"
+    else if out.exhaustionClass == "rate_limited_or_quota" || out.status == 429 ||
+            (out.status == 503 && quotaHint rawOutBodyForStatus) then
+      "rate_limited_or_quota"
+    else if out.status == 503 && cooldownReasonFor out.status rawOutBodyForStatus == some .overloaded then
+      "overloaded"
     else "error"
   let outcomeId? ← match ← execParamQuery st.store.missionsDb
       ("INSERT INTO proxy_outcomes(timestamp,chain_id,provider,account_id,model,requested_model,status,http_status,retries) " ++
@@ -3809,6 +3871,103 @@ private def parseGoalApprovalAction? (answers : JVal) : Option String :=
   | some "accept" | some "approve" | some "allow" | some "yes" => some "accept"
   | some "reject" | some "deny" | some "decline" | some "cancel" | some "no" | some "revise" => some "revise"
   | _ => none
+
+/-- Collect live per-provider health/cooldown/quota hints from Core's routing state for
+    `GET /api/resources/overview` so inference pools and Sankey links reflect live Core truth. -/
+private def collectResourcesPoolHealthHints
+    (st : CoreAppState) (nowEpochSec : UInt64) : IO (Array InferencePoolHealthHint) := do
+  let mut hints : Array InferencePoolHealthHint := #[]
+  let hps ← loadHydratedProviders st.store st.cfg.workingDir
+  let enabledHps := hps.filter (·.enabled)
+  let poolSlugsForHp (hp : HydratedProvider) : Array String :=
+    if hp.providerType == "custom" then
+      let addSafe (acc : Array String) (cand : String) : Array String :=
+        if cand.isEmpty || cand == "custom" || (OrbCore.ProxyModelRouting.providerId? cand).isSome || acc.contains cand then
+          acc
+        else acc.push cand
+      let base := #[s!"custom:{hp.id}"]
+      let withSlug := addSafe base (providerSlugOf hp.name)
+      addSafe withSlug (OrbCore.ProxyModelRouting.customProviderName hp.name)
+    else #[hp.providerType]
+  let trackedCooldowns ← match st.healthTracker? with
+    | some ht => snapshotActiveHealthCooldowns ht nowEpochSec
+    | none => pure #[]
+  let disabledIds ← match st.healthTracker? with
+    | some ht => snapshotDisabledHealthAccountIds ht
+    | none => pure #[]
+  let rawCooldowns := (← st.proxyCooldownsRef.get) ++ trackedCooldowns
+  let usageCached ← match st.providerHub? with
+    | some hub => hub.mu.atomically (do return (← get).usageEntries)
+    | none => pure #[]
+  let isFileAccountHash (s : String) : Bool :=
+    s.length == 64 && s.toList.all (fun c => ('0' ≤ c && c ≤ '9') || ('a' ≤ c && c ≤ 'f'))
+  let hpOwnsExact (hp : HydratedProvider) (acctId : String) : Bool :=
+    acctId == hp.id ||
+    (!hp.modelPrefix.isEmpty && acctId == hp.modelPrefix) ||
+    (hp.providerType == "custom" && acctId == s!"custom:{hp.id}")
+  let hpMatchesSharedPool (hp : HydratedProvider) (acctId : String) : Bool :=
+    hp.hasOAuth && !hp.hasApiKey &&
+    (acctId == s!"cliproxyapi:{hp.providerType}" ||
+     (hp.providerType == "antigravity" && acctId.startsWith "cliproxyapi:antigravity:" &&
+      !isFileAccountHash (acctId.drop "cliproxyapi:antigravity:".length).toString))
+  let enabledSlugsForAccount (acctId : String) : Array String :=
+    let exactAll := hps.filter (fun hp => hpOwnsExact hp acctId)
+    if !exactAll.isEmpty then
+      (exactAll.filter (·.enabled)).foldl (fun acc hp => acc ++ poolSlugsForHp hp) #[]
+    else if acctId.startsWith "cliproxyapi:" then
+      let sharedAll := hps.filter (fun hp => hpMatchesSharedPool hp acctId)
+      if !sharedAll.isEmpty then
+        (sharedAll.filter (·.enabled)).foldl (fun acc hp => acc ++ poolSlugsForHp hp) #[]
+      else
+        let rest := (acctId.drop 12).toString
+        let seg := (rest.splitOn ":").headD rest
+        let tail := if rest.length > seg.length + 1 then (rest.drop (seg.length + 1)).toString else ""
+        if isFileAccountHash tail then #[]
+        else
+          let typed := hps.filter (fun hp => hp.providerType == seg)
+          if typed.isEmpty || typed.any (·.enabled) then #[seg] else #[]
+    else
+      let seg := (acctId.splitOn ":").headD acctId
+      if acctId.startsWith "custom:" then #[acctId] else #[seg]
+  for did in disabledIds do
+    for slug in enabledSlugsForAccount did do
+      hints := hints.push { provider := slug, health := "disabled_by_provider" }
+  for cd in rawCooldowns do
+    if cd.remainingSecs nowEpochSec > 0 then
+      for slug in enabledSlugsForAccount cd.accountId do
+        hints := hints.push {
+          provider := slug
+          health := "cooldown"
+          resetAt? := some (formatEpochIso8601Utc cd.untilEpoch)
+        }
+  if let some ht := st.healthTracker? then
+    for hp in enabledHps do
+      let slugs := poolSlugsForHp hp
+      let keys := #[hp.id] ++ (if hp.modelPrefix.isEmpty then #[] else #[hp.modelPrefix])
+      for k in keys do
+        let rec ← lookupAccountHealthRecord ht k
+        if rec.disabledByProvider then
+          for slug in slugs do
+            hints := hints.push { provider := slug, health := "disabled_by_provider" }
+        else if rec.parkedQuota || rec.poisonedSub || rec.transientStreak > 0 || rec.consecutiveTrips > 0 then
+          for slug in slugs do
+            hints := hints.push { provider := slug, health := "degraded" }
+  for u in usageCached do
+    if let some hp := enabledHps.find? (fun p => p.id == u.providerId) then
+      let opt := u.payload.fieldOrNull "optimize"
+      let wins := (opt.fieldArr? "windows").getD #[]
+      let pKey? := opt.fieldStr? "primary_window"
+      let chosen? := (pKey?.bind fun pk => wins.find? (fun w => w.fieldStr? "key" == some pk)).orElse (fun _ => wins[0]?)
+      if let some pct := chosen?.bind (fun w => w.field? "pct_remaining") then
+        let reset? := chosen?.bind (fun w => w.fieldStr? "reset_at")
+        for slug in poolSlugsForHp hp do
+          hints := hints.push {
+            provider := slug
+            health := "ok"
+            quotaPctRemaining? := some pct
+            resetAt? := reset?
+          }
+  return hints
 
 set_option maxHeartbeats 1600000 in
 private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowEpochSec : UInt64) : IO (Except ByteArray CoreHttpResponse) := do
@@ -6825,12 +6984,14 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
         (caller.isLegacyUnscoped || caller.role == "admin") caller.isLegacyUnscoped then
       return .ok { status := cCode, contentType := cCtype, corsOrigin? := reqOrigin?, body := cBody }
     let sHub ← match st.systemHub? with | some h => pure h | none => newSystemRuntimeHub
+    let resPoolHints ← if req.method == "GET" && cleanPath == "/api/resources/overview" then
+        collectResourcesPoolHealthHints st nowEpochSec else pure #[]
     if let some (sCode, sCtype, sBody) ← dispatchResourcesAndSystemRoute
         sHub st.store st.cfg.workingDir st.cfg.libraryRemote st.cfg.githubClientId
         st.bunkerStateRef? st.managedStore? st.relayHub? st.broadcastHub?
         req.method cleanPath rawTarget req.headers req.bodySlice.toByteArray
         caller.userId caller.username st.bootstrapAdminId
-        (caller.isLegacyUnscoped || caller.role == "admin") caller.isLegacyUnscoped then
+        (caller.isLegacyUnscoped || caller.role == "admin") caller.isLegacyUnscoped resPoolHints then
       return .ok (hardenedDownloadResponse req.method cleanPath rawTarget req.bodySlice.toByteArray sCode sCtype sBody reqOrigin?)
 
   -- Mission Detail & Delete (`GET|DELETE /api/control/missions/:id`, `SM-01`, `SM-07`)
@@ -7301,6 +7462,8 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
       let defCid ← nextUniqueId st "chain" nowEpochSec
       let cid := chainId?.orElse (fun _ => (jv.fieldStr? "id").map (·.trimAscii.toString) |>.filter (!·.isEmpty)) |>.getD defCid
       let existing? := (← loadChainRows).find? (fun c => c.fieldStr? "id" == some cid)
+      if cid.startsWith "builtin/" && (req.method == "POST" || existing?.isNone) then
+        return .ok (mkJson 400 "{\"error\":\"builtin_chain_id_reserved\"}")
       let .ok storedRows ← execParamQuery st.store.missionsDb "SELECT models_json FROM model_routing_chains WHERE id=?1;" #[cid]
         | return .ok (mkJson 500 "{\"error\":\"routing_chain_store_unavailable\"}")
       -- Entries are stored under one spelling per provider, whatever the editor sent.
@@ -9059,11 +9222,13 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
     return .ok { status := cCode, contentType := cCtype, corsOrigin? := reqOrigin?, body := cBody }
 
   let sHubFallback ← match st.systemHub? with | some h => pure h | none => newSystemRuntimeHub
+  let resPoolHintsFb ← if req.method == "GET" && cleanPath == "/api/resources/overview" then
+      collectResourcesPoolHealthHints st nowEpochSec else pure #[]
   if let some (sysCode, sysCtype, sysBody) ← dispatchResourcesAndSystemRoute
       sHubFallback st.store st.cfg.workingDir st.cfg.libraryRemote st.cfg.githubClientId
       st.bunkerStateRef? st.managedStore? st.relayHub? st.broadcastHub?
       req.method cleanPath rawTarget req.headers req.bodySlice.toByteArray
-      caller.userId caller.username st.bootstrapAdminId isAdmCaller caller.isLegacyUnscoped then
+      caller.userId caller.username st.bootstrapAdminId isAdmCaller caller.isLegacyUnscoped resPoolHintsFb then
     return .ok (hardenedDownloadResponse req.method cleanPath rawTarget req.bodySlice.toByteArray sysCode sysCtype sysBody reqOrigin?)
 
   return .ok (mkJson 404 s!"\{\"error\":\"not_found\",\"path\":{jsonEscape cleanPath}}")

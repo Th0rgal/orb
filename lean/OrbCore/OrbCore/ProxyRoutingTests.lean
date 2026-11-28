@@ -2714,6 +2714,39 @@ def run : IO Unit := do
       (mockTransport? := some hashMock) (healthTracker? := some hashHtr) (nowEpoch? := some (nowT + 10))
     check (hOut2.status == 200 && hOut2.selectedAccount == hashB && (← hashAttempts.get) == #[hashB])
       s!"subsequent request in hashA -> hashB chain must skip cooling hashA directly to hashB: status={hOut2.status} attempts={← hashAttempts.get}"
+
+    -- Fractional Retry-After ceiling, JSON-body resets_in_seconds fallback, and multi-target
+    -- 503 model_cooldown exhaustion -> mission stops with `remote_quota` and zero leaked IDs.
+    check (parseRetryAfterValue? "120.5" == some 121 && parseRetryAfterValue? "60.0" == some 60 &&
+           retryAfterBodySecs? "{\"error\":{\"type\":\"model_cooldown\",\"resets_in_seconds\":185}}" == some 185 &&
+           announcedRetryAfterSecs? #[("Retry-After", "120.2")] "{}" == some 121)
+      "decimal Retry-After ceiling and JSON body resets_in_seconds parsing"
+    let multiMcChain : RoutingChain := {
+      id := "multi-mc-chain", name := "Multi MC",
+      targets := #[
+        { accountId := "cliproxyapi:openai", provider := "openai", baseUrl := "http://127.0.0.1:1", apiKey := "sk-secret-1", modelId := "gpt-6.2-astra" },
+        { accountId := "cliproxyapi:anthropic", provider := "anthropic", baseUrl := "http://127.0.0.1:1", apiKey := "sk-secret-2", modelId := "claude-opus-5-5" }
+      ]
+    }
+    chainsRef.modify fun cs => cs.push multiMcChain
+    let multiMcMock : ProviderTarget → IO (Except String HttpsResponse) := fun target => do
+      return .ok {
+        status := 503
+        headers := #[("Content-Type", "application/json")]
+        body := s!"\{\"error\":\{\"type\":\"model_cooldown\",\"message\":\"model {target.modelId} cooling down\",\"resets_in_seconds\":240}}".toUTF8
+      }
+    let multiHtr ← newProviderHealthTracker 1 2
+    let multiApp := { app with proxyMockTransport? := some multiMcMock, healthTracker? := some multiHtr }
+    let mMultiId := "m-multi-mc-v2"
+    let tokMulti ← seedRunningMissionWithModel mMultiId "" "multi-mc-chain"
+    let multiBody := renderCompact (.obj #[("model", .str "multi-mc-chain"), ("messages", .arr #[])])
+    let multiRaw := s!"POST /v1/chat/completions HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {tokMulti}\r\nContent-Length: {multiBody.utf8ByteSize}\r\n\r\n{multiBody}"
+    let .ok multiReq := parseRequest multiRaw.toUTF8 none | throw (IO.userError "multi-mc request parse failed")
+    let .ok multiResp ← dispatchCoreRequest multiApp multiReq nowT | throw (IO.userError "multi-mc unexpected upgrade")
+    let (stM, trM, genM, liveM, errsM) ← readMissionState mMultiId
+    check (multiResp.status == 503 && stM == "interrupted" && trM == "remote_quota" && genM == 2 && liveM == 0 && errsM.size == 1 &&
+           ((errsM[0]?.getD "").splitOn "sk-secret").length == 1)
+      s!"multi-target 503 model_cooldown exhaustion with JSON resets_in_seconds must stop mission with remote_quota: http={multiResp.status} status={stM} reason={trM} errs={errsM.size}"
   finally
     closeCoreStore store
     IO.FS.removeDirAll root

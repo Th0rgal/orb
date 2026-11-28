@@ -2053,6 +2053,97 @@ class Delivery(unittest.TestCase):
                 server2.server_close()
                 db2.close()
 
+    def test_v2_provider_priority_health_chains_and_resources_flow_parity(self):
+        accounts = [
+            {'id': 'xai-a', 'name': 'xAI A', 'provider_type': 'xai', 'priority': 1, 'enabled': True, 'user_enabled': True},
+            {'id': 'xai-b', 'name': 'xAI B', 'provider_type': 'xai', 'priority': 0, 'enabled': True, 'user_enabled': True},
+            {'id': 'ag-1', 'name': 'Antigravity', 'provider_type': 'antigravity', 'priority': 0, 'enabled': True, 'user_enabled': True},
+        ]
+        health = [
+            {'account_id': 'xai-b', 'account_state': 'degraded', 'cooldown_secs_remaining': 120, 'parked_reason': 'usage_limit'},
+            {'account_id': 'ag-1', 'account_state': 'disabled_by_provider', 'disabled_by_provider': True, 'disabled_by_provider_message': 'TOS_VIOLATION'},
+        ]
+        chains = [
+            {'id': 'builtin/smart', 'name': 'Smart', 'is_default': True,
+             'entries': [{'provider_id': 'xai', 'model_id': 'grok-4'}]},
+            {'id': 'custom/fast', 'name': 'Fast', 'is_default': False,
+             'entries': [{'provider_id': 'antigravity', 'model_id': 'gemini-4-neon'}]},
+        ]
+        with patch.object(live, 'Connection') as conn, contextlib.redirect_stdout(io.StringIO()) as output:
+            c = conn.return_value
+            c.binding = 'thomas'
+            c.get.side_effect = [accounts, {'user': {'role': 'admin'}}, health, chains]
+            live.provider_inventory('thomas')
+        lines = output.getvalue().splitlines()
+        self.assertEqual(lines[0], 'accounts')
+        self.assertEqual(lines[1], 'P\tadmin\t1')
+        # Ordered by priority within provider_type: xai-b (prio 0) precedes xai-a (prio 1)
+        self.assertEqual(lines[2], 'A\txai-b\txAI B\txai\t1\t1\txai')
+        self.assertEqual(lines[3], 'A\txai-a\txAI A\txai\t1\t1\txai')
+        self.assertEqual(lines[4], 'A\tag-1\tAntigravity\tantigravity\t1\t1\tantigravity')
+        self.assertIn('H\txai-b\tcooldown\t120\tusage_limit', lines)
+        self.assertIn('H\tag-1\tdisabled_by_provider\t0\tTOS_VIOLATION', lines)
+        self.assertIn('CS\t1', lines)
+        self.assertIn('C\tbuiltin/smart\tSmart\t1\txai/grok-4', lines)
+        self.assertIn('C\tcustom/fast\tFast\t0\tantigravity/gemini-4-neon', lines)
+
+        # Member role projects P\tadmin\t0 and transient /chains error omits CS\t1 so prior chains survive
+        with patch.object(live, 'Connection') as conn, contextlib.redirect_stdout(io.StringIO()) as output:
+            c = conn.return_value
+            c.binding = 'member'
+            c.get.side_effect = [accounts, {'user': {'role': 'member'}}, health, OSError('transient')]
+            live.provider_inventory('member')
+        mem_lines = output.getvalue().splitlines()
+        self.assertIn('P\tadmin\t0', mem_lines)
+        self.assertNotIn('CS\t1', mem_lines)
+
+        # Mutations: reorder, clear cooldown (percent-encoding colons), set default chain
+        with patch.object(live, 'Connection') as conn:
+            c = conn.return_value
+            c.binding = 'thomas'
+            c.request.return_value = []
+            with patch.object(live.sys, 'stdin', io.TextIOWrapper(io.BytesIO(b'xai-a\nxai-b'))):
+                live.mutate('thomas', 'reorder-providers', '')
+            c.request.assert_called_once_with('/api/ai/providers/reorder', body={'ids': ['xai-a', 'xai-b']}, method='POST')
+
+            c.request.reset_mock()
+            live.mutate('thomas', 'clear-provider-health', 'cliproxyapi:openai:abcd')
+            c.request.assert_called_once_with('/api/model-routing/health/cliproxyapi%3Aopenai%3Aabcd/clear', method='POST', body={})
+
+            c.request.reset_mock()
+            c.request.return_value = {'id': 'custom/fast', 'is_default': True}
+            live.mutate('thomas', 'set-default-chain', 'custom/fast')
+            c.request.assert_called_once_with('/api/model-routing/chains/custom%2Ffast', body={'is_default': True}, method='PUT')
+
+        # Resources flow links + throttled 429 summary + pool health/quota projection
+        overview = {
+            'inference': {
+                'current_b_tok_per_h': 1.5,
+                'throttled_429_count': 3,
+                'pools': [{'id': 'p1', 'label': 'Anthropic', 'current_b_tok_per_h': 1.5, 'est_usd_per_h': 20, 'quota_pct_remaining': 45, 'health': 'degraded'}],
+            },
+            'compute': {
+                'active_vcpu': 8,
+                'total_vcpu': 16,
+                'sources': [{'id': 'c1', 'label': 'Boat', 'active_vcpu': 8, 'total_vcpu': 16, 'est_usd_per_h': 1.2, 'health': 'ok'}],
+            },
+            'missions': [{'id': 'm1', 'title': 'Campaign', 'status': 'active', 'vcpu': 8, 'b_tok_per_h': 1.5}],
+            'links': [
+                {'kind': 'inference', 'source_id': 'p1', 'mission_id': 'm1', 'value': 1.5, 'degraded': True},
+                {'kind': 'compute', 'source_id': 'c1', 'mission_id': 'm1', 'value': 8, 'degraded': False},
+            ],
+        }
+        with patch.object(live, 'Connection') as conn, contextlib.redirect_stdout(io.StringIO()) as output:
+            c = conn.return_value
+            c.binding = 'thomas'
+            c.request.return_value = overview
+            live.resource_inventory('thomas', '6h')
+        res_lines = output.getvalue().splitlines()
+        self.assertIn('R\t\tInference · Anthropic\t1.5 B tok/h · $20/h · 45% quota · degraded', res_lines)
+        self.assertIn('F\tinference\tAnthropic\tCampaign\t1.5\t1', res_lines)
+        self.assertIn('F\tcompute\tBoat\tCampaign\t8\t0', res_lines)
+        self.assertIn('S\t3\t1.5\t8\t16', res_lines)
+
     def test_sql_bounds_current_text_and_scopes_reader(self):
         with contextlib.closing(fixture()) as db:
             db.execute("DELETE FROM mission_events WHERE event_type='assistant_message_canonical'")

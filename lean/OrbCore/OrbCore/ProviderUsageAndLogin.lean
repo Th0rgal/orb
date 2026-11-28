@@ -501,17 +501,51 @@ def loadHydratedProviders (store : CoreStore) (workingDir : String)
         | some id, some pt => some (id, pt, (r[2]?.bind String.toNat?).getD 0)
         | _, _ => none)
     | .error _ => pure #[]
-  let savedOrderFor (id pType : String) (fallback : Nat) : Nat :=
-    match orderJv.fieldNat? id with
-    | some p => p
-    | none =>
-      if dbSortOrders.any (fun (_, pt, so) => pt == pType && so > 0) then
-        (dbSortOrders.find? (fun (rid, _, _) => rid == id)).map (·.2.2) |>.getD fallback
-      else fallback
   let authFiles ← scanCliProxyAuthFiles
   let uniquePrefix := fun (file : CliAuthFileInfo) =>
     if !file.prefixId.isEmpty && !file.prefixId.contains '/' &&
         (authFiles.filter (fun f => f.prefixId == file.prefixId)).size == 1 then file.prefixId else ""
+  let maxOrderJvForType (pType : String) : Option Nat := Id.run do
+    let mut best : Option Nat := none
+    let bump (cand : Option Nat) (cur : Option Nat) : Option Nat :=
+      match cand, cur with
+      | some v, some b => some (max v b)
+      | some v, none => some v
+      | none, b => b
+    for p in dbProvs do
+      if p.providerType == pType then best := bump (orderJv.fieldNat? p.id) best
+    for leg in legacyArr do
+      let lid := ((leg.fieldStr? "id").getD "").trimAscii.toString
+      let lt := ((leg.fieldStr? "provider_type").getD "custom").trimAscii.toString
+      if !lid.isEmpty && lt == pType then best := bump (orderJv.fieldNat? lid) best
+    for af in authFiles do
+      let afType := authTypeToProviderType af.authType
+      if afType == pType then
+        best := bump (orderJv.fieldNat? (fileAccountId afType af.fileName)) best
+        if !af.prefixId.isEmpty then best := bump (orderJv.fieldNat? af.prefixId) best
+    return best
+  let maxDbSortOrderForType (pType : String) : Option Nat := Id.run do
+    let mut best : Option Nat := none
+    for (_, pt, so) in dbSortOrders do
+      if pt == pType then
+        best := match best with | some b => some (max b so) | none => some so
+    return best
+  let savedOrderFor (id pType : String) (fallback : Nat) : Nat :=
+    match orderJv.fieldNat? id with
+    | some p => p
+    | none =>
+      let hasPositiveDb := dbSortOrders.any (fun (_, pt, so) => pt == pType && so > 0)
+      match dbSortOrders.find? (fun (rid, _, _) => rid == id) with
+      | some (_, _, dbSo) =>
+        match maxOrderJvForType pType with
+        | some mJv => mJv + 1 + dbSo
+        | none => if hasPositiveDb then dbSo else fallback
+      | none =>
+        match maxOrderJvForType pType, (if hasPositiveDb then maxDbSortOrderForType pType else none) with
+        | some mJv, some mDb => mJv + 1 + mDb + 1 + fallback
+        | some mJv, none => mJv + 1 + fallback
+        | none, some mDb => mDb + 1 + fallback
+        | none, none => fallback
 
   let nowIso := formatEpochIso8601Utc (← nowEpoch)
   -- Accounts added by a member never inherit the operator's credentials: no instance env-key

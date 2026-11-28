@@ -605,4 +605,44 @@ final class OrbSettingsTests: XCTestCase {
         XCTAssertTrue(OrbProviderDirectoryHint.isEnabled(in: defaults))
     }
 
+    func testRoutingHealthClassificationAndBuiltinDeleteGuard() {
+        let unknownHealthy = OrbJSON.object([
+            "account_id": .string("a1"),
+            "is_healthy": .null,
+            "is_degraded": .bool(false),
+            "cooldown_secs_remaining": .number(0),
+        ])
+        XCTAssertFalse(OrbRoutingSettings.isAttentionHealth(unknownHealthy))
+        XCTAssertEqual(OrbRoutingSettings.healthStatusTone(unknownHealthy), "success")
+        XCTAssertEqual(OrbRoutingSettings.healthLine(unknownHealthy), "no requests yet")
+
+        let cooling = OrbJSON.object([
+            "account_id": .string("a2"),
+            "is_healthy": .null,
+            "is_degraded": .bool(true),
+            "cooldown_secs_remaining": .number(90),
+            "parked_reason": .string("usage_limit"),
+        ])
+        XCTAssertTrue(OrbRoutingSettings.isAttentionHealth(cooling))
+        XCTAssertEqual(OrbRoutingSettings.healthStatusTone(cooling), "error")
+        XCTAssertEqual(OrbRoutingSettings.cooldownSecs(cooling), 90)
+        XCTAssertEqual(OrbRoutingSettings.healthLine(cooling), "cooldown 1m 30s · usage_limit")
+
+        let banned = OrbJSON.object([
+            "account_id": .string("a3"),
+            "account_state": .string("disabled_by_provider"),
+            "disabled_by_provider": .bool(true),
+            "disabled_by_provider_message": .string("TOS_VIOLATION"),
+        ])
+        XCTAssertTrue(OrbRoutingSettings.isAttentionHealth(banned))
+        XCTAssertEqual(OrbRoutingSettings.healthStatusTone(banned), "error")
+        XCTAssertEqual(OrbRoutingSettings.healthLine(banned), "disabled by provider · TOS_VIOLATION")
+
+        XCTAssertFalse(OrbRoutingSettings.canDeleteChain("builtin/smart"))
+        XCTAssertTrue(OrbRoutingSettings.canDeleteChain("custom/fast"))
+        XCTAssertFalse(OrbRoutingSettings.canCreateChainID("builtin/spoof"))
+        XCTAssertFalse(OrbRoutingSettings.canCreateChainID("   "))
+        XCTAssertTrue(OrbRoutingSettings.canCreateChainID("fast-fallback"))
+    }
+
 }

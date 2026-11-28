@@ -839,14 +839,84 @@ private def routeSettingsBody (st : DesktopState) (page : AccountRoutePage) (hov
   return WidgetNode.scrollClip (BoxStyle.col 0 |>.withFixedSize width height)
     { offsetY := st.fleetTopSub } content (some fleetViewportId) (hitTestable := false)
 
+private def ordinalRank (n : Nat) : String :=
+  let mod100 := n % 100
+  if mod100 >= 11 && mod100 <= 13 then s!"{n}th"
+  else match n % 10 with
+    | 1 => s!"{n}st"
+    | 2 => s!"{n}nd"
+    | 3 => s!"{n}rd"
+    | _ => s!"{n}th"
+
+private def providerHealthSummary (account : ProviderAccount) : String :=
+  if account.healthState == "disabled_by_provider" then
+    if account.healthDetail.isEmpty then "Disabled by provider"
+    else "Disabled by provider · " ++ account.healthDetail
+  else if account.healthState == "disabled" then "Disabled"
+  else if account.cooldownSecs > 0 then
+    let base := s!"Cooldown · {account.cooldownSecs}s"
+    if account.healthDetail.isEmpty then base else base ++ " · " ++ account.healthDetail
+  else if account.healthState == "needs_reauth" then "Sign in again"
+  else if account.healthState == "degraded" then
+    if account.healthDetail.isEmpty then "Degraded" else "Degraded · " ++ account.healthDetail
+  else if account.globallyEnabled then "Use for my missions"
+  else "Disabled globally"
+
 /-- Give long inventories their full scroll extent while shaping only visible rows. -/
 private def buildLiveInventory (st : DesktopState) (hover : Option WidgetId) (width height : SubPx) : WidgetNode := Id.run do
   let theme := st.theme
+  let pal := theme.palette
   let colW := min (pxToSub 640) (width - pxToSub 24)
   let rowH := pxToSub 60
   let providers := st.screen == .inference
   if providers then
     if let some page := st.accountRoutePage then return routeSettingsBody st page hover width height colW
+  let showTabs := providers && !st.routingChains.isEmpty
+  let tabH := if showTabs then pxToSub 38 else 0
+  let listH := max (pxToSub 60) (height - tabH)
+  let tabBar : List WidgetNode := if !showTabs then [] else
+    let mkTab (id : WidgetId) (label : String) (active : Bool) : WidgetNode :=
+      inventoryTarget theme hover id (colW / 2) tabH
+        (screenTextLine theme (colW / 2) (pxToSub 20) (pxToSub 13) (pxToSub 20)
+          (if active then pal.textPrimary else pal.textSecondary) (if active then "✓ " ++ label else label) (if active then 600 else 400))
+    [WidgetNode.box (BoxStyle.row 0 |>.withFixedSize colW tabH)
+      [mkTab inferenceTabAccountsId "Accounts" (st.inferenceTab != "chains"),
+       mkTab inferenceTabChainsId s!"Chains ({st.routingChains.length})" (st.inferenceTab == "chains")]]
+  if providers && st.inferenceTab == "chains" then
+    if st.providerReadFailed then
+      let failed := WidgetNode.box (BoxStyle.col 0 |>.withAlign .center |>.withJustify .center |>.withFixedSize width listH)
+        [screenTextLine theme colW (pxToSub 20) (pxToSub 13) (pxToSub 20) pal.textSecondary "Could not load accounts. Open Inference to retry."]
+      return WidgetNode.box (BoxStyle.col 0 |>.withAlign .center |>.withFixedSize width height) (tabBar ++ [failed])
+    let chains := st.routingChains
+    let count := chains.length
+    if count == 0 then
+      let empty := WidgetNode.box (BoxStyle.col 0 |>.withAlign .center |>.withJustify .center |>.withFixedSize width listH)
+        [screenTextLine theme colW (pxToSub 20) (pxToSub 13) (pxToSub 20) pal.textSecondary "No routing chains"]
+      return WidgetNode.box (BoxStyle.col 0 |>.withAlign .center |>.withFixedSize width height) (tabBar ++ [empty])
+    let top := min st.fleetTopSub (count * rowH - listH)
+    let first := top / rowH
+    let limit := listH / rowH + 2
+    let spacer := fun n => WidgetNode.box (BoxStyle.col 0 |>.withFixedSize colW (n * rowH)) []
+    let rows := ((chains.drop first).take limit).mapIdx fun i ch =>
+      let idx := first + i
+      let title := if ch.isDefault then ch.name ++ " · Default" else ch.name
+      let detail := if ch.entriesSummary.isEmpty then ch.id else ch.id ++ " · " ++ ch.entriesSummary
+      let actionW := min (pxToSub 96) (colW / 4)
+      let mainRowW := colW - actionW
+      let actionNode := if ch.isDefault then
+          screenTextLine theme actionW (pxToSub 20) (pxToSub 12) (pxToSub 20) pal.textMuted "Default"
+        else if st.providerCanAdmin then
+          inventoryTarget theme hover (routingChainDefaultId idx) actionW rowH
+            (screenTextLine theme actionW (pxToSub 20) (pxToSub 12) (pxToSub 20) pal.textPrimary "Set default" 500)
+        else
+          WidgetNode.box (BoxStyle.row 0 |>.withFixedSize actionW rowH) []
+      WidgetNode.box (BoxStyle.row 0 |>.withFixedSize colW rowH)
+        [buildMachineRow theme mainRowW rowH title detail "" true false, actionNode]
+    let content := WidgetNode.box (BoxStyle.col 0 |>.withAlign .center)
+      ([spacer first] ++ rows ++ [spacer (count - first - rows.length)])
+    let scroller := WidgetNode.scrollClip (BoxStyle.col 0 |>.withFixedSize width listH)
+      { offsetY := top } content (some fleetViewportId) (hitTestable := false)
+    return WidgetNode.box (BoxStyle.col 0 |>.withAlign .center |>.withFixedSize width height) (tabBar ++ [scroller])
   let accounts := st.providers.getD []
   let count := if providers then accounts.length else st.fleetMachines.length
   if count == 0 then
@@ -854,24 +924,49 @@ private def buildLiveInventory (st : DesktopState) (hover : Option WidgetId) (wi
       else if st.providerReadFailed then "Could not load accounts. Open Inference to retry."
       else if st.providers.isNone then "Loading accounts…"
       else "No provider accounts"
-    return WidgetNode.box (BoxStyle.col 0 |>.withAlign .center |>.withJustify .center |>.withFixedSize width height)
-      [screenTextLine theme colW (pxToSub 20) (pxToSub 13) (pxToSub 20) theme.palette.textSecondary message]
-  let top := min st.fleetTopSub (count * rowH - height)
+    let empty := WidgetNode.box (BoxStyle.col 0 |>.withAlign .center |>.withJustify .center |>.withFixedSize width listH)
+      [screenTextLine theme colW (pxToSub 20) (pxToSub 13) (pxToSub 20) pal.textSecondary message]
+    return WidgetNode.box (BoxStyle.col 0 |>.withAlign .center |>.withFixedSize width height) (tabBar ++ [empty])
+  let top := min st.fleetTopSub (count * rowH - listH)
   let first := top / rowH
-  let limit := height / rowH + 2
+  let limit := listH / rowH + 2
   let spacer := fun n => WidgetNode.box (BoxStyle.col 0 |>.withFixedSize colW (n * rowH)) []
   let rows := if providers then ((accounts.drop first).take limit).mapIdx fun i account =>
-      let id := providerWidgetId (first + i)
-      let availability := if account.globallyEnabled then "Use for my missions" else "Disabled globally"
+      let idx := first + i
+      let id := providerWidgetId idx
+      let peers := if account.providerType.isEmpty then [] else accounts.filter (·.providerType == account.providerType)
+      let peerCount := peers.length
+      let peerIdx := (peers.findIdx? (·.id == account.id)).getD 0
+      let title := if peerCount >= 2 then account.name ++ " · " ++ ordinalRank (peerIdx + 1) else account.name
+      let availability := providerHealthSummary account
       let detail := if account.category.isEmpty || account.category == account.name then availability
         else account.category ++ " · " ++ availability
       let preference := if account.userEnabled then "Using" else "Skipped"
+      let canClear := st.providerCanAdmin && (account.cooldownSecs > 0 || account.healthState == "disabled_by_provider")
+      let canUp := peerCount >= 2 && peerIdx > 0
+      let canDown := peerCount >= 2 && peerIdx + 1 < peerCount
+      let moveW := pxToSub 28
+      let clearW := pxToSub 52
       let settingsW := min (pxToSub 84) (colW / 4)
-      let primaryW := colW - settingsW
+      let extraW := (if canUp then moveW else 0) + (if canDown then moveW else 0) + (if canClear then clearW else 0)
+      let primaryW := colW - settingsW - extraW
+      let upBtn := if canUp then
+          [inventoryTarget theme hover (providerMoveUpId idx) moveW rowH
+            (screenTextLine theme moveW (pxToSub 20) (pxToSub 13) (pxToSub 20) pal.textSecondary "↑")]
+        else []
+      let downBtn := if canDown then
+          [inventoryTarget theme hover (providerMoveDownId idx) moveW rowH
+            (screenTextLine theme moveW (pxToSub 20) (pxToSub 13) (pxToSub 20) pal.textSecondary "↓")]
+        else []
+      let clearBtn := if canClear then
+          [inventoryTarget theme hover (providerClearHealthId idx) clearW rowH
+            (screenTextLine theme clearW (pxToSub 20) (pxToSub 12) (pxToSub 20) pal.textPrimary "Clear" 500)]
+        else []
       WidgetNode.box (BoxStyle.row 0 |>.withFixedSize colW rowH)
-        [inventoryTarget theme hover id primaryW rowH (buildMachineRow theme primaryW rowH account.name detail preference true false),
-         inventoryTarget theme hover (providerSettingsId (first + i)) settingsW rowH
-           (screenTextLine theme settingsW (pxToSub 20) (pxToSub 13) (pxToSub 20) theme.palette.textSecondary "Settings ›")]
+        ([inventoryTarget theme hover id primaryW rowH (buildMachineRow theme primaryW rowH title detail preference true false)] ++
+         upBtn ++ downBtn ++ clearBtn ++
+         [inventoryTarget theme hover (providerSettingsId idx) settingsW rowH
+           (screenTextLine theme settingsW (pxToSub 20) (pxToSub 13) (pxToSub 20) pal.textSecondary "Settings ›")])
     else ((st.fleetMachines.drop first).take limit).mapIdx fun i m =>
       let detail := String.intercalate " · " ([m.roleLabel, m.cpuRamSpec].filter (!·.isEmpty))
       let rightLabel := if st.selectedMachineId == m.machineId then "Selected · " ++ m.state else m.state
@@ -879,8 +974,10 @@ private def buildLiveInventory (st : DesktopState) (hover : Option WidgetId) (wi
       inventoryTarget theme hover (liveMachineWidgetId (first + i)) colW rowH row
   let content := WidgetNode.box (BoxStyle.col 0 |>.withAlign .center)
     ([spacer first] ++ rows ++ [spacer (count - first - rows.length)])
-  return WidgetNode.scrollClip (BoxStyle.col 0 |>.withFixedSize width height)
+  let scroller := WidgetNode.scrollClip (BoxStyle.col 0 |>.withFixedSize width listH)
     { offsetY := top } content (some fleetViewportId) (hitTestable := false)
+  if tabBar.isEmpty then return scroller
+  else return WidgetNode.box (BoxStyle.col 0 |>.withAlign .center |>.withFixedSize width height) (tabBar ++ [scroller])
 
 /-- Build the Settings (`Account` tab) screen (`06_settings_general`) matching the `600 px` SolidJS column. -/
 def buildSettingsGeneralBody (st : DesktopState) (mainW bodyH : SubPx) : WidgetNode :=
@@ -1343,15 +1440,58 @@ def buildDesktopScreen (st : DesktopState) (availW availH : SubPx)
           [WidgetNode.box (BoxStyle.row 0) pager] ++ actions ++ errors)
       return WidgetNode.box (BoxStyle.col 0 |>.withFixedSize mainW availH |>.withBg mainFill) [headerNode, body]
     | .resources => Id.run do
-      let w := min (pxToSub 640) (mainW - pxToSub 24)
+      let toolbarW := min (pxToSub 640) (mainW - pxToSub 24)
+      let w := min (pxToSub 920) (mainW - pxToSub 24)
       let line := fun (width : SubPx) (t : String) =>
         screenTextLine theme width (pxToSub 32) (pxToSub 14) (pxToSub 24) pal.textPrimary t
       let button := fun id width title =>
         inventoryTarget theme hoverRow id width (pxToSub 32) (line width title)
       let ranges := resourceRanges.mapIdx fun i range =>
-        button (955 + i) (w / 7) (if st.resourceRange == range then "✓ " ++ range else range)
-      let toolbar := WidgetNode.box (BoxStyle.row 0) (ranges ++ [button 945 (2 * w / 7) "Refresh"])
-      let rows := st.resourceRows.getD []
+        button (955 + i) (toolbarW / 7) (if st.resourceRange == range then "✓ " ++ range else range)
+      let toolbar := WidgetNode.box (BoxStyle.row 0) (ranges ++ [button 945 (2 * toolbarW / 7) "Refresh"])
+      let lensBar := WidgetNode.box (BoxStyle.row 0)
+        [button resourceLensAllId (w / 3) (if st.resourceLens == "all" then "✓ All" else "All"),
+         button resourceLensInferenceId (w / 3) (if st.resourceLens == "inference" then "✓ Inference" else "Inference"),
+         button resourceLensComputeId (w / 3) (if st.resourceLens == "compute" then "✓ Compute" else "Compute")]
+      let summaryNodes : List WidgetNode := match st.resourceSummary with
+        | none => []
+        | some s =>
+          let thr := if s.throttled429 > 0 then s!" · {s.throttled429} 429s" else ""
+          [screenTextLine theme w (pxToSub 22) (pxToSub 12) (pxToSub 18) pal.textSecondary
+            s!"{s.bTokPerH} B tok/h · {s.activeVcpu}/{s.totalVcpu} vCPU{thr}"]
+      let visibleFlows := st.resourceFlows.filter fun f =>
+        st.resourceLens == "all" || f.lens == st.resourceLens
+      let flowCard : List WidgetNode := if visibleFlows.isEmpty then [] else Id.run do
+        let parseFlowMillis (s : String) : Nat :=
+          match s.splitOn "." with
+          | [w] => (w.toNat?.getD 0) * 1000
+          | [w, f] =>
+            let whole := w.toNat?.getD 0
+            let frac3 := ((f ++ "000").take 3).toString.toNat?.getD 0
+            whole * 1000 + frac3
+          | _ => 0
+        let shown := visibleFlows.take 4
+        let maxVal := shown.foldl (fun acc f => max acc (parseFlowMillis f.value)) 1
+        let barColor (f : ResourceFlowLink) : Color :=
+          if f.degraded then 0xD97706FF
+          else if f.lens == "compute" then 0x3B82F6FF
+          else 0x8B5CF6FF
+        let maxBarW := w - pxToSub 24
+        let flowRows := shown.map fun f =>
+          let unit := if f.lens == "compute" then "vCPU" else "B tok/h"
+          let tag := if f.degraded then " · degraded" else ""
+          let caption := s!"{f.source} → {f.target} · {f.value} {unit}{tag}"
+          let v := max 1 (parseFlowMillis f.value)
+          let barW := max (pxToSub 24) ((maxBarW * v) / maxVal)
+          WidgetNode.box (BoxStyle.col (pxToSub 2) |>.withFixedSize maxBarW (pxToSub 26))
+            [screenTextLine theme maxBarW (pxToSub 16) (pxToSub 11) (pxToSub 16) pal.textPrimary caption,
+             WidgetNode.rrect (BoxStyle.row 0 |>.withFixedSize barW (pxToSub 6))
+               (barColor f) (CornerRadii.uniform (pxToSub 3)) BorderStyle.none []]
+        return [WidgetNode.rrect
+          (BoxStyle.col (pxToSub 6) |>.withPadding (Edges.all (pxToSub 10)) |>.withFixedSize w (pxToSub (20 + flowRows.length * 32)))
+          pal.elevatedSurface (CornerRadii.uniform (pxToSub 8)) (BorderStyle.uniform theme.borderWidth pal.borderSubtle)
+          flowRows]
+      let rows := filterResourceRowsByLens (st.resourceRows.getD []) st.resourceLens
       let controls := WidgetNode.box (BoxStyle.row (pxToSub 6))
         [button 946 (w / 3) "Previous", line (w / 4) s!"{st.resourcePage + 1} / {(rows.length + 3) / 4}",
          button 947 (w / 3) "Next"]
@@ -1362,8 +1502,8 @@ def buildDesktopScreen (st : DesktopState) (availW availH : SubPx)
       let content := if st.resourceFailed then [line w "Could not load resources. Refresh to retry."]
         else if st.resourceRows.isNone then [line w "Loading resources…"]
         else if rows.isEmpty then [line w s!"No resource usage · {st.resourceRange}"]
-        else items ++ (if rows.length > 4 then [controls] else [])
-      return WidgetNode.box (BoxStyle.col 0 |>.withAlign .center |>.withFixedSize mainW availH |>.withBg mainFill) (headerNode :: toolbar :: content)
+        else summaryNodes ++ flowCard ++ items ++ (if rows.length > 4 then [controls] else [])
+      return WidgetNode.box (BoxStyle.col 0 |>.withAlign .center |>.withFixedSize mainW availH |>.withBg mainFill) (headerNode :: toolbar :: lensBar :: content)
     | .inbox => Id.run do
       let line := fun (w : SubPx) (text : String) => screenTextLine theme w (pxToSub 32) (pxToSub 14) (pxToSub 24) pal.textPrimary text
       let button := fun (id : Nat) (width : SubPx) (title : String) =>

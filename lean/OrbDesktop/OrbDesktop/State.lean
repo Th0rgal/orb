@@ -431,14 +431,51 @@ structure ProviderAccount where
   userEnabled : Bool
   globallyEnabled : Bool
   providerType : String := ""
+  healthState : String := ""
+  cooldownSecs : Nat := 0
+  healthDetail : String := ""
   deriving BEq, Repr, Inhabited
 
-def providerWidgetId (index : Nat) : WidgetId := 6000000 + index
+structure RoutingChainSummary where
+  id : String
+  name : String
+  isDefault : Bool := false
+  entriesSummary : String := ""
+  deriving BEq, Repr, Inhabited
 
-def providerSettingsId (index : Nat) : WidgetId := 7000000 + index
-def providerRouteId (index : Nat) : WidgetId := 8000000 + index
+def inferenceTabAccountsId : WidgetId := 5999996
+def inferenceTabChainsId : WidgetId := 5999997
 def providersBackId : WidgetId := 5999998
 def providersRetryId : WidgetId := 5999999
+def providerWidgetId (index : Nat) : WidgetId := 6000000 + index
+def providerMoveUpId (index : Nat) : WidgetId := 6500000 + index
+def providerMoveDownId (index : Nat) : WidgetId := 6750000 + index
+def providerSettingsId (index : Nat) : WidgetId := 7000000 + index
+def providerClearHealthId (index : Nat) : WidgetId := 7500000 + index
+def providerRouteId (index : Nat) : WidgetId := 8000000 + index
+def routingChainDefaultId (index : Nat) : WidgetId := 8500000 + index
+
+def resourceLensAllId : WidgetId := 948
+def resourceLensInferenceId : WidgetId := 949
+def resourceLensComputeId : WidgetId := 954
+
+/-- Compute the reordered IDs of `account`'s provider group when moving it by `delta` (`-1` or `1`),
+    mirroring `moveAccount` in `orb/src/accountOrder.ts`. -/
+def moveProviderPeerIds (accounts : List ProviderAccount) (account : ProviderAccount) (moveUp : Bool) : Option (List String) := Id.run do
+  let peers := accounts.filter (·.providerType == account.providerType) |>.map (·.id)
+  let some idx := peers.findIdx? (· == account.id) | return none
+  if moveUp then
+    if idx == 0 then return none
+    let before := peers.take (idx - 1)
+    let prev := peers[idx - 1]!
+    let after := peers.drop (idx + 1)
+    return some (before ++ [account.id, prev] ++ after)
+  else
+    if idx + 1 >= peers.length then return none
+    let before := peers.take idx
+    let next := peers[idx + 1]!
+    let after := peers.drop (idx + 2)
+    return some (before ++ [next, account.id] ++ after)
 
 structure AccountRouteOption where
   action : String
@@ -464,6 +501,28 @@ structure ResourceRow where
   usage : String
   deriving BEq, Repr, Inhabited
 
+structure ResourceFlowLink where
+  lens : String
+  source : String
+  target : String
+  value : String
+  degraded : Bool := false
+  deriving BEq, Repr, Inhabited
+
+structure ResourceSummary where
+  throttled429 : Nat := 0
+  bTokPerH : String := "0"
+  activeVcpu : String := "0"
+  totalVcpu : String := "0"
+  deriving BEq, Repr, Inhabited
+
+def filterResourceRowsByLens (rows : List ResourceRow) (lens : String) : List ResourceRow :=
+  if lens == "inference" then
+    rows.filter fun r => r.title.startsWith "Inference ·" || r.title.startsWith "Mission ·"
+  else if lens == "compute" then
+    rows.filter fun r => r.title.startsWith "Compute ·" || r.title.startsWith "Mission ·"
+  else rows
+
 structure InboxItem where
   mission : String
   stamp : Nat
@@ -477,6 +536,9 @@ inductive LiveWrite where
   | cloudCancel (mission : String)
   | inboxRead (item : InboxItem) (openItem : Bool)
   | providerPreference (account : String) (enabled : Bool)
+  | providerReorder (ids : List String)
+  | providerClearHealth (account : String)
+  | chainSetDefault (chainId : String)
   | create
   | send (mission text : String)
   | stop (mission : String)
@@ -599,6 +661,9 @@ structure DesktopState where
   catalogRevision : Nat := 0
   providers : Option (List ProviderAccount) := none
   providerReadFailed : Bool := false
+  providerCanAdmin : Bool := false
+  routingChains : List RoutingChainSummary := []
+  inferenceTab : String := "accounts"
   accountRoutePage : Option AccountRoutePage := none
   projectMemberships : List (String × List String) := []
   expandedProjects : List String := []
@@ -622,6 +687,9 @@ structure DesktopState where
   cloudFailed : Bool := false
   cloudPage : Nat := 0
   resourceRows : Option (List ResourceRow) := none
+  resourceFlows : List ResourceFlowLink := []
+  resourceSummary : Option ResourceSummary := none
+  resourceLens : String := "all"
   resourceFailed : Bool := false
   resourcePage : Nat := 0
   resourceRange : String := "6h"
@@ -1657,7 +1725,7 @@ def DesktopState.hoverTarget (st : DesktopState) (hit : Option WidgetId) : Optio
   else if st.screen == .machinesFleet && id >= liveMachineWidgetId 0 && id < 600000 then some id
   else if st.screen == .cloud && id >= 960 && id < 972 then some id
   else if st.screen == .resources && id >= 945 && id < 960 then some id
-  else if st.screen == .inference && id >= providersBackId then some id else st.sidebarHoverRow hit
+  else if st.screen == .inference && id >= inferenceTabAccountsId then some id else st.sidebarHoverRow hit
 
 def DesktopState.sidebarHoverDamage (st : DesktopState) (regions : List (WidgetId × Rect)) (scale : Nat)
     (previous next : Option WidgetId) : Damage := Id.run do
@@ -2163,8 +2231,8 @@ def stepDesktopEvent (scale120 : Nat) (viewport : Rect) (st : DesktopState) (ev 
             imeResetGen := if sameDraftSession then st.imeResetGen else next.imeResetGen }
         else { next with draftProject := "" }
       let next := if navId == 111 then next.openCloud "" else next
-      let next := if navId == 114 then { next with resourceRows := none, resourceFailed := false, resourcePage := 0 } else next
-      let next := if navId == 113 then { next with providers := none, providerReadFailed := false } else next
+      let next := if navId == 114 then { next with resourceRows := none, resourceFlows := [], resourceSummary := none, resourceFailed := false, resourcePage := 0 } else next
+      let next := if navId == 113 then { next with providers := none, providerReadFailed := false, routingChains := [], inferenceTab := "accounts" } else next
       return ({ next with sidebarRows := next.sidebarRows.map fun row => { row with selected := row.widgetId == navId } }, some viewport)
     if st.screen == .inference then
       if let some page := st.accountRoutePage then
@@ -2172,15 +2240,39 @@ def stepDesktopEvent (scale120 : Nat) (viewport : Rect) (st : DesktopState) (ev 
           return ({ st with accountRoutePage := none, fleetTopSub := page.previousTop, writeError := "" }, some viewport)
         if navId == providersRetryId && page.failed then
           return ({ st with accountRoutePage := some { page with options := none, pending := none, polling := false, failed := false }, writeError := "" }, some viewport)
-        if navId >= providerRouteId 0 && !page.failed && page.pending.isNone then
+        if navId >= providerRouteId 0 && navId < routingChainDefaultId 0 && !page.failed && page.pending.isNone then
           if let some row := (page.options.getD [])[navId - providerRouteId 0]? then
             if row.action == "refresh" then
               return ({ st with accountRoutePage := some { page with options := none, polling := false }, writeError := "" }, some viewport)
             if row.action == "vpn" || row.action == "routers" then
               return ({ st with accountRoutePage := some { page with pending := some row, polling := false }, writeError := "" }, some viewport)
-      else if navId >= providerSettingsId 0 then
-        if let some account := (st.providers.getD [])[navId - providerSettingsId 0]? then
-          return ({ st with accountRoutePage := some { account, previousTop := st.fleetTopSub }, fleetTopSub := 0, writeError := "" }, some viewport)
+      else
+        if navId == inferenceTabAccountsId then
+          return ({ st with inferenceTab := "accounts", fleetTopSub := 0, writeError := "" }, some viewport)
+        if navId == inferenceTabChainsId then
+          return ({ st with inferenceTab := "chains", fleetTopSub := 0, writeError := "" }, some viewport)
+        if navId >= routingChainDefaultId 0 then
+          if st.providerCanAdmin then
+            if let some chain := st.routingChains[navId - routingChainDefaultId 0]? then
+              if !chain.isDefault then
+                return ({ st with writeRequest := some (.chainSetDefault chain.id) }, none)
+        if navId >= providerClearHealthId 0 && navId < providerRouteId 0 then
+          if st.providerCanAdmin then
+            if let some account := (st.providers.getD [])[navId - providerClearHealthId 0]? then
+              return ({ st with writeRequest := some (.providerClearHealth account.id) }, none)
+        if navId >= providerSettingsId 0 && navId < providerClearHealthId 0 then
+          if let some account := (st.providers.getD [])[navId - providerSettingsId 0]? then
+            return ({ st with accountRoutePage := some { account, previousTop := st.fleetTopSub }, fleetTopSub := 0, writeError := "" }, some viewport)
+        if navId >= providerMoveDownId 0 && navId < providerSettingsId 0 then
+          let accounts := st.providers.getD []
+          if let some account := accounts[navId - providerMoveDownId 0]? then
+            if let some ids := moveProviderPeerIds accounts account false then
+              return ({ st with writeRequest := some (.providerReorder ids) }, none)
+        if navId >= providerMoveUpId 0 && navId < providerMoveDownId 0 then
+          let accounts := st.providers.getD []
+          if let some account := accounts[navId - providerMoveUpId 0]? then
+            if let some ids := moveProviderPeerIds accounts account true then
+              return ({ st with writeRequest := some (.providerReorder ids) }, none)
     if st.screen == .cloud then
       if st.cloudCanCreate then
         let projects := st.cloudProjects
@@ -2217,11 +2309,17 @@ def stepDesktopEvent (scale120 : Nat) (viewport : Rect) (st : DesktopState) (ev 
       if ev matches .composerReturn .. then return (st, none)
     if st.screen == .resources then
       if navId == 945 then
-        return ({ st with resourceRows := none, resourceFailed := false, resourcePage := 0 }, some viewport)
+        return ({ st with resourceRows := none, resourceFlows := [], resourceSummary := none, resourceFailed := false, resourcePage := 0 }, some viewport)
+      if navId == resourceLensAllId then
+        return ({ st with resourceLens := "all", resourcePage := 0 }, some viewport)
+      if navId == resourceLensInferenceId then
+        return ({ st with resourceLens := "inference", resourcePage := 0 }, some viewport)
+      if navId == resourceLensComputeId then
+        return ({ st with resourceLens := "compute", resourcePage := 0 }, some viewport)
       if navId >= 955 && navId < 960 then
         let range := resourceRanges.getD (navId - 955) "6h"
-        return ({ st with resourceRange := range, resourceRows := none, resourceFailed := false, resourcePage := 0 }, some viewport)
-      let rows := st.resourceRows.getD []
+        return ({ st with resourceRange := range, resourceRows := none, resourceFlows := [], resourceSummary := none, resourceFailed := false, resourcePage := 0 }, some viewport)
+      let rows := filterResourceRowsByLens (st.resourceRows.getD []) st.resourceLens
       if navId == 946 || (ev matches .key 0xff55 0 .pressed) then
         return ({ st with resourcePage := st.resourcePage - 1 }, some viewport)
       if navId == 947 || (ev matches .key 0xff56 0 .pressed) then
@@ -2244,7 +2342,7 @@ def stepDesktopEvent (scale120 : Nat) (viewport : Rect) (st : DesktopState) (ev 
       match ev with
       | .text _ | .imeBatch .. | .preedit .. | .composerReturn .. => return (st, none)
       | _ => pure ()
-    if st.screen == .inference && st.accountRoutePage.isNone && navId >= providerWidgetId 0 then
+    if st.screen == .inference && st.accountRoutePage.isNone && navId >= providerWidgetId 0 && navId < providerMoveUpId 0 then
       if let some account := (st.providers.getD [])[navId - providerWidgetId 0]? then
         return ({ st with writeRequest := some (.providerPreference account.id (!account.userEnabled)) }, none)
     if let .composerReturn shift := ev then
