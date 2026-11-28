@@ -1886,7 +1886,6 @@ private def isMissionOwnedChain
   let defaultChainId? := (chains.find? (·.isDefault)).map (·.id)
   let effMissionModel :=
     if !rawMissionModel.isEmpty then rawMissionModel
-    else if bLow == "opencode" then defaultChainId?.getD "builtin/smart"
     else if bLow == "codex" then defaultCodexModel
     else ""
   if effMissionModel.isEmpty then
@@ -2207,13 +2206,23 @@ private def handleProxyRequest (st : CoreAppState) (req : HttpRequest) (cleanPat
   if !headersAlreadyCommitted && plan.eligible.isEmpty then
     stopMissionTurnForUnavailableChain st stopMid? chains cleanPath activeChain.id plan.cooling nowEpochSec
     if !plan.cooling.isEmpty then
-      if plan.allUsageLimited then
-        let limit := (soonestCooldown? plan.cooling).getD
-          { accountId := "", untilEpoch := nowEpochSec + 60, reason := .usageLimit, label := "" }
-        let reply := usageLimitReply activeChain.id limit nowEpochSec
-        return mkJsonHdr reply.status reply.body reply.headers
-      let retryAfter := (plan.retryAfterSecs? nowEpochSec).getD 60
-      let reply := cooldownReply activeChain.id retryAfter
+      let coolTarget? := activeChain.targets[0]?
+      let coolProv := (coolTarget?.map (·.provider)).getD ""
+      let coolAcct := (plan.cooling[0]?.map (·.accountId)).orElse (fun _ => coolTarget?.map (·.accountId)) |>.getD ""
+      let coolModel := (coolTarget?.map (·.modelId)).filter (!·.isEmpty) |>.getD rawRequestedModel
+      let (reply, coolStatus) :=
+        if plan.allUsageLimited then
+          let limit := (soonestCooldown? plan.cooling).getD
+            { accountId := "", untilEpoch := nowEpochSec + 60, reason := .usageLimit, label := "" }
+          (usageLimitReply activeChain.id limit nowEpochSec, "rate_limited_or_quota")
+        else
+          let retryAfter := (plan.retryAfterSecs? nowEpochSec).getD 60
+          (cooldownReply activeChain.id retryAfter, "model_cooldown")
+      discard <| execParamQuery st.store.missionsDb
+        ("INSERT INTO proxy_outcomes(timestamp,chain_id,provider,account_id,model,requested_model,status,http_status,retries) " ++
+         "VALUES(?1,?2,?3,?4,?5,?6,?7,?8,0);")
+        #[formatEpochIso8601Utc nowEpochSec, (if routeKind == "chain" then activeChain.id else routeKind),
+          coolProv, coolAcct, coolModel, rawRequestedModel, coolStatus, toString reply.status]
       return mkJsonHdr reply.status reply.body reply.headers
   let effectiveChain ←
     if expected?.isSome then
@@ -2378,11 +2387,21 @@ private def handleProxyRequest (st : CoreAppState) (req : HttpRequest) (cleanPat
             discard <| writeReceipt st.cfg.workingDir mid {
               revision := sel.revision, requestedModel := requestedModel, program := confirmed, model := model
             }
-  let servedTarget? := dispatchChain.targets.find? (fun t => t.accountId == out.selectedAccount)
+  let servedTarget? := (dispatchChain.targets.find? (fun t => t.accountId == out.selectedAccount)).orElse
+    (fun _ => dispatchChain.targets[0]?)
   let effectiveModel := (servedTarget?.map (·.modelId)).filter (!·.isEmpty) |>.getD rawRequestedModel
+  let rawOutBodyForStatus := String.fromUTF8? out.body |>.getD ""
   let initOutcomeStatus :=
     if out.status ≥ 200 && out.status < 300 then "ok"
     else if out.exhaustionClass == "upstream_idle_timeout" then "upstream_idle_timeout"
+    else if out.exhaustionClass == "model_cooldown" ||
+            (out.status == 503 && (modelCooldownHint rawOutBodyForStatus || lookupHeader? out.headers "x-orb-retry-reason" == some "model_cooldown")) then
+      "model_cooldown"
+    else if out.exhaustionClass == "rate_limited_or_quota" || out.status == 429 ||
+            (out.status == 503 && quotaHint rawOutBodyForStatus) then
+      "rate_limited_or_quota"
+    else if out.status == 503 && cooldownReasonFor out.status rawOutBodyForStatus == some .overloaded then
+      "overloaded"
     else "error"
   let outcomeId? ← match ← execParamQuery st.store.missionsDb
       ("INSERT INTO proxy_outcomes(timestamp,chain_id,provider,account_id,model,requested_model,status,http_status,retries) " ++
@@ -3837,7 +3856,10 @@ private def parseGoalApprovalAction? (answers : JVal) : Option String :=
 private def collectResourcesPoolHealthHints
     (st : CoreAppState) (nowEpochSec : UInt64) : IO (Array InferencePoolHealthHint) := do
   let mut hints : Array InferencePoolHealthHint := #[]
-  let dbProvs ← listAIProviders st.store
+  let hps ← loadHydratedProviders st.store st.cfg.workingDir
+  let enabledHps := hps.filter (·.enabled)
+  let poolSlugForHp (hp : HydratedProvider) : String :=
+    if hp.providerType == "custom" then s!"custom:{hp.id}" else hp.providerType
   let trackedCooldowns ← match st.healthTracker? with
     | some ht => snapshotActiveHealthCooldowns ht nowEpochSec
     | none => pure #[]
@@ -3848,43 +3870,58 @@ private def collectResourcesPoolHealthHints
   let usageCached ← match st.providerHub? with
     | some hub => hub.mu.atomically (do return (← get).usageEntries)
     | none => pure #[]
-  let providerSlugFor (acctId : String) : String :=
-    match dbProvs.find? (fun p => p.id == acctId) with
-    | some p => p.providerType
-    | none =>
-      if acctId.startsWith "cliproxyapi:" then
-        let rest := (acctId.drop 12).toString
-        (rest.splitOn ":").headD rest
-      else (acctId.splitOn ":").headD acctId
+  let hpMatchesAcct (hp : HydratedProvider) (acctId : String) : Bool :=
+    acctId == hp.id ||
+    (!hp.modelPrefix.isEmpty && acctId == hp.modelPrefix) ||
+    (hp.providerType == "custom" && acctId == s!"custom:{hp.id}") ||
+    (hp.hasOAuth && (acctId == s!"cliproxyapi:{hp.providerType}" || acctId.startsWith s!"cliproxyapi:{hp.providerType}:"))
+  let enabledSlugsForAccount (acctId : String) : Array String :=
+    let matchedAll := hps.filter (fun hp => hpMatchesAcct hp acctId)
+    if !matchedAll.isEmpty then
+      (matchedAll.filter (·.enabled)).map poolSlugForHp
+    else if acctId.startsWith "cliproxyapi:" then
+      let rest := (acctId.drop 12).toString
+      let seg := (rest.splitOn ":").headD rest
+      let typed := hps.filter (fun hp => hp.providerType == seg)
+      if typed.isEmpty || typed.any (·.enabled) then #[seg] else #[]
+    else
+      let seg := (acctId.splitOn ":").headD acctId
+      if acctId.startsWith "custom:" then #[acctId] else #[seg]
   for did in disabledIds do
-    hints := hints.push { provider := providerSlugFor did, health := "disabled_by_provider" }
+    for slug in enabledSlugsForAccount did do
+      hints := hints.push { provider := slug, health := "disabled_by_provider" }
   for cd in rawCooldowns do
     if cd.remainingSecs nowEpochSec > 0 then
-      hints := hints.push {
-        provider := providerSlugFor cd.accountId
-        health := "cooldown"
-        resetAt? := some (formatEpochIso8601Utc cd.untilEpoch)
-      }
+      for slug in enabledSlugsForAccount cd.accountId do
+        hints := hints.push {
+          provider := slug
+          health := "cooldown"
+          resetAt? := some (formatEpochIso8601Utc cd.untilEpoch)
+        }
   if let some ht := st.healthTracker? then
-    for p in dbProvs do
-      let rec ← lookupAccountHealthRecord ht p.id
-      if rec.disabledByProvider then
-        hints := hints.push { provider := p.providerType, health := "disabled_by_provider" }
-      else if rec.parkedQuota || rec.poisonedSub || rec.transientStreak > 0 || rec.consecutiveTrips > 0 then
-        hints := hints.push { provider := p.providerType, health := "degraded" }
+    for hp in enabledHps do
+      let slug := poolSlugForHp hp
+      let keys := #[hp.id] ++ (if hp.modelPrefix.isEmpty then #[] else #[hp.modelPrefix])
+      for k in keys do
+        let rec ← lookupAccountHealthRecord ht k
+        if rec.disabledByProvider then
+          hints := hints.push { provider := slug, health := "disabled_by_provider" }
+        else if rec.parkedQuota || rec.poisonedSub || rec.transientStreak > 0 || rec.consecutiveTrips > 0 then
+          hints := hints.push { provider := slug, health := "degraded" }
   for u in usageCached do
-    let opt := u.payload.fieldOrNull "optimize"
-    let wins := (opt.fieldArr? "windows").getD #[]
-    let pKey? := opt.fieldStr? "primary_window"
-    let chosen? := (pKey?.bind fun pk => wins.find? (fun w => w.fieldStr? "key" == some pk)).orElse (fun _ => wins[0]?)
-    if let some pct := chosen?.bind (fun w => w.field? "pct_remaining") then
-      let reset? := chosen?.bind (fun w => w.fieldStr? "reset_at")
-      hints := hints.push {
-        provider := providerSlugFor u.providerId
-        health := "ok"
-        quotaPctRemaining? := some pct
-        resetAt? := reset?
-      }
+    if let some hp := enabledHps.find? (fun p => p.id == u.providerId) then
+      let opt := u.payload.fieldOrNull "optimize"
+      let wins := (opt.fieldArr? "windows").getD #[]
+      let pKey? := opt.fieldStr? "primary_window"
+      let chosen? := (pKey?.bind fun pk => wins.find? (fun w => w.fieldStr? "key" == some pk)).orElse (fun _ => wins[0]?)
+      if let some pct := chosen?.bind (fun w => w.field? "pct_remaining") then
+        let reset? := chosen?.bind (fun w => w.fieldStr? "reset_at")
+        hints := hints.push {
+          provider := poolSlugForHp hp
+          health := "ok"
+          quotaPctRemaining? := some pct
+          resetAt? := reset?
+        }
   return hints
 
 set_option maxHeartbeats 1600000 in

@@ -2261,7 +2261,18 @@ private def v2RoutingEndToEndContract
     let .ok noModelResp ← dispatchCoreRequest v2App noModelReq now | throw (IO.userError "v2 no-model unexpected upgrade")
     if noModelResp.status != 200 || (← tried.get) != #[acctB] then
       failures := failures.push s!"v2: request omitting model must route to custom default chain ({acctB}), got status={noModelResp.status} tried={← tried.get}"
-    -- Verify `isMissionOwnedChain` stops a model-less running mission routed to custom `is_default` chain.
+    -- Verify `rewriteTargetModelBody` injects `"model"` when caller omits `"model"` (both direct and narrowed OAuth prefix).
+    let rewrittenDirect := String.fromUTF8! (rewriteTargetModelBody
+      { accountId := acctB, provider := "xai", baseUrl := "https://api.x.ai/v1", apiKey := "k", modelId := "grok-4" }
+      noModelBody.toUTF8)
+    let rewrittenOAuth := String.fromUTF8! (rewriteTargetModelBody
+      { accountId := "oa-2", provider := "openai", baseUrl := "http://127.0.0.1:8317/v1", apiKey := "k", modelId := "orb-oa-2/gpt-6.1-sol" }
+      noModelBody.toUTF8)
+    if (rewrittenDirect.splitOn "\"model\":\"grok-4\"").length <= 1 ||
+       (rewrittenOAuth.splitOn "\"model\":\"orb-oa-2/gpt-6.1-sol\"").length <= 1 then
+      failures := failures.push s!"v2: rewriteTargetModelBody must inject model on model-less body: direct={rewrittenDirect} oauth={rewrittenOAuth}"
+    -- Verify `isMissionOwnedChain` stops BOTH a model-less `claudecode` mission on custom `is_default`
+    -- AND a model-less `opencode` mission hitting `"builtin/smart"` while custom chain is `is_default`.
     let defMid := "m-v2-custom-default-stop"
     let defOwnerUid := match ← execParamQuery store.missionsDb "SELECT id FROM users WHERE role='admin' LIMIT 1;" #[] with
       | .ok rs => (rs[1]?.bind (·[0]?)).getD app.bootstrapAdminId
@@ -2289,9 +2300,41 @@ private def v2RoutingEndToEndContract
     let defTermReason := match ← execParamQuery store.missionsDb "SELECT terminal_reason FROM mission_runs WHERE mission_id=?1;" #[defMid] with
       | .ok rs => (rs[1]?.bind (·[0]?)).getD ""
       | .error _ => ""
+    -- Model-less `opencode` mission hitting `builtin/smart` while `customChainId` is `is_default`:
+    let ocMid := "m-v2-opencode-smart-stop"
+    discard <| execParamQuery store.missionsDb
+      ("INSERT INTO missions(id,title,status,backend,model_override,workspace_id,owner_user_id,created_at,updated_at) " ++
+       "VALUES(?1,'V2 OpenCode Stop','active','opencode','','ws-v2',?2,?3,?3);")
+      #[ocMid, defOwnerUid, nowIsoDef]
+    discard <| execParamQuery store.missionsDb
+      "INSERT INTO mission_runs(id,mission_id,generation,execution_state,owner_actor_id,terminal_reason,updated_at) VALUES(?1,?2,1,'running','v2-test','',?3);"
+      #[s!"run-{ocMid}", ocMid, nowIsoDef]
+    let .ok ocTok ← mintMissionProxyToken store ocMid defOwnerUid (now + 3600)
+      | throw (IO.userError "v2 opencode mintMissionProxyToken failed")
+    let ocSmartChain : RoutingChain := {
+      id := "builtin/smart", name := "Smart", isDefault := false,
+      targets := #[
+        { accountId := acctB, provider := "xai", baseUrl := "https://api.x.ai/v1", apiKey := "k", modelId := "grok-4" }
+      ]
+    }
+    let savedChainsOc ← v2App.chainsRef.get
+    v2App.chainsRef.set (savedChainsOc.filter (·.id != "builtin/smart") |>.push ocSmartChain)
+    let ocBody := "{\"model\":\"builtin/smart\",\"messages\":[]}"
+    let ocRaw := s!"POST /v1/chat/completions HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {ocTok}\r\nContent-Length: {ocBody.utf8ByteSize}\r\n\r\n{ocBody}"
+    let .ok ocReq := parseRequest ocRaw.toUTF8 none | throw (IO.userError "v2 opencode stop parse failed")
+    let .ok ocResp ← dispatchCoreRequest v2App ocReq now | throw (IO.userError "v2 opencode stop unexpected upgrade")
+    v2App.chainsRef.set savedChainsOc
+    let ocMissionStatus := match ← execParamQuery store.missionsDb "SELECT status FROM missions WHERE id=?1;" #[ocMid] with
+      | .ok rs => (rs[1]?.bind (·[0]?)).getD ""
+      | .error _ => ""
+    let ocTermReason := match ← execParamQuery store.missionsDb "SELECT terminal_reason FROM mission_runs WHERE mission_id=?1;" #[ocMid] with
+      | .ok rs => (rs[1]?.bind (·[0]?)).getD ""
+      | .error _ => ""
     cooldownsRef.set #[]
     if defProxyResp.status != 429 || defMissionStatus != "interrupted" || defTermReason != "remote_quota" then
       failures := failures.push s!"v2: custom is_default chain must stop model-less mission with remote_quota, got http={defProxyResp.status} status={defMissionStatus} reason={defTermReason}"
+    if ocResp.status != 429 || ocMissionStatus != "interrupted" || ocTermReason != "remote_quota" then
+      failures := failures.push s!"v2: model-less opencode mission hitting builtin/smart while custom chain is default must stop with remote_quota, got http={ocResp.status} status={ocMissionStatus} reason={ocTermReason}"
 
     -- 7) Multiple accounts added AFTER reorder must preserve insertion `sort_order` after reordered
     --    peers even when their IDs sort in reverse ASCII order, and unranked sidecar files must not
@@ -2394,24 +2437,43 @@ private def v2RoutingEndToEndContract
     if gResp.status != 429 || !(← tried.get).isEmpty || ((String.fromUTF8! gResp.body).splitOn "usage limit").length <= 1 then
       failures := failures.push s!"v2: disabledByProvider + shadowed usageLimit must short-circuit with usage-limit 429 without resurrecting banned account, got status={gResp.status} tried={← tried.get} body={String.fromUTF8! gResp.body}"
 
-    -- 10) `GET /api/resources/overview` must reflect real Core `proxy_outcomes` 429/503 counts,
-    --     per-pool cooldown/disabled health, and degraded inference Sankey links (while still
-    --     redacting instance-wide inference telemetry for member callers).
-    let resNowIso := formatEpochIso8601Utc (← nowEpoch)
+    -- 10) `GET /api/resources/overview` must reflect real Core `proxy_outcomes` 503 `model_cooldown`
+    --     and pre-dispatch cooldown `429` counts recorded via real `dispatchCoreRequest` calls,
+    --     ignore disabled (`enabled=false`) accounts so they never poison active pools, isolate
+    --     distinct `custom:*` pools, and redact instance-wide inference telemetry for member callers.
+    let resNow ← nowEpoch
+    let resNowIso := formatEpochIso8601Utc resNow
+    let (liveAdminId, liveAdminEpoch) := match ← execParamQuery store.missionsDb "SELECT id, session_epoch FROM users WHERE role='admin' LIMIT 1;" #[] with
+      | .ok rs => ((rs[1]?.bind (·[0]?)).getD defOwnerUid, ((rs[1]?.bind (·[1]?)).bind String.toNat?).getD 1)
+      | .error _ => (defOwnerUid, 1)
+    let (liveMemberId, liveMemberEpoch) := match ← execParamQuery store.missionsDb "SELECT id, session_epoch FROM users WHERE role='member' LIMIT 1;" #[] with
+      | .ok rs => ((rs[1]?.bind (·[0]?)).getD "member", ((rs[1]?.bind (·[1]?)).bind String.toNat?).getD 1)
+      | .error _ => ("member", 1)
+    let liveJwt := mintSessionTokenV2 v2App.cfg.jwtSecret liveAdminId "admin" liveAdminEpoch.toUInt64 (resNow + 3600)
+    let liveMemberJwt := mintSessionTokenV2 v2App.cfg.jwtSecret liveMemberId "member" liveMemberEpoch.toUInt64 (resNow + 3600)
+    discard <| execParamQuery store.missionsDb "DELETE FROM proxy_outcomes;" #[]
     discard <| execParamQuery store.missionsDb
       ("INSERT INTO proxy_usage(timestamp,model,input_tokens,output_tokens,cost_cents,provider,account_id,mission_id) " ++
        "VALUES(?1,'grok-4',5000,1000,12,'xai',?2,?3);")
       #[resNowIso, acctB, defMid]
-    discard <| execParamQuery store.missionsDb
-      ("INSERT INTO proxy_outcomes(timestamp,chain_id,provider,account_id,model,status,http_status,total_ms) " ++
-       "VALUES(?1,?2,'xai',?3,'grok-4','rate_limited_or_quota',429,25);")
-      #[resNowIso, customChainId, acctB]
-    discard <| execParamQuery store.missionsDb
-      ("INSERT INTO proxy_outcomes(timestamp,chain_id,provider,account_id,model,status,http_status,total_ms) " ++
-       "VALUES(?1,?2,'xai',?3,'grok-4','model_cooldown',503,30);")
-      #[resNowIso, customChainId, acctA]
-    cooldownsRef.set #[{ accountId := acctB, untilEpoch := now + 600, reason := .usageLimit }]
-    let ovAdmin ← getJson v2App jwt "/api/resources/overview?range=6h" now
+    let mc503Tracker ← newProviderHealthTracker 1 2
+    let mc503App : CoreAppState := {
+      v2App with
+      healthTracker? := some mc503Tracker
+      proxyMockTransport? := some fun _ => pure (.ok {
+        status := 503
+        headers := #[("Content-Type", "application/json")]
+        body := "{\"error\":{\"type\":\"model_cooldown\",\"message\":\"model cooling down\",\"resets_in_seconds\":300}}".toUTF8
+      })
+    }
+    -- Real 1st request: hits upstream 503 model_cooldown on both accounts -> records `model_cooldown` + parks both.
+    let ovReqBody := renderCompact (.obj #[("model", .str customChainId), ("messages", .arr #[])])
+    let ovReqRaw := s!"POST /v1/chat/completions HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {liveJwt}\r\nContent-Length: {ovReqBody.utf8ByteSize}\r\n\r\n{ovReqBody}"
+    let .ok ovReq1 := parseRequest ovReqRaw.toUTF8 none | throw (IO.userError "v2 overview req1 parse failed")
+    let .ok ovResp1 ← dispatchCoreRequest mc503App ovReq1 resNow | throw (IO.userError "v2 overview req1 upgrade")
+    -- Real 2nd request: hits pre-dispatch cooldown short-circuit (429 usageLimit) -> also recorded in `proxy_outcomes`.
+    let .ok ovResp2 ← dispatchCoreRequest mc503App ovReq1 resNow | throw (IO.userError "v2 overview req2 upgrade")
+    let ovAdmin ← getJson mc503App liveJwt "/api/resources/overview?range=6h" resNow
     let ovInf := ovAdmin.fieldOrNull "inference"
     let ov429 := (ovInf.fieldNat? "throttled_429_count").getD 0
     let xaiPool? := ((ovInf.fieldArr? "pools").getD #[]).find? (·.fieldStr? "id" == some "xai")
@@ -2420,9 +2482,42 @@ private def v2RoutingEndToEndContract
     let xaiLink? := ((ovAdmin.fieldArr? "links").getD #[]).find? (fun l =>
       l.fieldStr? "kind" == some "inference" && l.fieldStr? "source_id" == some "xai")
     let xaiLinkDeg := (xaiLink?.bind (·.fieldBool? "degraded")).getD false
-    if ov429 < 2 || xaiPoolHealth != "cooldown" || xaiPoolReset.isEmpty || !xaiLinkDeg then
-      failures := failures.push s!"v2: /api/resources/overview must reflect real 429s, cooldown pool health, and degraded link: 429={ov429} health={xaiPoolHealth} reset={xaiPoolReset} deg={xaiLinkDeg}"
-    let ovMember ← getJson v2App memberJwt "/api/resources/overview?range=6h" now
+    if ovResp1.status != 503 || ovResp2.status != 429 || ov429 < 2 ||
+       xaiPoolHealth != "cooldown" || xaiPoolReset.isEmpty || !xaiLinkDeg then
+      failures := failures.push s!"v2: /api/resources/overview must reflect real 503/429 dispatch outcomes, cooldown pool health, and degraded link: r1={ovResp1.status} r2={ovResp2.status} 429={ov429} health={xaiPoolHealth} reset={xaiPoolReset} deg={xaiLinkDeg}"
+    -- Disabled account (`enabled=false`) must never poison active pool, and `custom:prov-a` cooldown
+    -- must not bleed into unrelated `custom:prov-b`.
+    let disAcctId := "v2-xai-disabled-banned"
+    let custAId := "v2-cust-a"
+    let custBId := "v2-cust-b"
+    discard <| upsertAIProvider store { id := disAcctId, providerType := "xai", name := "Disabled Banned", enabled := false, apiKey := "k", updatedAt := resNowIso }
+    discard <| upsertAIProvider store { id := custAId, providerType := "custom", name := "Custom A", enabled := true, apiKey := "k", updatedAt := resNowIso }
+    discard <| upsertAIProvider store { id := custBId, providerType := "custom", name := "Custom B", enabled := true, apiKey := "k", updatedAt := resNowIso }
+    discard <| execParamQuery store.missionsDb "DELETE FROM proxy_outcomes;" #[]
+    discard <| execParamQuery store.missionsDb
+      ("INSERT INTO proxy_usage(timestamp,model,input_tokens,output_tokens,cost_cents,provider,account_id,mission_id) " ++
+       "VALUES(?1,'m-a',4000,500,5,?2,?3,?4),(?1,'m-b',4000,500,5,?5,?6,?4);")
+      #[resNowIso, s!"custom:{custAId}", custAId, defMid, s!"custom:{custBId}", custBId]
+    let isoTracker ← newProviderHealthTracker 1 2
+    isoTracker.health.atomically do
+      modify fun s => { s with accounts := #[
+        { accountId := disAcctId, slotId := accountSlotId disAcctId, disabledByProvider := true, disabledMessage := "BANNED" },
+        { accountId := custAId, slotId := accountSlotId custAId,
+          cooldown? := some { accountId := custAId, untilEpoch := resNow + 600, reason := .usageLimit } }
+      ] }
+    cooldownsRef.set #[]
+    let isoApp := { v2App with healthTracker? := some isoTracker }
+    let ovIso ← getJson isoApp liveJwt "/api/resources/overview?range=6h" resNow
+    let isoPools := (ovIso.fieldOrNull "inference").fieldArr? "pools" |>.getD #[]
+    let xaiIsoHealth := (isoPools.find? (·.fieldStr? "id" == some "xai") |>.bind (·.fieldStr? "health")).getD ""
+    let custAHealth := (isoPools.find? (·.fieldStr? "id" == some s!"custom:{custAId}") |>.bind (·.fieldStr? "health")).getD ""
+    let custBHealth := (isoPools.find? (·.fieldStr? "id" == some s!"custom:{custBId}") |>.bind (·.fieldStr? "health")).getD ""
+    if xaiIsoHealth != "ok" || custAHealth != "cooldown" || custBHealth != "ok" then
+      failures := failures.push s!"v2: disabled account must not poison xai and custom pools must stay isolated: xai={xaiIsoHealth} custA={custAHealth} custB={custBHealth}"
+    discard <| deleteAIProvider store disAcctId
+    discard <| deleteAIProvider store custAId
+    discard <| deleteAIProvider store custBId
+    let ovMember ← getJson mc503App liveMemberJwt "/api/resources/overview?range=6h" resNow
     let ovMemInf := ovMember.fieldOrNull "inference"
     if (ovMemInf.fieldNat? "throttled_429_count").getD 99 != 0 ||
        !((ovMemInf.fieldArr? "pools").getD #[]).isEmpty ||

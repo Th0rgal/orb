@@ -205,13 +205,10 @@ def rewriteTargetModelBody (tgt : ProviderTarget) (body : ByteArray) : ByteArray
     | some raw =>
       match OrbBin.Json.parse raw with
       | .ok obj@(.obj _) =>
-        match obj.fieldStr? "model" with
-        | some reqMdl =>
-          let chosen := if tgt.modelId.isEmpty then reqMdl else tgt.modelId
-          let effMdl := if isAg then canonicalAntigravityProxyModelId chosen else chosen
-          if effMdl.isEmpty then body
-          else (renderCompact (obj.setField "model" (.str effMdl))).toUTF8
-        | none => body
+        let chosen := if !tgt.modelId.isEmpty then tgt.modelId else (obj.fieldStr? "model").getD ""
+        let effMdl := if isAg then canonicalAntigravityProxyModelId chosen else chosen
+        if effMdl.isEmpty then body
+        else (renderCompact (obj.setField "model" (.str effMdl))).toUTF8
       | _ => body
 
 /-- When a routing chain has `stripThinking = true` (e.g. `builtin/assistant`),

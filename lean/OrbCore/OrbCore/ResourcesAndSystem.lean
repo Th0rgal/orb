@@ -585,7 +585,9 @@ def buildResourcesOverviewJson
 
   let poolHealthMeta (poolId : String) : String × JVal × JVal := Id.run do
     let baseProv := (poolId.splitOn ":").headD poolId
-    let matching := poolHints.filter fun h => h.provider == poolId || h.provider == baseProv
+    let isCustomPool := poolId.startsWith "custom:"
+    let matching := poolHints.filter fun h =>
+      h.provider == poolId || (!isCustomPool && h.provider == baseProv)
     let mut worstHealth := "ok"
     let mut minQuota? : Option (Float × JVal) := none
     let mut soonestReset? : Option String := none
@@ -602,7 +604,8 @@ def buildResourcesOverviewJson
           soonestReset? := match soonestReset? with
             | none => some rs
             | some prev => if rs < prev then some rs else some prev
-    let hasThrottles := throttledByProvider.any fun (p, c) => (p == poolId || p == baseProv) && c > 0
+    let hasThrottles := throttledByProvider.any fun (p, c) =>
+      c > 0 && (p == poolId || (!isCustomPool && p == baseProv))
     if worstHealth == "ok" && hasThrottles then
       worstHealth := "degraded"
     let qJv := match minQuota? with | some (_, v) => v | none => .null
