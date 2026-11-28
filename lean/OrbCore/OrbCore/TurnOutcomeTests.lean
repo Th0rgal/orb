@@ -1309,6 +1309,45 @@ private def checkSidecarAuthFileDuplicated : IO Unit := do
          !OrbCore.ProviderUsageAndLogin.sidecarAuthFileDuplicated #[agyFirst] "antigravity" agySecond)
     "sidecarAuthFileDuplicated suppresses duplicate enabled/kimi cliproxyapi rows while keeping distinct and multi-account email-less antigravity files"
 
+private def verifyConcurrentResumeFenced
+    (store : CoreStore) (sup : RemoteJobSupervisor) (root : String)
+    (claims : OrbCore.McpGateway.McpSessionClaims) (startedMid : String) : IO Unit := do
+  -- A second `resume_mission` while a live `running` remote job exists must fail closed
+  -- (`mission_already_active`), never append a stray `user_message`, and never spawn a competing job.
+  let db := store.missionsDb
+  let userMsgCountBefore ← cellOf db "SELECT COUNT(*) FROM mission_events WHERE mission_id=?1 AND event_type='user_message';" #[startedMid]
+  let jobCountBefore ← cellOf db "SELECT COUNT(*) FROM remote_node_jobs WHERE mission_id=?1;" #[startedMid]
+  let resumeBusyRaw ← OrbCore.McpGateway.dispatchMcpToolCall store none none none ({} : ManagedFleetState) root claims
+    "resume_mission" (.obj #[("mission_id", .str startedMid), ("content", .str "Competing resume."), ("idempotency_key", .str "resume-busy-2")]) 4000000001 (some sup)
+  let resumeBusyRes := ((OrbBin.Json.parse resumeBusyRaw).toOption.getD .null).fieldOrNull "result"
+  check (verifyReceiptWord resumeBusyRes == 16777474 &&
+         resumeBusyRes.fieldStr? "accepted" == some "no" &&
+         resumeBusyRes.fieldStr? "code" == some "mission_already_active")
+    s!"competing resume_mission while job is running must reject with mission_already_active: {resumeBusyRaw}"
+  let userMsgCountAfter ← cellOf db "SELECT COUNT(*) FROM mission_events WHERE mission_id=?1 AND event_type='user_message';" #[startedMid]
+  let jobCountAfter ← cellOf db "SELECT COUNT(*) FROM remote_node_jobs WHERE mission_id=?1;" #[startedMid]
+  check (userMsgCountAfter == userMsgCountBefore && jobCountAfter == jobCountBefore)
+    s!"competing resume_mission must not append user_message ({userMsgCountBefore}->{userMsgCountAfter}) or job ({jobCountBefore}->{jobCountAfter})"
+  -- Direct `submitRemoteMissionTurn` must also fence any competing turn while a live job exists.
+  OrbBin.PosixExt.setenvVar "SANDBOXED_REMOTE_NODES_ENABLED" "true"
+  OrbBin.PosixExt.setenvVar "SANDBOXED_REMOTE_NODES" "mockres=http://127.0.0.1:9|TURN_OUTCOME_MOCK_TOK"
+  OrbBin.PosixExt.setenvVar "TURN_OUTCOME_MOCK_TOK" "secret-mock-tok"
+  OrbBin.PosixExt.setenvVar "SANDBOXED_PUBLIC_URL" "http://127.0.0.1:3000"
+  let busySubmitRes ← submitRemoteMissionTurn store none none none sup root {
+    missionId := startedMid, targetNodeId := "mockres", backend := "codex",
+    prompt := "Competing turn"
+  } 4000000002
+  OrbBin.PosixExt.unsetenvVar "SANDBOXED_REMOTE_NODES_ENABLED"
+  OrbBin.PosixExt.unsetenvVar "SANDBOXED_REMOTE_NODES"
+  OrbBin.PosixExt.unsetenvVar "TURN_OUTCOME_MOCK_TOK"
+  OrbBin.PosixExt.unsetenvVar "SANDBOXED_PUBLIC_URL"
+  match busySubmitRes with
+  | .error e =>
+    check (e.startsWith "remote_dispatch_busy:existing_active_job:")
+      s!"direct submitRemoteMissionTurn while job is running must return remote_dispatch_busy, got: {e}"
+  | .ok jid =>
+    throw (IO.userError s!"direct submitRemoteMissionTurn must not launch competing job {jid} while active job exists")
+
 def run : IO Unit := do
   OrbCore.CloudHttpAndWorkerTests.run
   checkSidecarAuthFileDuplicated
@@ -1800,48 +1839,7 @@ def run : IO Unit := do
                (res.fieldOrNull "result").fieldStr? "mission_id" == some startedMid &&
                (res.fieldOrNull "result").fieldStr? "status" == some "active")
           s!"{label} receipt must normalize to accepted (65793) with active result: {raw}"
-      -- A second `resume_mission` while a live `running` remote job exists must fail closed
-      -- (`mission_already_active`), never append a stray `user_message`, and never spawn a competing job.
-      let userMsgCountBefore : Nat ← match ← execParamQuery db "SELECT COUNT(*) FROM mission_events WHERE mission_id=?1 AND event_type='user_message';" #[startedMid] with
-        | .ok rows => pure (if rows.size > 1 then cellNat rows[1]! 0 else 0)
-        | .error _ => pure 0
-      let jobCountBefore : Nat ← match ← execParamQuery db "SELECT COUNT(*) FROM remote_node_jobs WHERE mission_id=?1;" #[startedMid] with
-        | .ok rows => pure (if rows.size > 1 then cellNat rows[1]! 0 else 0)
-        | .error _ => pure 0
-      let resumeBusyRaw ← OrbCore.McpGateway.dispatchMcpToolCall store none none none ({} : ManagedFleetState) root claims
-        "resume_mission" (.obj #[("mission_id", .str startedMid), ("content", .str "Competing resume."), ("idempotency_key", .str "resume-busy-2")]) 4000000001 (some sup)
-      let resumeBusyRes := ((OrbBin.Json.parse resumeBusyRaw).toOption.getD .null).fieldOrNull "result"
-      check (verifyReceiptWord resumeBusyRes == 16777474 &&
-             resumeBusyRes.fieldStr? "accepted" == some "no" &&
-             resumeBusyRes.fieldStr? "code" == some "mission_already_active")
-        s!"competing resume_mission while job is running must reject with mission_already_active: {resumeBusyRaw}"
-      let userMsgCountAfter : Nat ← match ← execParamQuery db "SELECT COUNT(*) FROM mission_events WHERE mission_id=?1 AND event_type='user_message';" #[startedMid] with
-        | .ok rows => pure (if rows.size > 1 then cellNat rows[1]! 0 else 0)
-        | .error _ => pure 0
-      let jobCountAfter : Nat ← match ← execParamQuery db "SELECT COUNT(*) FROM remote_node_jobs WHERE mission_id=?1;" #[startedMid] with
-        | .ok rows => pure (if rows.size > 1 then cellNat rows[1]! 0 else 0)
-        | .error _ => pure 0
-      check (userMsgCountAfter == userMsgCountBefore && jobCountAfter == jobCountBefore)
-        s!"competing resume_mission must not append user_message ({userMsgCountBefore}->{userMsgCountAfter}) or job ({jobCountBefore}->{jobCountAfter})"
-      -- Direct `submitRemoteMissionTurn` must also fence any competing turn while a live job exists.
-      OrbBin.PosixExt.setenvVar "SANDBOXED_REMOTE_NODES_ENABLED" "true"
-      OrbBin.PosixExt.setenvVar "SANDBOXED_REMOTE_NODES" "mockres=http://127.0.0.1:9|TURN_OUTCOME_MOCK_TOK"
-      OrbBin.PosixExt.setenvVar "TURN_OUTCOME_MOCK_TOK" "secret-mock-tok"
-      OrbBin.PosixExt.setenvVar "SANDBOXED_PUBLIC_URL" "http://127.0.0.1:3000"
-      let busySubmitRes ← submitRemoteMissionTurn store none none none sup root {
-        missionId := startedMid, targetNodeId := "mockres", backend := "codex",
-        prompt := "Competing turn"
-      } 4000000002
-      OrbBin.PosixExt.unsetenvVar "SANDBOXED_REMOTE_NODES_ENABLED"
-      OrbBin.PosixExt.unsetenvVar "SANDBOXED_REMOTE_NODES"
-      OrbBin.PosixExt.unsetenvVar "TURN_OUTCOME_MOCK_TOK"
-      OrbBin.PosixExt.unsetenvVar "SANDBOXED_PUBLIC_URL"
-      match busySubmitRes with
-      | .error e =>
-        check (e.startsWith "remote_dispatch_busy:existing_active_job:")
-          s!"direct submitRemoteMissionTurn while job is running must return remote_dispatch_busy, got: {e}"
-      | .ok jid =>
-        throw (IO.userError s!"direct submitRemoteMissionTurn must not launch competing job {jid} while active job exists")
+      verifyConcurrentResumeFenced store sup root claims startedMid
       let cancelActId := (((OrbBin.Json.parse cancelRaw).toOption.getD .null).fieldOrNull "result").fieldStr? "action_id" |>.getD ""
       let cancelGetActRaw ← OrbCore.McpGateway.dispatchMcpToolCall store none none none ({} : ManagedFleetState) root claims
         "get_action" (.obj #[("action_id", .str cancelActId)]) 4000000000
