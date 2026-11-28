@@ -294,18 +294,18 @@ def resolveConcreteRemoteTargetNode
   if staticNodes.any (fun n => n.id == clean) then
     return .ok clean
   if clean == "auto" || clean.startsWith "auto:" then
-    let canary ← NativeCanary.load
-    let poolStatic := staticNodes.filter fun n => !canary.reserves n.id
     if let some (store, missionId) := scope? then
-      if !poolStatic.isEmpty then
+      if !staticNodes.isEmpty then
         let excluded ← OrbCore.AutoPlacement.lineageExclusions store missionId
-        let cands ← OrbCore.AutoPlacement.candidates store poolStatic
+        let cands ← OrbCore.AutoPlacement.candidates store staticNodes
         if let some chosen := OrbCore.AutoPlacement.choose cands excluded then
           return .ok chosen
-        if poolStatic.any (fun n => n.dedicatedOwner?.isNone) then
+        if cands.any (!·.reserved) then
           return .error "no_eligible_node"
-    else if let some sn := poolStatic.find? (fun n => n.dedicatedOwner?.isNone && !OrbCore.AutoPlacement.reserved n) then
-      return .ok sn.id
+    else
+      let canary ← NativeCanary.load
+      if let some sn := staticNodes.find? (fun n => n.dedicatedOwner?.isNone && !canary.reserves n.id && !OrbCore.AutoPlacement.reserved n) then
+        return .ok sn.id
     if let some mc := mc? then
       if let some node ← scopedReadyManagedMachine? mc scope? then return .ok node
     return .error "no_remote_nodes_available"
@@ -351,20 +351,16 @@ def resolveMissionRemoteNode?
       tags := parseTagsArray (cell mRows[1]! 0)
       placeKind := (cell mRows[1]! 1).trimAscii.toString
       parentMid := (cell mRows[1]! 2).trimAscii.toString
+  let mut autoFallback? : Option String := none
   if let some rn := (extractTagValue? tags "remote-node:").orElse (fun _ => extractTagValue? tags "remote_node:") then
     if rn != "local" && rn != "client" then
       let rnLow := rn.toLower
       if rnLow == "auto" || rnLow.startsWith "auto:" then
-        -- Prefer the concrete node recorded on an existing job ledger row over a legacy `auto` tag
-        -- so resume / hang-cause checks name the node that actually owns the mission's job.
-        if let .ok jRows ← execParamQuery store.missionsDb
-            "SELECT COALESCE(node_id,'') FROM remote_node_jobs WHERE mission_id=?1 AND COALESCE(node_id,'')<>'' ORDER BY updated_at DESC LIMIT 1;"
-            #[mid] then
-          if jRows.size > 1 then
-            let jn := (cell jRows[1]! 0).trimAscii.toString
-            if !jn.isEmpty && jn != "local" then
-              return some jn
-      return some rn
+        -- Fall through to concrete run/job/orchestration/lineage evidence first so
+        -- legacy `auto` missions resolve to the concrete node that actually owns them.
+        autoFallback? := some rn
+      else
+        return some rn
   if placeKind.startsWith "managed-" && placeKind != "managed" then
     return some placeKind
   -- 3. `mission_runs.scope_unit` (`remote-node:<id>`)
@@ -377,16 +373,18 @@ def resolveMissionRemoteNode?
         let rn := (su.drop 12).trimAscii.toString
         if !rn.isEmpty && rn != "local" then
           return some rn
-  -- 4. `remote_node_jobs` / `projects.remote_jobs` ledger
+  -- 4. `remote_node_jobs` / `projects.remote_jobs` ledger (prefer non-terminal jobs, then latest updated_at/rowid)
   if let .ok jRows ← execParamQuery store.missionsDb
-      "SELECT COALESCE(node_id,'') FROM remote_node_jobs WHERE mission_id=?1 AND COALESCE(node_id,'')<>'' ORDER BY updated_at DESC LIMIT 1;"
+      ("SELECT COALESCE(node_id,'') FROM remote_node_jobs WHERE mission_id=?1 AND COALESCE(node_id,'')<>'' " ++
+       "ORDER BY CASE WHEN state NOT IN ('succeeded','failed','cancelled','lost','terminal','completed','aborted') THEN 0 ELSE 1 END ASC, updated_at DESC, rowid DESC LIMIT 1;")
       #[mid] then
     if jRows.size > 1 then
       let jn := (cell jRows[1]! 0).trimAscii.toString
       if !jn.isEmpty && jn != "local" then
         return some jn
   if let .ok pjRows ← execParamQuery store.projectsDb
-      "SELECT COALESCE(node_id,'') FROM remote_jobs WHERE mission_id=?1 AND COALESCE(node_id,'')<>'' ORDER BY updated_at DESC LIMIT 1;"
+      ("SELECT COALESCE(node_id,'') FROM remote_jobs WHERE mission_id=?1 AND COALESCE(node_id,'')<>'' " ++
+       "ORDER BY CASE WHEN state NOT IN ('succeeded','failed','cancelled','lost','terminal','completed','aborted') THEN 0 ELSE 1 END ASC, updated_at DESC, rowid DESC LIMIT 1;")
       #[mid] then
     if pjRows.size > 1 then
       let pjn := (cell pjRows[1]! 0).trimAscii.toString
@@ -419,8 +417,9 @@ def resolveMissionRemoteNode?
         |>.orElse (fun _ => if parentMid.isEmpty then none else some parentMid)
     if let some anc := anc? then
       if anc != mid then
-        return (← resolveMissionRemoteNode? store mc? anc (depth - 1))
-  return none
+        if let some ancNode ← resolveMissionRemoteNode? store mc? anc (depth - 1) then
+          return some ancNode
+  return autoFallback?
 
 /-- Trust classification for secret delivery, shared by direct retrieval and
     approval polling. A managed binding is sufficient even before enrollment;
@@ -2256,6 +2255,11 @@ partial def spawnRemoteJobPoller
     let mut cancelSent : Bool := false
     let mut keepRunning : Bool := true
     let mut consecNetErrors : Nat := 0
+    let mut firstNetErrSec? : Option UInt64 := none
+    let monitorIntervalMs := Nat.max 500 (((← IO.getEnv "SANDBOXED_NODE_API_MONITOR_INTERVAL_MS").bind String.toNat?).getD 30000)
+    -- Give `monitorStaticNodeApis` two full ticks to classify a pingable hung node
+    -- before emitting a generic unreachable banner, preventing double-flagging on fast ECONNREFUSED.
+    let hangGraceSecs : UInt64 := (Nat.max 5 (2 * ((monitorIntervalMs + 999) / 1000) + 5)).toUInt64
     -- A harness that never produces its first event (e.g. OpenCode after a failed model
     -- stream, which logs the error but does not exit) would otherwise hang the turn forever.
     -- Only fresh turns are watched: a poller resumed mid-turn may be inside a long tool call.
@@ -2378,6 +2382,8 @@ partial def spawnRemoteJobPoller
           break
         if let some netErr := transientErr? then
           consecNetErrors := consecNetErrors + 1
+          let errStartSec := firstNetErrSec?.getD nowSec
+          if firstNetErrSec?.isNone then firstNetErrSec? := some nowSec
           -- Losing observation (transport error or transient HTTP 5xx/proxy error) is not
           -- terminal evidence: the node may still be executing. Record unreachability
           -- durably, keep the turn owned and keep observing (`FLT-06`).
@@ -2388,7 +2394,7 @@ partial def spawnRemoteJobPoller
             discard <| execParamQuery store.projectsDb
               "UPDATE remote_jobs SET state='unreachable', heartbeat_at=?2, updated_at=?2 WHERE job_id=?1 AND state NOT IN ('succeeded','failed','cancelled','lost','terminal','completed','aborted','cancel_requested');"
               #[jobId, nowIso]
-            if !unreachableNotified && (← pollerOwnsGeneration) then
+            if !unreachableNotified && nowSec ≥ errStartSec + hangGraceSecs && (← pollerOwnsGeneration) then
               unreachableNotified := true
               -- When the static-node API monitor already flagged this node as hung,
               -- avoid emitting a second generic unreachable error on the same mission.
@@ -2400,6 +2406,7 @@ partial def spawnRemoteJobPoller
         else if let .ok (jStatus, _, jJv?, _, _) := jobStatus then
           if 200 ≤ jStatus && jStatus < 300 then
             consecNetErrors := 0
+            firstNetErrSec? := none
             unreachableNotified := false
             let jv := jJv?.getD (.obj #[])
             let rawJState := ((jv.fieldStr? "state").getD "running").trimAscii.toString.toLower
@@ -3381,7 +3388,11 @@ def tickRemoteFollowupPump
     if rawNode.trimAscii.toString.isEmpty then continue
     let effNode ← match ← resolveConcreteRemoteTargetNode mc? rawNode (some (store, mid)) with
       | .ok n => pure n
+      | .error "no_eligible_node" => continue
       | .error _ => pure rawNode
+    -- Do not claim or emit repeated retry errors every 2s while the destination node is confirmed hung.
+    let nodeHung ← try (pure (← nodeApiHangCause? store effNode).isSome) catch _ => pure false
+    if nodeHung then continue
     let some (qUid, nextMsgId, nextPrompt) ← claimNextQueuedFollowup? store mid gen nowIso | continue
     let mut sid? : Option String := none
     if let .ok sRows ← execParamQuery store.missionsDb "SELECT COALESCE(session_id,'') FROM missions WHERE id=?1;" #[mid] then

@@ -447,6 +447,7 @@ def loadPersistedNodeCordons (dataRoot : String) : IO (Array String) := do
 def setPersistedNodeCordoned (dataRoot nodeName : String) (cordoned : Bool) : IO Bool := do
   let trimmed := dataRoot.trimAscii.toString
   let cleanNode := nodeName.trimAscii.toString
+  let cleanLow := cleanNode.toLower
   if trimmed.isEmpty || cleanNode.isEmpty then return false
   let path := System.FilePath.mk s!"{trimmed}/node_state.json"
   let mut existingObj : Array (String × JVal) := #[]
@@ -455,16 +456,21 @@ def setPersistedNodeCordoned (dataRoot nodeName : String) (cordoned : Bool) : IO
       if let .ok (.obj fields) := OrbBin.Json.parse raw then
         existingObj := fields.filter (fun (k, _) => k != "cordoned")
   let prev := ← loadPersistedNodeCordons trimmed
-  let wasCordoned := prev.contains cleanNode
+  let wasCordoned := prev.any (fun c => c.trimAscii.toString.toLower == cleanLow)
   if wasCordoned == cordoned then
     return false
-  let next :=
-    if cordoned then (prev.filter (· != cleanNode)).push cleanNode
-    else prev.filter (· != cleanNode)
+  let filtered := prev.filter (fun c => c.trimAscii.toString.toLower != cleanLow)
+  let next := if cordoned then filtered.push cleanNode else filtered
   let sortedNext := next.qsort (· < ·)
   let outObj := JVal.obj (existingObj.push ("cordoned", .arr (sortedNext.map .str)))
   discard <| (IO.FS.createDirAll (System.FilePath.mk trimmed)).toBaseIO
-  discard <| (IO.FS.writeFile path ((renderCompact outObj) ++ "\n")).toBaseIO
+  let tmpPath := System.FilePath.mk s!"{trimmed}/node_state.json.{← newUuidV4}.tmp"
+  match ← (IO.FS.writeFile tmpPath ((renderCompact outObj) ++ "\n")).toBaseIO with
+  | .error _ => return false
+  | .ok () =>
+    if let .error _ ← (IO.FS.rename tmpPath path).toBaseIO then
+      discard <| (IO.FS.removeFile tmpPath).toBaseIO
+      return false
   return true
 
 /-- Build server-advertised typed remote launch capabilities (`RemoteLaunchCapabilities`). -/
@@ -1950,18 +1956,20 @@ def dispatchRemoteFleetAndRelayRoutes?
       let wantCordoned := action == "cordon"
       let cordVal := if wantCordoned then "1" else "0"
       let mut changed := false
+      let mut effNodeName := nodeName
       if let some mid ← resolveManagedMachineId? mc nodeName then
         if let some (mPrev, _) ← getManagedMachine? mc mid then
           changed := mPrev.cordoned != wantCordoned
         discard <| execParamQuery mc.db "UPDATE managed_machines SET cordoned=?2 WHERE id=?1;" #[mid, cordVal]
       else
         let (_, staticNodes) ← loadStaticRemoteNodes
-        if !staticNodes.any (fun n => n.id == nodeName) then
-          return some (jsonErr 404 "unknown_node")
-        changed ← setPersistedNodeCordoned store.rootDir nodeName wantCordoned
+        let some sn := staticNodes.find? (fun n => n.id.trimAscii.toString.toLower == nodeName.trimAscii.toString.toLower)
+          | return some (jsonErr 404 "unknown_node")
+        effNodeName := sn.id
+        changed ← setPersistedNodeCordoned store.rootDir sn.id wantCordoned
       return some (jsonResp 200 (.obj #[
         ("ok", .bool true),
-        ("node", .str nodeName),
+        ("node", .str effNodeName),
         ("cordoned", .bool wantCordoned),
         ("changed", .bool changed)
       ]))
@@ -1972,7 +1980,7 @@ def dispatchRemoteFleetAndRelayRoutes?
       if cap < 1 || cap > 256 then
         return some (jsonErr 400 "invalid_capacity")
       let (_, staticNodes) ← loadStaticRemoteNodes
-      let staticMatch? := staticNodes.find? (fun n => n.id == nodeName)
+      let staticMatch? := staticNodes.find? (fun n => n.id.trimAscii.toString.toLower == nodeName.trimAscii.toString.toLower)
       let (effNodeId, secret) ← do
         if let some sn := staticMatch? then
           match ← resolveStaticNodeToken? sn with
@@ -1989,12 +1997,14 @@ def dispatchRemoteFleetAndRelayRoutes?
       let mut bodyFields := #[("lease_token", JVal.str leaseTok), ("capacity", JVal.nat cap)]
       if let some cc := jv.fieldNat? "coordinator_capacity" then
         bodyFields := bodyFields.push ("coordinator_capacity", JVal.nat cc)
-      match ← callRemoteNodeHttp hub? mc nodeName "POST" "/capacity" (some (.obj bodyFields)) #[] 10000 with
+      match ← callRemoteNodeHttp hub? mc effNodeId "POST" "/capacity" (some (.obj bodyFields)) #[] 10000 with
       | .error e => return some (jsonErr 502 e)
       | .ok (st, txt, jv?, _, _) =>
         if 200 ≤ st && st < 300 then
           if let some sn := staticMatch? then
-            let persistedCordons ← loadPersistedNodeCordons store.rootDir
+            let mut persistedCordons ← loadPersistedNodeCordons store.rootDir
+            if let .ok rows ← execParamQuery store.missionsDb "SELECT node_id FROM node_api_hangs WHERE strikes>=2" #[] then
+              persistedCordons := persistedCordons ++ (rows.extract 1 rows.size).map (fun r => cell r 0)
             let refreshed ← probeStaticNodeHeartbeat sn persistedCordons nowIso isAdmin
             return some (jsonResp 200 refreshed)
         return some (jsonResp st (jv?.getD (.obj #[("raw", .str txt)])))

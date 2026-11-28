@@ -1371,7 +1371,7 @@ private def classifyMissionPlacementTarget
   if clientPlaced || placeKind == "client" then
     (4, 0)
   else
-    let tagNode? := (tags.find? (fun t => t.startsWith "remote-node:")).map (fun t => (t.drop 12).toString)
+    let tagNode? := (tags.find? (fun t => t.startsWith "remote-node:" || t.startsWith "remote_node:")).map (fun t => (t.drop 12).toString)
     let effNode := (remoteNodeId?.orElse (fun _ => tagNode?) |>.getD "").trimAscii.toString.toLower
     let matchedNode? := staticNodes.find? (fun n => n.id.trimAscii.toString.toLower == effNode)
     let isReservedNode :=
@@ -3240,6 +3240,20 @@ private def remoteDispatchHttpStatus (error : String) : Nat :=
 
 private def hungNodeJsonBody (nodeId cause : String) : String :=
   renderCompact (.obj #[("error", .str cause), ("reason", .str "hung_node"), ("node_id", .str nodeId)])
+
+/-- Resolve `"auto"` targets and reject hung nodes before writing transcript events or committing idempotency. -/
+private def resolveDirectTargetOrHungError (st : CoreAppState) (mid targetNode : String) : IO (Except (Nat × String) String) := do
+  let tLow := targetNode.trimAscii.toString.toLower
+  let effNode ←
+    if tLow == "auto" || tLow.startsWith "auto:" then
+      match ← resolveConcreteRemoteTargetNode st.managedStore? targetNode (some (st.store, mid)) with
+      | .ok concrete => pure concrete
+      | .error e => return .error (503, renderCompact (.obj #[("error", .str e)]))
+    else
+      pure targetNode
+  if let some cause ← nodeApiHangCause? st.store effNode then
+    return .error (503, hungNodeJsonBody effNode cause)
+  return .ok effNode
 
 private def launchBtwSideAgent (st : CoreAppState) (caller : CallerPrincipal) (srcMid : String)
     (jv : JVal) (hdrIdemKey : String) (nowEpochSec : UInt64) : IO (Nat × String) := do
@@ -6111,13 +6125,27 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
         match bodyVal?.bind (·.fieldArr? "tags") with
         | some xs => xs.filterMap (fun v => match v with | .str s => some s | _ => none)
         | none => #[]
-      let remoteNodeId? := (JsonTape.lookupString? tape "remote_node_id").map (·.trimAscii.toString) |>.filter (!·.isEmpty)
+      let bodyRemoteNodeId? := (JsonTape.lookupString? tape "remote_node_id").map (·.trimAscii.toString) |>.filter (!·.isEmpty)
+      let tagRemoteNodes : Array String := baseReqTags.filterMap fun t =>
+        if t.startsWith "remote-node:" || t.startsWith "remote_node:" then
+          let v := (t.drop 12).trimAscii.toString
+          if v.isEmpty then none else some v
+        else none
+      let distinctTagNodes := tagRemoteNodes.foldl (init := (#[] : Array String)) fun acc n =>
+        if acc.any (fun x => x.toLower == n.toLower) then acc else acc.push n
+      if distinctTagNodes.size > 1 then
+        abortIdem
+        return .ok (mkJson 400 "{\"error\":\"conflicting_remote_node_placement\"}")
+      if let (some bn, some tn) := (bodyRemoteNodeId?, distinctTagNodes[0]?) then
+        if bn.toLower != tn.toLower then
+          abortIdem
+          return .ok (mkJson 400 "{\"error\":\"conflicting_remote_node_placement\"}")
+      let remoteNodeId? := bodyRemoteNodeId?.orElse (fun _ => distinctTagNodes[0]?)
+      let cleanBaseTags := baseReqTags.filter (fun t => !(t.startsWith "remote-node:") && !(t.startsWith "remote_node:"))
       let reqTags : Array String :=
         match remoteNodeId? with
-        | some rn =>
-          if baseReqTags.any (·.startsWith "remote-node:") then baseReqTags
-          else baseReqTags.push s!"remote-node:{rn}"
-        | none => baseReqTags
+        | some rn => cleanBaseTags.push s!"remote-node:{rn}"
+        | none => cleanBaseTags
       let placement? := JsonTape.lookupString? tape "placement"
       let clientPlaced := isClientPlacement placement? reqTags
       let rawPlaceKind? := JsonTape.lookupString? tape "placement_kind"
@@ -6722,8 +6750,9 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
             let (resolvedNode, rentedVmId) ← match ← resolveOrProvisionAutoManagedTarget st caller mid mRec.ownerUserId mRec.project targetNode jv nowEpochSec with
               | .ok pair => pure pair
               | .error (errCode, errBody) => return .ok (mkJson errCode errBody)
-            if let some cause ← nodeApiHangCause? st.store resolvedNode then
-              return .ok (mkJson 503 (hungNodeJsonBody resolvedNode cause))
+            let resolvedNode ← match ← resolveDirectTargetOrHungError st mid resolvedNode with
+              | .ok n => pure n
+              | .error (errCode, errBody) => return .ok (mkJson errCode errBody)
             let effTagsJson ← if !rentedVmId.isEmpty then
               updateMissionBoundManagedNode st.store mid resolvedNode nowIso
             else pure mRec.tagsJson
@@ -8077,11 +8106,13 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
                   return .ok (mkJson 500 "{\"error\":\"message_receipt_unconfirmed\"}")
               return .ok (mkJson errCode errBody)
             | .error (.provisioning (errCode, errBody)) => return .ok (mkJson errCode errBody)
-          if let some cause ← nodeApiHangCause? st.store resolvedNode then
-            if keyed && rentedVmId.isEmpty then
-              if let .error _ ← abortIdempotencySlot st.store receiptScope msgId then
-                return .ok (mkJson 500 "{\"error\":\"message_receipt_unconfirmed\"}")
-            return .ok (mkJson 503 (hungNodeJsonBody resolvedNode cause))
+          let resolvedNode ← match ← resolveDirectTargetOrHungError st mid resolvedNode with
+            | .ok n => pure n
+            | .error (errCode, errBody) =>
+              if keyed && rentedVmId.isEmpty then
+                if let .error _ ← abortIdempotencySlot st.store receiptScope msgId then
+                  return .ok (mkJson 500 "{\"error\":\"message_receipt_unconfirmed\"}")
+              return .ok (mkJson errCode errBody)
           let effTagsJson ← if !rentedVmId.isEmpty then
             updateMissionBoundManagedNode st.store mid resolvedNode nowIso
           else pure m.tagsJson
@@ -8147,6 +8178,8 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
             if let .error dispErr ← submitRemoteMissionTurn st.store st.managedStore? st.relayHub? st.broadcastHub? sup st.cfg.workingDir spec nowEpochSec then
               if !(goalDispatch?.isSome && (dispErr == "remote_goal_dispatch_fenced" || dispErr.startsWith "remote_dispatch_uncertain:" ||
                   dispErr.startsWith "remote_accept_persist_failed:")) then
+                if keyed && rentedVmId.isEmpty && !dispErr.startsWith "remote_dispatch_uncertain:" && !dispErr.startsWith "remote_accept_persist_failed:" then
+                  discard <| abortIdempotencySlot st.store receiptScope msgId
                 return .ok (mkJson (remoteDispatchHttpStatus dispErr) s!"\{\"error\":{jsonEscape dispErr}}")
       else
         if let some m := mission? then
@@ -8226,10 +8259,13 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
       let rawBody := String.fromUTF8? req.bodySlice.toByteArray |>.getD "{}"
       let bodyJv := (OrbBin.Json.parse rawBody).toOption.getD (.obj #[])
       let content? := bodyJv.fieldStr? "content"
-      let resumeTargetNode? ← resolveMissionRemoteNode? st.store st.managedStore? mid
-      if let some targetNode := resumeTargetNode? then
-        if let some cause ← nodeApiHangCause? st.store targetNode then
-          return .ok (mkJson 503 (hungNodeJsonBody targetNode cause))
+      let rawResumeTarget? ← resolveMissionRemoteNode? st.store st.managedStore? mid
+      let resumeTargetNode? ← match rawResumeTarget? with
+        | some targetNode =>
+          match ← resolveDirectTargetOrHungError st mid targetNode with
+          | .ok concrete => pure (some concrete)
+          | .error (errCode, errBody) => return .ok (mkJson errCode errBody)
+        | none => pure none
       let mut goalGeneration? : Option UInt64 := none
       if goalResumeRoute.isSome then
         let some generation := bodyJv.fieldUInt64? "run_generation"

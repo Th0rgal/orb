@@ -1692,17 +1692,15 @@ def dispatchMcpToolCall
         s!"send_message_to_mission does not support `{uf}`" nowIso
     if mid.isEmpty || content.isEmpty then
       return ← failReservedOrErr store claims callerUserId toolName idemKeyTop "invalid_arguments" "mission_id and message/content are required" nowIso
-    if let some t := (args.fieldStr? "title").map (·.trimAscii.toString) then
-      if !t.isEmpty then
-        let .ok _ ← execParamQuery store.missionsDb "UPDATE missions SET title=?2, metadata_updated_at=?3 WHERE id=?1;" #[mid, t, nowIso]
-          | return ← settleReservedMcpAction store claims callerUserId toolName idemKeyTop "uncertain" "title update failed" nowIso
-    -- When the Core runtime dispatcher (`remoteSup?`) is wired, verify the mission exists
-    -- and has a real delivery route before claiming success (`MCP-07`).
+    -- Verify target resolution and hung-node status before mutating `missions.title`,
+    -- `operator_notes`, or `mission_events`.
+    let mr? ← getMission? store mid
+    let resolvedNodeOpt? ← resolveMissionRemoteNode? store mc? mid
     let mut deliveryTarget? : Option (MissionRecord × String) := none
     if let some _ := remoteSup? then
-      let some mr ← getMission? store mid
+      let some mr := mr?
         | return ← failReservedOrErr store claims callerUserId toolName idemKeyTop "not_found" s!"Mission `{mid}` not found" nowIso
-      match ← resolveMissionRemoteNode? store mc? mid with
+      match resolvedNodeOpt? with
       | some targetNode =>
         if targetNode.trimAscii.toString.isEmpty then
           return ← failReservedOrErr store claims callerUserId toolName idemKeyTop "unsupported"
@@ -1712,15 +1710,35 @@ def dispatchMcpToolCall
         return ← failReservedOrErr store claims callerUserId toolName idemKeyTop "unsupported"
           s!"Mission `{mid}` has no remote delivery target (placement={mr.placementKind}); send_message_to_mission cannot silently fall back to a note." nowIso
     let mut willQueue := false
-    if let (some _, some (mr, targetNode)) := (remoteSup?, deliveryTarget?) then
-      let hasInflight : Bool ← match ← execParamQuery store.missionsDb
-          "SELECT 1 FROM remote_node_jobs WHERE mission_id=?1 AND state NOT IN ('succeeded','failed','cancelled','lost','terminal','completed','aborted') LIMIT 1;" #[mid] with
-        | .ok rows => pure (decide (rows.size > 1))
-        | .error _ => pure false
-      willQueue := mr.status == "active" || mr.status == "pending" || mr.status == "waiting_background" || mr.status == "waiting_rate_limit" || hasInflight
-      if !willQueue then
-        if let some cause ← nodeApiHangCause? store targetNode then
+    let mut concreteDeliveryTarget? : Option (MissionRecord × String) := deliveryTarget?
+    let hasLiveInflight : Bool ← match ← execParamQuery store.missionsDb
+        "SELECT 1 FROM remote_node_jobs WHERE mission_id=?1 AND state NOT IN ('succeeded','failed','cancelled','lost','terminal','completed','aborted','unreachable','cancel_requested') LIMIT 1;" #[mid] with
+      | .ok rows => pure (decide (rows.size > 1))
+      | .error _ => pure false
+    let missionBusy :=
+      (mr?.map (fun mr => mr.status == "active" || mr.status == "pending" || mr.status == "waiting_background" || mr.status == "waiting_rate_limit")).getD false
+    willQueue := missionBusy || hasLiveInflight
+    if !willQueue then
+      let checkNode? := (deliveryTarget?.map Prod.snd).orElse (fun _ => resolvedNodeOpt?)
+      if let some rawTarget := checkNode? then
+        let tLow := rawTarget.trimAscii.toString.toLower
+        let mut effTarget := rawTarget
+        if tLow == "auto" || tLow.startsWith "auto:" then
+          match ← resolveConcreteRemoteTargetNode mc? rawTarget (some (store, mid)) with
+          | .ok concrete => effTarget := concrete
+          | .error e =>
+            if e == "no_eligible_node" then
+              return ← settleReservedMcpAction store claims callerUserId toolName idemKeyTop "failed" e nowIso "placement_failed"
+            else if remoteSup?.isSome then
+              return ← settleReservedMcpAction store claims callerUserId toolName idemKeyTop "failed" e nowIso "no_execution_placement"
+        if let some cause ← nodeApiHangCause? store effTarget then
           return ← settleReservedMcpAction store claims callerUserId toolName idemKeyTop "failed" cause nowIso "hung_node"
+        if let some (mr, _) := deliveryTarget? then
+          concreteDeliveryTarget? := some (mr, effTarget)
+    if let some t := (args.fieldStr? "title").map (·.trimAscii.toString) then
+      if !t.isEmpty then
+        let .ok _ ← execParamQuery store.missionsDb "UPDATE missions SET title=?2, metadata_updated_at=?3 WHERE id=?1;" #[mid, t, nowIso]
+          | return ← settleReservedMcpAction store claims callerUserId toolName idemKeyTop "uncertain" "title update failed" nowIso
     let noteId ← if idemKeyTop.isEmpty then newUuidV4
       else pure s!"mcp-msg-{(LeanSys.Auth.bytesToHexLower (LeanSys.Auth.sha256Bytes (s!"{actionScope claims callerUserId toolName}:{idemKeyTop}".toUTF8))).take 24}"
     let .ok _ ← execParamQuery store.askDb
@@ -1730,7 +1748,7 @@ def dispatchMcpToolCall
     let .ok _ ← appendMissionEvent store mid "operator_note" (renderCompact (.obj #[("id", .str noteId), ("content", .str content)])) nowIso
       | return ← settleReservedMcpAction store claims callerUserId toolName idemKeyTop "uncertain" "note event failed" nowIso
     let mut queued := false
-    if let (some sup, some (mr, targetNode)) := (remoteSup?, deliveryTarget?) then
+    if let (some sup, some (mr, targetNode)) := (remoteSup?, concreteDeliveryTarget?) then
       if willQueue then
         match ← enqueueStructuredFollowup store "core" noteId mid content "mcp" nowIso with
         | .ok _ => queued := true
@@ -1761,7 +1779,8 @@ def dispatchMcpToolCall
           resumeSessionId? := resumeSid?
         }
         if let .error e ← submitRemoteMissionTurn store mc? relayHub? broadcastHub? sup workingDir spec nowEpochSec then
-          return ← settleReservedMcpAction store claims callerUserId toolName idemKeyTop "uncertain" e nowIso
+          let outcome := if e.startsWith "remote_dispatch_uncertain:" || e.startsWith "remote_accept_persist_failed:" then "uncertain" else "failed"
+          return ← settleReservedMcpAction store claims callerUserId toolName idemKeyTop outcome e nowIso
     let resObj := JVal.obj #[
       ("ok", .bool true),
       ("mission_id", .str mid),
@@ -1808,14 +1827,26 @@ def dispatchMcpToolCall
         | return mcpErr "receipt_record_failed" "The mutation completed but its receipt could not be recorded. Reconcile the action." false
       return mcpOk settled
     else if toolName == "resume_mission" then
-      if let some target ← resolveMissionRemoteNode? store mc? mid then
-        if let some cause ← nodeApiHangCause? store target then
+      let mut resolvedTarget? : Option String := none
+      if let some rawTarget ← resolveMissionRemoteNode? store mc? mid then
+        let tLow := rawTarget.trimAscii.toString.toLower
+        let mut effTarget := rawTarget
+        if tLow == "auto" || tLow.startsWith "auto:" then
+          match ← resolveConcreteRemoteTargetNode mc? rawTarget (some (store, mid)) with
+          | .ok concrete => effTarget := concrete
+          | .error e =>
+            if e == "no_eligible_node" then
+              return ← settleReservedMcpAction store claims callerUserId toolName idemKeyTop "failed" e nowIso "placement_failed"
+            else if remoteSup?.isSome then
+              return ← settleReservedMcpAction store claims callerUserId toolName idemKeyTop "failed" e nowIso "no_execution_placement"
+        if let some cause ← nodeApiHangCause? store effTarget then
           return ← settleReservedMcpAction store claims callerUserId toolName idemKeyTop "failed" cause nowIso "hung_node"
+        resolvedTarget? := some effTarget
       if let some t := (args.fieldStr? "title").map (·.trimAscii.toString) then
         if !t.isEmpty then
           discard <| execParamQuery store.missionsDb "UPDATE missions SET title=?2, metadata_updated_at=?3 WHERE id=?1;" #[mid, t, nowIso]
       if let (some sup, some mr) := (remoteSup?, ← getMission? store mid) then
-        if let some targetNode ← resolveMissionRemoteNode? store mc? mid then
+        if let some targetNode := resolvedTarget? then
           -- The tool schema names the steering text `content`; `prompt`/`message` are legacy aliases.
           let prompt := ((args.fieldStr? "content").orElse (fun _ => (args.fieldStr? "prompt").orElse (fun _ => args.fieldStr? "message")) |>.getD "Continue.").trimAscii.toString
           let effPrompt := if prompt.isEmpty then "Continue." else prompt
@@ -1843,7 +1874,8 @@ def dispatchMcpToolCall
             resumeSessionId? := resumeSid?
           }
           if let .error dispErr ← submitRemoteMissionTurn store mc? relayHub? broadcastHub? sup workingDir spec nowEpochSec then
-            return ← settleReservedMcpAction store claims callerUserId toolName idemKeyTop "uncertain" dispErr nowIso
+            let outcome := if dispErr.startsWith "remote_dispatch_uncertain:" || dispErr.startsWith "remote_accept_persist_failed:" then "uncertain" else "failed"
+            return ← settleReservedMcpAction store claims callerUserId toolName idemKeyTop outcome dispErr nowIso
           let .ok settled ← recordSettledMcpAction store claims callerUserId toolName args
             (.obj #[("ok", .bool true), ("mission_id", .str mid), ("status", .str "active")]) nowIso mid
             | return mcpErr "receipt_record_failed" "The mutation completed but its receipt could not be recorded. Reconcile the action." false

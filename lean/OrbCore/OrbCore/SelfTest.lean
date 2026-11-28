@@ -7024,9 +7024,9 @@ private def runProdParityAndMissionMoveTests (_baseCfg : CoreConfig) : IO UInt32
   -- are flagged exactly once, and recovery (`online`) uncordons cleanly.
   let .ok (r19OkFd, r19OkPort) ← tcpListen "127.0.0.1" 0 8
     | return (← fail "tcpListen r19OkFd failed")
-  let .ok (r19ClosedFd, r19ClosedPort) ← tcpListen "127.0.0.1" 0 4
-    | do discard <| closeFd r19OkFd; return (← fail "tcpListen r19ClosedFd failed")
-  discard <| closeFd r19ClosedFd
+  let .ok (r19LagashFd, r19LagashPort) ← tcpListen "127.0.0.1" 0 8
+    | do discard <| closeFd r19OkFd; return (← fail "tcpListen r19LagashFd failed")
+  let r19LagashOnline ← IO.mkRef false
   let r19HbTask ← IO.asTask (prio := .dedicated) do
     for _ in [0:2] do
       if let .ok cfd ← tcpAcceptPoll r19OkFd 4000 then
@@ -7035,9 +7035,21 @@ private def runProdParityAndMissionMoveTests (_baseCfg : CoreConfig) : IO UInt32
         discard <| writeAll cfd (encodeCoreHttpResponse (jsonResponse 200 hbJson)) false
         discard <| closeFd cfd
     discard <| closeFd r19OkFd
+  let r19LagashTask ← IO.asTask (prio := .dedicated) do
+    for _ in [0:4] do
+      if let .ok cfd ← tcpAcceptPoll r19LagashFd 4000 then
+        let reqOpt ← readCoreHttpRequestFromFd cfd 1000
+        if ← r19LagashOnline.get then
+          let path := match reqOpt with | .ok req => req.path | .error _ => ""
+          let respJson :=
+            if path.startsWith "/jobs" then "{\"job_id\":\"j-r19-rec\",\"state\":\"running\"}"
+            else "{\"version\":\"1.3.0-lean4\",\"protocol_version\":2,\"capacity_total\":4,\"capacity_available\":4,\"active_jobs\":0,\"queued_jobs\":0,\"cordoned\":false}"
+          discard <| writeAll cfd (encodeCoreHttpResponse (jsonResponse 200 respJson)) false
+        discard <| closeFd cfd
+    discard <| closeFd r19LagashFd
   OrbBin.PosixExt.setenvVar "SANDBOXED_REMOTE_NODES_ENABLED" "true"
   OrbBin.PosixExt.setenvVar "SANDBOXED_REMOTE_NODES"
-    s!"lagash=http://localhost:{r19ClosedPort}|ORB_TEST_LAGASH_TOK,uruk=http://localhost:{r19OkPort}|ORB_TEST_URUK_TOK"
+    s!"lagash=http://localhost:{r19LagashPort}|ORB_TEST_LAGASH_TOK,uruk=http://localhost:{r19OkPort}|ORB_TEST_URUK_TOK"
   OrbBin.PosixExt.setenvVar "ORB_TEST_LAGASH_TOK" "tok-lagash-r19"
   OrbBin.PosixExt.setenvVar "ORB_TEST_URUK_TOK" "tok-uruk-r19"
   discard <| execParamQuery store.missionsDb
@@ -7065,13 +7077,25 @@ private def runProdParityAndMissionMoveTests (_baseCfg : CoreConfig) : IO UInt32
     "{\"title\":\"R19 Auto Placement\",\"backend\":\"opencode\",\"remote_node_id\":\"auto\"}"
   let (r19ExplicitSt, r19ExplicitBody) ← sendJson "POST" "/api/control/missions" hsJwt
     "{\"title\":\"R19 Explicit Hung\",\"backend\":\"opencode\",\"remote_node_id\":\"lagash\"}"
+  -- Finding 1: tag-only placement and conflicting remote_node_id + tags cannot bypass R19 cordoning.
+  let (r19TagHungSt, r19TagHungBody) ← sendJson "POST" "/api/control/missions" hsJwt
+    "{\"title\":\"R19 Tag Hung\",\"backend\":\"opencode\",\"tags\":[\"remote-node:lagash\"]}"
+  let (r19TagAutoSt, r19TagAutoBody) ← sendJson "POST" "/api/control/missions" hsJwt
+    "{\"title\":\"R19 Tag Auto\",\"backend\":\"opencode\",\"tags\":[\"remote-node:auto\"]}"
+  let (r19ConflictSt, r19ConflictBody) ← sendJson "POST" "/api/control/missions" hsJwt
+    "{\"title\":\"R19 Conflict\",\"backend\":\"opencode\",\"remote_node_id\":\"uruk\",\"tags\":[\"remote-node:lagash\"]}"
   let (r19ResActSt, r19ResActBody) ← sendJson "POST" "/api/control/missions/m-r19-active/resume" hsJwt "{}"
   let (r19ResIntSt, r19ResIntBody) ← sendJson "POST" "/api/control/missions/m-r19-int/resume" hsJwt "{}"
   let r19FlagRows := (← execParamQuery store.missionsDb
     "SELECT mission_id FROM mission_events WHERE mission_id IN ('m-r19-active','m-r19-int') AND event_type='error' AND json_extract(payload,'$.reason')='hung_node' ORDER BY mission_id;" #[]).toOption.getD #[]
   let r19UserMsgs := (← execParamQuery store.missionsDb
     "SELECT COUNT(*) FROM mission_events WHERE mission_id IN ('m-r19-active','m-r19-int') AND event_type='user_message';" #[]).toOption.getD #[]
-  -- Now recover `lagash` (`online`) and confirm uncordoning + resume unblocked.
+  -- Finding 6: mixed-case persisted cordon is cleanly removed by case-insensitive `/api/nodes/lagash/uncordon`.
+  discard <| OrbCore.RemoteFleetAndRelay.setPersistedNodeCordoned dataRoot "Lagash" true
+  let (r19UncordSt, r19UncordBody) ← sendJson "POST" "/api/nodes/lagash/uncordon" hsJwt "{}"
+  let r19AfterMixedUncord ← OrbCore.RemoteFleetAndRelay.loadPersistedNodeCordons dataRoot
+  -- Now recover `lagash` (`online`) with live responder and confirm uncordoning + strict HTTP 200 resume.
+  r19LagashOnline.set true
   OrbCore.RemoteFleetAndRelay.observeNodeApi store "lagash" "online" "2026-11-28T00:03:00Z" (pure false)
   let (r19FleetRecSt, r19FleetRecBody) ← sendJson "GET" "/api/remote-nodes" hsJwt ""
   let r19LagashUncordoned :=
@@ -7087,15 +7111,21 @@ private def runProdParityAndMissionMoveTests (_baseCfg : CoreConfig) : IO UInt32
   OrbBin.PosixExt.unsetenvVar "ORB_TEST_URUK_TOK"
   discard <| execParamQuery store.missionsDb "DELETE FROM remote_node_jobs WHERE job_id IN ('j-r19-act','j-r19-int');" #[]
   let _ := r19HbTask.get
+  let _ := r19LagashTask.get
   if r19FleetSt != 200 || !r19LagashCordoned ||
      r19AutoSt != 201 || (r19AutoBody.splitOn "\"remote_node_id\":\"uruk\"").length < 2 ||
      r19ExplicitSt != 503 || !r19ExplicitBody.contains "lagash" || !r19ExplicitBody.contains "hung_node" ||
+     r19TagHungSt != 503 || !r19TagHungBody.contains "lagash" || !r19TagHungBody.contains "hung_node" ||
+     r19TagAutoSt != 201 || (r19TagAutoBody.splitOn "\"remote_node_id\":\"uruk\"").length < 2 ||
+     r19ConflictSt != 400 || !r19ConflictBody.contains "conflicting_remote_node_placement" ||
      r19ResActSt != 503 || !r19ResActBody.contains "lagash" || !r19ResActBody.contains "API is unresponsive" ||
      r19ResIntSt != 503 || !r19ResIntBody.contains "lagash" || !r19ResIntBody.contains "API is unresponsive" ||
      r19FlagRows.size != 3 || (r19UserMsgs[1]?.bind (·[0]?)).getD "" != "0" ||
+     r19UncordSt != 200 || (r19UncordBody.splitOn "\"changed\":true").length < 2 ||
+     r19AfterMixedUncord.any (fun c => c.toLower == "lagash") ||
      r19FleetRecSt != 200 || !r19LagashUncordoned ||
-     r19ResRecSt == 503 then
-    return (← fail s!"R19 HTTP integration test failed: fleet={r19FleetSt}/{r19LagashCordoned} auto={r19AutoSt}:{r19AutoBody} explicit={r19ExplicitSt}:{r19ExplicitBody} resAct={r19ResActSt}:{r19ResActBody} resInt={r19ResIntSt}:{r19ResIntBody} flags={reprStr r19FlagRows} userMsgs={reprStr r19UserMsgs} recFleet={r19FleetRecSt}/{r19LagashUncordoned} recRes={r19ResRecSt}:{r19ResRecBody}")
+     r19ResRecSt != 200 then
+    return (← fail s!"R19 HTTP integration test failed: fleet={r19FleetSt}/{r19LagashCordoned} auto={r19AutoSt}:{r19AutoBody} explicit={r19ExplicitSt}:{r19ExplicitBody} tagHung={r19TagHungSt}:{r19TagHungBody} tagAuto={r19TagAutoSt}:{r19TagAutoBody} conflict={r19ConflictSt}:{r19ConflictBody} resAct={r19ResActSt}:{r19ResActBody} resInt={r19ResIntSt}:{r19ResIntBody} flags={reprStr r19FlagRows} userMsgs={reprStr r19UserMsgs} uncord={r19UncordSt}:{r19UncordBody} afterMixed={r19AfterMixedUncord} recFleet={r19FleetRecSt}/{r19LagashUncordoned} recRes={r19ResRecSt}:{r19ResRecBody}")
 
   -- Plain-HTTP connect timeout (`OrbBin.HttpClient.sendRequest`):
   -- (a) Listener with backlog 1 + 2 fillers so `connect()` never completes: `sendRequest` with `timeoutMs = 500`
