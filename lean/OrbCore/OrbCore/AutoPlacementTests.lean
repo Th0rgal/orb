@@ -215,6 +215,21 @@ private def gatewayTests (root : String) : IO Unit := do
     let idleEvsAfterPump ← sql "SELECT event_type FROM mission_events WHERE mission_id='idle-bab'"
     check (pumpedWhileHung == 0 && idleEvsAfterPump.size == 1)
       s!"R19: tickRemoteFollowupPump must not claim or emit errors while node is hung: pumped={pumpedWhileHung} evs={reprStr idleEvsAfterPump}"
+    -- R2 F2 & F3: `remote-node:auto` on an unstarted fork/child does NOT inherit its parent's hung node,
+    -- respects its own `exclude-node:` tags, and `resolveConcreteRemoteTargetNode` handles mixed-case
+    -- `Auto` / `LOCAL` / `AUTO-MANAGED` case-insensitively.
+    discard <| sql "INSERT INTO missions(id,owner_user_id,project,status,parent_mission_id,tags) VALUES('fork-auto','alice','p','awaiting_user','free','[\"forked-from:free\",\"remote-node:Auto\",\"exclude-node:ashur\"]');"
+    check ((← OrbCore.RemoteDispatch.resolveMissionRemoteNode? store none "fork-auto") == some "Auto")
+      "R19: unstarted remote-node:auto fork keeps auto instead of inheriting parent's hung node"
+    let autoMixedRes ← OrbCore.RemoteDispatch.resolveConcreteRemoteTargetNode none "Auto" (some (store, "fork-auto"))
+    check (autoMixedRes.toOption == some "ur")
+      s!"R19: mixed-case Auto resolves to healthy static node ur: {reprStr autoMixedRes}"
+    let localMixedRes ← OrbCore.RemoteDispatch.resolveConcreteRemoteTargetNode none "LOCAL" (some (store, "fork-auto"))
+    check (match localMixedRes with | .error "not_a_remote_target" => true | _ => false)
+      s!"R19: mixed-case LOCAL rejected as not_a_remote_target: {reprStr localMixedRes}"
+    let managedMixedRes ← OrbCore.RemoteDispatch.resolveConcreteRemoteTargetNode none "AUTO-MANAGED" none
+    check (match managedMixedRes with | .error "no_managed_machines_available" => true | _ => false)
+      s!"R19: mixed-case AUTO-MANAGED handled case-insensitively: {reprStr managedMixedRes}"
     -- Recovery/uncordoning clears the hang incident, restores placement eligibility, and preserves operator cordons.
     observeNodeApi store "babylon" "online" "t3" (pure false)
     check (← nodeApiHangCause? store "babylon").isNone "R19: healthy heartbeat clears the incident"

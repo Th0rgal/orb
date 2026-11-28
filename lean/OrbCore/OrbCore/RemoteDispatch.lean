@@ -288,12 +288,13 @@ def resolveConcreteRemoteTargetNode
     (rawTarget : String)
     (scope? : Option (CoreStore × String) := none) : IO (Except String String) := do
   let clean := rawTarget.trimAscii.toString
-  if clean.isEmpty || clean == "local" || clean == "client" then
+  let cleanLow := clean.toLower
+  if cleanLow.isEmpty || cleanLow == "local" || cleanLow == "client" then
     return .error "not_a_remote_target"
   let (_, staticNodes) ← loadStaticRemoteNodes
-  if staticNodes.any (fun n => n.id == clean) then
-    return .ok clean
-  if clean == "auto" || clean.startsWith "auto:" then
+  if let some sn := staticNodes.find? (fun n => n.id.trimAscii.toString.toLower == cleanLow) then
+    return .ok sn.id
+  if cleanLow == "auto" || cleanLow.startsWith "auto:" then
     if let some (store, missionId) := scope? then
       if !staticNodes.isEmpty then
         let excluded ← OrbCore.AutoPlacement.lineageExclusions store missionId
@@ -309,7 +310,7 @@ def resolveConcreteRemoteTargetNode
     if let some mc := mc? then
       if let some node ← scopedReadyManagedMachine? mc scope? then return .ok node
     return .error "no_remote_nodes_available"
-  if clean == "auto-managed" || clean.startsWith "auto-managed:" then
+  if cleanLow == "auto-managed" || cleanLow.startsWith "auto-managed:" then
     let some mc := mc?
       | return .error "no_managed_machines_available"
     if let some node ← scopedReadyManagedMachine? mc scope? then return .ok node
@@ -353,10 +354,10 @@ def resolveMissionRemoteNode?
       parentMid := (cell mRows[1]! 2).trimAscii.toString
   let mut autoFallback? : Option String := none
   if let some rn := (extractTagValue? tags "remote-node:").orElse (fun _ => extractTagValue? tags "remote_node:") then
-    if rn != "local" && rn != "client" then
-      let rnLow := rn.toLower
+    let rnLow := rn.toLower
+    if rnLow != "local" && rnLow != "client" then
       if rnLow == "auto" || rnLow.startsWith "auto:" then
-        -- Fall through to concrete run/job/orchestration/lineage evidence first so
+        -- Fall through to this mission's own concrete run/job/orchestration/VM history first so
         -- legacy `auto` missions resolve to the concrete node that actually owns them.
         autoFallback? := some rn
       else
@@ -408,6 +409,9 @@ def resolveMissionRemoteNode?
           let vmid := (cell vmRows[1]! 0).trimAscii.toString
           if !vmid.isEmpty then
             return some s!"managed-{vmid}"
+  -- Respect an explicit `remote-node:auto` tag on this mission before inheriting an ancestor's node.
+  if let some af := autoFallback? then
+    return some af
   -- 6. Recurse into fork / `/btw` parent when workspace is inherited
   if depth > 0 then
     let anc? :=
@@ -419,7 +423,7 @@ def resolveMissionRemoteNode?
       if anc != mid then
         if let some ancNode ← resolveMissionRemoteNode? store mc? anc (depth - 1) then
           return some ancNode
-  return autoFallback?
+  return none
 
 /-- Trust classification for secret delivery, shared by direct retrieval and
     approval polling. A managed binding is sufficient even before enrollment;
@@ -2257,9 +2261,10 @@ partial def spawnRemoteJobPoller
     let mut consecNetErrors : Nat := 0
     let mut firstNetErrSec? : Option UInt64 := none
     let monitorIntervalMs := Nat.max 500 (((← IO.getEnv "SANDBOXED_NODE_API_MONITOR_INTERVAL_MS").bind String.toNat?).getD 30000)
-    -- Give `monitorStaticNodeApis` two full ticks to classify a pingable hung node
-    -- before emitting a generic unreachable banner, preventing double-flagging on fast ECONNREFUSED.
-    let hangGraceSecs : UInt64 := (Nat.max 5 (2 * ((monitorIntervalMs + 999) / 1000) + 5)).toUInt64
+    -- Give `monitorStaticNodeApis` time past `nodeHasFreshApiActivity` (20s) plus two full ticks
+    -- and sequential probe slack to classify a pingable hung node before emitting a generic
+    -- unreachable banner, preventing double-flagging on fast ECONNREFUSED.
+    let hangGraceSecs : UInt64 := (20 + 2 * ((monitorIntervalMs + 999) / 1000) + 15).toUInt64
     -- A harness that never produces its first event (e.g. OpenCode after a failed model
     -- stream, which logs the error but does not exit) would otherwise hang the turn forever.
     -- Only fresh turns are watched: a poller resumed mid-turn may be inside a long tool call.
@@ -2395,11 +2400,22 @@ partial def spawnRemoteJobPoller
               "UPDATE remote_jobs SET state='unreachable', heartbeat_at=?2, updated_at=?2 WHERE job_id=?1 AND state NOT IN ('succeeded','failed','cancelled','lost','terminal','completed','aborted','cancel_requested');"
               #[jobId, nowIso]
             if !unreachableNotified && nowSec ≥ errStartSec + hangGraceSecs && (← pollerOwnsGeneration) then
-              unreachableNotified := true
-              -- When the static-node API monitor already flagged this node as hung,
-              -- avoid emitting a second generic unreachable error on the same mission.
-              let alreadyHung ← try (pure (← nodeApiHangCause? store effNodeId).isSome) catch _ => pure false
-              if !alreadyHung then
+              -- When the static-node API monitor already flagged this node as hung (`strikes >= 2`),
+              -- suppress the generic unreachable error. When `strikes == 1`, defer so the next
+              -- monitor tick can either confirm the hang or clear it if ping fails.
+              let hangStrikes : Nat ← try
+                  match ← execParamQuery store.missionsDb
+                      "SELECT strikes FROM node_api_hangs WHERE node_id=?1 LIMIT 1;"
+                      #[effNodeId.trimAscii.toString.toLower] with
+                  | .ok rows => pure (if rows.size > 1 then cellNat rows[1]! 0 else 0)
+                  | .error _ => pure 0
+                catch _ => pure 0
+              if hangStrikes ≥ 2 then
+                unreachableNotified := true
+              else if hangStrikes == 1 then
+                pure ()
+              else
+                unreachableNotified := true
                 emitMissionEventAndBroadcast store broadcastHub? missionId "error"
                   (renderCompact (.obj #[("message", .str s!"Lost contact with remote node `{effNodeId}`; the turn remains owned and will reconcile when the node is reachable: {netErr}")])) nowIso
             IO.sleep 2000

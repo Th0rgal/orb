@@ -6140,10 +6140,14 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
         if bn.toLower != tn.toLower then
           abortIdem
           return .ok (mkJson 400 "{\"error\":\"conflicting_remote_node_placement\"}")
-      let remoteNodeId? := bodyRemoteNodeId?.orElse (fun _ => distinctTagNodes[0]?)
+      let rawCanonicalNode? := bodyRemoteNodeId?.orElse (fun _ => distinctTagNodes[0]?)
+      let isNonRemoteSentinel (s : String) : Bool :=
+        let l := s.trimAscii.toString.toLower
+        l == "local" || l == "client"
+      let remoteNodeId? := rawCanonicalNode?.filter (!isNonRemoteSentinel ·)
       let cleanBaseTags := baseReqTags.filter (fun t => !(t.startsWith "remote-node:") && !(t.startsWith "remote_node:"))
       let reqTags : Array String :=
-        match remoteNodeId? with
+        match rawCanonicalNode? with
         | some rn => cleanBaseTags.push s!"remote-node:{rn}"
         | none => cleanBaseTags
       let placement? := JsonTape.lookupString? tape "placement"
