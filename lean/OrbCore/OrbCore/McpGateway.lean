@@ -1934,7 +1934,7 @@ def dispatchMcpToolCall
           return ← settleReservedMcpAction store claims callerUserId toolName idemKeyTop "failed" cause nowIso "hung_node"
         resolvedTarget? := some effTarget
       let hasInflight : Bool ← match ← execParamQuery store.missionsDb
-          "SELECT 1 FROM remote_node_jobs WHERE mission_id=?1 AND state NOT IN ('succeeded','failed','cancelled','lost','terminal','completed','aborted') LIMIT 1;" #[mid] with
+          "SELECT 1 FROM remote_node_jobs WHERE mission_id=?1 AND state NOT IN ('succeeded','failed','cancelled','lost','terminal','completed','aborted','unreachable') LIMIT 1;" #[mid] with
         | .ok rows => pure (decide (rows.size > 1))
         | .error _ => pure false
       if hasInflight then

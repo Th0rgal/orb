@@ -2888,7 +2888,7 @@ partial def submitRemoteMissionTurn
         | return .error "remote_goal_owner_read_failed"
       if owners.size ≤ 1 then return .error "remote_goal_dispatch_fenced"
       let .ok liveGoal ← query
-        "SELECT 1 FROM remote_node_jobs WHERE mission_id=?1 AND state NOT IN ('succeeded','failed','cancelled','lost','terminal','completed','aborted') LIMIT 1;"
+        "SELECT 1 FROM remote_node_jobs WHERE mission_id=?1 AND state NOT IN ('succeeded','failed','cancelled','lost','terminal','completed','aborted','unreachable') LIMIT 1;"
         #[spec.missionId] | return .error "remote_inflight_read_failed"
       if liveGoal.size > 1 then return .error "remote_goal_dispatch_fenced"
       if !cid.isEmpty then
@@ -2907,7 +2907,7 @@ partial def submitRemoteMissionTurn
         let .ok rows ← query
           ("UPDATE mission_continuations SET dispatch_job_id=?5 WHERE id=?1 AND request_id=?2 AND mission_id=?3 " ++
            "AND phase=2 AND run_generation=CAST(?4 AS INTEGER) AND dispatch_job_id='' " ++
-           "AND NOT EXISTS(SELECT 1 FROM remote_node_jobs WHERE mission_id=?3 AND state NOT IN ('succeeded','failed','cancelled','lost','terminal','completed','aborted')) " ++
+           "AND NOT EXISTS(SELECT 1 FROM remote_node_jobs WHERE mission_id=?3 AND state NOT IN ('succeeded','failed','cancelled','lost','terminal','completed','aborted','unreachable')) " ++
            "RETURNING id;") #[claim.id, claim.requestId, spec.missionId, s!"{claim.generation}", jobId]
           | return .error "wakeup_claim_write_failed"
         if rows.size ≤ 1 then return .error "wakeup_claim_fenced"
@@ -2918,14 +2918,14 @@ partial def submitRemoteMissionTurn
       else
         -- Fence ordinary turns against launching a competing second job while an
         -- earlier submission for this mission is still `submitting` or `uncertain` (`FLT-05`),
-        -- or while a live job (`running`, `queued`, `cancel_requested`, `unreachable`, etc.) is active.
+        -- or while a live job (`running`, `queued`, `cancel_requested`, etc.) is active.
         let .ok inflight ← query
           "SELECT job_id FROM remote_node_jobs WHERE mission_id=?1 AND state IN ('submitting','uncertain') LIMIT 1;"
           #[spec.missionId] | return .error "remote_inflight_read_failed"
         if inflight.size > 1 then
           return .error s!"existing_uncertain_job:{cell inflight[1]! 0}"
         let .ok active ← query
-          "SELECT job_id FROM remote_node_jobs WHERE mission_id=?1 AND state NOT IN ('succeeded','failed','cancelled','lost','terminal','completed','aborted','submitting','uncertain') LIMIT 1;"
+          "SELECT job_id FROM remote_node_jobs WHERE mission_id=?1 AND state NOT IN ('succeeded','failed','cancelled','lost','terminal','completed','aborted','unreachable','submitting','uncertain') LIMIT 1;"
           #[spec.missionId] | return .error "remote_inflight_read_failed"
         if active.size > 1 then
           return .error s!"existing_active_job:{cell active[1]! 0}"
