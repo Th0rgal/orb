@@ -2338,28 +2338,24 @@ private def handleProxyRequest (st : CoreAppState) (req : HttpRequest) (cleanPat
     { out with body := loginErrorBody, contentType := "application/json" }
     else out
   -- Provider status follows what real requests saw: a refused login is recorded per
-  -- upstream account, and an account that just served a request is cleared.
+  -- upstream account, and an account that actually completed a 2xx request is cleared.
   for (accountKey, code) in (← authEvidence.get) do
     discard <| execParamQuery st.store.missionsDb
       ("INSERT INTO provider_auth_health(account_key,code,observed_at) VALUES(?1,?2,?3) " ++
        "ON CONFLICT(account_key) DO UPDATE SET code=excluded.code,observed_at=excluded.observed_at;")
       #[accountKey, code, formatEpochIso8601Utc nowEpochSec]
-  if out.status ≥ 200 && out.status < 300 && !out.selectedAccount.isEmpty then
-    discard <| execParamQuery st.store.missionsDb
-      "DELETE FROM provider_auth_health WHERE account_key=?1;" #[out.selectedAccount]
+  if out.stream?.isNone && out.status ≥ 200 && out.status < 300 && !out.selectedAccount.isEmpty then
+    clearRequestAuthEvidenceForAccount st.providerHub? st.store st.cfg.workingDir out.selectedAccount
   match st.healthTracker? with
   | some htr =>
-    let active ← snapshotActiveHealthCooldowns htr nowEpochSec
-    st.proxyCooldownsRef.set active
+    syncCooldownsFromHealthTracker htr st.proxyCooldownsRef nowEpochSec
   | none =>
-    let cooldowns ← st.proxyCooldownsRef.get
-    let stillActive := activeCooldowns cooldowns nowEpochSec
-    let withoutSelected := stillActive.filter (fun c => c.accountId != out.selectedAccount)
-    let refreshed :=
+    st.proxyCooldownsRef.modify fun cooldowns =>
+      let stillActive := activeCooldowns cooldowns nowEpochSec
+      let withoutSelected := stillActive.filter (fun c => c.accountId != out.selectedAccount)
       match cooldownForOutcome out nowEpochSec with
       | some c => withoutSelected.push c
       | none => withoutSelected
-    st.proxyCooldownsRef.set refreshed
   if let some mid := stopMid? then
     if out.status ≥ 400 && !out.firstByteCommitted && out.stream?.isNone then
       if ← isMissionOwnedChain st mid chains cleanPath activeChain.id then
@@ -2479,7 +2475,10 @@ private def handleProxyRequest (st : CoreAppState) (req : HttpRequest) (cleanPat
                          (finalTarget?.map (·.modelId)).getD rawRequestedModel,
                          toString (finalAttempts - 1)]
                  let streamStatus := classifyProxyStreamOutcome out.contentType wantsStreamReq copy ok timedOut
-                 if streamStatus != "ok" then
+                 if streamStatus == "ok" then
+                   if out.status ≥ 200 && out.status < 300 && !finalAccount.isEmpty then
+                     clearRequestAuthEvidenceForAccount st.providerHub? st.store st.cfg.workingDir finalAccount
+                 else
                    if let some oid := outcomeId? then
                      discard <| execParamQuery st.store.missionsDb
                        "UPDATE proxy_outcomes SET status=?2 WHERE id=?1;" #[oid, streamStatus]
@@ -2488,8 +2487,7 @@ private def handleProxyRequest (st : CoreAppState) (req : HttpRequest) (cleanPat
                        let finalPrevStreak :=
                          (prevStreaks.find? (fun (aid, _) => aid == finalAccount)).map Prod.snd |>.getD prevSelectedStreak
                        discard <| recordStreamCutHealth htr finalAccount finalPrevStreak nowEpochSec
-                       let active ← snapshotActiveHealthCooldowns htr nowEpochSec
-                       st.proxyCooldownsRef.set active }
+                       syncCooldownsFromHealthTracker htr st.proxyCooldownsRef nowEpochSec }
   | none =>
     accountBody out.body
     return { status := out.status, contentType := out.contentType, corsOrigin? := reqOrigin?, extraHdrs := diagHdrs, body := out.body }
@@ -3983,7 +3981,7 @@ private def collectResourcesPoolHealthHints
   if let some ht := st.healthTracker? then
     for hp in enabledHps do
       let slugs := poolSlugsForHp hp
-      let keys := #[hp.id] ++ (if hp.modelPrefix.isEmpty then #[] else #[hp.modelPrefix])
+      let keys := providerHealthKeys hp
       for k in keys do
         let rec ← lookupAccountHealthRecord ht k
         if rec.disabledByProvider then

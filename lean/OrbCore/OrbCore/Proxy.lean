@@ -668,6 +668,46 @@ def clearAccountHealthWhere (tracker : ProviderHealthTracker) (pick : String →
     let st ← get
     set { st with accounts := st.accounts.filter (fun r => !pick r.accountId) }
 
+/-- Atomically clear matching account health records from BOTH `ProviderHealthTracker` and legacy
+    `proxyCooldownsRef` under `tracker.health`'s mutex (when present), preventing a concurrent
+    proxy request from resurrecting a cleared cooldown via a stale `snapshotActiveHealthCooldowns`. -/
+def clearAccountCooldowns
+    (tracker? : Option ProviderHealthTracker)
+    (cooldownsRef : IO.Ref (Array AccountCooldown))
+    (pick : String → Bool) : IO Unit :=
+  match tracker? with
+  | some tracker =>
+    tracker.health.atomically do
+      let st ← get
+      set { st with accounts := st.accounts.filter (fun r => !pick r.accountId) }
+      cooldownsRef.modify (fun cs => cs.filter (fun c => !pick c.accountId))
+  | none =>
+    cooldownsRef.modify (fun cs => cs.filter (fun c => !pick c.accountId))
+
+/-- Atomically expire elapsed cooldowns in `ProviderHealthTracker` and mirror the active set into
+    `proxyCooldownsRef` under `tracker.health`'s mutex so a pre-clear snapshot can never overwrite
+    `proxyCooldownsRef` after `clearAccountCooldowns`. -/
+def syncCooldownsFromHealthTracker
+    (tracker : ProviderHealthTracker)
+    (cooldownsRef : IO.Ref (Array AccountCooldown))
+    (nowEpoch : UInt64) : IO Unit :=
+  tracker.health.atomically do
+    let st ← get
+    let mut updated : Array AccountHealthRecord := Array.mkEmpty st.accounts.size
+    let mut active : Array AccountCooldown := #[]
+    for rec in st.accounts do
+      match rec.cooldown? with
+      | some c =>
+        if c.untilEpoch > nowEpoch then
+          updated := updated.push rec
+          active := active.push c
+        else
+          updated := updated.push { rec with cooldown? := none, parkedQuota := false, poisonedSub := false }
+      | none =>
+        updated := updated.push rec
+    set { st with accounts := updated }
+    cooldownsRef.set active
+
 /-- Plan a `RoutingChain` directly from `ProviderHealthTracker`'s single-owner state at `nowEpoch`.
     Provider-disabled accounts are removed from `eligible` and are not reported as cooling down. -/
 def planChainFromHealth (tracker : ProviderHealthTracker) (chain : RoutingChain) (nowEpoch : UInt64) : IO ChainPlan := do

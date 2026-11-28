@@ -915,27 +915,35 @@ def memberProviderDisplayName (hps : Array HydratedProvider) (hp : HydratedProvi
   return s!"{metaInfo.name} {idx + 1}"
 
 def renderMemberHydratedProviderJv (hp : HydratedProvider) (displayName : String)
-    (userEnabled? : Option Bool := none) (rejected : Bool := false) : JVal := Id.run do
+    (userEnabled? : Option Bool := none) (rejected : Bool := false)
+    (statusOverride? : Option (String × String) := none) : JVal := Id.run do
   let metaInfo := lookupProviderMeta hp.providerType
   let hasCreds := hp.hasApiKey || hp.hasOAuth
   let uEn := userEnabled?.getD true
   let effEn := hp.enabled && uEn
   let statusObj : JVal :=
-    if hasCreds && rejected then
-      .obj #[
-        ("type", .str "needs_reauth"),
-        ("message", .str "Sign in again: the provider rejected this login")
-      ]
-    else if hasCreds then
-      .obj #[
-        ("type", .str "connected"),
-        ("message", .str (if hp.hasOAuth then "Connected via OAuth" else "API key configured"))
-      ]
-    else
+    if !hasCreds then
       .obj #[
         ("type", .str "needs_auth"),
         ("message", .str "Credentials not configured")
       ]
+    else match statusOverride? with
+      | some (stType, stMsg) =>
+        .obj #[
+          ("type", .str stType),
+          ("message", .str stMsg)
+        ]
+      | none =>
+        if rejected then
+          .obj #[
+            ("type", .str "needs_reauth"),
+            ("message", .str "Sign in again: the provider rejected this login")
+          ]
+        else
+          .obj #[
+            ("type", .str "connected"),
+            ("message", .str (if hp.hasOAuth then "Connected via OAuth" else "API key configured"))
+          ]
   .obj #[
     ("id", .str hp.id),
     ("name", .str displayName),
@@ -973,7 +981,7 @@ def projectMemberProviderUsageJv (jv : JVal) (displayName : String) : JVal :=
   | other => other
 
 def renderHydratedProviderJv (hp : HydratedProvider) (userEnabled? : Option Bool := none) (observedRpm? : Option UInt32 := none)
-    (rejected : Bool := false) : JVal := Id.run do
+    (rejected : Bool := false) (statusOverride? : Option (String × String) := none) : JVal := Id.run do
   let metaInfo := lookupProviderMeta hp.providerType
   let hasCreds := hp.hasApiKey || hp.hasOAuth
   let authMethods : Array JVal :=
@@ -981,27 +989,35 @@ def renderHydratedProviderJv (hp : HydratedProvider) (userEnabled? : Option Bool
     else if metaInfo.usesOAuth then #[.str "oauth"]
     else #[.str "api_key"]
   let statusObj : JVal :=
-    if hasCreds && rejected then
-      -- The vendor refused this login on the last usage probe (dead refresh token).
-      .obj #[
-        ("type", .str "needs_reauth"),
-        ("auth_methods", .arr authMethods),
-        ("message", .str "Sign in again: the provider rejected this login")
-      ]
-    else if hasCreds then
-      .obj #[
-        ("type", .str "connected"),
-        ("auth_methods", .arr authMethods),
-        ("auth_type", .str (if hp.hasOAuth then "oauth" else "api_key")),
-        ("account", if hp.accountEmail.isEmpty then .null else .str hp.accountEmail),
-        ("message", .str (if hp.hasOAuth then "Connected via OAuth" else "API key configured"))
-      ]
-    else
+    if !hasCreds then
       .obj #[
         ("type", .str "needs_auth"),
         ("auth_methods", .arr authMethods),
         ("message", .str "Credentials not configured")
       ]
+    else match statusOverride? with
+      | some (stType, stMsg) =>
+        .obj #[
+          ("type", .str stType),
+          ("auth_methods", .arr authMethods),
+          ("message", .str stMsg)
+        ]
+      | none =>
+        if rejected then
+          -- The vendor refused this login on the last usage probe or real request.
+          .obj #[
+            ("type", .str "needs_reauth"),
+            ("auth_methods", .arr authMethods),
+            ("message", .str "Sign in again: the provider rejected this login")
+          ]
+        else
+          .obj #[
+            ("type", .str "connected"),
+            ("auth_methods", .arr authMethods),
+            ("auth_type", .str (if hp.hasOAuth then "oauth" else "api_key")),
+            ("account", if hp.accountEmail.isEmpty then .null else .str hp.accountEmail),
+            ("message", .str (if hp.hasOAuth then "Connected via OAuth" else "API key configured"))
+          ]
   let mut fields : Array (String × JVal) := #[
     ("id", .str hp.id),
     ("name", .str hp.name),
@@ -1051,16 +1067,16 @@ def providerListedFor (hp : HydratedProvider) (effAdmin : Bool) (callerUserId : 
 def renderHydratedProviderForCaller (hps : Array HydratedProvider) (hp : HydratedProvider)
     (effAdmin : Bool) (callerUserId : String) (usernames : Array (String × String))
     (userEnabled? : Option Bool := none) (observedRpm? : Option UInt32 := none)
-    (rejected : Bool := false) : JVal :=
+    (rejected : Bool := false) (statusOverride? : Option (String × String) := none) : JVal :=
   if effAdmin || providerAddedBy hp callerUserId then
-    let base := renderHydratedProviderJv hp userEnabled? (if effAdmin then observedRpm? else none) rejected
+    let base := renderHydratedProviderJv hp userEnabled? (if effAdmin then observedRpm? else none) rejected statusOverride?
     let uname := (usernames.find? (·.1 == hp.createdByUserId)).map Prod.snd
     let base := base.setField "added_by_me" (.bool (providerAddedBy hp callerUserId))
     if hp.createdByUserId.isEmpty then base
     else (base.setField "created_by_user_id" (.str hp.createdByUserId)).setField "created_by_username"
       (match uname with | some u => .str u | none => .null)
   else
-    (renderMemberHydratedProviderJv hp (memberProviderDisplayName hps hp) userEnabled? rejected).setField
+    (renderMemberHydratedProviderJv hp (memberProviderDisplayName hps hp) userEnabled? rejected statusOverride?).setField
       "added_by_me" (.bool false)
 
 /-! ## Provider Subscription & Rate-Limit Usage (`GET /api/ai/providers/usage` & `/:id/usage`) -/
@@ -2897,6 +2913,121 @@ private def mapLoginSlug (raw : String) : Option (String × String × String) :=
   | "muse-code" | "meta" => some ("meta", "meta", "redirect")
   | _ => none
 
+private def isFileAccountHash (s : String) : Bool :=
+  s.length == 64 && s.toList.all (fun c => ('0' ≤ c && c ≤ '9') || ('a' ≤ c && c ≤ 'f'))
+
+/-- Canonical cooldown/health/auth-evidence keys owned by a hydrated provider row:
+    its row id, optional routing `modelPrefix`, `custom:<id>` for custom providers,
+    and `cliproxyapi:<provider_type>` for OAuth-only accounts. -/
+def providerHealthKeys (hp : HydratedProvider) : Array String := Id.run do
+  let mut keys : Array String := #[hp.id]
+  if !hp.modelPrefix.isEmpty && !keys.contains hp.modelPrefix then
+    keys := keys.push hp.modelPrefix
+  if hp.providerType == "custom" then
+    let ck := s!"custom:{hp.id}"
+    if !keys.contains ck then keys := keys.push ck
+  if hp.hasOAuth && !hp.hasApiKey then
+    let sk := s!"cliproxyapi:{hp.providerType}"
+    if !keys.contains sk then keys := keys.push sk
+  return keys
+
+/-- Whether a proxy account/cooldown/auth-health key belongs to `hp` (including
+    Antigravity per-model pool keys `cliproxyapi:antigravity:<model>` while excluding
+    64-hex per-file account hashes and IDs owned by another provider row). -/
+def matchesProviderHealthKey (hps : Array HydratedProvider) (hp : HydratedProvider) (k : String) : Bool :=
+  (providerHealthKeys hp).contains k ||
+  (hp.hasOAuth && !hp.hasApiKey && hp.providerType == "antigravity" &&
+    k.startsWith "cliproxyapi:antigravity:" &&
+    !isFileAccountHash (k.drop "cliproxyapi:antigravity:".length).toString &&
+    !hps.any (fun other => other.id == k && other.id != hp.id))
+
+private structure AccountOutcomeSummary where
+  accountId : String
+  totalCount : Nat := 0
+  okCount : Nat := 0
+  latestId : Nat := 0
+  latestStatus : String := ""
+  latestHttpStatus : Nat := 0
+  deriving Inhabited
+
+/-- Load all persisted real-request auth rejections from `provider_auth_health`. -/
+def loadProviderAuthHealthRows (store : CoreStore) : IO (Array (String × String)) := do
+  match ← execParamQuery store.missionsDb "SELECT account_key, code FROM provider_auth_health;" #[] with
+  | .ok rows =>
+    return (rows.extract 1 rows.size).filterMap fun r =>
+      match r[0]? with
+      | some k => if k.isEmpty then none else some (k, (r[1]?).getD "")
+      | none => none
+  | .error _ => return #[]
+
+/-- Load per-account request-outcome counts and latest outcome status from `proxy_outcomes`. -/
+private def loadAccountOutcomeSummaries (store : CoreStore) : IO (Array AccountOutcomeSummary) := do
+  let .ok aggRows ← execParamQuery store.missionsDb
+      ("SELECT account_id, COUNT(*), COALESCE(SUM(CASE WHEN status='ok' THEN 1 ELSE 0 END),0), MAX(id) " ++
+       "FROM proxy_outcomes WHERE COALESCE(account_id,'') <> '' GROUP BY account_id;") #[]
+    | return #[]
+  if aggRows.size ≤ 1 then return #[]
+  let mut latestById : Array (Nat × String × Nat) := #[]
+  if let .ok latRows ← execParamQuery store.missionsDb
+      ("SELECT id, status, COALESCE(http_status,0) FROM proxy_outcomes " ++
+       "WHERE id IN (SELECT MAX(id) FROM proxy_outcomes WHERE COALESCE(account_id,'') <> '' GROUP BY account_id);") #[] then
+    for i in [1:latRows.size] do
+      let r := latRows[i]!
+      let lid := ((r[0]?).bind String.toNat?).getD 0
+      let lst := (r[1]?).getD ""
+      let lhttp := ((r[2]?).bind String.toNat?).getD 0
+      if lid > 0 then latestById := latestById.push (lid, lst, lhttp)
+  let mut out : Array AccountOutcomeSummary := Array.mkEmpty (aggRows.size - 1)
+  for i in [1:aggRows.size] do
+    let r := aggRows[i]!
+    let aid := ((r[0]?).getD "").trimAscii.toString
+    if !aid.isEmpty then
+      let tot := ((r[1]?).bind String.toNat?).getD 0
+      let okc := ((r[2]?).bind String.toNat?).getD 0
+      let lid := ((r[3]?).bind String.toNat?).getD 0
+      let (lst, lhttp) := match latestById.find? (fun (id, _, _) => id == lid) with
+        | some (_, s, h) => (s, h)
+        | none => ("", 0)
+      out := out.push {
+        accountId := aid, totalCount := tot, okCount := okc,
+        latestId := lid, latestStatus := lst, latestHttpStatus := lhttp
+      }
+  return out
+
+/-- Clear persisted `provider_auth_health` and any stale `needs_reauth` cached usage entry
+    for the account that just succeeded on a real proxied request. -/
+def clearRequestAuthEvidenceForAccount
+    (hub? : Option ProviderRuntimeHub) (store : CoreStore) (workingDir : String)
+    (accountKey : String) : IO Unit := do
+  let cleanKey := accountKey.trimAscii.toString
+  if cleanKey.isEmpty then return
+  discard <| execParamQuery store.missionsDb
+    "DELETE FROM provider_auth_health WHERE account_key=?1;" #[cleanKey]
+  let hps ← loadHydratedProviders store workingDir
+  let exactMatches := hps.filter fun hp =>
+    hp.id == cleanKey ||
+    (!hp.modelPrefix.isEmpty && hp.modelPrefix == cleanKey) ||
+    (hp.providerType == "custom" && s!"custom:{hp.id}" == cleanKey)
+  let clearedProviders : Array HydratedProvider :=
+    if !exactMatches.isEmpty then exactMatches
+    else
+      let poolMatches := hps.filter (fun hp => matchesProviderHealthKey hps hp cleanKey)
+      if poolMatches.size == 1 then poolMatches else #[]
+  for hp in clearedProviders do
+    for k in providerHealthKeys hp do
+      if k != cleanKey then
+        discard <| execParamQuery store.missionsDb
+          "DELETE FROM provider_auth_health WHERE account_key=?1;" #[k]
+  if let some hub := hub? then
+    let clearIds := clearedProviders.map (·.id)
+    if !clearIds.isEmpty then
+      hub.mu.atomically do
+        modify fun st => {
+          st with
+          usageEntries := st.usageEntries.filter fun e =>
+            !(clearIds.contains e.providerId && e.payload.fieldStr? "status" == some "needs_reauth")
+        }
+
 /-- The last usage probe of this account was refused for authentication. -/
 def loginRejected (hub : ProviderRuntimeHub) (providerId : String) : IO Bool := do
   let entries ← hub.mu.atomically (do return (← get).usageEntries)
@@ -2905,16 +3036,17 @@ def loginRejected (hub : ProviderRuntimeHub) (providerId : String) : IO Bool := 
 
 /-- The login of this provider is known to be refused: by its last usage probe, or by the
     last real request the proxy sent with it. When CLIProxyAPI holds the login the proxy's
-    evidence is per provider type (`cliproxyapi:<type>`): it reports a refusal only when no
-    login of that type could serve, and one success clears it. -/
-def loginRejectedFor (hub : ProviderRuntimeHub) (store : CoreStore) (hp : HydratedProvider) : IO Bool := do
+    evidence is per provider type (`cliproxyapi:<type>` or `cliproxyapi:antigravity:<model>`):
+    it reports a refusal only when no login of that type could serve, and one success clears it. -/
+def loginRejectedFor (hub : ProviderRuntimeHub) (store : CoreStore) (hp : HydratedProvider)
+    (hps? : Option (Array HydratedProvider) := none)
+    (authHealthRows? : Option (Array (String × String)) := none) : IO Bool := do
   if ← loginRejected hub hp.id then return true
-  let viaCliProxy := hp.hasOAuth && !hp.hasApiKey
-  match ← execParamQuery store.missionsDb
-      "SELECT 1 FROM provider_auth_health WHERE account_key=?1 OR (?2<>'' AND account_key=?2) LIMIT 1;"
-      #[hp.id, if viaCliProxy then s!"cliproxyapi:{hp.providerType}" else ""] with
-  | .ok rows => return rows.size > 1
-  | .error _ => return false
+  let rows ← match authHealthRows? with
+    | some rs => pure rs
+    | none => loadProviderAuthHealthRows store
+  let hps := hps?.getD #[hp]
+  return rows.any (fun (k, _) => matchesProviderHealthKey hps hp k)
 
 def reconcileCliLoginCompletion
     (hub : ProviderRuntimeHub) (store : CoreStore) (workingDir : String)
@@ -3006,8 +3138,7 @@ def reconcileCliLoginCompletion
       #[typeKey, typePrefix, if targetedCodex then "selected" else "all"]
     for k in oauthRowIds do
       discard <| execParamQuery store.missionsDb "DELETE FROM provider_auth_health WHERE account_key=?1;" #[k]
-    cooldowns.modify (fun cs => cs.filter (fun c => !matchesLoginKey c.accountId))
-    if let some tracker := tracker? then clearAccountHealthWhere tracker matchesLoginKey
+    clearAccountCooldowns tracker? cooldowns matchesLoginKey
     let freshProviders ← loadHydratedProviders store workingDir
     let freshAffected :=
       let byId := freshProviders.filter (fun hp => ids.contains hp.id || (!completedProvId.isEmpty && hp.id == completedProvId))
@@ -3244,6 +3375,171 @@ private def filterDiscoveryConnectionModels (hps : Array HydratedProvider) (c : 
   | some fms => c1.setField "fallback_models" (.arr (fms.filter keepModel))
   | none => c1
 
+private structure ProviderHealthEvidence where
+  coreRem : UInt64 := 0
+  coreReason? : Option String := none
+  sidecarDisabled : Bool := false
+  sidecarNeedsReauth : Bool := false
+  sidecarLoginReason : UInt8 := 0
+  sidecarRem : UInt64 := 0
+  sidecarRetryAt? : Option String := none
+  sidecarReason? : Option String := none
+  authRejectedByRequest : Bool := false
+  authFailureCode? : Option String := none
+  disabledByProvider : Bool := false
+  disabledMessage : String := ""
+  parkedQuota : Bool := false
+  poisonedSub : Bool := false
+  trackerFails : Nat := 0
+  cdRem : UInt64 := 0
+  parkedUntilJv : JVal := .null
+  parkedReasonJv : JVal := .null
+  parkedSourceJv : JVal := .null
+  lastFailureReasonJv : JVal := .null
+  loginUnavailable : Bool := false
+  failCnt : Nat := 0
+  isDegraded : Bool := false
+  accountState : String := "healthy"
+  observedRequests : Nat := 0
+  latestOutcomeStatus : String := ""
+  latestOutcomeHttp : Nat := 0
+  deriving Inhabited
+
+private def evaluateProviderHealthEvidence
+    (hps : Array HydratedProvider)
+    (hp : HydratedProvider)
+    (nowSec : UInt64)
+    (cooldowns tracked : Array AccountCooldown)
+    (disabledIds : Array String)
+    (healthTracker? : Option ProviderHealthTracker)
+    (sidecarFiles : Array SidecarAuthFileEntry)
+    (authHealthRows : Array (String × String))
+    (outcomeSummaries : Array AccountOutcomeSummary) : IO ProviderHealthEvidence := do
+  let keys := providerHealthKeys hp
+  let coreCooldowns := cooldowns.filter (fun c => matchesProviderHealthKey hps hp c.accountId)
+  let coreRem : UInt64 :=
+    coreCooldowns.foldl (fun acc c => max acc (c.remainingSecs nowSec)) 0
+  let coreReason? : Option String :=
+    (coreCooldowns.foldl (fun (best : UInt64 × Option String) c =>
+      let r := c.remainingSecs nowSec
+      if r > best.1 then (r, some (cooldownReasonSlug c.reason)) else best) (0, none)).2
+  let matchedSidecar? := matchPreferredSidecarFileForProvider? hps sidecarFiles hp
+  let sidecarDisabled := (matchedSidecar?.map (·.disabled)).getD false
+  let sidecarNeedsReauth := matchedSidecar?.any (·.needsReauth)
+  let sidecarLoginReason := (matchedSidecar?.map (·.loginReason)).getD 0
+  let sidecarRem : UInt64 := if sidecarDisabled then 0 else (matchedSidecar?.map (·.remainingSecs)).getD 0
+  let sidecarRetryAt? := matchedSidecar?.bind (·.retryAt?)
+  let sidecarReason? := matchedSidecar?.bind (·.reason?)
+  let mut lookupKeys := keys
+  for c in tracked do
+    if matchesProviderHealthKey hps hp c.accountId && !lookupKeys.contains c.accountId then
+      lookupKeys := lookupKeys.push c.accountId
+  for d in disabledIds do
+    if matchesProviderHealthKey hps hp d && !lookupKeys.contains d then
+      lookupKeys := lookupKeys.push d
+  let trackerRecs ← match healthTracker? with
+    | some t => lookupKeys.mapM (lookupAccountHealthRecord t)
+    | none => pure #[]
+  let disabledRec? := trackerRecs.find? (fun r => r.disabledByProvider)
+  let disabledByProvider := disabledRec?.isSome
+  let disabledMessage : String :=
+    match disabledRec? with
+    | some r => if r.disabledMessage.trimAscii.toString.isEmpty then "Provider disabled this account" else r.disabledMessage
+    | none => ""
+  let parkedQuota := trackerRecs.any (·.parkedQuota)
+  let poisonedSub := trackerRecs.any (·.poisonedSub)
+  let authMatch? := authHealthRows.find? (fun (k, _) => matchesProviderHealthKey hps hp k)
+  let authRejectedByRequest := authMatch?.isSome
+  let authFailureCode? := authMatch?.map (fun (_, code) => if code.trimAscii.toString.isEmpty then "auth_failure" else code.trimAscii.toString)
+  let loginUnavailable := sidecarNeedsReauth || authRejectedByRequest
+  let cdRem : UInt64 :=
+    if disabledByProvider || sidecarDisabled then 0
+    else if sidecarNeedsReauth then sidecarRem
+    else max coreRem sidecarRem
+  let (parkedUntilJv, parkedReasonJv, parkedSourceJv) : JVal × JVal × JVal :=
+    if disabledByProvider then
+      (.null, .str "disabled_by_provider", .str "provider")
+    else if sidecarDisabled then
+      (.null, .str "disabled", .str "sidecar")
+    else if sidecarRem > 0 && (sidecarNeedsReauth || sidecarRem >= coreRem) then
+      let uJv := match sidecarRetryAt? with
+        | some iso => .str iso
+        | none => .str (formatEpochIso8601Utc (nowSec + sidecarRem))
+      let rJv := match sidecarReason? with
+        | some r => .str r
+        | none => .str "credential_quota"
+      (uJv, rJv, .str "sidecar")
+    else if coreRem > 0 && !sidecarNeedsReauth then
+      (.str (formatEpochIso8601Utc (nowSec + coreRem)),
+       .str (coreReason?.getD "rate_limit"),
+       .str "core")
+    else
+      (.null, .null, .null)
+  let lastFailureReasonJv : JVal :=
+    if parkedReasonJv != .null then parkedReasonJv
+    else match authFailureCode? with
+      | some code => .str code
+      | none => .null
+  let trackerFails : Nat :=
+    trackerRecs.foldl (fun acc r => max acc (max r.transientStreak.toNat r.consecutiveTrips.toNat)) 0
+  let parkedOrPoisoned : Bool :=
+    loginUnavailable || disabledByProvider || sidecarDisabled || cdRem > 0 || parkedQuota || poisonedSub
+  let failCnt : Nat := max trackerFails (if parkedOrPoisoned then 1 else 0)
+  let isDegraded : Bool := parkedOrPoisoned || failCnt > 0
+  let isQuotaParked : Bool :=
+    parkedQuota ||
+    parkedReasonJv == .str "credential_quota" ||
+    parkedReasonJv == .str "quota_exhausted" ||
+    parkedReasonJv == .str "usage_limit"
+  let accountState : String :=
+    if disabledByProvider then "disabled_by_provider"
+    else if sidecarDisabled then "disabled"
+    else if authRejectedByRequest || coreReason? == some "auth_failure" then "auth_failed"
+    else if isQuotaParked then "quota_exhausted"
+    else if isDegraded then "degraded"
+    else "healthy"
+  let matchedOutcomes := outcomeSummaries.filter (fun o => matchesProviderHealthKey hps hp o.accountId)
+  let observedRequests := matchedOutcomes.foldl (fun acc o => acc + o.totalCount) 0
+  let latestOutcome? := matchedOutcomes.foldl (fun (best? : Option AccountOutcomeSummary) o =>
+    match best? with
+    | none => some o
+    | some b => if o.latestId >= b.latestId then some o else some b) none
+  return {
+    coreRem, coreReason?, sidecarDisabled, sidecarNeedsReauth, sidecarLoginReason,
+    sidecarRem, sidecarRetryAt?, sidecarReason?, authRejectedByRequest, authFailureCode?,
+    disabledByProvider, disabledMessage, parkedQuota, poisonedSub, trackerFails,
+    cdRem, parkedUntilJv, parkedReasonJv, parkedSourceJv, lastFailureReasonJv,
+    loginUnavailable, failCnt, isDegraded, accountState, observedRequests,
+    latestOutcomeStatus := (latestOutcome?.map (·.latestStatus)).getD "",
+    latestOutcomeHttp := (latestOutcome?.map (·.latestHttpStatus)).getD 0
+  }
+
+/-- Map observed runtime/request evidence onto the `/api/ai/providers` `status` override.
+    Returns `none` when no negative evidence overrides `connected` (or when `rejected` handles `needs_reauth`). -/
+private def providerStatusOverrideOf (ev : ProviderHealthEvidence) (rejected : Bool) : Option (String × String) :=
+  if ev.disabledByProvider then
+    some ("disabled_by_provider", ev.disabledMessage)
+  else if rejected then
+    none
+  else if ev.coreReason? == some "auth_failure" then
+    some ("auth_failed", "Provider rejected recent requests (auth failure)")
+  else if ev.cdRem > 0 || ev.parkedQuota then
+    let isQuota :=
+      ev.parkedQuota ||
+      ev.coreReason? == some "usage_limit" ||
+      ev.sidecarReason? == some "credential_quota" ||
+      ev.sidecarReason? == some "quota_exhausted" ||
+      ev.sidecarReason? == some "quota"
+    if isQuota then
+      some ("quota_exhausted", s!"Provider quota exhausted (cooling down for {ev.cdRem}s)")
+    else
+      let reasonStr := ev.coreReason?.orElse (fun _ => ev.sidecarReason?) |>.getD "cooldown"
+      some ("error", s!"Provider cooling down after recent request failures ({reasonStr}, {ev.cdRem}s remaining)")
+  else if ev.trackerFails > 0 then
+    some ("error", s!"Recent proxy requests failed ({ev.trackerFails} consecutive)")
+  else
+    none
+
 /-! ## Unified Dispatcher for AI Providers, Proxy Analytics, Model-Routing Health/Test & Catalog -/
 
 set_option maxHeartbeats 1200000 in
@@ -3264,17 +3560,10 @@ def dispatchProviderAndAiRoute
   let qMap := parseQueryMap rawTarget
   let effAdmin := isLegacyUnscoped || isAdmin
   -- The proxy records a login held by CLIProxyAPI under `cliproxyapi:<type>` (and
-  -- Antigravity pools models under `cliproxyapi:antigravity:<model>`), not only the row id.
-  let isFileAccountHash (s : String) : Bool :=
-    s.length == 64 && s.toList.all (fun c => ('0' ≤ c && c ≤ '9') || ('a' ≤ c && c ≤ 'f'))
-  let healthKeys (hp : HydratedProvider) : Array String :=
-    if hp.hasOAuth && !hp.hasApiKey then #[hp.id, s!"cliproxyapi:{hp.providerType}"] else #[hp.id]
+  -- Antigravity pools models under `cliproxyapi:antigravity:<model>`), custom rows under
+  -- `custom:<id>`, and pinned logins under `hp.modelPrefix`, not only the row id.
   let matchesHealthKey (hps : Array HydratedProvider) (hp : HydratedProvider) (k : String) : Bool :=
-    (healthKeys hp).contains k ||
-    (hp.hasOAuth && !hp.hasApiKey && hp.providerType == "antigravity" &&
-      k.startsWith "cliproxyapi:antigravity:" &&
-      !isFileAccountHash (k.drop "cliproxyapi:antigravity:".length).toString &&
-      !hps.any (fun other => other.id == k && other.id != hp.id))
+    matchesProviderHealthKey hps hp k
 
   -- 1. `GET /api/providers/antigravity-models` & `GET /api/antigravity-models` (300s cached!)
   if method == "GET" && (segs == ["api", "providers", "antigravity-models"] || segs == ["api", "antigravity-models"]) then
@@ -3558,7 +3847,7 @@ def dispatchProviderAndAiRoute
     let nowSec ← nowEpoch
     let hps ← loadHydratedProviders store workingDir
     -- Both Core owners of a cooldown (`proxyCooldownsRef` and `ProviderHealthTracker`),
-    -- plus CLIProxyAPI's `/v0/management/auth-files` cooldowns for matched OAuth-only rows.
+    -- persisted request auth/outcome evidence, plus CLIProxyAPI's `/v0/management/auth-files`.
     let tracked ← match healthTracker? with
       | some t => snapshotActiveHealthCooldowns t nowSec
       | none => pure #[]
@@ -3567,72 +3856,23 @@ def dispatchProviderAndAiRoute
       | none => pure #[]
     let cooldowns := (← proxyCooldownsRef.get) ++ tracked
     let sidecarFiles ← fetchSidecarAuthFiles
+    let authHealthRows ← loadProviderAuthHealthRows store
+    let outcomeSummaries ← loadAccountOutcomeSummaries store
     let usageCached ← hub.mu.atomically (do return (← get).usageEntries)
     let visibleHps := if effAdmin then hps else hps.filter (fun hp => hp.enabled && (hp.hasApiKey || hp.hasOAuth))
     let mut snaps : Array JVal := #[]
     for hp in visibleHps do
-      let keys := healthKeys hp
-      let coreCooldowns := cooldowns.filter (fun c => matchesHealthKey hps hp c.accountId)
-      let coreRem : UInt64 :=
-        coreCooldowns.foldl (fun acc c => max acc (c.remainingSecs nowSec)) 0
-      let coreReason? : Option String :=
-        (coreCooldowns.foldl (fun (best : UInt64 × Option String) c =>
-          let r := c.remainingSecs nowSec
-          if r > best.1 then (r, some (cooldownReasonSlug c.reason)) else best) (0, none)).2
-      let matchedSidecar? := matchPreferredSidecarFileForProvider? hps sidecarFiles hp
-      let sidecarDisabled := (matchedSidecar?.map (·.disabled)).getD false
-      let loginUnavailable := matchedSidecar?.any (·.needsReauth)
-      let sidecarRem : UInt64 := if sidecarDisabled then 0 else (matchedSidecar?.map (·.remainingSecs)).getD 0
-      let mut lookupKeys := keys
-      for c in tracked do
-        if matchesHealthKey hps hp c.accountId && !lookupKeys.contains c.accountId then
-          lookupKeys := lookupKeys.push c.accountId
-      for d in disabledIds do
-        if matchesHealthKey hps hp d && !lookupKeys.contains d then
-          lookupKeys := lookupKeys.push d
-      let trackerRecs ← match healthTracker? with
-        | some t => lookupKeys.mapM (lookupAccountHealthRecord t)
-        | none => pure #[]
-      let disabledRec? := trackerRecs.find? (fun r => r.disabledByProvider)
-      let disabledByProvider := disabledRec?.isSome
-      let disabledMessage : String :=
-        match disabledRec? with
-        | some r => if r.disabledMessage.trimAscii.toString.isEmpty then "Provider disabled this account" else r.disabledMessage
-        | none => ""
-      let cdRem : UInt64 := if disabledByProvider || sidecarDisabled then 0
-        else if loginUnavailable then sidecarRem else max coreRem sidecarRem
-      let (parkedUntilJv, parkedReasonJv, parkedSourceJv) : JVal × JVal × JVal :=
-        if disabledByProvider then
-          (.null, .str "disabled_by_provider", .str "provider")
-        else if sidecarDisabled then
-          (.null, .str "disabled", .str "sidecar")
-        else if sidecarRem > 0 && (loginUnavailable || sidecarRem >= coreRem) then
-          let uJv := match matchedSidecar?.bind (·.retryAt?) with
-            | some iso => .str iso
-            | none => .str (formatEpochIso8601Utc (nowSec + sidecarRem))
-          let rJv := match matchedSidecar?.bind (·.reason?) with
-            | some r => .str r
-            | none => .str "credential_quota"
-          (uJv, rJv, .str "sidecar")
-        else if coreRem > 0 && !loginUnavailable then
-          (.str (formatEpochIso8601Utc (nowSec + coreRem)),
-           .str (coreReason?.getD "rate_limit"),
-           .str "core")
-        else
-          (.null, .null, .null)
-      let trackerFails : Nat :=
-        trackerRecs.foldl (fun acc r => max acc (max r.transientStreak.toNat r.consecutiveTrips.toNat)) 0
-      let parkedOrPoisoned : Bool :=
-        loginUnavailable || disabledByProvider || sidecarDisabled || cdRem > 0 ||
-        trackerRecs.any (fun r => r.parkedQuota || r.poisonedSub)
-      let failCnt : Nat := max trackerFails (if parkedOrPoisoned then 1 else 0)
-      let isDegraded : Bool := parkedOrPoisoned || failCnt > 0
-      let isHealthy : Bool := !isDegraded
-      let accountState : String :=
-        if disabledByProvider then "disabled_by_provider"
-        else if sidecarDisabled then "disabled"
-        else if isDegraded then "degraded"
-        else "healthy"
+      let ev ← evaluateProviderHealthEvidence hps hp nowSec cooldowns tracked disabledIds
+        healthTracker? sidecarFiles authHealthRows outcomeSummaries
+      let hasUsageEvidence := usageCached.any (fun u => u.providerId == hp.id)
+      let isHealthyJv : JVal :=
+        if ev.isDegraded then .bool false
+        else if ev.observedRequests > 0 || hasUsageEvidence then .bool true
+        else .null
+      let sampleCountJv : JVal :=
+        if ev.observedRequests > 0 then JVal.nat ev.observedRequests
+        else if hasUsageEvidence then JVal.nat 1
+        else .null
       let remQuota : JVal :=
         match usageCached.find? (fun u => u.providerId == hp.id) with
         | some u =>
@@ -3647,26 +3887,26 @@ def dispatchProviderAndAiRoute
       snaps := snaps.push (.obj #[
         ("account_id", .str hp.id),
         ("provider_id", .str hp.providerType),
-        ("account_state", .str accountState),
-        ("disabled", .bool (disabledByProvider || sidecarDisabled)),
-        ("disabled_by_provider", .bool disabledByProvider),
-        ("disabled_by_provider_message", if disabledByProvider then .str disabledMessage else .null),
-         ("is_healthy", if usageCached.any (fun u => u.providerId == hp.id) then .bool isHealthy else .null),
-        ("is_degraded", .bool isDegraded),
+        ("account_state", .str ev.accountState),
+        ("disabled", .bool (ev.disabledByProvider || ev.sidecarDisabled)),
+        ("disabled_by_provider", .bool ev.disabledByProvider),
+        ("disabled_by_provider_message", if ev.disabledByProvider then .str ev.disabledMessage else .null),
+        ("is_healthy", isHealthyJv),
+        ("is_degraded", .bool ev.isDegraded),
         ("ewma_ttft_ms", .null),
         ("ewma_tps", .null),
-         ("remaining_quota_pct", remQuota),
-        ("consecutive_failures", JVal.nat failCnt),
-        ("cooldown_secs_remaining", JVal.uint64 cdRem),
-        ("cooldown_remaining_secs", JVal.uint64 cdRem),
-        ("parked_until", parkedUntilJv),
-        ("parked_reason", parkedReasonJv),
-        ("parked_source", parkedSourceJv),
-        ("last_failure_reason", parkedReasonJv),
-        ("login_status", if loginUnavailable then .str "needs_reauth" else .null),
-        ("login_reason_code", JVal.nat ((matchedSidecar?.map (fun (f : SidecarAuthFileEntry) => f.loginReason)).getD 0).toNat),
-        ("login_message", if loginUnavailable then .str "Sign in again" else .null),
-         ("sample_count", if usageCached.any (fun u => u.providerId == hp.id) then JVal.nat 1 else .null),
+        ("remaining_quota_pct", remQuota),
+        ("consecutive_failures", JVal.nat ev.failCnt),
+        ("cooldown_secs_remaining", JVal.uint64 ev.cdRem),
+        ("cooldown_remaining_secs", JVal.uint64 ev.cdRem),
+        ("parked_until", ev.parkedUntilJv),
+        ("parked_reason", ev.parkedReasonJv),
+        ("parked_source", ev.parkedSourceJv),
+        ("last_failure_reason", ev.lastFailureReasonJv),
+        ("login_status", if ev.loginUnavailable then .str "needs_reauth" else .null),
+        ("login_reason_code", JVal.nat ev.sidecarLoginReason.toNat),
+        ("login_message", if ev.loginUnavailable then .str "Sign in again" else .null),
+        ("sample_count", sampleCountJv),
         ("antigravity_refusal", .null)
       ])
     return some (jsonResp 200 (.arr snaps))
@@ -3676,14 +3916,20 @@ def dispatchProviderAndAiRoute
     let rawAcct := String.intercalate "/" ((segs.drop 3).take (segs.length - 4))
     let acctId := (percentDecodeStrict rawAcct).getD rawAcct
     let hps ← loadHydratedProviders store workingDir
-    let matchedProv? := hps.find? (fun hp => hp.id == acctId)
+    let matchedProv? :=
+      (hps.find? (fun hp => hp.id == acctId))
+      |>.orElse (fun _ => hps.find? (fun hp =>
+        (!hp.modelPrefix.isEmpty && hp.modelPrefix == acctId) ||
+        (hp.providerType == "custom" && s!"custom:{hp.id}" == acctId)))
+      |>.orElse (fun _ =>
+        let matching := hps.filter (fun hp => matchesHealthKey hps hp acctId)
+        if matching.size == 1 then matching[0]? else none)
     let matchClear (k : String) : Bool :=
+      k == acctId ||
       match matchedProv? with
       | some hp => matchesHealthKey hps hp k
-      | none => k == acctId
-    let cur ← proxyCooldownsRef.get
-    proxyCooldownsRef.set (cur.filter (fun c => !matchClear c.accountId))
-    if let some t := healthTracker? then clearAccountHealthWhere t matchClear
+      | none => false
+    clearAccountCooldowns healthTracker? proxyCooldownsRef matchClear
     if let some hp := matchedProv? then
       let sidecarFiles ← fetchSidecarAuthFiles
       -- Recovery retains enabled-only matching even when reporting also sees old disabled files.
@@ -3763,26 +4009,31 @@ def dispatchProviderAndAiRoute
 
     -- A reorder returns the same account inventory as a fresh list request.
     if reorder || (method == "GET" && segs.length == 3) then
-      if isLegacyUnscoped && !reorder then
-        let hasLegacyJson ← (System.FilePath.mk s!"{workingDir}/.sandboxed-sh/ai_providers.json").pathExists
-        let hasStoreJson ← (System.FilePath.mk s!"{store.rootDir}/ai_providers.json").pathExists
-        if !hasLegacyJson && !hasStoreJson && (← scanCliProxyAuthFiles).isEmpty then
-          return none
+      let nowSec ← nowEpoch
       let hps ← loadHydratedProviders store workingDir
       let uPrefs ← if isLegacyUnscoped then pure #[] else getUserProviderPrefs store callerUserId
       let usernames ← listUsernamesById store
       let sidecarFiles ← fetchSidecarAuthFiles
+      let tracked ← match healthTracker? with
+        | some t => snapshotActiveHealthCooldowns t nowSec
+        | none => pure #[]
+      let disabledIds ← match healthTracker? with
+        | some t => snapshotDisabledHealthAccountIds t
+        | none => pure #[]
+      let cooldowns := (← proxyCooldownsRef.get) ++ tracked
+      let authHealthRows ← loadProviderAuthHealthRows store
       let mut arr : Array JVal := #[]
       for hp in hps do
         if providerListedFor hp effAdmin callerUserId then
           let uEn? := if isLegacyUnscoped then none else some (isUserProviderEnabled uPrefs hp.id)
-          let rejected ← loginRejectedFor hub store hp
-          let rejected := rejected ||
-            (matchPreferredSidecarFileForProvider? hps sidecarFiles hp).any (·.needsReauth)
+          let ev ← evaluateProviderHealthEvidence hps hp nowSec cooldowns tracked disabledIds
+            healthTracker? sidecarFiles authHealthRows #[]
+          let rejected := (← loginRejected hub hp.id) || ev.loginUnavailable
+          let statusOverride? := providerStatusOverrideOf ev rejected
           let obs? ← match pacingTracker? with
             | some tr => if effAdmin then lookupObservedKeyRpm? tr hp.id else pure none
             | none => pure none
-          let row := renderHydratedProviderForCaller hps hp effAdmin callerUserId usernames uEn? obs? rejected
+          let row := renderHydratedProviderForCaller hps hp effAdmin callerUserId usernames uEn? obs? rejected statusOverride?
           let row := match uEn? with
             | some ue => (row.setField "globally_enabled" (.bool hp.enabled)).setField "effective_enabled" (.bool (hp.enabled && ue))
             | none => row
@@ -4073,20 +4324,30 @@ def dispatchProviderAndAiRoute
           | return some (jsonErr 404 "Provider not found")
         if !providerListedFor hp effAdmin callerUserId then
           return some (jsonErr 404 "Provider not found")
-        let rejected ← loginRejectedFor hub store hp
+        let nowSec ← nowEpoch
         let sidecarFiles ← fetchSidecarAuthFiles
-        let rejected := rejected ||
-          (matchPreferredSidecarFileForProvider? hps sidecarFiles hp).any (·.needsReauth)
+        let tracked ← match healthTracker? with
+          | some t => snapshotActiveHealthCooldowns t nowSec
+          | none => pure #[]
+        let disabledIds ← match healthTracker? with
+          | some t => snapshotDisabledHealthAccountIds t
+          | none => pure #[]
+        let cooldowns := (← proxyCooldownsRef.get) ++ tracked
+        let authHealthRows ← loadProviderAuthHealthRows store
+        let ev ← evaluateProviderHealthEvidence hps hp nowSec cooldowns tracked disabledIds
+          healthTracker? sidecarFiles authHealthRows #[]
+        let rejected := (← loginRejected hub hp.id) || ev.loginUnavailable
+        let statusOverride? := providerStatusOverrideOf ev rejected
         let usernames ← listUsernamesById store
         if effAdmin then
           let obs? ← match pacingTracker? with
             | some tr => lookupObservedKeyRpm? tr hp.id
             | none => pure none
-          return some (jsonResp 200 (renderHydratedProviderForCaller hps hp true callerUserId usernames none obs? rejected))
+          return some (jsonResp 200 (renderHydratedProviderForCaller hps hp true callerUserId usernames none obs? rejected statusOverride?))
         else
           let uPrefs ← if isLegacyUnscoped then pure #[] else getUserProviderPrefs store callerUserId
           let uEn? := if isLegacyUnscoped then none else some (isUserProviderEnabled uPrefs hp.id)
-          return some (jsonResp 200 (renderHydratedProviderForCaller hps hp false callerUserId usernames uEn? none rejected))
+          return some (jsonResp 200 (renderHydratedProviderForCaller hps hp false callerUserId usernames uEn? none rejected statusOverride?))
 
       -- `GET /api/ai/providers/:id/usage`
       if method == "GET" && segs.length == 5 && segs[4]? == some "usage" then
@@ -4138,17 +4399,104 @@ def dispatchProviderAndAiRoute
       if method == "POST" && segs.length == 5 && segs[4]? == some "health" then
         let some hp := matchedProv?
           | return some (jsonErr 404 "Provider not found")
+        if !providerVisibleTo hp effAdmin callerUserId then
+          return some (jsonErr 404 "Provider not found")
         if !hp.hasApiKey && !hp.hasOAuth then
           return some (jsonResp 200 (.obj #[
             ("healthy", .bool false),
             ("status", .str "no_credentials"),
-            ("message", .str "No credentials configured")
+            ("message", .str "No credentials configured"),
+            ("sample_count", JVal.nat 0),
+            ("evidence_source", .str "config")
           ]))
+        let nowSec ← nowEpoch
+        let tracked ← match healthTracker? with
+          | some t => snapshotActiveHealthCooldowns t nowSec
+          | none => pure #[]
+        let disabledIds ← match healthTracker? with
+          | some t => snapshotDisabledHealthAccountIds t
+          | none => pure #[]
+        let cooldowns := (← proxyCooldownsRef.get) ++ tracked
+        let sidecarFiles ← fetchSidecarAuthFiles
+        let authHealthRows ← loadProviderAuthHealthRows store
+        let outcomeSummaries ← loadAccountOutcomeSummaries store
+        let ev ← evaluateProviderHealthEvidence hps hp nowSec cooldowns tracked disabledIds
+          healthTracker? sidecarFiles authHealthRows outcomeSummaries
+        let rejected := (← loginRejected hub hp.id) || ev.loginUnavailable
+        if !hp.enabled || ev.sidecarDisabled then
+          return some (jsonResp 200 (.obj #[
+            ("healthy", .bool false),
+            ("status", .str "disabled"),
+            ("message", .str "Provider is disabled"),
+            ("sample_count", JVal.nat ev.observedRequests),
+            ("evidence_source", .str (if ev.sidecarDisabled then "sidecar" else "config"))
+          ]))
+        if ev.disabledByProvider then
+          return some (jsonResp 200 (.obj #[
+            ("healthy", .bool false),
+            ("status", .str "disabled_by_provider"),
+            ("message", .str ev.disabledMessage),
+            ("sample_count", JVal.nat ev.observedRequests),
+            ("evidence_source", .str "provider")
+          ]))
+        if rejected || ev.coreReason? == some "auth_failure" then
+          return some (jsonResp 200 (.obj #[
+            ("healthy", .bool false),
+            ("status", .str (if rejected then "needs_reauth" else "auth_failed")),
+            ("message", .str "Sign in again: the provider rejected this login"),
+            ("cooldown_secs_remaining", JVal.uint64 ev.cdRem),
+            ("last_failure_reason", ev.lastFailureReasonJv),
+            ("sample_count", JVal.nat ev.observedRequests),
+            ("evidence_source", .str (if ev.authRejectedByRequest || ev.coreReason? == some "auth_failure" then "request_evidence" else if ev.sidecarNeedsReauth then "sidecar" else "usage_probe"))
+          ]))
+        if ev.cdRem > 0 || ev.parkedQuota then
+          let stStr := if ev.accountState == "quota_exhausted" then "quota_exhausted" else "cooldown"
+          return some (jsonResp 200 (.obj #[
+            ("healthy", .bool false),
+            ("status", .str stStr),
+            ("message", .str s!"Provider is in cooldown ({ev.cdRem}s remaining)"),
+            ("cooldown_secs_remaining", JVal.uint64 ev.cdRem),
+            ("parked_until", ev.parkedUntilJv),
+            ("parked_reason", ev.parkedReasonJv),
+            ("parked_source", ev.parkedSourceJv),
+            ("sample_count", JVal.nat ev.observedRequests),
+            ("evidence_source", if ev.parkedSourceJv == .str "sidecar" then .str "sidecar" else .str "request_evidence")
+          ]))
+        if ev.trackerFails > 0 then
+          return some (jsonResp 200 (.obj #[
+            ("healthy", .bool false),
+            ("status", .str "degraded"),
+            ("message", .str s!"Recent proxy requests failed ({ev.trackerFails} consecutive)"),
+            ("consecutive_failures", JVal.nat ev.trackerFails),
+            ("sample_count", JVal.nat ev.observedRequests),
+            ("evidence_source", .str "request_evidence")
+          ]))
+        if ev.observedRequests > 0 then
+          if ev.latestOutcomeStatus == "ok" then
+            return some (jsonResp 200 (.obj #[
+              ("healthy", .bool true),
+              ("status", .str "connected"),
+              ("message", .str "Verified by recent proxy request evidence"),
+              ("status_code", JVal.nat (if ev.latestOutcomeHttp > 0 then ev.latestOutcomeHttp else 200)),
+              ("sample_count", JVal.nat ev.observedRequests),
+              ("evidence_source", .str "request_evidence")
+            ]))
+          else
+            return some (jsonResp 200 (.obj #[
+              ("healthy", .bool false),
+              ("status", .str "degraded"),
+              ("message", .str s!"Last proxy request failed ({ev.latestOutcomeStatus})"),
+              ("last_failure_reason", .str ev.latestOutcomeStatus),
+              ("status_code", JVal.nat ev.latestOutcomeHttp),
+              ("sample_count", JVal.nat ev.observedRequests),
+              ("evidence_source", .str "request_evidence")
+            ]))
         return some (jsonResp 200 (.obj #[
-          ("healthy", .bool true),
-          ("status", .str "connected"),
-          ("message", .str "Provider credentials ready"),
-          ("status_code", JVal.nat 200)
+          ("healthy", .null),
+          ("status", .str "unverified"),
+          ("message", .str "Credentials configured; no proxy request evidence observed yet"),
+          ("sample_count", JVal.nat 0),
+          ("evidence_source", .str "none")
         ]))
 
       -- `POST /api/ai/providers/:id/reset-usage`
@@ -4171,8 +4519,7 @@ def dispatchProviderAndAiRoute
           | return some (jsonErr 404 "Provider not found")
         if !effAdmin && !providerAddedBy hp callerUserId then
           return some (jsonErr 403 "admin_required")
-        let cur ← proxyCooldownsRef.get
-        proxyCooldownsRef.set (cur.filter (fun c => c.accountId != hp.id))
+        clearAccountCooldowns healthTracker? proxyCooldownsRef (matchesHealthKey hps hp)
         let live ← probeProviderUsage hub hp
         let projected := if effAdmin || providerAddedBy hp callerUserId then live else projectMemberProviderUsageJv live (memberProviderDisplayName hps hp)
         return some (jsonResp 200 projected)
