@@ -410,7 +410,7 @@ fun OrbAppRoot(
                             },
                             onSelectProject = { proj -> push(OrbNavScreen.Project(proj)) },
                             onSelectMission = { mission, proj ->
-                                push(OrbNavScreen.Conversation(proj, mission))
+                                push(OrbNavScreen.Conversation(proj, if (mission.id.isBlank()) null else mission))
                             },
                             bannerContent = {
                                 if (showBunkerBanner || totalWaitingApprovals > 0 || showEnrollBanner) {

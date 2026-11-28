@@ -61,6 +61,9 @@ import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Cloud
+import androidx.compose.material.icons.filled.Dns
+import androidx.compose.material.icons.filled.Laptop
+import androidx.compose.material.icons.filled.PhoneAndroid
 import androidx.compose.material.icons.filled.Code
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Description
@@ -6046,13 +6049,26 @@ fun OrbAgentPickerSheet(
                                     val provLabel = OrbManagedMachines.nodeProvider(OrbManagedMachines.nodeLabels(node))
                                         ?.let { OrbManagedMachines.providerLabel(it) }
                                     val selected = selectedWorkspaceId.isEmpty() && selectedNodeId == nid
+                                    val deviceHint = "$nid $nName".lowercase()
+                                    val deviceIcon = when {
+                                        listOf("razr", "phone", "android", "pixel", "mobile").any { it in deviceHint } -> Icons.Default.PhoneAndroid
+                                        listOf("m2air", "mac", "laptop", "book").any { it in deviceHint } -> Icons.Default.Laptop
+                                        else -> Icons.Default.Dns
+                                    }
                                     Row(
                                         modifier = Modifier
                                             .fillMaxWidth()
                                             .orbPressClickable { if (!locked) onSelectNodeId(nid, false) }
                                             .padding(horizontal = 14.dp, vertical = 11.dp),
-                                        verticalAlignment = Alignment.CenterVertically
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(10.dp)
                                     ) {
+                                        Icon(
+                                            imageVector = deviceIcon,
+                                            contentDescription = null,
+                                            tint = if (selected) Color.White else OrbStyle.textSecondary,
+                                            modifier = Modifier.size(16.dp)
+                                        )
                                         Column(modifier = Modifier.weight(1f)) {
                                             Text(
                                                 text = nName,
@@ -6300,7 +6316,35 @@ fun OrbAgentPickerSheet(
                 }
             }
 
-            if (showClaudePermissions) {
+            var showAdvanced by remember { mutableStateOf(false) }
+            if (showClaudePermissions || showWorktreeMode || showCyber) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(OrbStyle.surface)
+                        .border(1.dp, OrbStyle.border, RoundedCornerShape(10.dp))
+                        .orbPressClickable { showAdvanced = !showAdvanced }
+                        .padding(horizontal = 12.dp, vertical = 9.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text(
+                        text = if (showAdvanced) "Hide advanced options" else "Advanced options",
+                        color = OrbStyle.textSecondary,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Medium
+                    )
+                    Icon(
+                        imageVector = if (showAdvanced) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
+                        contentDescription = null,
+                        tint = OrbStyle.textMuted,
+                        modifier = Modifier.size(16.dp)
+                    )
+                }
+            }
+
+            if (showAdvanced && showClaudePermissions) {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text(
                         text = "CLAUDE PERMISSIONS",
@@ -6335,7 +6379,7 @@ fun OrbAgentPickerSheet(
                 }
             }
 
-            if (showWorktreeMode) {
+            if (showAdvanced && showWorktreeMode) {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text(
                         text = "GIT WORKSPACE",
@@ -6370,7 +6414,7 @@ fun OrbAgentPickerSheet(
                 }
             }
 
-            if (showCyber) {
+            if (showAdvanced && showCyber) {
                 Text("Cyber program", color = OrbStyle.textMuted, fontSize = 12.sp)
                 Column(modifier = Modifier.fillMaxWidth()) {
                     OrbCyberMode.entries.forEach { mode ->
