@@ -149,6 +149,13 @@ def defaultCliBundleManifestJVal : JVal :=
       ("sha256", .str "531cff2441129c30f0edd5878af494108ad07f5feb46d7ee29a2a5b830a5765d"),
       ("format", .str "tar.gz"),
       ("entry", .str "opencode")
+    ]),
+    ("pi", .obj #[
+      ("bin", .str "pi"),
+      ("version", .str "0.73.1"),
+      ("url", .str "https://github.com/earendil-works/pi/releases/download/v0.73.1/pi-linux-x64.tar.gz"),
+      ("sha256", .str "00f0db9e93f6ba33deb1bb4d75b4eafede9fa5379b635a908cf967d5b37e366d"),
+      ("format", .str "pi-tar.gz")
     ])
   ]
   let verHash := (bytesToHexLower (sha256Bytes (renderCompact harnesses).toUTF8)).take 16 |>.toString
@@ -224,6 +231,34 @@ private def hydrateAgyCliBundleSpec (normArch : String) (cliBundle : JVal) : IO 
       |>.push ("harnesses", newHarnesses)
   return .obj updatedBFields
 
+/-- Select architecture-matched Pi standalone binary (`x86_64` vs `aarch64`) when using the default Pi entry. -/
+private def hydrateArchPiCliBundleSpec (normArch : String) (cliBundle : JVal) : JVal :=
+  if normArch != "aarch64" then cliBundle
+  else
+    match cliBundle, cliBundle.field? "harnesses" with
+    | .obj bFields, some (.obj hFields) =>
+      let piEntry? := (hFields.find? (fun p => p.1 == "pi")).map Prod.snd
+      let curUrl := (piEntry?.bind (·.fieldStr? "url")).getD ""
+      if curUrl != "https://github.com/earendil-works/pi/releases/download/v0.73.1/pi-linux-x64.tar.gz" then
+        cliBundle
+      else
+        let armPi := JVal.obj #[
+          ("bin", .str "pi"),
+          ("version", .str "0.73.1"),
+          ("url", .str "https://github.com/earendil-works/pi/releases/download/v0.73.1/pi-linux-arm64.tar.gz"),
+          ("sha256", .str "f47455b6a7ff6e43752a37c7c0a08b8054efd82cae1efc06d007c94f06a56318"),
+          ("format", .str "pi-tar.gz")
+        ]
+        let updatedHFields := (hFields.filter (fun p => p.1 != "pi")).push ("pi", armPi)
+        let newHarnesses := JVal.obj updatedHFields
+        let verHash := (bytesToHexLower (sha256Bytes (renderCompact newHarnesses).toUTF8)).take 16 |>.toString
+        let updatedBFields :=
+          (bFields.filter (fun p => p.1 != "harnesses" && p.1 != "version"))
+            |>.push ("version", .str verHash)
+            |>.push ("harnesses", newHarnesses)
+        .obj updatedBFields
+    | _, _ => cliBundle
+
 /-- Build the Core release manifest returned in `GET /api/node-releases/manifest` and
     `POST /api/node-releases/heartbeat`. -/
 def buildNodeReleaseManifestJVal (dataRoot arch : String) (cordoned : Bool := false) : IO JVal := do
@@ -242,7 +277,8 @@ def buildNodeReleaseManifestJVal (dataRoot arch : String) (cordoned : Bool := fa
         ("arch", .str normArch)
       ]
   let cliBundleRaw ← loadCliBundleManifestJVal dataRoot
-  let cliBundle ← hydrateAgyCliBundleSpec normArch cliBundleRaw
+  let cliBundleAgy ← hydrateAgyCliBundleSpec normArch cliBundleRaw
+  let cliBundle := hydrateArchPiCliBundleSpec normArch cliBundleAgy
   let winSecs := (((← IO.getEnv "ORB_NODE_UPDATE_STARTUP_WINDOW_SECS") >>= String.toNat?).getD 90).toUInt64
   return .obj #[
     ("version", .nat 1),

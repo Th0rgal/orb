@@ -139,7 +139,7 @@ def run : IO Unit := do
     let privdBinSha := ((man.field? "binaries").bind (·.field? "orb-privd")).bind (·.fieldStr? "sha256")
     let cliHarnesses := ((man.field? "cli_bundle").bind (·.field? "harnesses"))
     let agyEntry := cliHarnesses.bind (·.field? "agy")
-    assertTrue "heartbeat response exposes sandboxed-node & orb-privd sha256 + 4-harness cli_bundle with hydrated agy URL"
+    assertTrue "heartbeat response exposes sandboxed-node & orb-privd sha256 + 5-harness cli_bundle with hydrated agy URL"
       (hbJv.fieldStr? "node_id" == some "uruk-test" &&
        nodeBinSha == some nodeSha &&
        privdBinSha == some privdSha &&
@@ -147,7 +147,8 @@ def run : IO Unit := do
        agyEntry.bind (·.fieldStr? "sha256") == some agySha &&
        (cliHarnesses.bind (·.field? "claude")).isSome &&
        (cliHarnesses.bind (·.field? "codex")).isSome &&
-       (cliHarnesses.bind (·.field? "opencode")).isSome)
+       (cliHarnesses.bind (·.field? "opencode")).isSome &&
+       (cliHarnesses.bind (·.field? "pi")).isSome)
 
     -- 3. Rollback report persisted in node_update_status.json
     let reports ← OrbCore.NodeRelease.loadNodeUpdateReports root

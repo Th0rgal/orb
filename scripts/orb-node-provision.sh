@@ -92,6 +92,9 @@ CLAUDE_SHA256=3cc175d82980c20ab66057d345bd2d913244f8cf1791d10722a1225214b57219
 CODEX_VERSION=0.166.0
 CODEX_URL=https://registry.npmjs.org/@openai/codex/-/codex-$CODEX_VERSION-linux-x64.tgz
 CODEX_SHA256=cbc00a26d3d0e2ceefc4be8891f8a81ef1e349b3b175bc0ae308762bc001fd93
+PI_VERSION=0.73.1
+PI_URL=https://github.com/earendil-works/pi/releases/download/v$PI_VERSION/pi-linux-x64.tar.gz
+PI_SHA256=00f0db9e93f6ba33deb1bb4d75b4eafede9fa5379b635a908cf967d5b37e366d
 
 verify_sha256() {
   local got
@@ -104,7 +107,7 @@ fetch_pinned() {
   verify_sha256 "$3" "$2"
 }
 
-if [[ ! -x /opt/orb/bin/opencode || ! -x /opt/orb/bin/claude || ! -x /opt/orb/bin/codex ]]; then
+if [[ ! -x /opt/orb/bin/opencode || ! -x /opt/orb/bin/claude || ! -x /opt/orb/bin/codex || ! -x /opt/orb/bin/pi ]]; then
   dl_dir=$(mktemp -d /tmp/.orb-tools.XXXXXX)
   trap 'rm -rf "$dl_dir"' EXIT
   install -d -m 0755 "$TOOLS_DIR"
@@ -142,6 +145,17 @@ V=$cx_dir/vendor/x86_64-unknown-linux-musl
 PATH="\$V/codex-path:\$PATH" CODEX_MANAGED_BY_NPM=1 exec "\$V/bin/codex" "\$@"
 EOF
     chmod 0755 /opt/orb/bin/codex
+  fi
+  if [[ ! -x /opt/orb/bin/pi ]]; then
+    pi_dir=$TOOLS_DIR/pi/$PI_VERSION
+    if [[ ! -x $pi_dir/pi ]]; then
+      fetch_pinned "$PI_URL" "$PI_SHA256" "$dl_dir/pi.tgz"
+      install -d -m 0755 "$pi_dir"
+      tar -xzf "$dl_dir/pi.tgz" -C "$pi_dir" --strip-components=1 --no-same-owner
+      chmod -R a+rX,go-w "$pi_dir"
+      chmod 0755 "$pi_dir/pi"
+    fi
+    ln -sfn "$pi_dir/pi" /opt/orb/bin/pi
   fi
   rm -rf "$dl_dir"
   trap - EXIT
