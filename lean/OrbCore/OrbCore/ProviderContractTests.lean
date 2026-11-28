@@ -8,7 +8,7 @@ import OrbCore.Control
 
 namespace OrbCore.ProviderContractTests
 
-open LeanSys.Http
+open LeanSys.Http LeanSys.Posix
 open OrbBin.Json OrbBin.PosixExt
 open OrbCore.Store OrbCore.Control OrbCore.R7Core OrbCore.Proxy OrbCore.Managed
 open OrbCore.ProviderUsageAndLogin
@@ -2809,6 +2809,732 @@ private def v1LocalHarnessAndChainRefreshContract
     discard <| (IO.FS.removeFile liveCodexPath).toBaseIO
   return failures
 
+set_option maxRecDepth 4096 in
+set_option maxHeartbeats 2000000 in
+/-- R8 end-to-end contract:
+    1) `POST /api/model-routing/health/:account/clear` atomically clears BOTH cooldown stores
+       (`ProviderHealthTracker` and `proxyCooldownsRef`), across row IDs, shared pool keys
+       (`cliproxyapi:<type>`), `custom:<id>` keys, and Antigravity per-model pool keys (including
+       `POST /api/ai/providers/:id/antigravity/recheck`), without resurrecting cooldown state on
+       subsequent proxy requests or store reloads, while keeping unrelated accounts untouched.
+    2) Provider status across `GET /api/model-routing/health`, `GET /api/ai/providers`,
+       `GET /api/ai/providers/:id`, and `POST /api/ai/providers/:id/health` comes strictly from
+       request evidence (never fabricating `healthy: true` with zero requests, surfacing active
+       request-driven cooldowns / `disabled_by_provider` / persisted `provider_auth_health` even
+       across tracker restarts, and clearing stale `needs_reauth` cache on real 200 success). -/
+private def r8DualStoreClearAndRequestEvidenceContract
+    (app : CoreAppState) (store : CoreStore) (root jwt memberJwt memberId : String)
+    (hub : ProviderRuntimeHub) (cooldownsRef : IO.Ref (Array AccountCooldown)) : IO (Array String) := do
+  let mut failures : Array String := #[]
+  let wallNow ← nowEpoch
+  let acctMain := "r8-xai-main"
+  let acctUnverified := "r8-xai-unverified"
+  let acctCustom := "r8-custom-1"
+  let acctKeep := "r8-keep-1"
+  let acctLegacyOnly := "r8-legacy-only-1"
+  let acctAg2 := "r8-ag-pool-2"
+  let acctMemberXai := "r8-member-xai"
+  let acctMemberAg := "r8-member-ag"
+  let chainMain := "r8-chain-main"
+  let chainUnv := "r8-chain-unv"
+  let tracker ← newProviderHealthTracker 1 2
+  let upstreamMode ← IO.mkRef "quota503"
+  let upstreamCalls ← IO.mkRef (0 : Nat)
+  let midFlightHookRef ← IO.mkRef (pure () : IO Unit)
+  let r8App : CoreAppState := {
+    app with
+    healthTracker? := some tracker
+    proxyMockTransport? := some (fun target => do
+      upstreamCalls.modify (· + 1)
+      let hook ← midFlightHookRef.get
+      hook
+      let mode ← upstreamMode.get
+      if mode == "quota503" then
+        return .ok {
+          status := 503
+          headers := #[("Content-Type", "application/json"), ("Retry-After", "300")]
+          body := "{\"error\":{\"type\":\"quota_exhausted\",\"message\":\"quota limit reached\"}}".toUTF8
+        }
+      else if mode == "notfound404" then
+        return .ok {
+          status := 404
+          headers := #[("Content-Type", "application/json")]
+          body := "{\"error\":{\"type\":\"not_found\",\"message\":\"model not found\"}}".toUTF8
+        }
+      else if mode == "auth401" then
+        return .ok {
+          status := 401
+          headers := #[("Content-Type", "application/json")]
+          body := "{\"error\":{\"code\":\"invalid_api_key\",\"message\":\"API key rejected\"}}".toUTF8
+        }
+      else if mode == "tos403" then
+        return .ok {
+          status := 403
+          headers := #[("Content-Type", "application/json")]
+          body := "{\"error\":{\"code\":403,\"message\":\"SECRET-ORG-EMAIL@private.invalid violated Terms of Service\",\"status\":\"PERMISSION_DENIED\",\"details\":[{\"reason\":\"TOS_VIOLATION\"}]}}".toUTF8
+        }
+      else
+        return .ok {
+          status := 200
+          headers := #[("Content-Type", "application/json")]
+          body := s!"\{\"model\":{jsonEscape target.modelId},\"choices\":[\{\"message\":\{\"role\":\"assistant\",\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}".toUTF8
+        })
+  }
+  let postProxy := fun (targetApp : CoreAppState) (model : String) (ts : UInt64) => do
+    let body := renderCompact (.obj #[("model", .str model), ("messages", .arr #[])])
+    let raw := s!"POST /v1/chat/completions HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {jwt}\r\nContent-Length: {body.utf8ByteSize}\r\n\r\n{body}"
+    let .ok req := parseRequest raw.toUTF8 none | throw (IO.userError "r8 proxy request parse failed")
+    let .ok resp ← dispatchCoreRequest targetApp req ts | throw (IO.userError "r8 proxy unexpected upgrade")
+    return resp
+  let statusOf (v : JVal) : Option String := (v.fieldOrNull "status").fieldStr? "type"
+  let statusMsgOf (v : JVal) : String := ((v.fieldOrNull "status").fieldStr? "message").getD ""
+  try
+    for (pid, pt, nm, key, bu, owner) in #[
+      (acctMain, "xai", "R8 xAI Main", "sk-r8-main", "", ""),
+      (acctUnverified, "xai", "R8 xAI Unverified", "sk-r8-unv", "", ""),
+      (acctCustom, "custom", "R8 Custom", "sk-r8-custom", "https://r8-custom.invalid/v1", ""),
+      (acctKeep, "xai", "R8 Keep", "sk-r8-keep", "", ""),
+      (acctMemberXai, "xai", "R8 Member xAI", "sk-r8-mem-xai", "", memberId),
+      (acctMemberAg, "antigravity", "R8 Member AG", "cli-proxy-managed", "", memberId)
+    ] do
+      match ← upsertAIProvider store {
+        id := pid, providerType := pt, name := nm, enabled := true,
+        apiKey := key, baseUrl := bu, updatedAt := toString wallNow, createdByUserId := owner
+      } with
+      | .error e => throw (IO.userError s!"r8 seed {pid} failed: {e}")
+      | .ok () => pure ()
+    for (cid, acct) in #[(chainMain, acctMain), (chainUnv, acctUnverified)] do
+      let (st, _) ← postJson r8App jwt "/api/model-routing/chains"
+        (renderCompact (.obj #[
+          ("id", .str cid),
+          ("name", .str cid),
+          ("entries", .arr #[.obj #[("provider_id", .str "xai"), ("account_id", .str acct), ("model_id", .str "grok-4")]])
+        ])) wallNow
+      if st != 201 then
+        failures := failures.push s!"r8: create chain {cid} expected 201, got {st}"
+
+    -- (1) Zero request evidence & usage-cache semantics:
+    --     - unobserved provider -> is_healthy=null, sample_count=null, POST /health -> unverified
+    --     - no-op {"status":"connected"} usage cache (no windows/status_code/metrics) -> STILL unverified
+    --     - {"status":"needs_reauth"} usage cache -> is_healthy=false, is_degraded=true, account_state="auth_failed"
+    --     - {"status":"error"} usage cache -> is_healthy=false, is_degraded=true, account_state="degraded"
+    let healthInit := (← getJson r8App jwt "/api/model-routing/health" wallNow).asArr?.getD #[]
+    let unvHealthRow := (healthInit.find? (·.fieldStr? "account_id" == some acctUnverified)).getD .null
+    if unvHealthRow.field? "is_healthy" != some .null ||
+       unvHealthRow.field? "sample_count" != some .null ||
+       unvHealthRow.fieldBool? "is_degraded" != some false then
+      failures := failures.push s!"r8: unobserved provider must report is_healthy=null, sample_count=null, got {renderCompact unvHealthRow}"
+    let (unvPostSt, unvPostDoc) ← postJson r8App jwt s!"/api/ai/providers/{acctUnverified}/health" "{}" wallNow
+    if unvPostSt != 200 || unvPostDoc.field? "healthy" != some .null ||
+       unvPostDoc.fieldStr? "status" != some "unverified" ||
+       unvPostDoc.fieldStr? "evidence_source" != some "none" then
+      failures := failures.push s!"r8: POST /api/ai/providers/:id/health without request evidence must not lie healthy=true, got {unvPostSt} {renderCompact unvPostDoc}"
+
+    hub.mu.atomically do
+      modify fun s => { s with usageEntries := (s.usageEntries.filter (·.providerId != acctCustom)).push {
+        providerId := acctCustom, fetchedSec := wallNow, fetchedIso := formatEpochIso8601Utc wallNow,
+        payload := .obj #[("status", .str "connected")]
+      } }
+    let healthNoopUsage := (← getJson r8App jwt "/api/model-routing/health" wallNow).asArr?.getD #[]
+    let customNoopRow := (healthNoopUsage.find? (·.fieldStr? "account_id" == some acctCustom)).getD .null
+    let (_, customNoopPost) ← postJson r8App jwt s!"/api/ai/providers/{acctCustom}/health" "{}" wallNow
+    if customNoopRow.field? "is_healthy" != some .null || customNoopRow.field? "sample_count" != some .null ||
+       customNoopPost.field? "healthy" != some .null || customNoopPost.fieldStr? "status" != some "unverified" then
+      failures := failures.push s!"r8: no-op usage stub must not fabricate is_healthy=true: health={renderCompact customNoopRow} post={renderCompact customNoopPost}"
+
+    hub.mu.atomically do
+      modify fun s => { s with usageEntries := (s.usageEntries.filter (·.providerId != acctCustom)).push {
+        providerId := acctCustom, fetchedSec := wallNow, fetchedIso := formatEpochIso8601Utc wallNow,
+        payload := .obj #[("status", .str "needs_reauth"), ("error", .str "401 unauthorized")]
+      } }
+    let healthReauthUsage := (← getJson r8App jwt "/api/model-routing/health" wallNow).asArr?.getD #[]
+    let customReauthRow := (healthReauthUsage.find? (·.fieldStr? "account_id" == some acctCustom)).getD .null
+    if customReauthRow.fieldBool? "is_healthy" != some false ||
+       customReauthRow.fieldBool? "is_degraded" != some true ||
+       customReauthRow.fieldStr? "account_state" != some "auth_failed" ||
+       customReauthRow.fieldStr? "login_status" != some "needs_reauth" then
+      failures := failures.push s!"r8: needs_reauth usage entry must surface auth_failed + is_healthy=false, got {renderCompact customReauthRow}"
+
+    hub.mu.atomically do
+      modify fun s => { s with usageEntries := (s.usageEntries.filter (·.providerId != acctCustom)).push {
+        providerId := acctCustom, fetchedSec := wallNow, fetchedIso := formatEpochIso8601Utc wallNow,
+        payload := .obj #[("status", .str "error"), ("error", .str "usage probe timeout")]
+      } }
+    let healthErrUsage := (← getJson r8App jwt "/api/model-routing/health" wallNow).asArr?.getD #[]
+    let customErrRow := (healthErrUsage.find? (·.fieldStr? "account_id" == some acctCustom)).getD .null
+    let (_, customErrPost) ← postJson r8App jwt s!"/api/ai/providers/{acctCustom}/health" "{}" wallNow
+    if customErrRow.fieldBool? "is_healthy" != some false ||
+       customErrRow.fieldBool? "is_degraded" != some true ||
+       customErrPost.fieldBool? "healthy" != some false ||
+       customErrPost.fieldStr? "status" != some "degraded" then
+      failures := failures.push s!"r8: error usage entry must surface degraded + healthy=false: health={renderCompact customErrRow} post={renderCompact customErrPost}"
+
+    -- HTTP 429/503 usage probe with `status: "connected"` (even with Anthropic-style headers/windows) MUST be degraded, NOT healthy=true.
+    hub.mu.atomically do
+      modify fun s => { s with usageEntries := (s.usageEntries.filter (·.providerId != acctCustom)).push {
+        providerId := acctCustom, fetchedSec := wallNow, fetchedIso := formatEpochIso8601Utc wallNow,
+        payload := .obj #[
+          ("status", .str "connected"),
+          ("status_code", JVal.nat 429),
+          ("unified_5h_utilization", .num "1.0"),
+          ("optimize", .obj #[("windows", .arr #[.obj #[("key", .str "5h"), ("pct_remaining", JVal.nat 0)]])])
+        ]
+      } }
+    let health429Usage := (← getJson r8App jwt "/api/model-routing/health" wallNow).asArr?.getD #[]
+    let custom429Row := (health429Usage.find? (·.fieldStr? "account_id" == some acctCustom)).getD .null
+    let (_, custom429Post) ← postJson r8App jwt s!"/api/ai/providers/{acctCustom}/health" "{}" wallNow
+    if custom429Row.fieldBool? "is_healthy" != some false ||
+       custom429Row.fieldBool? "is_degraded" != some true ||
+       custom429Post.fieldBool? "healthy" != some false ||
+       custom429Post.fieldStr? "status" != some "degraded" then
+      failures := failures.push s!"r8: 429 usage probe must never be classified as verified healthy: health={renderCompact custom429Row} post={renderCompact custom429Post}"
+
+    -- Positive verified usage probe (200 status_code) MUST report is_healthy=true and POST /health healthy=true (usage_probe).
+    hub.mu.atomically do
+      modify fun s => { s with usageEntries := (s.usageEntries.filter (·.providerId != acctCustom)).push {
+        providerId := acctCustom, fetchedSec := wallNow, fetchedIso := formatEpochIso8601Utc wallNow,
+        payload := .obj #[("status", .str "connected"), ("status_code", JVal.nat 200)]
+      } }
+    let health200Usage := (← getJson r8App jwt "/api/model-routing/health" wallNow).asArr?.getD #[]
+    let custom200Row := (health200Usage.find? (·.fieldStr? "account_id" == some acctCustom)).getD .null
+    let (_, custom200Post) ← postJson r8App jwt s!"/api/ai/providers/{acctCustom}/health" "{}" wallNow
+    if custom200Row.fieldBool? "is_healthy" != some true ||
+       custom200Row.fieldBool? "is_degraded" != some false ||
+       custom200Row.fieldNat? "sample_count" != some 1 ||
+       custom200Post.fieldBool? "healthy" != some true ||
+       custom200Post.fieldStr? "status" != some "connected" ||
+       custom200Post.fieldStr? "evidence_source" != some "usage_probe" then
+      failures := failures.push s!"r8: verified 200 usage probe must report healthy=true: health={renderCompact custom200Row} post={renderCompact custom200Post}"
+
+    hub.mu.atomically do
+      modify fun s => { s with usageEntries := s.usageEntries.filter (·.providerId != acctCustom) }
+
+    -- (2) Real proxy 503 quota failure populates BOTH stores, preserves legacy-only cooldowns in `cooldownsRef`,
+    --     and drives provider status from request evidence.
+    cooldownsRef.set #[
+      { accountId := acctKeep, untilEpoch := wallNow + 1800, reason := .serverError },
+      { accountId := acctLegacyOnly, untilEpoch := wallNow + 1800, reason := .rateLimit }
+    ]
+    tracker.health.atomically do
+      modify fun s => { s with accounts := s.accounts.push {
+        accountId := acctKeep, slotId := accountSlotId acctKeep,
+        cooldown? := some { accountId := acctKeep, untilEpoch := wallNow + 1800, reason := .serverError }
+      } }
+    upstreamMode.set "quota503"
+    upstreamCalls.set 0
+    let failResp ← postProxy r8App chainMain wallNow
+    if failResp.status != 503 || (← upstreamCalls.get) != 1 then
+      failures := failures.push s!"r8: expected initial 503 failure, got status={failResp.status} calls={← upstreamCalls.get}"
+    let inLegacyAfterFail := (← cooldownsRef.get).any (·.accountId == acctMain)
+    let inTrackerAfterFail := (← lookupAccountHealthRecord tracker acctMain).cooldown?.isSome
+    let legacyOnlySurvived := (← cooldownsRef.get).any (·.accountId == acctLegacyOnly)
+    if !inLegacyAfterFail || !inTrackerAfterFail then
+      failures := failures.push s!"r8: real 503 quota failure must populate BOTH cooldown stores: legacy={inLegacyAfterFail} tracker={inTrackerAfterFail}"
+    if !legacyOnlySurvived then
+      failures := failures.push "r8: syncCooldownsFromHealthTracker during proxy request must preserve active legacy-only cooldowns"
+    let healthAfterFail := (← getJson r8App jwt "/api/model-routing/health" wallNow).asArr?.getD #[]
+    let mainHealthFail := (healthAfterFail.find? (·.fieldStr? "account_id" == some acctMain)).getD .null
+    if (mainHealthFail.fieldUInt64? "cooldown_secs_remaining").getD 0 == 0 ||
+       mainHealthFail.fieldBool? "is_healthy" != some false ||
+       mainHealthFail.fieldBool? "is_degraded" != some true ||
+       mainHealthFail.fieldStr? "account_state" != some "quota_exhausted" ||
+       (mainHealthFail.fieldNat? "sample_count").getD 0 < 1 then
+      failures := failures.push s!"r8: health GET after real 503 quota must report cooldown + quota_exhausted + is_healthy=false, got {renderCompact mainHealthFail}"
+    let listAfterFail := (← getJson r8App jwt "/api/ai/providers" wallNow).asArr?.getD #[]
+    let listMainFail := (listAfterFail.find? (·.fieldStr? "id" == some acctMain)).getD .null
+    let detailMainFail ← getJson r8App jwt s!"/api/ai/providers/{acctMain}" wallNow
+    if statusOf listMainFail != some "quota_exhausted" || statusOf detailMainFail != some "quota_exhausted" then
+      failures := failures.push s!"r8: provider list/detail must reflect request-driven quota cooldown instead of connected: list={statusOf listMainFail} detail={statusOf detailMainFail}"
+    let (_, postHealthFail) ← postJson r8App jwt s!"/api/ai/providers/{acctMain}/health" "{}" wallNow
+    if postHealthFail.fieldBool? "healthy" != some false || postHealthFail.fieldStr? "status" != some "quota_exhausted" then
+      failures := failures.push s!"r8: POST provider health during cooldown must report healthy=false quota_exhausted, got {renderCompact postHealthFail}"
+
+    -- Next request while cooled MUST short-circuit without calling upstream.
+    upstreamCalls.set 0
+    let shortResp ← postProxy r8App chainMain wallNow
+    if shortResp.status != 429 || (← upstreamCalls.get) != 0 then
+      failures := failures.push s!"r8: cooled target must short-circuit with 429 and 0 upstream calls, got {shortResp.status} calls={← upstreamCalls.get}"
+
+    -- (3) `POST /api/model-routing/health/:account/clear` clears BOTH stores; before a real 200 arrives
+    --     the cleared account is unverified (not falsely healthy=true and not stuck degraded);
+    --     subsequent 200 succeeds and transitions to verified healthy=true.
+    let (clrSt, _) ← postJson r8App jwt s!"/api/model-routing/health/{acctMain}/clear" "{}" wallNow
+    if clrSt != 204 then
+      failures := failures.push s!"r8: health clear expected 204, got {clrSt}"
+    if (← cooldownsRef.get).any (·.accountId == acctMain) ||
+       (← lookupAccountHealthRecord tracker acctMain).cooldown?.isSome then
+      failures := failures.push "r8: health clear must remove cooldown from BOTH proxyCooldownsRef and ProviderHealthTracker"
+    if !(← cooldownsRef.get).any (·.accountId == acctKeep) ||
+       (← lookupAccountHealthRecord tracker acctKeep).cooldown?.isNone ||
+       !(← cooldownsRef.get).any (·.accountId == acctLegacyOnly) then
+      failures := failures.push "r8: health clear must preserve unrelated cooldowns (both tracked and legacy-only)"
+    let healthPostClear := (← getJson r8App jwt "/api/model-routing/health" wallNow).asArr?.getD #[]
+    let mainHealthPostClear := (healthPostClear.find? (·.fieldStr? "account_id" == some acctMain)).getD .null
+    let (_, postHealthPostClear) ← postJson r8App jwt s!"/api/ai/providers/{acctMain}/health" "{}" wallNow
+    if mainHealthPostClear.fieldBool? "is_degraded" != some false ||
+       mainHealthPostClear.field? "is_healthy" != some .null ||
+       mainHealthPostClear.field? "sample_count" != some .null ||
+       postHealthPostClear.field? "healthy" != some .null ||
+       postHealthPostClear.fieldStr? "status" != some "unverified" then
+      failures := failures.push s!"r8: cleared account with zero OK requests must be unverified with sample_count=null: health={renderCompact mainHealthPostClear} post={renderCompact postHealthPostClear}"
+    upstreamMode.set "ok"
+    upstreamCalls.set 0
+    let okResp ← postProxy r8App chainMain wallNow
+    if okResp.status != 200 || (← upstreamCalls.get) != 1 then
+      failures := failures.push s!"r8: request after clear must hit upstream and succeed 200, got {okResp.status} calls={← upstreamCalls.get}"
+    let healthAfterOk := (← getJson r8App jwt "/api/model-routing/health" wallNow).asArr?.getD #[]
+    let mainHealthOk := (healthAfterOk.find? (·.fieldStr? "account_id" == some acctMain)).getD .null
+    if mainHealthOk.fieldBool? "is_healthy" != some true ||
+       mainHealthOk.fieldBool? "is_degraded" != some false ||
+       (mainHealthOk.fieldUInt64? "cooldown_secs_remaining").getD 1 != 0 ||
+       (mainHealthOk.fieldNat? "sample_count").getD 0 < 2 then
+      failures := failures.push s!"r8: health GET after recovery 200 must show is_healthy=true and observed sample_count, got {renderCompact mainHealthOk}"
+    let (_, postHealthOk) ← postJson r8App jwt s!"/api/ai/providers/{acctMain}/health" "{}" wallNow
+    if postHealthOk.fieldBool? "healthy" != some true ||
+       postHealthOk.fieldStr? "status" != some "connected" ||
+       postHealthOk.fieldStr? "evidence_source" != some "request_evidence" then
+      failures := failures.push s!"r8: POST provider health after 200 must report healthy=true from request_evidence, got {renderCompact postHealthOk}"
+
+    -- (4) 100%-failed non-auth 404 proxy outcome (no tracker cooldown/streak) MUST report is_healthy=false, is_degraded=true.
+    upstreamMode.set "notfound404"
+    let nfResp ← postProxy r8App chainUnv wallNow
+    if nfResp.status != 404 then
+      failures := failures.push s!"r8: expected 404 response, got {nfResp.status}"
+    let healthAfter404 := (← getJson r8App jwt "/api/model-routing/health" wallNow).asArr?.getD #[]
+    let unv404Row := (healthAfter404.find? (·.fieldStr? "account_id" == some acctUnverified)).getD .null
+    let (_, unv404Post) ← postJson r8App jwt s!"/api/ai/providers/{acctUnverified}/health" "{}" wallNow
+    if unv404Row.fieldBool? "is_healthy" != some false ||
+       unv404Row.fieldBool? "is_degraded" != some true ||
+       unv404Row.fieldStr? "account_state" != some "degraded" ||
+       unv404Post.fieldBool? "healthy" != some false ||
+       unv404Post.fieldStr? "status" != some "degraded" ||
+       unv404Post.fieldNat? "status_code" != some 404 then
+      failures := failures.push s!"r8: 100%-failed non-auth 404 outcome must report degraded + healthy=false: health={renderCompact unv404Row} post={renderCompact unv404Post}"
+    discard <| postJson r8App jwt s!"/api/model-routing/health/{acctUnverified}/clear" "{}" wallNow
+
+    -- (5) Uncooled Antigravity per-model 1-strike failure + per-model auth-evidence clear + multi-account pool clear.
+    let anthUuid := "10000000-0000-4000-8000-000000000001"
+    let agUuid := "10000000-0000-4000-8000-000000000003"
+    let agModelKey := OrbCore.ProxyModelRouting.antigravityPoolAccount "gemini-4-neon"
+    let agOtherModelKey := OrbCore.ProxyModelRouting.antigravityPoolAccount "claude-opus-5-5"
+    let customKey := s!"custom:{acctCustom}"
+    let upsertTrackerRecs (recs : Array AccountHealthRecord) : IO Unit :=
+      tracker.health.atomically do
+        modify fun s => {
+          s with
+          accounts := s.accounts.filter (fun r => !recs.any (·.accountId == r.accountId)) ++ recs
+        }
+    upsertTrackerRecs #[{
+      accountId := agModelKey, slotId := accountSlotId agModelKey, transientStreak := 1
+    }]
+    let healthAgStreak := (← getJson r8App jwt "/api/model-routing/health" wallNow).asArr?.getD #[]
+    let agStreakRow := (healthAgStreak.find? (·.fieldStr? "account_id" == some agUuid)).getD .null
+    let agStreakDetail ← getJson r8App jwt s!"/api/ai/providers/{agUuid}" wallNow
+    if agStreakRow.fieldBool? "is_degraded" != some true ||
+       agStreakRow.fieldBool? "is_healthy" != some false ||
+       (agStreakRow.fieldNat? "consecutive_failures").getD 0 < 1 ||
+       statusOf agStreakDetail != some "error" then
+      failures := failures.push s!"r8: uncooled Antigravity per-model 1-strike streak must surface degraded/error: health={renderCompact agStreakRow} detail={statusOf agStreakDetail}"
+
+    cooldownsRef.modify fun cs => cs ++ #[
+      { accountId := "cliproxyapi:anthropic", untilEpoch := wallNow + 1200, reason := .overloaded },
+      { accountId := anthUuid, untilEpoch := wallNow + 1200, reason := .overloaded },
+      { accountId := customKey, untilEpoch := wallNow + 1200, reason := .rateLimit },
+      { accountId := agModelKey, untilEpoch := wallNow + 1200, reason := .usageLimit }
+    ]
+    upsertTrackerRecs #[
+      { accountId := "cliproxyapi:anthropic", slotId := accountSlotId "cliproxyapi:anthropic",
+        cooldown? := some { accountId := "cliproxyapi:anthropic", untilEpoch := wallNow + 1200, reason := .overloaded } },
+      { accountId := anthUuid, slotId := accountSlotId anthUuid,
+        cooldown? := some { accountId := anthUuid, untilEpoch := wallNow + 1200, reason := .overloaded } },
+      { accountId := customKey, slotId := accountSlotId customKey,
+        cooldown? := some { accountId := customKey, untilEpoch := wallNow + 1200, reason := .rateLimit } },
+      { accountId := agModelKey, slotId := accountSlotId agModelKey, parkedQuota := true,
+        cooldown? := some { accountId := agModelKey, untilEpoch := wallNow + 1200, reason := .usageLimit } }
+    ]
+    let (clrPoolSt, _) ← postJson r8App jwt "/api/model-routing/health/cliproxyapi%3Aanthropic/clear" "{}" wallNow
+    if clrPoolSt != 204 ||
+       (← cooldownsRef.get).any (fun c => c.accountId == "cliproxyapi:anthropic" || c.accountId == anthUuid) ||
+       (← lookupAccountHealthRecord tracker "cliproxyapi:anthropic").cooldown?.isSome ||
+       (← lookupAccountHealthRecord tracker anthUuid).cooldown?.isSome then
+      failures := failures.push "r8: clearing cliproxyapi%3Aanthropic must clear both shared pool and unique OAuth row from BOTH stores"
+    let (clrCustomSt, _) ← postJson r8App jwt s!"/api/model-routing/health/{acctCustom}/clear" "{}" wallNow
+    if clrCustomSt != 204 ||
+       (← cooldownsRef.get).any (·.accountId == customKey) ||
+       (← lookupAccountHealthRecord tracker customKey).cooldown?.isSome then
+      failures := failures.push "r8: clearing custom provider row must clear custom:<id> from BOTH stores"
+    let (recheckSt, _) ← postJson r8App jwt s!"/api/ai/providers/{agUuid}/antigravity/recheck" "{}" wallNow
+    if recheckSt != 200 ||
+       (← cooldownsRef.get).any (·.accountId == agModelKey) ||
+       (← lookupAccountHealthRecord tracker agModelKey).cooldown?.isSome then
+      failures := failures.push s!"r8: admin antigravity/recheck must clear per-model pool cooldown from BOTH stores, got status={recheckSt}"
+
+    -- Cross-model Antigravity `provider_auth_health` clearing (even with 2+ Antigravity accounts in pool).
+    discard <| upsertAIProvider store {
+      id := acctAg2, providerType := "antigravity", name := "R8 AG Pool 2", enabled := true,
+      apiKey := "cli-proxy-managed", updatedAt := toString wallNow
+    }
+    discard <| execParamQuery store.missionsDb
+      "INSERT OR REPLACE INTO provider_auth_health(account_key,code,observed_at) VALUES(?1,'http_401',?2);"
+      #[agOtherModelKey, formatEpochIso8601Utc wallNow]
+    hub.mu.atomically do
+      modify fun s =>
+        let kept := s.usageEntries.filter (fun e => e.providerId != agUuid && e.providerId != acctAg2 && e.providerId != acctMemberAg)
+        { s with usageEntries := kept ++ #[
+          { providerId := agUuid, fetchedSec := 1, fetchedIso := "1970-01-01T00:00:01Z", payload := .obj #[("status", .str "needs_reauth")] },
+          { providerId := acctAg2, fetchedSec := 1, fetchedIso := "1970-01-01T00:00:01Z", payload := .obj #[("status", .str "needs_reauth")] },
+          { providerId := acctMemberAg, fetchedSec := 1, fetchedIso := "1970-01-01T00:00:01Z", payload := .obj #[("status", .str "needs_reauth")] }
+        ] }
+    let agDetailBeforeClear ← getJson r8App jwt s!"/api/ai/providers/{agUuid}" wallNow
+    if statusOf agDetailBeforeClear != some "needs_reauth" then
+      failures := failures.push s!"r8: Antigravity per-model 401 must surface needs_reauth, got {statusOf agDetailBeforeClear}"
+    clearRequestAuthEvidenceForAccount (some hub) store root agModelKey
+    let agDetailAfterClear ← getJson r8App jwt s!"/api/ai/providers/{agUuid}" wallNow
+    if statusOf agDetailAfterClear != some "connected" then
+      failures := failures.push s!"r8: 200 on sibling Antigravity model must clear per-model provider_auth_health and 100%-reauth pool cache, got {statusOf agDetailAfterClear}"
+    -- Disabled OAuth sibling must not block clearing sole active OAuth account in `clearRequestAuthEvidenceForAccount`.
+    discard <| upsertAIProvider store {
+      id := acctAg2, providerType := "antigravity", name := "R8 AG Disabled Sibling", enabled := false,
+      apiKey := "cli-proxy-managed", updatedAt := toString wallNow
+    }
+    discard <| upsertAIProvider store {
+      id := acctMemberAg, providerType := "antigravity", name := "R8 Member AG", enabled := false,
+      apiKey := "cli-proxy-managed", updatedAt := toString wallNow, createdByUserId := memberId
+    }
+    discard <| execParamQuery store.missionsDb
+      "INSERT OR REPLACE INTO provider_auth_health(account_key,code,observed_at) VALUES(?1,'http_401',?2);"
+      #[agUuid, formatEpochIso8601Utc wallNow]
+    hub.mu.atomically do
+      modify fun s =>
+        let kept := s.usageEntries.filter (·.providerId != agUuid)
+        { s with usageEntries := kept.push {
+          providerId := agUuid, fetchedSec := 1, fetchedIso := "1970-01-01T00:00:01Z",
+          payload := .obj #[("status", .str "needs_reauth")]
+        } }
+    clearRequestAuthEvidenceForAccount (some hub) store root agModelKey
+    let agDetailAfterDisabledSib ← getJson r8App jwt s!"/api/ai/providers/{agUuid}" wallNow
+    if statusOf agDetailAfterDisabledSib != some "connected" then
+      failures := failures.push s!"r8: disabled Antigravity siblings must not block clearing sole active OAuth account, got {statusOf agDetailAfterDisabledSib}"
+    discard <| deleteAIProvider store acctAg2
+
+    -- (6) RBAC on `antigravity/recheck` & member tenant-isolation redaction.
+    -- 6a. Disabled member-owned Antigravity provider MUST be rejected with 403 for non-admin owner.
+    let (memDisRecheckSt, _) ← postJson r8App memberJwt s!"/api/ai/providers/{acctMemberAg}/antigravity/recheck" "{}" wallNow
+    if memDisRecheckSt != 403 then
+      failures := failures.push s!"r8: member antigravity/recheck on disabled provider must return 403, got {memDisRecheckSt}"
+    discard <| upsertAIProvider store {
+      id := acctMemberAg, providerType := "antigravity", name := "R8 Member AG", enabled := true,
+      apiKey := "cli-proxy-managed", updatedAt := toString wallNow, createdByUserId := memberId
+    }
+    let (memWrongTypeSt, _) ← postJson r8App memberJwt s!"/api/ai/providers/{acctMemberXai}/antigravity/recheck" "{}" wallNow
+    if memWrongTypeSt != 409 then
+      failures := failures.push s!"r8: antigravity/recheck on non-Antigravity provider must return 409, got {memWrongTypeSt}"
+    cooldownsRef.modify fun cs => cs ++ #[
+      { accountId := agModelKey, untilEpoch := wallNow + 1200, reason := .usageLimit },
+      { accountId := acctMemberAg, untilEpoch := wallNow + 1200, reason := .rateLimit }
+    ]
+    upsertTrackerRecs #[
+      { accountId := agModelKey, slotId := accountSlotId agModelKey, parkedQuota := true,
+        cooldown? := some { accountId := agModelKey, untilEpoch := wallNow + 1200, reason := .usageLimit } },
+      { accountId := acctMemberAg, slotId := accountSlotId acctMemberAg,
+        disabledByProvider := true, disabledMessage := "TOS_BANNED_MEMBER_AG",
+        cooldown? := some { accountId := acctMemberAg, untilEpoch := wallNow + 1200, reason := .rateLimit } }
+    ]
+    let (memRecheckSt, _) ← postJson r8App memberJwt s!"/api/ai/providers/{acctMemberAg}/antigravity/recheck" "{}" wallNow
+    if memRecheckSt != 200 then
+      failures := failures.push s!"r8: member owner antigravity/recheck expected 200, got {memRecheckSt}"
+    if !(← cooldownsRef.get).any (·.accountId == agModelKey) ||
+       (← lookupAccountHealthRecord tracker agModelKey).cooldown?.isNone then
+      failures := failures.push "r8: member antigravity/recheck must NOT clear instance-wide shared pool cooldowns"
+    if !(← lookupAccountHealthRecord tracker acctMemberAg).disabledByProvider then
+      failures := failures.push "r8: member antigravity/recheck must NOT clear terminal disabledByProvider ban"
+    if (← cooldownsRef.get).any (·.accountId == acctMemberAg) ||
+       (← lookupAccountHealthRecord tracker acctMemberAg).cooldown?.isSome then
+      failures := failures.push "r8: member antigravity/recheck should still clear its own row cooldown"
+    -- 6b. Member `antigravity/recheck` must NOT fence off concurrent in-flight 403 TOS_VIOLATION bans or 401 auth rejections.
+    discard <| postJson r8App jwt s!"/api/model-routing/health/{acctMemberAg}/clear" "{}" wallNow
+    let seqBeforeMemRecheck ← currentClearSeq tracker
+    discard <| postJson r8App memberJwt s!"/api/ai/providers/{acctMemberAg}/antigravity/recheck" "{}" wallNow
+    let curGen ← currentRouteGeneration tracker
+    let initSlice : Orb.HarnessCloud.ProviderAttemptSliceState := {
+      firstByteCommitted := 0, pinnedAccountId := 0, attemptsUsed := 0,
+      transientStreak := 0, routeGeneration := curGen, cooldownUntilEpoch := 0
+    }
+    let _ ← recordHealthAttempt tracker initSlice acctMemberAg 403 #[]
+      "{\"error\":{\"code\":403,\"message\":\"TOS\",\"details\":[{\"reason\":\"TOS_VIOLATION\"}]}}"
+      false 0 curGen wallNow (some seqBeforeMemRecheck)
+    if !(← lookupAccountHealthRecord tracker acctMemberAg).disabledByProvider then
+      failures := failures.push "r8: member antigravity/recheck must NOT suppress concurrent in-flight 403 TOS_VIOLATION ban"
+    if ← accountClearedSince tracker acctMemberAg seqBeforeMemRecheck (bansOrAuth := true) then
+      failures := failures.push "r8: member antigravity/recheck must NOT set bansOrAuth clear fence"
+    -- Cleanup shared pool cooldown seeded for member test
+    discard <| postJson r8App jwt "/api/model-routing/health/cliproxyapi%3Aantigravity/clear" "{}" wallNow
+    discard <| postJson r8App jwt s!"/api/model-routing/health/{acctMemberAg}/clear" "{}" wallNow
+
+    -- (7) Concurrent/interleaved in-flight proxy failure vs `/clear` MUST NOT resurrect cooldown,
+    --     `disabled_by_provider`, `provider_auth_health`, `proxy_outcomes` degradation, or stream-cut streak!
+    let triggerClearInFlight : IO Unit := do
+      discard <| postJson r8App jwt s!"/api/model-routing/health/{acctMain}/clear" "{}" wallNow
+    let assertMainUnverifiedAfterRace (label : String) : IO (Option String) := do
+      let hRows := (← getJson r8App jwt "/api/model-routing/health" wallNow).asArr?.getD #[]
+      let hRow := (hRows.find? (·.fieldStr? "account_id" == some acctMain)).getD .null
+      let (_, pDoc) ← postJson r8App jwt s!"/api/ai/providers/{acctMain}/health" "{}" wallNow
+      if hRow.fieldBool? "is_degraded" != some false ||
+         hRow.field? "is_healthy" != some .null ||
+         pDoc.field? "healthy" != some .null ||
+         pDoc.fieldStr? "status" != some "unverified" then
+        return some s!"r8: {label} resurrected degraded health via HTTP endpoints: health={renderCompact hRow} post={renderCompact pDoc}"
+      return none
+    -- 7a. In-flight 503 quota vs mid-flight `/clear`
+    upstreamMode.set "quota503"
+    midFlightHookRef.set triggerClearInFlight
+    let race503Resp ← postProxy r8App chainMain wallNow
+    midFlightHookRef.set (pure ())
+    if race503Resp.status != 503 then
+      failures := failures.push s!"r8: race 503 expected 503, got {race503Resp.status}"
+    if (← cooldownsRef.get).any (·.accountId == acctMain) ||
+       (← lookupAccountHealthRecord tracker acctMain).cooldown?.isSome ||
+       (← lookupAccountHealthRecord tracker acctMain).parkedQuota then
+      failures := failures.push "r8: pre-clear in-flight 503 must NOT resurrect cooldown or parkedQuota after concurrent /clear"
+    if let some err ← assertMainUnverifiedAfterRace "race503" then failures := failures.push err
+    -- 7b. In-flight 401 auth rejection vs mid-flight `/clear`
+    upstreamMode.set "auth401"
+    midFlightHookRef.set triggerClearInFlight
+    let race401Resp ← postProxy r8App chainMain wallNow
+    midFlightHookRef.set (pure ())
+    if race401Resp.status != 401 then
+      failures := failures.push s!"r8: race 401 expected 401, got {race401Resp.status}"
+    let authRowsAfterRace ← loadProviderAuthHealthRows store
+    if authRowsAfterRace.any (fun (k, _) => k == acctMain) then
+      failures := failures.push "r8: pre-clear in-flight 401 must NOT resurrect provider_auth_health after concurrent /clear"
+    if let some err ← assertMainUnverifiedAfterRace "race401" then failures := failures.push err
+    -- 7c. In-flight 403 TOS_VIOLATION vs mid-flight `/clear`
+    upstreamMode.set "tos403"
+    midFlightHookRef.set triggerClearInFlight
+    let race403Resp ← postProxy r8App chainMain wallNow
+    midFlightHookRef.set (pure ())
+    if race403Resp.status != 403 then
+      failures := failures.push s!"r8: race 403 expected 403, got {race403Resp.status}"
+    if (← lookupAccountHealthRecord tracker acctMain).disabledByProvider then
+      failures := failures.push "r8: pre-clear in-flight 403 TOS_VIOLATION must NOT resurrect disabledByProvider after concurrent /clear"
+    if let some err ← assertMainUnverifiedAfterRace "race403" then failures := failures.push err
+    -- 7d. End-to-end streaming HTTP proxy cut across concurrent `/clear` (real TCP loopback SSE cut)
+    let .ok (sLfd, sPort) ← tcpListen "127.0.0.1" 0 4
+      | throw (IO.userError "r8 stream cut: tcpListen failed")
+    let prevPlaintext ← IO.getEnv "SANDBOXED_SH_ALLOW_PLAINTEXT_UPSTREAM"
+    setenvVar "SANDBOXED_SH_ALLOW_PLAINTEXT_UPSTREAM" "1"
+    let acctStream := "r8-stream-cut"
+    let chainStream := "r8-chain-stream"
+    let streamSrv ← IO.asTask (prio := .dedicated) do
+      if let .ok cfd ← tcpAcceptPoll sLfd 5000 then
+        discard <| pollReadable cfd 2000
+        discard <| readStreamChunk cfd 65536
+        discard <| writeAll cfd
+          ("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n" ++
+           "data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n").toUTF8 false
+        discard <| closeFd cfd
+      discard <| closeFd sLfd
+    try
+      discard <| upsertAIProvider store {
+        id := acctStream, providerType := "custom", name := "R8 Stream Cut", enabled := true,
+        apiKey := "sk-r8-stream", baseUrl := s!"http://127.0.0.1:{sPort}/v1", updatedAt := toString wallNow
+      }
+      discard <| postJson r8App jwt "/api/model-routing/chains"
+        (renderCompact (.obj #[
+          ("id", .str chainStream), ("name", .str chainStream),
+          ("entries", .arr #[.obj #[("provider_id", .str s!"custom:{acctStream}"), ("account_id", .str acctStream), ("model_id", .str "m-stream")]])
+        ])) wallNow
+      upsertTrackerRecs #[{ accountId := acctStream, slotId := accountSlotId acctStream, transientStreak := 1 }]
+      let liveStreamApp : CoreAppState := { r8App with proxyMockTransport? := none }
+      let sBody := renderCompact (.obj #[("model", .str chainStream), ("stream", .bool true), ("messages", .arr #[])])
+      let sRaw := s!"POST /v1/chat/completions HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {jwt}\r\nContent-Length: {sBody.utf8ByteSize}\r\n\r\n{sBody}"
+      let .ok sReq := parseRequest sRaw.toUTF8 none | throw (IO.userError "r8 stream req parse failed")
+      let .ok sResp ← dispatchCoreRequest liveStreamApp sReq wallNow | throw (IO.userError "r8 stream unexpected upgrade")
+      match sResp.bodyStream? with
+      | none =>
+        failures := failures.push s!"r8: streaming proxy request expected bodyStream?, got status={sResp.status}"
+      | some bodyPump =>
+        -- Concurrent `/clear` runs while the SSE stream is open (after startClearSeq? & prevStreaks were snapshotted).
+        discard <| postJson liveStreamApp jwt s!"/api/model-routing/health/{acctStream}/clear" "{}" wallNow
+        discard <| bodyPump (fun _ => pure true)
+        let streamRec ← lookupAccountHealthRecord tracker acctStream
+        let streamHealthRows := (← getJson liveStreamApp jwt "/api/model-routing/health" wallNow).asArr?.getD #[]
+        let streamHealthRow := (streamHealthRows.find? (·.fieldStr? "account_id" == some acctStream)).getD .null
+        let (_, streamPostDoc) ← postJson liveStreamApp jwt s!"/api/ai/providers/{acctStream}/health" "{}" wallNow
+        if streamRec.transientStreak > 0 || streamRec.cooldown?.isSome ||
+           (← cooldownsRef.get).any (·.accountId == acctStream) ||
+           streamHealthRow.fieldBool? "is_degraded" != some false ||
+           streamHealthRow.field? "is_healthy" != some .null ||
+           streamPostDoc.field? "healthy" != some .null ||
+           streamPostDoc.fieldStr? "status" != some "unverified" then
+          failures := failures.push s!"r8: pre-clear streaming cut must NOT resurrect streak/cooldown/degraded health: rec={repr streamRec} health={renderCompact streamHealthRow} post={renderCompact streamPostDoc}"
+    finally
+      discard <| IO.wait streamSrv
+      match prevPlaintext with
+      | some v => setenvVar "SANDBOXED_SH_ALLOW_PLAINTEXT_UPSTREAM" v
+      | none => unsetenvVar "SANDBOXED_SH_ALLOW_PLAINTEXT_UPSTREAM"
+      discard <| execParamQuery store.missionsDb "DELETE FROM proxy_outcomes WHERE account_id=?1;" #[acctStream]
+      discard <| execParamQuery store.missionsDb "DELETE FROM model_routing_chains WHERE id=?1;" #[chainStream]
+      discard <| deleteAIProvider store acctStream
+
+    -- (8) Auth rejection persists across tracker restart, and a real 200 request clears BOTH `provider_auth_health`
+    --     AND stale cached `usageEntries` `needs_reauth`.
+    upstreamMode.set "auth401"
+    let authFailResp ← postProxy r8App chainUnv wallNow
+    if authFailResp.status != 401 then
+      failures := failures.push s!"r8: expected 401 auth rejection, got {authFailResp.status}"
+    let restartedTracker ← newProviderHealthTracker 1 2
+    let restartedCooldowns ← IO.mkRef (#[] : Array AccountCooldown)
+    let restartedApp : CoreAppState := { r8App with healthTracker? := some restartedTracker, proxyCooldownsRef := restartedCooldowns }
+    let healthAfterRestart := (← getJson restartedApp jwt "/api/model-routing/health" wallNow).asArr?.getD #[]
+    let unvRestartRow := (healthAfterRestart.find? (·.fieldStr? "account_id" == some acctUnverified)).getD .null
+    if unvRestartRow.fieldStr? "account_state" != some "auth_failed" ||
+       unvRestartRow.fieldBool? "is_healthy" != some false ||
+       unvRestartRow.fieldStr? "login_status" != some "needs_reauth" then
+      failures := failures.push s!"r8: persisted request auth rejection must survive restart on /api/model-routing/health, got {renderCompact unvRestartRow}"
+    let detailRestart ← getJson restartedApp jwt s!"/api/ai/providers/{acctUnverified}" wallNow
+    if statusOf detailRestart != some "needs_reauth" then
+      failures := failures.push s!"r8: persisted request auth rejection must show needs_reauth after restart, got {statusOf detailRestart}"
+    hub.mu.atomically do
+      modify fun s => { s with usageEntries := (s.usageEntries.filter (·.providerId != acctUnverified)).push {
+        providerId := acctUnverified, fetchedSec := 1, fetchedIso := "1970-01-01T00:00:01Z",
+        payload := .obj #[("status", .str "connected"), ("status_code", JVal.nat 401)]
+      } }
+    let detail401Usage ← getJson restartedApp jwt s!"/api/ai/providers/{acctUnverified}" wallNow
+    if statusOf detail401Usage != some "needs_reauth" then
+      failures := failures.push s!"r8: usage status_code=401 must surface needs_reauth on provider detail, got {statusOf detail401Usage}"
+    upstreamMode.set "ok"
+    let recovResp ← postProxy restartedApp chainUnv wallNow
+    if recovResp.status != 200 then
+      failures := failures.push s!"r8: recovery 200 on restartedApp failed: {recovResp.status}"
+    let detailRecov ← getJson restartedApp jwt s!"/api/ai/providers/{acctUnverified}" wallNow
+    let healthRecov := (← getJson restartedApp jwt "/api/model-routing/health" wallNow).asArr?.getD #[]
+    let unvRecovRow := (healthRecov.find? (·.fieldStr? "account_id" == some acctUnverified)).getD .null
+    if statusOf detailRecov != some "connected" || unvRecovRow.fieldBool? "is_healthy" != some true then
+      failures := failures.push s!"r8: real 200 request must clear provider_auth_health AND stale status_code=401 usage cache, got detail={statusOf detailRecov} health={renderCompact unvRecovRow}"
+
+    -- (9) `403 TOS_VIOLATION` (`disabled_by_provider`) surfaces with full diagnostics for admin,
+    --     redacts `disabledMessage` and global `proxy_outcomes` for non-owning members,
+    --     takes precedence over disabled config on `POST /health`, and clears via `/health/:id/clear`.
+    upstreamMode.set "tos403"
+    let tosResp ← postProxy restartedApp chainUnv wallNow
+    if tosResp.status != 403 then
+      failures := failures.push s!"r8: expected 403 TOS_VIOLATION, got {tosResp.status}"
+    let detailTos ← getJson restartedApp jwt s!"/api/ai/providers/{acctUnverified}" wallNow
+    let (_, postTos) ← postJson restartedApp jwt s!"/api/ai/providers/{acctUnverified}/health" "{}" wallNow
+    if statusOf detailTos != some "disabled_by_provider" ||
+       postTos.fieldStr? "status" != some "disabled_by_provider" ||
+       postTos.fieldBool? "healthy" != some false then
+      failures := failures.push s!"r8: TOS_VIOLATION must surface disabled_by_provider on detail + POST health, got detail={statusOf detailTos} post={renderCompact postTos}"
+    -- Non-owning member MUST NOT see raw `SECRET-ORG-EMAIL@private.invalid` or global `proxy_outcomes` sample counts!
+    let memListTos := (← getJson restartedApp memberJwt "/api/ai/providers" wallNow).asArr?.getD #[]
+    let memListUnv := (memListTos.find? (·.fieldStr? "id" == some acctUnverified)).getD .null
+    let memDetailTos ← getJson restartedApp memberJwt s!"/api/ai/providers/{acctUnverified}" wallNow
+    let memHealthTos := (← getJson restartedApp memberJwt "/api/model-routing/health" wallNow).asArr?.getD #[]
+    let memHealthUnv := (memHealthTos.find? (·.fieldStr? "account_id" == some acctUnverified)).getD .null
+    let memHealthMain := (memHealthTos.find? (·.fieldStr? "account_id" == some acctMain)).getD .null
+    let (_, memPostTos) ← postJson restartedApp memberJwt s!"/api/ai/providers/{acctUnverified}/health" "{}" wallNow
+    let (_, memPostMain) ← postJson restartedApp memberJwt s!"/api/ai/providers/{acctMain}/health" "{}" wallNow
+    let memLeakRaw := renderCompact (.arr #[memListUnv, memDetailTos, memHealthUnv, memPostTos])
+    if (memLeakRaw.splitOn "SECRET-ORG-EMAIL").length > 1 ||
+       statusMsgOf memListUnv != "Provider disabled this account" ||
+       statusMsgOf memDetailTos != "Provider disabled this account" ||
+       memHealthUnv.fieldStr? "disabled_by_provider_message" != some "Provider disabled this account" ||
+       memPostTos.fieldStr? "message" != some "Provider disabled this account" then
+      failures := failures.push s!"r8: non-owning member must receive redacted disabled_by_provider message, got {memLeakRaw}"
+    if memHealthMain.field? "sample_count" != some .null ||
+       memPostMain.fieldNat? "sample_count" != some 0 then
+      failures := failures.push s!"r8: non-admin member must not see unscoped global proxy_outcomes counts: health={renderCompact memHealthMain} post={renderCompact memPostMain}"
+    -- Precedence: `disabled_by_provider` wins over `enabled=false` on `POST /api/ai/providers/:id/health`.
+    discard <| upsertAIProvider store {
+      id := acctUnverified, providerType := "xai", name := "R8 xAI Unverified", enabled := false,
+      apiKey := "sk-r8-unv", baseUrl := "", updatedAt := toString wallNow
+    }
+    let (_, postTosWhileDisabled) ← postJson restartedApp jwt s!"/api/ai/providers/{acctUnverified}/health" "{}" wallNow
+    if postTosWhileDisabled.fieldStr? "status" != some "disabled_by_provider" then
+      failures := failures.push s!"r8: disabled_by_provider must take precedence over disabled config on POST /health, got {renderCompact postTosWhileDisabled}"
+    let (clrTosSt, _) ← postJson restartedApp jwt s!"/api/model-routing/health/{acctUnverified}/clear" "{}" wallNow
+    let detailTosCleared ← getJson restartedApp jwt s!"/api/ai/providers/{acctUnverified}" wallNow
+    if clrTosSt != 204 || statusOf detailTosCleared != some "connected" then
+      failures := failures.push s!"r8: clear must remove disabled_by_provider, got code={clrTosSt} status={statusOf detailTosCleared}"
+
+    -- (10) `healthTracker? = none` legacy fallback clears `proxy_outcomes` degradation,
+    --      `antigravity/recheck` refreshes stale `needs_verification` in `hub.usageEntries`,
+    --      and untargeted member login preserves unrelated `TOS_VIOLATION` bans while clearing
+    --      shared-pool `provider_auth_health`.
+    let legacyApp : CoreAppState := { r8App with healthTracker? := none }
+    upstreamMode.set "notfound404"
+    discard <| postProxy legacyApp chainMain wallNow
+    let (legacyClrSt, _) ← postJson legacyApp jwt s!"/api/model-routing/health/{acctMain}/clear" "{}" wallNow
+    let legacyHealthRows := (← getJson legacyApp jwt "/api/model-routing/health" wallNow).asArr?.getD #[]
+    let legacyMainRow := (legacyHealthRows.find? (·.fieldStr? "account_id" == some acctMain)).getD .null
+    let (_, legacyMainPost) ← postJson legacyApp jwt s!"/api/ai/providers/{acctMain}/health" "{}" wallNow
+    if legacyClrSt != 204 ||
+       legacyMainRow.fieldBool? "is_degraded" != some false ||
+       legacyMainRow.field? "is_healthy" != some .null ||
+       legacyMainRow.field? "sample_count" != some .null ||
+       legacyMainPost.field? "healthy" != some .null ||
+       legacyMainPost.fieldStr? "status" != some "unverified" then
+      failures := failures.push s!"r8: healthTracker?=none clear must clear proxy_outcomes degradation: health={renderCompact legacyMainRow} post={renderCompact legacyMainPost}"
+
+    hub.mu.atomically do
+      modify fun s => { s with usageEntries := (s.usageEntries.filter (·.providerId != agUuid)).push {
+        providerId := agUuid, fetchedSec := wallNow, fetchedIso := formatEpochIso8601Utc wallNow,
+        payload := .obj #[("status", .str "needs_verification")]
+      } }
+    let (agRechSt, _) ← postJson r8App jwt s!"/api/ai/providers/{agUuid}/antigravity/recheck" "{}" wallNow
+    let agRechHealth := (← getJson r8App jwt "/api/model-routing/health" wallNow).asArr?.getD #[]
+    let agRechRow := (agRechHealth.find? (·.fieldStr? "account_id" == some agUuid)).getD .null
+    if agRechSt != 200 || agRechRow.fieldBool? "is_degraded" != some false || agRechRow.fieldBool? "is_healthy" != some true then
+      failures := failures.push s!"r8: antigravity/recheck must update hub.usageEntries from live probe, got status={agRechSt} row={renderCompact agRechRow}"
+    hub.mu.atomically do
+      modify fun s => { s with usageEntries := s.usageEntries.filter (·.providerId != agUuid) }
+
+    -- Untargeted member login must preserve an existing TOS-banned Antigravity row while clearing shared-pool auth health.
+    upsertTrackerRecs #[{
+      accountId := acctMemberAg, slotId := accountSlotId acctMemberAg,
+      disabledByProvider := true, disabledMessage := "EXISTING_TOS_BAN"
+    }]
+    discard <| execParamQuery store.missionsDb
+      "INSERT OR REPLACE INTO provider_auth_health(account_key,code,observed_at) VALUES(?1,'auth_unavailable',?2);"
+      #[agModelKey, formatEpochIso8601Utc wallNow]
+    let agLoginBase := (← scanCliProxyAuthFiles).map (fun f => (f.fileName, f.fingerprint))
+    let agNewFile := s!"{root}/auth-empty/antigravity-r8-member-new.json"
+    let agNewProvId := fileAccountId "antigravity" "antigravity-r8-member-new.json"
+    IO.FS.writeFile agNewFile "{\"type\":\"antigravity\",\"email\":\"r8-mem-new@fixture.invalid\",\"access_token\":\"fixture-tok\"}"
+    try
+      let memLoginSess : CliLoginSession := {
+        sessionId := "r8-mem-add", providerSlug := "antigravity", authFileType := "antigravity",
+        targetProvId? := none, stateToken := "r8-mem-add-state", authUrl := "fixture", flow := "redirect",
+        createdSec := wallNow, beforeFiles := agLoginBase, userId := memberId
+      }
+      let memLoginDone ← reconcileCliLoginCompletion hub store root cooldownsRef (some tracker) memLoginSess wallNow
+      let authAfterMemLogin ← loadProviderAuthHealthRows store
+      if memLoginDone.status != "completed" ||
+         !(← lookupAccountHealthRecord tracker acctMemberAg).disabledByProvider ||
+         authAfterMemLogin.any (fun (k, _) => k == agModelKey) then
+        failures := failures.push s!"r8: untargeted member login must keep existing TOS ban and clear shared-pool auth health: status={memLoginDone.status} banned={(← lookupAccountHealthRecord tracker acctMemberAg).disabledByProvider} auth={authAfterMemLogin.map Prod.fst}"
+    finally
+      discard <| (IO.FS.removeFile agNewFile).toBaseIO
+      discard <| deleteAIProvider store agNewProvId
+      discard <| postJson r8App jwt s!"/api/model-routing/health/{acctMemberAg}/clear" "{}" wallNow
+  finally
+    midFlightHookRef.set (pure ())
+    cooldownsRef.set #[]
+    hub.mu.atomically do
+      modify fun s => { s with usageEntries := s.usageEntries.filter (fun e =>
+        e.providerId != acctCustom && e.providerId != acctUnverified && e.providerId != acctAg2 && e.providerId != acctMemberAg) }
+    discard <| execParamQuery store.missionsDb "DELETE FROM provider_auth_health;" #[]
+    discard <| execParamQuery store.missionsDb "DELETE FROM proxy_outcomes WHERE account_id IN (?1,?2,?3,?4,?5,?6);"
+      #[acctMain, acctUnverified, acctCustom, acctKeep, acctMemberXai, acctMemberAg]
+    for cid in #[chainMain, chainUnv] do
+      discard <| execParamQuery store.missionsDb "DELETE FROM model_routing_chains WHERE id=?1;" #[cid]
+    for pid in #[acctMain, acctUnverified, acctCustom, acctKeep, acctAg2, acctMemberXai, acctMemberAg] do
+      discard <| deleteAIProvider store pid
+    let refreshed ← loadRoutingChainsFromStore store root
+    discard <| publishRoutingChainsUpdate app refreshed
+  return failures
+
 def run : IO Unit := do
   checkNativeCanary
   let fixtureRaw ← IO.FS.readFile "shared/orb-spec/fixtures/provider-response-contract.json"
@@ -3107,7 +3833,11 @@ def run : IO Unit := do
       failures := failures ++ (← routingCatalogContract app root jwt now)
       failures := failures ++ (← routingChainProbeContract app jwt now)
       failures := failures ++ (← customDiscoveryContract app jwt now)
+      let r8Now ← nowEpoch
+      let r8Jwt := mintSessionTokenV2 cfg.jwtSecret admin.id admin.role admin.sessionEpoch (r8Now + 3600)
+      let r8MemberJwt := mintSessionTokenV2 cfg.jwtSecret member.id member.role member.sessionEpoch (r8Now + 3600)
       failures := failures ++ (← v2RoutingEndToEndContract app store root jwt memberJwt cooldownsRef now)
+      failures := failures ++ (← r8DualStoreClearAndRequestEvidenceContract app store root r8Jwt r8MemberJwt member.id hub cooldownsRef)
       failures := failures ++ (← v1LocalHarnessAndChainRefreshContract app store root jwt now)
       if !failures.isEmpty then
         throw (IO.userError ("provider response contract failures:\n" ++ String.intercalate "\n" failures.toList))
