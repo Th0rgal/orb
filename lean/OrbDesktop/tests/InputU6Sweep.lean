@@ -1163,6 +1163,26 @@ private def verifyWaylandImeSerialGuard : IO Unit := do
       dirRows.any (·.id == 716) && !dirRows.any (·.id == 729) do
     throw <| IO.userError s!"Draft directory menu did not splice/validate mid-string preedit: {repr (dirRows.map fun r => (r.id, r.label))}"
 
+  -- Composer '+' attach button (id == 3) toggles attachCount 0 <-> 1, renders attachActive on live New Agent,
+  -- and resets attachCount := 0 on resetSelection, fixture Send, and fixture mission navigation.
+  let (liveAtt1, liveAttDmg1) := stepDesktopEvent 120 vpDev livePop (.activate 3)
+  let (liveAtt0, liveAttDmg0) := stepDesktopEvent 120 vpDev liveAtt1 (.activate 3)
+  unless liveAtt1.attachCount == 1 && liveAttDmg1.isSome && liveAtt0.attachCount == 0 && liveAttDmg0.isSome do
+    throw <| IO.userError s!"Live New Agent '+' button did not toggle cleanly: {liveAtt1.attachCount} -> {liveAtt0.attachCount}"
+  let (_, liveAttScene0) := renderScreenScene livePop 120
+  let (_, liveAttScene1) := renderScreenScene liveAtt1 120
+  let (_, liveAttScene2) := renderScreenScene liveAtt0 120
+  unless liveAttScene1.prims != liveAttScene0.prims && liveAttScene2.prims == liveAttScene0.prims do
+    throw <| IO.userError "Live New Agent '+' button did not toggle attachActive visual output"
+  let liveResetAtt := resetSelection liveAtt1 none
+  unless liveResetAtt.attachCount == 0 do
+    throw <| IO.userError s!"resetSelection leaked attachCount={liveResetAtt.attachCount}"
+  let fxAttOn := (stepDesktopEvent 120 vpDev { cPop with composer := { cPop.composer with text := "hi" } } (.activate 3)).1
+  let fxAttSent := (stepDesktopEvent 120 vpDev fxAttOn (.activate 2)).1
+  let fxAttNav := (stepDesktopEvent 120 vpDev fxAttOn (.activate 105)).1
+  unless fxAttOn.attachCount == 1 && fxAttSent.attachCount == 0 && fxAttNav.attachCount == 0 do
+    throw <| IO.userError s!"Fixture Send/navigation leaked attachCount: sent={fxAttSent.attachCount} nav={fxAttNav.attachCount}"
+
 def main : IO UInt32 := do
   verifyOrbScrollEquivalence
   verifyNineScreenControls

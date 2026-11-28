@@ -762,7 +762,7 @@ def resetSelection (st : DesktopState) (card : Option MissionSummaryCard) : Desk
     unconfirmedSend := none, writeError := "", imeResetGen := st.imeResetGen + 1
     voicePhase := .idle, voiceGeneration := st.voiceGeneration + 1, openMission := mid, missionMenu := none, stream := { shown := [], pending := [], renders := 1 }, liveTurns := [], liveTurnIds := [], unmatchedCanonicalTexts := [], livePersistedCount := 0, historyHasMore := false, historyNextCursor := none, historyLoading := false, historyLoadError := false, scroll := {}
     composer := { isRunning := card.any (·.isRunning) }
-    messageSent := false, missionStopped := false, missionArchived := false, sidePanelOpen := false
+    messageSent := false, missionStopped := false, missionArchived := false, sidePanelOpen := false, attachCount := 0
     sidebarRows := st.sidebarRows.map fun row => { row with selected := row.widgetId == (card.map (·.widgetId)).getD 101 } }
 
 def DesktopState.showsHistoryBanner (st : DesktopState) : Bool :=
@@ -1168,6 +1168,7 @@ private def normalizeFixtureScreen (st : DesktopState) (targetMission : Option S
     openMission := nextMission
     sidePanelOpen := nextSidePanelOpen
     sidePanelTab := nextSidePanelTab
+    attachCount := 0
     composer := { st.composer with
       isRunning := isMission && fixtureMissionRunning nextMission
       placeholder := fixtureScreenPlaceholder st.screen } }
@@ -1282,7 +1283,7 @@ private def stepSharedControls (st : DesktopState) (id : WidgetId) : Option Desk
   else if id == settingsSyncId then
     let nextSync := if st.settingsSyncMode == "Auto" then "Paused" else "Auto"
     some { st with settingsSyncMode := nextSync }
-  else if id == 3 then some { st with attachCount := st.attachCount + 1 }
+  else if id == 3 then some { st with attachCount := if st.attachCount == 0 then 1 else 0 }
   else none
 
 /-- Apply an updated Search palette buffer, preserving `selectedIdx` whenever `buf.displayText`
@@ -1428,6 +1429,7 @@ private def stepDesktopInput (scale120 : Nat) (viewport : Rect) (st : DesktopSta
           messageSent := true
           scroll := st.scroll.pinBottom
           imeResetGen := st.imeResetGen + 1
+          attachCount := 0
           composer := { st.composer with text := "", cursorOffset := 0, imePreeditText := "" } }
       else if st.composer.isRunning then
         { st with missionStopped := true, composer := { st.composer with isRunning := false } }

@@ -632,7 +632,7 @@ def readLiveFrame (slot : IO.Ref (Option LiveSubscription)) (scale : Nat) (viewp
         return (st.openCloud mid, some viewport)
       | .cloudSend .. => return ({ st with cloudDraft := {}, cloudAttempt := "", cloudLines := none, imeResetGen := st.imeResetGen + 1 }, some viewport)
       | .cloudCancel .. => return ({ st with cloudLines := none }, some viewport)
-      | .send .. => return ({ st with unconfirmedSend := none, scroll := st.scroll.pinBottom, composer := { isRunning := st.composer.isRunning }, imeResetGen := st.imeResetGen + 1 }, some viewport)
+      | .send .. => return ({ st with unconfirmedSend := none, scroll := st.scroll.pinBottom, composer := { isRunning := st.composer.isRunning }, imeResetGen := st.imeResetGen + 1, attachCount := 0 }, some viewport)
       | .stop _ => return (st, some viewport)
     catch _ =>
       let message := if action == "inbox-read" then "Couldn't mark this item read. Check the Inbox and try again."

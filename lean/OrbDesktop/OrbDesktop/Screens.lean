@@ -1551,7 +1551,7 @@ def buildDesktopScreen (st : DesktopState) (availW availH : SubPx)
              | .finishing => voiceButton voiceButtonId "close"
              else none
            WidgetNode.box (BoxStyle.col 0 |>.withJustify .center |>.withAlign .center |>.withFixedSize mainW bodyH)
-             [buildComposerWidget theme mainW composerH { st.composer with placeholder := "Describe a task, / for commands, @ for context" } [] (some (liveComposerControls st (width - pxToSub (if mic.isNone then 90 else if st.voicePhase == .idle || st.voicePhase == .choosing then 158 else if st.voicePhase == .recording then 150 else 122)) true)) (some header) mic]
+             [buildComposerWidget theme mainW composerH { st.composer with placeholder := "Describe a task, / for commands, @ for context" } [] (some (liveComposerControls st (width - pxToSub (if mic.isNone then 90 else if st.voicePhase == .idle || st.voicePhase == .choosing then 158 else if st.voicePhase == .recording then 150 else 122)) true)) (some header) mic (attachActive := st.attachCount > 0)]
            else if st.initialRosterPending then
              WidgetNode.box (BoxStyle.col 0 |>.withJustify .center |>.withAlign .center |>.withFixedSize mainW bodyH)
                [WidgetNode.rrect (BoxStyle.row 0 |>.withFixedSize (min (pxToSub 748) (mainW - pxToSub 68)) (pxToSub 42))
