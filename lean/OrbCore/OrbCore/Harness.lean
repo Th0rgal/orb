@@ -5,6 +5,7 @@
 -/
 import LeanSys
 import Orb.Kernel
+import Orb.PiHarness
 import Orb.HarnessCloud
 import OrbBin.Json
 import OrbBin.ClaudeControl
