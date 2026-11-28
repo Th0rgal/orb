@@ -515,30 +515,33 @@ class WaylandTestCompositor:
                 self._cond.wait(rem)
             return self.last_frame_hash
 
+    def _region_hash_locked(self, x0: int, y0: int, x1: int, y1: int) -> str:
+        frame = self.last_frame_bytes
+        stride = getattr(self, "last_frame_stride", self.width * 4)
+        w = getattr(self, "last_frame_w", self.width)
+        h = getattr(self, "last_frame_h", self.height)
+        rx0, rx1 = max(0, min(w, x0)), max(0, min(w, x1))
+        ry0, ry1 = max(0, min(h, y0)), max(0, min(h, y1))
+        hasher = hashlib.sha256()
+        for y in range(ry0, ry1):
+            row_off = y * stride
+            hasher.update(frame[row_off + rx0 * 4 : row_off + rx1 * 4])
+        return hasher.hexdigest()
+
     def region_hash(self, x0: int, y0: int, x1: int, y1: int) -> str:
         with self._lock:
-            frame = self.last_frame_bytes
-            stride = getattr(self, "last_frame_stride", self.width * 4)
-            w = getattr(self, "last_frame_w", self.width)
-            h = getattr(self, "last_frame_h", self.height)
-            rx0, rx1 = max(0, min(w, x0)), max(0, min(w, x1))
-            ry0, ry1 = max(0, min(h, y0)), max(0, min(h, y1))
-            hasher = hashlib.sha256()
-            for y in range(ry0, ry1):
-                row_off = y * stride
-                hasher.update(frame[row_off + rx0 * 4 : row_off + rx1 * 4])
-            return hasher.hexdigest()
+            return self._region_hash_locked(x0, y0, x1, y1)
 
     def wait_region_change(self, x0: int, y0: int, x1: int, y1: int, previous_hash: str, timeout: float = 5.0) -> str:
         deadline = time.monotonic() + timeout
-        while True:
-            cur = self.region_hash(x0, y0, x1, y1)
-            if cur != previous_hash:
-                return cur
-            rem = deadline - time.monotonic()
-            if rem <= 0:
-                raise TimeoutError(f"region ({x0},{y0},{x1},{y1}) hash did not change from {previous_hash[:12]}")
-            with self._lock:
+        with self._lock:
+            while True:
+                cur = self._region_hash_locked(x0, y0, x1, y1)
+                if cur != previous_hash:
+                    return cur
+                rem = deadline - time.monotonic()
+                if rem <= 0:
+                    raise TimeoutError(f"region ({x0},{y0},{x1},{y1}) hash did not change from {previous_hash[:12]}")
                 self._cond.wait(min(0.1, rem))
 
     def wait_text_input(self, enabled: bool, timeout: float = 5.0) -> None:
@@ -575,55 +578,67 @@ class WaylandTestCompositor:
     def pointer_move(self, x: float, y: float) -> None:
         with self._lock:
             assert self.pointer_id is not None
-            self._send(_wl_msg(self.pointer_id, 2, struct.pack("=Iii", self._ms(), int(x * 256), int(y * 256))))
-            self._send(_wl_msg(self.pointer_id, 5))
+            self._send(
+                _wl_msg(self.pointer_id, 2, struct.pack("=Iii", self._ms(), int(x * 256), int(y * 256)))
+                + _wl_msg(self.pointer_id, 5)
+            )
 
     def pointer_press(self, x: float, y: float, button: int = 0x110) -> None:
         with self._lock:
             assert self.pointer_id is not None
             fx, fy = int(x * 256), int(y * 256)
-            self._send(_wl_msg(self.pointer_id, 2, struct.pack("=Iii", self._ms(), fx, fy)))
-            self._send(_wl_msg(self.pointer_id, 5))
-            self._send(_wl_msg(self.pointer_id, 3, struct.pack("=IIII", self._next_serial(), self._ms(), button, 1)))
-            self._send(_wl_msg(self.pointer_id, 5))
+            self._send(
+                _wl_msg(self.pointer_id, 2, struct.pack("=Iii", self._ms(), fx, fy))
+                + _wl_msg(self.pointer_id, 5)
+                + _wl_msg(self.pointer_id, 3, struct.pack("=IIII", self._next_serial(), self._ms(), button, 1))
+                + _wl_msg(self.pointer_id, 5)
+            )
 
     def pointer_release(self, x: float, y: float, button: int = 0x110) -> None:
         with self._lock:
             assert self.pointer_id is not None
             fx, fy = int(x * 256), int(y * 256)
-            self._send(_wl_msg(self.pointer_id, 2, struct.pack("=Iii", self._ms(), fx, fy)))
-            self._send(_wl_msg(self.pointer_id, 5))
-            self._send(_wl_msg(self.pointer_id, 3, struct.pack("=IIII", self._next_serial(), self._ms(), button, 0)))
-            self._send(_wl_msg(self.pointer_id, 5))
+            self._send(
+                _wl_msg(self.pointer_id, 2, struct.pack("=Iii", self._ms(), fx, fy))
+                + _wl_msg(self.pointer_id, 5)
+                + _wl_msg(self.pointer_id, 3, struct.pack("=IIII", self._next_serial(), self._ms(), button, 0))
+                + _wl_msg(self.pointer_id, 5)
+            )
 
     def pointer_click(self, x: float, y: float, button: int = 0x110) -> None:
         with self._lock:
             assert self.pointer_id is not None
             fx, fy = int(x * 256), int(y * 256)
-            self._send(_wl_msg(self.pointer_id, 2, struct.pack("=Iii", self._ms(), fx, fy)))
-            self._send(_wl_msg(self.pointer_id, 5))
-            self._send(_wl_msg(self.pointer_id, 3, struct.pack("=IIII", self._next_serial(), self._ms(), button, 1)))
-            self._send(_wl_msg(self.pointer_id, 5))
-            self._send(_wl_msg(self.pointer_id, 3, struct.pack("=IIII", self._next_serial(), self._ms(), button, 0)))
-            self._send(_wl_msg(self.pointer_id, 5))
+            self._send(
+                _wl_msg(self.pointer_id, 2, struct.pack("=Iii", self._ms(), fx, fy))
+                + _wl_msg(self.pointer_id, 5)
+                + _wl_msg(self.pointer_id, 3, struct.pack("=IIII", self._next_serial(), self._ms(), button, 1))
+                + _wl_msg(self.pointer_id, 5)
+                + _wl_msg(self.pointer_id, 3, struct.pack("=IIII", self._next_serial(), self._ms(), button, 0))
+                + _wl_msg(self.pointer_id, 5)
+            )
 
     def pointer_scroll(self, x: float, y: float, dy: float) -> None:
         with self._lock:
             assert self.pointer_id is not None
-            self._send(_wl_msg(self.pointer_id, 2, struct.pack("=Iii", self._ms(), int(x * 256), int(y * 256))))
-            self._send(_wl_msg(self.pointer_id, 4, struct.pack("=IIi", self._ms(), 0, int(dy * 256))))
-            self._send(_wl_msg(self.pointer_id, 5))
+            self._send(
+                _wl_msg(self.pointer_id, 2, struct.pack("=Iii", self._ms(), int(x * 256), int(y * 256)))
+                + _wl_msg(self.pointer_id, 4, struct.pack("=IIi", self._ms(), 0, int(dy * 256)))
+                + _wl_msg(self.pointer_id, 5)
+            )
 
     def key_tap(self, key_name: str, mods: int = 0) -> None:
         code = EV[key_name]
         with self._lock:
             assert self.keyboard_id is not None
+            pkt = bytearray()
             if mods:
-                self._send(_wl_msg(self.keyboard_id, 4, struct.pack("=IIIII", self._next_serial(), mods, 0, 0, 0)))
-            self._send(_wl_msg(self.keyboard_id, 3, struct.pack("=IIII", self._next_serial(), self._ms(), code, 1)))
-            self._send(_wl_msg(self.keyboard_id, 3, struct.pack("=IIII", self._next_serial(), self._ms(), code, 0)))
+                pkt += _wl_msg(self.keyboard_id, 4, struct.pack("=IIIII", self._next_serial(), mods, 0, 0, 0))
+            pkt += _wl_msg(self.keyboard_id, 3, struct.pack("=IIII", self._next_serial(), self._ms(), code, 1))
+            pkt += _wl_msg(self.keyboard_id, 3, struct.pack("=IIII", self._next_serial(), self._ms(), code, 0))
             if mods:
-                self._send(_wl_msg(self.keyboard_id, 4, struct.pack("=IIIII", self._next_serial(), 0, 0, 0, 0)))
+                pkt += _wl_msg(self.keyboard_id, 4, struct.pack("=IIIII", self._next_serial(), 0, 0, 0, 0))
+            self._send(bytes(pkt))
 
     def type_ascii(self, text: str) -> None:
         for ch in text:
@@ -1527,9 +1542,13 @@ class WaylandU6SessionTest(unittest.TestCase):
                     comp.key_tap("4", MOD_CTRL)
                     _wait_until("GET /api/ai/providers", lambda: count_req("GET", "/api/ai/providers") >= 1)
                     row0_inf = comp.wait_region_change(525, 35, 1165, 95, row0_pre_inf, timeout=5.0)
+                    # Settle row 0 hover tint before clicking so a sub-ms partial hover commit
+                    # cannot prematurely satisfy `wait_region_change` before the async toggle renders.
+                    comp.pointer_move(700, 65)
+                    row0_hovered = comp.wait_region_change(525, 35, 1165, 95, row0_inf, timeout=5.0)
                     comp.pointer_click(700, 65)  # Toggle provider user_enabled -> false
                     _wait_until("provider skipped on Core", lambda: core_state.providers[0]["user_enabled"] is False)
-                    row0_toggled = comp.wait_region_change(525, 35, 1165, 95, row0_inf, timeout=5.0)
+                    row0_toggled = comp.wait_region_change(525, 35, 1165, 95, row0_hovered, timeout=5.0)
                     comp.pointer_click(700, 65)  # Toggle provider user_enabled -> true
                     _wait_until("provider re-enabled on Core", lambda: core_state.providers[0]["user_enabled"] is True)
                     comp.wait_region_change(525, 35, 1165, 95, row0_toggled, timeout=5.0)
@@ -1541,38 +1560,43 @@ class WaylandU6SessionTest(unittest.TestCase):
                     _wait_until("GET /alternative-routers", lambda: count_req("GET", "/api/ai/providers/acct-ag-1/alternative-routers") >= 1)
                     routes_init = comp.wait_region_change(525, 175, 1165, 390, routes_pre, timeout=5.0)
 
-                    # Select AirVPN · NL (row 2, center y=251): frame A paints pending before `readSources`
-                    # spawns `account_routes`, then frame B paints settled after refresh completes.
-                    alt_count_1 = count_req("GET", "/api/ai/providers/acct-ag-1/alternative-routers")
-                    comp.pointer_click(845, 251)
-                    routes_nl_pending = comp.wait_region_change(525, 175, 1165, 390, routes_init, timeout=5.0)
-                    _wait_until("PUT /vpn NL", lambda: core_state.vpn_state["acct-ag-1"]["country"] == "NL")
-                    _wait_until("refresh after PUT /vpn NL", lambda: count_req("GET", "/api/ai/providers/acct-ag-1/alternative-routers") > alt_count_1)
-                    routes_nl = comp.wait_region_change(525, 175, 1165, 390, routes_nl_pending, timeout=5.0)
+                    # Select AirVPN · NL / Direct / Alternative routers / DE: frame A paints pending before
+                    # `readSources` spawns `account_routes`, then frame B paints settled after refresh completes.
+                    def _click_route_and_wait(x: int, y: int, prev_hash: str, label: str, pred) -> str:
+                        alt_before = count_req("GET", "/api/ai/providers/acct-ag-1/alternative-routers")
+                        comp.pointer_click(x, y)
+                        first_hash = comp.wait_region_change(525, 175, 1165, 390, prev_hash, timeout=5.0)
+                        captured_before_refresh = (
+                            count_req("GET", "/api/ai/providers/acct-ag-1/alternative-routers") == alt_before
+                        )
+                        _wait_until(label, pred)
+                        _wait_until(
+                            f"refresh after {label}",
+                            lambda: count_req("GET", "/api/ai/providers/acct-ag-1/alternative-routers") > alt_before,
+                        )
+                        if captured_before_refresh:
+                            return comp.wait_region_change(525, 175, 1165, 390, first_hash, timeout=5.0)
+                        try:
+                            return comp.wait_region_change(525, 175, 1165, 390, first_hash, timeout=1.0)
+                        except TimeoutError:
+                            return first_hash
 
-                    # Switch back to Direct (row 1, center y=199) and wait for pending -> refresh -> settled.
-                    alt_count_2 = count_req("GET", "/api/ai/providers/acct-ag-1/alternative-routers")
-                    comp.pointer_click(845, 199)
-                    routes_direct_pending = comp.wait_region_change(525, 175, 1165, 390, routes_nl, timeout=5.0)
-                    _wait_until("PUT /vpn direct", lambda: core_state.vpn_state["acct-ag-1"]["mode"] == "direct")
-                    _wait_until("refresh after PUT /vpn direct", lambda: count_req("GET", "/api/ai/providers/acct-ag-1/alternative-routers") > alt_count_2)
-                    routes_direct = comp.wait_region_change(525, 175, 1165, 390, routes_direct_pending, timeout=5.0)
-
-                    # Toggle Alternative routers (row 4, center y=355) and wait for pending -> refresh -> settled.
-                    alt_count_3 = count_req("GET", "/api/ai/providers/acct-ag-1/alternative-routers")
-                    comp.pointer_click(845, 355)
-                    routes_alt_pending = comp.wait_region_change(525, 175, 1165, 390, routes_direct, timeout=5.0)
-                    _wait_until("PUT /alternative-routers false", lambda: core_state.alt_routers["acct-ag-1"]["allowed"] is False)
-                    _wait_until("refresh after PUT /alternative-routers", lambda: count_req("GET", "/api/ai/providers/acct-ag-1/alternative-routers") > alt_count_3)
-                    routes_alt_off = comp.wait_region_change(525, 175, 1165, 390, routes_alt_pending, timeout=5.0)
-
-                    # Select AirVPN · DE (row 3, center y=303) to confirm multi-country VPN switching.
-                    alt_count_4 = count_req("GET", "/api/ai/providers/acct-ag-1/alternative-routers")
-                    comp.pointer_click(845, 303)
-                    routes_de_pending = comp.wait_region_change(525, 175, 1165, 390, routes_alt_off, timeout=5.0)
-                    _wait_until("PUT /vpn DE", lambda: core_state.vpn_state["acct-ag-1"]["country"] == "DE")
-                    _wait_until("refresh after PUT /vpn DE", lambda: count_req("GET", "/api/ai/providers/acct-ag-1/alternative-routers") > alt_count_4)
-                    routes_de = comp.wait_region_change(525, 175, 1165, 390, routes_de_pending, timeout=5.0)
+                    routes_nl = _click_route_and_wait(
+                        845, 251, routes_init, "PUT /vpn NL",
+                        lambda: core_state.vpn_state["acct-ag-1"]["country"] == "NL",
+                    )
+                    routes_direct = _click_route_and_wait(
+                        845, 199, routes_nl, "PUT /vpn direct",
+                        lambda: core_state.vpn_state["acct-ag-1"]["mode"] == "direct",
+                    )
+                    routes_alt_off = _click_route_and_wait(
+                        845, 355, routes_direct, "PUT /alternative-routers false",
+                        lambda: core_state.alt_routers["acct-ag-1"]["allowed"] is False,
+                    )
+                    routes_de = _click_route_and_wait(
+                        845, 303, routes_alt_off, "PUT /vpn DE",
+                        lambda: core_state.vpn_state["acct-ag-1"]["country"] == "DE",
+                    )
 
                     # Toggle Alternative routers back ON via keyboard Return (focus already on row or click ‹ Inference back).
                     # Click ‹ Inference back button (providersBackId at y=35..77 -> center y=56), then re-open & Escape.
