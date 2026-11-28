@@ -317,6 +317,38 @@ def run (root : String) : IO Unit := do
     discard <| sql "DELETE FROM missions WHERE id='admin-other';"
     check ((← sql "SELECT COUNT(*) FROM mac_tether_requests WHERE mission_id='admin-other' AND state='revoked' AND lease_token='';")[1]? == some #["4"]) "deletion revokes pending and approved leases atomically"
     check ((← waitForMacTetherGen rt beforeDelete 3000) != beforeDelete && (← rt.slotsMu.atomically get).isEmpty) "durable cleanup invalidates cached relay slots and wakes the daemon"
+    -- Hybrid async/timeout auto-resume: pending tether arms `mac_tether_approval` continuation,
+    -- survives turn-end (`completed`/`interrupted`), revokes on `cancelled`, and wakes on approve/deny.
+    discard <| sql "UPDATE missions SET status='active', placement_kind='managed' WHERE id='admin-mission';"
+    let arApprove ← call adminMission "request_macbook_tether" requestArgs
+    let arApproveRes := arApprove.fieldOrNull "result"
+    let some arApproveId := arApproveRes.fieldStr? "request_id" | throw (IO.userError "mac tether: auto-resume approve fixture")
+    check (arApproveRes.fieldStr? "status" == some "pending" && arApproveRes.fieldBool? "auto_resume" == some true)
+      s!"pending tether must arm auto_resume: {renderCompact arApprove}"
+    check ((← sql "SELECT trigger_kind, phase FROM mission_continuations WHERE mission_id='admin-mission' AND job_id=?1;" #[arApproveId])[1]? == some #["mac_tether_approval", "1"])
+      "pending tether arms durable mac_tether_approval continuation"
+    for pauseSt in #["completed", "interrupted"] do
+      discard <| sql "UPDATE missions SET status=?1 WHERE id='admin-mission';" #[pauseSt]
+      check ((← sql "SELECT state FROM mac_tether_requests WHERE id=?1;" #[arApproveId])[1]? == some #["pending"])
+        s!"armed pending tether survives {pauseSt} while waiting for Touch ID"
+    let (arAppCode, _) ← send "POST" s!"/api/mac-tether/requests/{arApproveId}/approve" admin approval
+    check (arAppCode == 200) "approve armed pending tether succeeds after turn pause"
+    check ((← sql "SELECT trigger_kind, phase FROM mission_continuations WHERE mission_id='admin-mission' AND job_id=?1;" #[arApproveId])[1]? == some #["time", "1"])
+      "approving armed tether promotes continuation to due-now time wakeup"
+    check ((← sql "SELECT COUNT(*) FROM mission_events WHERE mission_id='admin-mission' AND event_type='mac_tether_decided' AND payload LIKE '%\"decision\":\"approved\"%';")[1]? == some #["1"])
+      "approving armed tether records mac_tether_decided event"
+    discard <| sql "UPDATE missions SET status='active' WHERE id='admin-mission';"
+    let arDeny ← call adminMission "request_macbook_tether" requestArgs
+    let some arDenyId := (arDeny.fieldOrNull "result").fieldStr? "request_id" | throw (IO.userError "mac tether: auto-resume deny fixture")
+    let (arDenyCode, _) ← send "POST" s!"/api/mac-tether/requests/{arDenyId}/deny" admin (.obj #[("reason", .str "Not now")])
+    check (arDenyCode == 200 &&
+      (← sql "SELECT trigger_kind, phase FROM mission_continuations WHERE mission_id='admin-mission' AND job_id=?1;" #[arDenyId])[1]? == some #["time", "1"])
+      "denying armed tether promotes continuation to due-now time wakeup"
+    let arCancel ← call adminMission "request_macbook_tether" requestArgs
+    let some arCancelId := (arCancel.fieldOrNull "result").fieldStr? "request_id" | throw (IO.userError "mac tether: auto-resume cancel fixture")
+    discard <| sql "UPDATE missions SET status='cancelled' WHERE id='admin-mission';"
+    check ((← sql "SELECT state FROM mac_tether_requests WHERE id=?1;" #[arCancelId])[1]? == some #["revoked"])
+      "cancelling mission still revokes armed pending tether"
     check failures.isEmpty s!"tether regressions: {repr failures}"
   finally
     stopMacTetherRuntime rt

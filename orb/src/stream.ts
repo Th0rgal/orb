@@ -410,6 +410,7 @@ export function storedToStream(ev: StoredEvent): StreamEvent | null {
     case "goal_status":
     case "goal_iteration":
     case "secret_approval_decided":
+    case "mac_tether_decided":
       return d({ ...ev.metadata, ...(() => { try { return JSON.parse(ev.content || "{}"); } catch { return {}; } })() });
     default:
       return null;

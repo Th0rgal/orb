@@ -9301,7 +9301,10 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
   -- MacBook tether broker (`/api/mac-tether/*`): laptop daemon, `orb-privd` and operator; never a dev pass.
   let tetherBunker ← match st.bunkerStateRef? with | some r => r.get | none => pure (0 : UInt8)
   if let some (tCode, tBody) ← dispatchMacTetherRoutes? st.store st.macTether? (st.managedStore?.map (·.db))
-      tetherBunker (isAdmCaller && !caller.isDevOperator) req.method rawTarget cleanPath req.bodySlice.toByteArray nowEpochSec then
+      tetherBunker (isAdmCaller && !caller.isDevOperator) req.method rawTarget cleanPath req.bodySlice.toByteArray nowEpochSec
+      (some (fun mid evTy payload => do
+        if !(← isBroadcastHubBridged st.broadcastHub?) then
+          publishControlEvent st.broadcastHub? evTy payload (some mid))) then
     return .ok (mkJson tCode tBody)
 
   if let some (sCode, sCtype, sBody) ← dispatchSecretAndApprovalRoutes?

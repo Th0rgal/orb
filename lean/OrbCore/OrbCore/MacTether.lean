@@ -837,6 +837,96 @@ def approveMacTetherRequest
   | some r => return .ok r
   | none => return .error "not_found"
 
+/-- Arm a durable `mac_tether_approval` continuation for a mission whose synchronous
+    tether wait timed out. When the operator later approves or denies the request,
+    `notifyMacTetherApprovalDecision` promotes this continuation to due-now. -/
+def armMacTetherApprovalWakeup
+    (st : CoreStore)
+    (missionId requestId scope : String)
+    (nowEpochSec : UInt64) : IO Bool := do
+  let mid := missionId.trimAscii.toString
+  let rid := requestId.trimAscii.toString
+  if mid.isEmpty || rid.isEmpty then return false
+  let .ok mRows ← execParamQuery st.missionsDb
+      "SELECT COALESCE(run_generation,1) FROM missions WHERE id=?1 LIMIT 1;" #[mid]
+    | return false
+  let some mRow := mRows[1]? | return false
+  let gen := ((mRow[0]?).bind String.toNat?).getD 1
+  let reqKey := s!"mac-tether:{rid}"
+  let .ok existing ← execParamQuery st.missionsDb
+      "SELECT id FROM mission_continuations WHERE mission_id=?1 AND request_id=?2 AND phase IN (1,2) LIMIT 1;"
+      #[mid, reqKey]
+    | return false
+  if existing.size > 1 then return true
+  let cid ← newUuidV4
+  let nowIso := formatEpochIso8601Utc nowEpochSec
+  let effScope := if scope.trimAscii.toString.isEmpty then "sandbox_ssh" else scope.trimAscii.toString
+  let prompt := s!"MacBook tether approval update for request `{rid}` (scope `{effScope}`). Call `request_macbook_tether(request_id=\"{rid}\", wait_secs=0)` to activate the local tunnel and continue."
+  let ins ← execParamQuery st.missionsDb
+    ("INSERT INTO mission_continuations(id,mission_id,run_generation,phase,due_epoch,trigger_kind,reason,prompt,request_id,job_id,source,error,recurrence,stop_after_first,created_at,updated_at) " ++
+     "VALUES(?1,?2,CAST(?3 AS INTEGER),1,CAST(?4 AS INTEGER),'mac_tether_approval','mac_tether_approval',?5,?6,?7,'mac-tether-approval','','',1,?8,?8);")
+    #[cid, mid, s!"{gen}", s!"{nowEpochSec + 86400}", prompt, reqKey, rid, nowIso]
+  return ins.isOk
+
+/-- Wake a mission waiting on a MacBook tether approval once the operator approves or denies it.
+    Remote/Core missions have their armed continuation promoted to due-now (`trigger_kind='time'`);
+    local (`placement_kind='client'`) missions receive a `mac_tether_decided` SSE event. -/
+def notifyMacTetherApprovalDecision
+    (st : CoreStore)
+    (rec : MacTetherRequestRecord)
+    (decision : String)
+    (nowEpochSec : UInt64)
+    (onMissionEvent? : Option (String → String → String → IO Unit) := none) : IO Unit := do
+  let rid := rec.id.trimAscii.toString
+  let mid := rec.missionId.trimAscii.toString
+  if mid.isEmpty || rid.isEmpty then return ()
+  let nowIso := formatEpochIso8601Utc nowEpochSec
+  let effScope := if !rec.effectiveScope.isEmpty then rec.effectiveScope else rec.requestedScope
+  let effTarget := if !rec.effectiveTarget.isEmpty then rec.effectiveTarget else "sandbox"
+  let prompt :=
+    if decision == "approved" then
+      s!"MacBook tether request `{rid}` was approved (scope `{effScope}`, target `{effTarget}`, ttl {rec.ttlMinutes}m). Call `request_macbook_tether(request_id=\"{rid}\", wait_secs=0)` once to activate the local tunnel and get `local_tether.ssh_command`, then continue."
+    else
+      let reasonPart := if rec.denyReason.trimAscii.toString.isEmpty then "" else s!" ({rec.denyReason.trimAscii.toString})"
+      s!"MacBook tether request `{rid}` was denied{reasonPart}. Adjust your plan or ask the user how to proceed."
+  let .ok mRows ← execParamQuery st.missionsDb
+      "SELECT COALESCE(placement_kind,''), COALESCE(run_generation,1) FROM missions WHERE id=?1 LIMIT 1;" #[mid]
+    | return ()
+  let some mRow := mRows[1]? | return ()
+  let placement := (mRow[0]?).getD "" |>.trimAscii.toString
+  let curGen := ((mRow[1]?).bind String.toNat?).getD 1
+  let armed : Bool ← match ← execParamQuery st.missionsDb
+      "SELECT id FROM mission_continuations WHERE mission_id=?1 AND job_id=?2 AND trigger_kind='mac_tether_approval' AND phase=1 LIMIT 1;"
+      #[mid, rid] with
+    | .ok rs => pure (decide (rs.size > 1))
+    | .error _ => pure false
+  let host := if placement == "client" then "client" else "core"
+  if placement == "client" then
+    if armed then
+      discard <| execParamQuery st.missionsDb
+        "UPDATE mission_continuations SET phase=4, updated_at=?3 WHERE mission_id=?1 AND job_id=?2 AND trigger_kind='mac_tether_approval' AND phase=1;"
+        #[mid, rid, nowIso]
+  else if armed then
+    discard <| execParamQuery st.missionsDb
+      ("UPDATE mission_continuations SET trigger_kind='time', due_epoch=CAST(?3 AS INTEGER), prompt=?4, " ++
+       "run_generation=CAST(?5 AS INTEGER), updated_at=?6 " ++
+       "WHERE mission_id=?1 AND job_id=?2 AND trigger_kind='mac_tether_approval' AND phase=1;")
+      #[mid, rid, s!"{nowEpochSec}", prompt, s!"{curGen}", nowIso]
+  let evPayload := renderCompact (.obj #[
+    ("type", .str "mac_tether_decided"),
+    ("mission_id", .str mid),
+    ("request_id", .str rid),
+    ("decision", .str decision),
+    ("scope", .str effScope),
+    ("prompt", .str prompt),
+    ("auto_resume", .bool armed),
+    ("auto_resume_host", .str host)
+  ])
+  if armed then
+    discard <| appendMissionEvent st mid "mac_tether_decided" evPayload nowIso
+  if let some cb := onMissionEvent? then
+    cb mid "mac_tether_decided" evPayload
+
 def denyMacTetherRequest
     (st : CoreStore)
     (rt? : Option MacTetherRuntime)
@@ -1074,11 +1164,15 @@ def executeMacTetherMcpTool
     return .error "MacBook tether tools need a mission session"
   let effMid := if direct then ((args.fieldStr? "mission_id").getD "").trimAscii.toString else callerMissionId
   let owns (r : MacTetherRequestRecord) : Bool := direct || r.missionId == effMid
-  let reply (r : MacTetherRequestRecord) : JVal := .obj #[
-    ("status", .str r.state),
-    ("request_id", .str r.id),
-    ("tether", renderMacTetherRequestJson r (r.state == "approved"))
-  ]
+  let reply (r : MacTetherRequestRecord) (autoResume? : Option Bool := none) : JVal :=
+    let base : Array (String × JVal) := #[
+      ("status", .str r.state),
+      ("request_id", .str r.id),
+      ("tether", renderMacTetherRequestJson r (r.state == "approved"))
+    ]
+    match autoResume? with
+    | some armed => .obj (base.push ("auto_resume", .bool armed))
+    | none => .obj base
   if toolName == "request_macbook_tether" then
     let waitSecs := (args.fieldNat? "wait_secs").getD 20
     if let some existingId := ((args.fieldStr? "request_id").map (·.trimAscii.toString)).filter (!·.isEmpty) then
@@ -1087,6 +1181,9 @@ def executeMacTetherMcpTool
       if !owns cur then
         return .error "Unknown tether request_id"
       let settled := (← waitTetherDecision st rt? existingId waitSecs).getD cur
+      if settled.state == "pending" && !effMid.isEmpty then
+        let armed ← armMacTetherApprovalWakeup st effMid settled.id settled.requestedScope nowEpochSec
+        return .ok (reply settled (some armed))
       return .ok (reply settled)
     let hostHint := ((args.fieldStr? "host_id").getD "").trimAscii.toString
     let (reqLabel, resolvedHost, isManaged) ← resolveMissionTetherMeta st managedDb? effMid hostHint
@@ -1094,6 +1191,9 @@ def executeMacTetherMcpTool
       | .ok r => pure r
       | .error e => return .error e
     let settled := (← waitTetherDecision st rt? created.id waitSecs).getD created
+    if settled.state == "pending" && !effMid.isEmpty then
+      let armed ← armMacTetherApprovalWakeup st effMid settled.id settled.requestedScope nowEpochSec
+      return .ok (reply settled (some armed))
     return .ok (reply settled)
   else if toolName == "list_macbook_tethers" then
     let stateFilter? := ((args.fieldStr? "state").map (·.trimAscii.toString)).filter (!·.isEmpty)
@@ -1138,7 +1238,8 @@ def dispatchMacTetherRoutes?
     (isAdmin : Bool)
     (method rawTarget cleanPath : String)
     (bodyBytes : ByteArray)
-    (nowEpochSec : UInt64) : IO (Option (Nat × String)) := do
+    (nowEpochSec : UInt64)
+    (onMissionEvent? : Option (String → String → String → IO Unit) := none) : IO (Option (Nat × String)) := do
   if cleanPath != "/api/mac-tether" && !cleanPath.startsWith "/api/mac-tether/" then
     return none
   if !isAdmin then
@@ -1186,13 +1287,17 @@ def dispatchMacTetherRoutes?
     | none => return err 404 "not_found"
   | "POST", ["requests", rid, "approve"] =>
     match ← approveMacTetherRequest st rt? bunkerState rid body nowEpochSec with
-    | .ok r => return tetherOk 200 r
+    | .ok r =>
+      notifyMacTetherApprovalDecision st r "approved" nowEpochSec onMissionEvent?
+      return tetherOk 200 r
     | .error "not_found" => return err 404 "not_found"
     | .error e =>
       return err (if e.startsWith "Request is already" then 409 else if e.startsWith "Biometric JIT" then 403 else 400) e
   | "POST", ["requests", rid, "deny"] =>
     match ← denyMacTetherRequest st rt? rid ((body.fieldStr? "reason").getD "") nowEpochSec with
-    | .ok r => return tetherOk 200 r
+    | .ok r =>
+      notifyMacTetherApprovalDecision st r "denied" nowEpochSec onMissionEvent?
+      return tetherOk 200 r
     | .error "not_found" => return err 404 "not_found"
     | .error e => return err 409 e
   | "POST", ["requests", rid, "revoke"] =>
