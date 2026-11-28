@@ -145,6 +145,9 @@ structure RuntimeState (σ : Type) where
   windowFocused : Bool := true
   lastImeOwner : Option EntityId := none
   lastImeContext : String := ""
+  /-- Set when an intra-batch focus/context switch occurred so `runWindow` cycles `zwp_text_input_v3`
+      even if focus returns to the same `EntityId` within the same `pumpEvents` batch. -/
+  imeCyclePending : Bool := false
   hoveredEntity : Option EntityId := none
   hitRegions : List (EntityId × Rect) := []
   scrollRegions : List ScrollRegion := []
@@ -490,7 +493,8 @@ def applyEventBatch {σ : Type} (rt : RuntimeState σ) (evs : Array Event)
     (clearPreedit : σ → σ × Bool := fun s => (s, false)) : RuntimeState σ := Id.run do
   let mut st := rt
   let mut imeContextSwitched :=
-    rt.lastImeOwner.isSome && (rt.focus.owner != rt.lastImeOwner || imeSessionKey rt.app != rt.lastImeContext)
+    rt.imeCyclePending ||
+    (rt.lastImeOwner.isSome && (rt.focus.owner != rt.lastImeOwner || imeSessionKey rt.app != rt.lastImeContext))
   let mut suppressActivatedSpaceText := false
   for ev in evs do
     if imeContextSwitched && isImeEvent ev then
@@ -516,6 +520,8 @@ def applyEventBatch {σ : Type} (rt : RuntimeState σ) (evs : Array Event)
     let switched := st.focus.owner != prevOwner || imeSessionKey st.app != prevCtx
     if switched then
       imeContextSwitched := true
+      if st.lastImeOwner.isSome || prevOwner.any isTextInputEntity then
+        st := { st with imeCyclePending := true }
       if prevOwner.any isTextInputEntity || st.focus.owner != prevOwner then
         let (app', cleared) := clearPreedit st.app
         if cleared then
@@ -864,17 +870,17 @@ def runWindow {σ : Type} (rt0 : RuntimeState σ)
         else none
       let imeCtx := imeSessionKey rt.app
       let imeWillDisableOrCycle :=
-        rt.lastImeOwner.isSome && (textOwner != rt.lastImeOwner || imeCtx != rt.lastImeContext)
+        rt.lastImeOwner.isSome && (rt.imeCyclePending || textOwner != rt.lastImeOwner || imeCtx != rt.lastImeContext)
       if imeWillDisableOrCycle then
         let (appCleared, cleared) := clearPreedit rt.app
         if cleared then
           rt := ({ rt with app := appCleared }).markDirty rt.viewportDeviceRect
       let wl ← if textOwner.isSome && rt.lastImeOwner.isSome &&
-          (textOwner != rt.lastImeOwner || imeCtx != rt.lastImeContext) then
+          (rt.imeCyclePending || textOwner != rt.lastImeOwner || imeCtx != rt.lastImeContext) then
           Wayland.syncTextFocus wl false
         else pure wl
       let wl ← Wayland.syncTextFocus wl textOwner.isSome
-      rt := { rt with wayland := wl, lastImeOwner := textOwner, lastImeContext := imeCtx }
+      rt := { rt with wayland := wl, lastImeOwner := textOwner, lastImeContext := imeCtx, imeCyclePending := false }
       if rt.framesRendered != rendered && rt.vulkan.backend == .cpuShm then
         let wl ← Wayland.present rt.wayland rt.vulkan.framebuffer
         rt := { rt with wayland := wl, presentCount := rt.presentCount + 1 }

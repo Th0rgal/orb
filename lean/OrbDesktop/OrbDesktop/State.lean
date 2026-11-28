@@ -1285,6 +1285,16 @@ private def stepSharedControls (st : DesktopState) (id : WidgetId) : Option Desk
   else if id == 3 then some { st with attachCount := st.attachCount + 1 }
   else none
 
+/-- Apply an editing key (`Backspace`, `Delete`, caret movement, undo/redo) to the active
+    Search palette buffer, preserving `selectedIdx` whenever the query text itself is unchanged. -/
+def stepSearchEditKey (viewport : Rect) (st : DesktopState) (spec : SearchDialogSpec)
+    (key mods : UInt32) : Option (DesktopState × Damage) :=
+  (st.searchBuffer.editKey? key mods).map fun buf =>
+    let nextIdx := if buf.displayText == spec.query then spec.selectedIdx else 0
+    let spec' := { spec with query := buf.displayText, selectedIdx := nextIdx }
+    let changed := buf != st.searchBuffer || spec' != spec
+    ({ st with searchBuffer := buf, modal := .searchPalette spec' }, if changed then some viewport else none)
+
 /-- Handle events while the Search Dialog modal overlay is open (shared across live and fixture modes). -/
 def stepSearchModal (viewport : Rect) (st : DesktopState) (spec : SearchDialogSpec) (ev : Event) :
     DesktopState × Damage := Id.run do

@@ -386,9 +386,8 @@ def desktopReducer (rt : Runtime.RuntimeState DesktopState) :
       if state != .released then
         if let .searchPalette spec := st.modal then
           if rt.focus.owner == some spec.inputWidgetId then
-            if let some buf := st.searchBuffer.editKey? key mods then
-              let spec' := { spec with query := buf.displayText, selectedIdx := 0 }
-              return ({ st with searchBuffer := buf, modal := .searchPalette spec' }, if buf == st.searchBuffer then none else some viewport)
+            if let some res := stepSearchEditKey viewport st spec key mods then
+              return res
         else if !st.liveData && st.screen == .settingsGeneral && rt.focus.owner == some settingsApiUrlId then
           if let some buf := st.settingsApiUrl.editKey? key mods then
             return ({ st with settingsApiUrl := buf }, if buf == st.settingsApiUrl then none else some viewport)

@@ -992,6 +992,63 @@ private def verifyWaylandImeSerialGuard : IO Unit := do
   unless popToSettings.composer.imePreeditText.isEmpty do
     throw <| IO.userError "Fixture .activate 103 clobbered cleared composer preedit back to non-empty"
 
+  -- Intra-batch focus round-trip (701 -> filter 732 -> 701 via pointer_click) during active IME preedit
+  -- must persist imeCyclePending := true so runWindow cycles zwp_text_input_v3 and advances imeEnableSerial.
+  let searchWithPreedit := (stepDesktopEvent 120 vpDev searchSt0 (.preedit "検" 0 1)).1
+  let (_, searchHitScene) := renderScreenScene searchWithPreedit 120
+  let some (_, r732) := searchHitScene.hitRegionsSub.find? (·.1 == searchTabUserId)
+    | throw <| IO.userError "missing hit region for searchTabUserId in round-trip test"
+  let rtSearchRoundTrip : Runtime.RuntimeState DesktopState := {
+    app := searchWithPreedit
+    focus := { owner := some 701, traps := desktopFocusTraps searchWithPreedit }
+    focusableOrder := searchHitScene.focusableOrder
+    hitRegions := searchHitScene.hitRegionsSub
+    lastImeOwner := some 701
+    lastImeContext := desktopImeSessionKey searchWithPreedit
+  }
+  let rtAfterRoundTrip := Runtime.applyEventBatch rtSearchRoundTrip
+    #[.pointerButton (r732.x + r732.w / 2) (r732.y + r732.h / 2) 0x110 true,
+      .pointerButton (r732.x + r732.w / 2) (r732.y + r732.h / 2) 0x110 false]
+    (fun _ st ev => stepDesktopEvent 120 vpDev st ev) desktopFocusChange desktopFocusTraps desktopImeSessionKey
+    DesktopState.clearAllPreeditChecked
+  unless rtAfterRoundTrip.focus.owner == some 701 && rtAfterRoundTrip.imeCyclePending &&
+      rtAfterRoundTrip.app.searchBuffer.imePreeditText.isEmpty do
+    throw <| IO.userError s!"Intra-batch 701->732->701 click failed to persist imeCyclePending: owner={repr rtAfterRoundTrip.focus.owner} pending={rtAfterRoundTrip.imeCyclePending}"
+
+  -- Search modal editKey? on boundary/cursor keys (Delete/Right at end, Left mid-query) must preserve selectedIdx.
+  let searchIdx1 := (stepDesktopEvent 120 vpDev searchSt0 (.key 0xff54 0 .pressed)).1
+  match searchIdx1.modal with
+  | .searchPalette sp1 =>
+    let some (afterDelAtEnd, dmgDelAtEnd) := stepSearchEditKey vpDev searchIdx1 sp1 0xffff 0
+      | throw <| IO.userError "stepSearchEditKey did not handle boundary Delete"
+    match afterDelAtEnd.modal with
+    | .searchPalette sp =>
+      unless sp.selectedIdx == 1 && dmgDelAtEnd.isNone do
+        throw <| IO.userError s!"Boundary Delete in Search reset selectedIdx or damaged unnecessarily: idx={sp.selectedIdx}"
+    | _ => throw <| IO.userError "Boundary Delete closed Search unexpectedly"
+    let some (afterRightAtEnd, _) := stepSearchEditKey vpDev searchIdx1 sp1 0xff53 0
+      | throw <| IO.userError "stepSearchEditKey did not handle boundary Right"
+    match afterRightAtEnd.modal with
+    | .searchPalette sp =>
+      unless sp.selectedIdx == 1 do
+        throw <| IO.userError s!"Boundary Right in Search reset selectedIdx: idx={sp.selectedIdx}"
+    | _ => throw <| IO.userError "Boundary Right closed Search unexpectedly"
+    let some (afterLeftMid, dmgLeftMid) := stepSearchEditKey vpDev searchIdx1 sp1 0xff51 0
+      | throw <| IO.userError "stepSearchEditKey did not handle caret Left"
+    match afterLeftMid.modal with
+    | .searchPalette sp =>
+      unless sp.selectedIdx == 1 && dmgLeftMid.isSome do
+        throw <| IO.userError s!"Caret Left in Search reset selectedIdx or omitted caret damage: idx={sp.selectedIdx}"
+    | _ => throw <| IO.userError "Caret Left closed Search unexpectedly"
+    let some (afterBksp, dmgBksp) := stepSearchEditKey vpDev searchIdx1 sp1 0xff08 0
+      | throw <| IO.userError "stepSearchEditKey did not handle Backspace"
+    match afterBksp.modal with
+    | .searchPalette sp =>
+      unless sp.selectedIdx == 0 && sp.query == "missio" && dmgBksp.isSome do
+        throw <| IO.userError s!"Query-changing Backspace in Search did not reset selectedIdx: idx={sp.selectedIdx} q={repr sp.query}"
+    | _ => throw <| IO.userError "Backspace closed Search unexpectedly"
+  | _ => throw <| IO.userError "searchIdx1 did not remain in searchPalette"
+
 def main : IO UInt32 := do
   verifyOrbScrollEquivalence
   verifyNineScreenControls
