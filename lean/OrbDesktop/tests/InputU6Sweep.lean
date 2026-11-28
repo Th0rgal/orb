@@ -1049,6 +1049,120 @@ private def verifyWaylandImeSerialGuard : IO Unit := do
     | _ => throw <| IO.userError "Backspace closed Search unexpectedly"
   | _ => throw <| IO.userError "searchIdx1 did not remain in searchPalette"
 
+  -- Search modal .preedit/.imeBatch/.text with unchanged displayText must preserve selectedIdx and emit no damage:
+  -- verifies pointer-clicking Open (708) on selectedIdx=1, double-clicking row 703 via Runtime.applyEventBatch,
+  -- Tab focus move out of 701, and Wayland done (.imeBatch 0 0 "" "" 0 0).
+  let (afterNoopPre, dmgNoopPre) := stepDesktopEvent 120 vpDev searchIdx1 (.preedit "" 0 0)
+  let (afterNoopIme, dmgNoopIme) := stepDesktopEvent 120 vpDev searchIdx1 (.imeBatch 0 0 "" "" 0 0)
+  let (afterNoopTxt, dmgNoopTxt) := stepDesktopEvent 120 vpDev searchIdx1 (.text "")
+  for (label, st', dmg') in [("preedit", afterNoopPre, dmgNoopPre), ("imeBatch", afterNoopIme, dmgNoopIme), ("text", afterNoopTxt, dmgNoopTxt)] do
+    match st'.modal with
+    | .searchPalette sp =>
+      unless sp.selectedIdx == 1 && dmg'.isNone do
+        throw <| IO.userError s!"No-op Search {label} reset selectedIdx or damaged: idx={sp.selectedIdx} dmg={dmg'.isSome}"
+    | _ => throw <| IO.userError s!"No-op Search {label} closed Search unexpectedly"
+  let (_, searchIdx1Scene) := renderScreenScene searchIdx1 120
+  let some (_, r708) := searchIdx1Scene.hitRegionsSub.find? (·.1 == searchOpenId)
+    | throw <| IO.userError "missing hit region for searchOpenId (708)"
+  let some (_, r703) := searchIdx1Scene.hitRegionsSub.find? (·.1 == 703)
+    | throw <| IO.userError "missing hit region for search row 703"
+  let rtSearchOpenClick : Runtime.RuntimeState DesktopState := {
+    app := searchIdx1
+    focus := { owner := some 701, traps := desktopFocusTraps searchIdx1 }
+    focusableOrder := searchIdx1Scene.focusableOrder
+    hitRegions := searchIdx1Scene.hitRegionsSub
+    lastImeOwner := some 701
+    lastImeContext := desktopImeSessionKey searchIdx1
+  }
+  let rtAfterOpenClick := Runtime.applyEventBatch rtSearchOpenClick
+    #[.pointerButton (r708.x + r708.w / 2) (r708.y + r708.h / 2) 0x110 true,
+      .pointerButton (r708.x + r708.w / 2) (r708.y + r708.h / 2) 0x110 false]
+    (fun _ st ev => stepDesktopEvent 120 vpDev st ev) desktopFocusChange desktopFocusTraps desktopImeSessionKey
+    DesktopState.clearAllPreeditChecked
+  unless rtAfterOpenClick.app.screen == .missionSplitDiff && rtAfterOpenClick.app.modal == .none &&
+      rtAfterOpenClick.focus.owner == some 1 do
+    throw <| IO.userError s!"Clicking Open (708) on selectedIdx=1 failed: screen={repr rtAfterOpenClick.app.screen} focus={repr rtAfterOpenClick.focus.owner}"
+  let rtSearchDblClick0 : Runtime.RuntimeState DesktopState := {
+    app := searchSt0
+    focus := { owner := some 701, traps := desktopFocusTraps searchSt0 }
+    focusableOrder := searchIdx1Scene.focusableOrder
+    hitRegions := searchIdx1Scene.hitRegionsSub
+    lastImeOwner := some 701
+    lastImeContext := desktopImeSessionKey searchSt0
+  }
+  let click703 : Array Event :=
+    #[.pointerButton (r703.x + r703.w / 2) (r703.y + r703.h / 2) 0x110 true,
+      .pointerButton (r703.x + r703.w / 2) (r703.y + r703.h / 2) 0x110 false]
+  let rtAfterClick1 := Runtime.applyEventBatch rtSearchDblClick0 click703
+    (fun _ st ev => stepDesktopEvent 120 vpDev st ev) desktopFocusChange desktopFocusTraps desktopImeSessionKey
+    DesktopState.clearAllPreeditChecked
+  let rtAfterClick2 := Runtime.applyEventBatch rtAfterClick1 click703
+    (fun _ st ev => stepDesktopEvent 120 vpDev st ev) desktopFocusChange desktopFocusTraps desktopImeSessionKey
+    DesktopState.clearAllPreeditChecked
+  unless rtAfterClick1.focus.owner == some 701 &&
+      rtAfterClick2.app.screen == .missionSplitDiff && rtAfterClick2.app.modal == .none &&
+      rtAfterClick2.focus.owner == some 1 do
+    throw <| IO.userError s!"Double-clicking non-zero Search row 703 failed: screen={repr rtAfterClick2.app.screen} modal={rtAfterClick2.app.modal != .none} focus={repr rtAfterClick2.focus.owner}"
+  let rtAfterTabOut := Runtime.applyEventBatch rtSearchOpenClick
+    #[.key 0xff09 0 .pressed]
+    (fun _ st ev => stepDesktopEvent 120 vpDev st ev) desktopFocusChange desktopFocusTraps desktopImeSessionKey
+    DesktopState.clearAllPreeditChecked
+  match rtAfterTabOut.app.modal with
+  | .searchPalette sp =>
+    unless sp.selectedIdx == 1 do
+      throw <| IO.userError s!"Tab out of Search input 701 reset selectedIdx: {sp.selectedIdx}"
+  | _ => throw <| IO.userError "Tab out of Search input 701 closed Search unexpectedly"
+
+  -- Search modal dismissal restores focus to composer 1 on composer-bearing screens (.missionSplitDiff,
+  -- .newMissionDialog, .toastNotifications), respects target-screen focus on screen-changing opens (705 -> fleetLocalId),
+  -- and falls back to sidebarToggleId (117) instead of hidden 101/112/113 when sidebarHidden == true.
+  for scr in [ScreenId.missionSplitDiff, .newMissionDialog, .toastNotifications] do
+    let baseScr := DesktopState.forScreen scr
+    let opened := openSearchModal baseScr
+    let closed := (stepDesktopEvent 120 vpDev opened (.key 0xff1b 0 .pressed)).1
+    unless desktopFocusChange opened closed (.key 0xff1b 0 .pressed) == some 1 do
+      throw <| IO.userError s!"Closing Search on {repr scr} did not restore composer focus 1"
+  let searchAll := (stepDesktopEvent 120 vpDev searchSt0 (.activate searchClearId)).1
+  let openFleetFromSearch := (stepDesktopEvent 120 vpDev searchAll (.activate 705)).1
+  let openFleetFromSearch2 := (stepDesktopEvent 120 vpDev openFleetFromSearch (.activate 705)).1
+  unless openFleetFromSearch2.screen == .machinesFleet && openFleetFromSearch2.modal == .none &&
+      desktopFocusChange openFleetFromSearch openFleetFromSearch2 (.activate 705) == some fleetLocalId do
+    throw <| IO.userError s!"Opening Search item 705 did not focus fleetLocalId: screen={repr openFleetFromSearch2.screen} focus={repr (desktopFocusChange openFleetFromSearch openFleetFromSearch2 (.activate 705))}"
+  let hiddenLiveFleet : DesktopState := { livePop with screen := .machinesFleet, sidebarHidden := true }
+  let hiddenSearch := openSearchModal hiddenLiveFleet
+  unless desktopFocusChange hiddenSearch hiddenLiveFleet (.key 0xff1b 0 .pressed) == some sidebarToggleId do
+    throw <| IO.userError "Closing Search with sidebarHidden on live fleet targeted hidden sidebar button instead of 117"
+  let hiddenDisconnected : DesktopState := {
+    livePop with screen := .controlEmpty, sidebarHidden := true, connectionBinding := ""
+  }
+  unless !hiddenDisconnected.hasLiveConnection &&
+      desktopFocusChange (openSearchModal hiddenDisconnected) hiddenDisconnected (.key 0xff1b 0 .pressed) == some sidebarToggleId do
+    throw <| IO.userError "Closing Search with sidebarHidden on disconnected controlEmpty targeted hidden 101 instead of 117"
+
+  -- missionMenuRows must splice mid-string IME preedit via menu.draft.displayText on .rename and .draftDirectory.
+  let renameMenu : MissionMenu := {
+    mission := "m-1", x := 400, y := 400, trigger := 710, page := .rename,
+    draft := { text := "AlphaBeta", cursorOffset := 5, imePreeditText := "検", imePreeditOffset := 5, imePreeditLen := 1 }
+  }
+  let renameSt : DesktopState := {
+    livePop with
+    missionCards := [{
+      widgetId := 120, missionId := "m-1", title := "AlphaBeta", status := "idle",
+      project := "default", track := "", model := "codex", updatedLabel := "now", summaryText := ""
+    }]
+  }
+  let renameRows := missionMenuRows renameSt renameMenu
+  unless (renameRows.find? (·.id == 1)).map (·.label) == some "Alpha検Beta" do
+    throw <| IO.userError s!"Rename menu did not splice mid-string preedit: {repr ((renameRows.find? (·.id == 1)).map (·.label))}"
+  let dirMenu : MissionMenu := {
+    mission := "", x := 400, y := 400, trigger := draftDirectoryPickerId, page := .draftDirectory,
+    draft := { text := "workspace", cursorOffset := 0, imePreeditText := "/", imePreeditOffset := 0, imePreeditLen := 1 }
+  }
+  let dirRows := missionMenuRows renameSt dirMenu
+  unless (dirRows.find? (·.id == 1)).map (·.label) == some "/workspace" &&
+      dirRows.any (·.id == 716) && !dirRows.any (·.id == 729) do
+    throw <| IO.userError s!"Draft directory menu did not splice/validate mid-string preedit: {repr (dirRows.map fun r => (r.id, r.label))}"
+
 def main : IO UInt32 := do
   verifyOrbScrollEquivalence
   verifyNineScreenControls

@@ -106,7 +106,8 @@ def deleteAroundCursor (buf : ComposerBuffer) (delBefore delAfter : Nat) : Compo
 /-- Set or clear the active IME preedit composition string at `cursorOffset`. -/
 def setPreedit (buf : ComposerBuffer) (preedit : String) : ComposerBuffer :=
   let cur := clampCursor buf.text buf.cursorOffset
-  if buf.imePreeditText == preedit && buf.imePreeditOffset == cur then buf else
+  if preedit.isEmpty && buf.imePreeditText.isEmpty then buf
+  else if buf.imePreeditText == preedit && buf.imePreeditOffset == cur then buf else
   { buf with
     wheelTop := none
     preferredX := none

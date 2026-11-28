@@ -1285,15 +1285,20 @@ private def stepSharedControls (st : DesktopState) (id : WidgetId) : Option Desk
   else if id == 3 then some { st with attachCount := st.attachCount + 1 }
   else none
 
+/-- Apply an updated Search palette buffer, preserving `selectedIdx` whenever `buf.displayText`
+    matches `spec.query` and returning damage only when the buffer or modal spec actually changed. -/
+def applySearchBuffer (viewport : Rect) (st : DesktopState) (spec : SearchDialogSpec)
+    (buf : ComposerBuffer) : DesktopState × Damage :=
+  let nextIdx := if buf.displayText == spec.query then spec.selectedIdx else 0
+  let spec' := { spec with query := buf.displayText, selectedIdx := nextIdx }
+  let changed := buf != st.searchBuffer || spec' != spec
+  ({ st with searchBuffer := buf, modal := .searchPalette spec' }, if changed then some viewport else none)
+
 /-- Apply an editing key (`Backspace`, `Delete`, caret movement, undo/redo) to the active
     Search palette buffer, preserving `selectedIdx` whenever the query text itself is unchanged. -/
 def stepSearchEditKey (viewport : Rect) (st : DesktopState) (spec : SearchDialogSpec)
     (key mods : UInt32) : Option (DesktopState × Damage) :=
-  (st.searchBuffer.editKey? key mods).map fun buf =>
-    let nextIdx := if buf.displayText == spec.query then spec.selectedIdx else 0
-    let spec' := { spec with query := buf.displayText, selectedIdx := nextIdx }
-    let changed := buf != st.searchBuffer || spec' != spec
-    ({ st with searchBuffer := buf, modal := .searchPalette spec' }, if changed then some viewport else none)
+  (st.searchBuffer.editKey? key mods).map (applySearchBuffer viewport st spec)
 
 /-- Handle events while the Search Dialog modal overlay is open (shared across live and fixture modes). -/
 def stepSearchModal (viewport : Rect) (st : DesktopState) (spec : SearchDialogSpec) (ev : Event) :
@@ -1335,17 +1340,11 @@ def stepSearchModal (viewport : Rect) (st : DesktopState) (spec : SearchDialogSp
     if !st.searchBuffer.imePreeditText.isEmpty then return (st, none)
     return (openItem spec.selectedIdx, some viewport)
   | .text utf8 =>
-    let buf := st.searchBuffer.insertText utf8
-    let spec' := { spec with query := buf.displayText, selectedIdx := 0 }
-    return ({ st with searchBuffer := buf, modal := .searchPalette spec' }, some viewport)
+    return applySearchBuffer viewport st spec (st.searchBuffer.insertText utf8)
   | .preedit utf8 _ _ =>
-    let buf := st.searchBuffer.setPreedit utf8
-    let spec' := { spec with query := buf.displayText, selectedIdx := 0 }
-    return ({ st with searchBuffer := buf, modal := .searchPalette spec' }, some viewport)
+    return applySearchBuffer viewport st spec (st.searchBuffer.setPreedit utf8)
   | .imeBatch db da commit preedit _ _ =>
-    let buf := st.searchBuffer.applyImeBatch db da commit preedit
-    let spec' := { spec with query := buf.displayText, selectedIdx := 0 }
-    return ({ st with searchBuffer := buf, modal := .searchPalette spec' }, some viewport)
+    return applySearchBuffer viewport st spec (st.searchBuffer.applyImeBatch db da commit preedit)
   | .activate id =>
     let resetSpec : SearchDialogSpec := { spec with selectedIdx := 0 }
     if id == searchEscId || id == searchBackdropId then
@@ -1828,7 +1827,7 @@ def contextSelection (st : DesktopState) (rowId : String) : DesktopState :=
 
 def missionMenuRows (st : DesktopState) (menu : MissionMenu) : List MissionMenuRow := Id.run do
   if menu.page == .draftDirectory then
-    let path := menu.draft.text ++ menu.draft.imePreeditText
+    let path := menu.draft.displayText
     let valid := path.isEmpty || path.startsWith "/"
     let children : List MissionMenuRow := (menu.directoryRows.getD []).mapIdx fun i (full, name) =>
       { id := 2000000 + i, label := name, value := full, icon := "folder" }
@@ -1903,7 +1902,7 @@ def missionMenuRows (st : DesktopState) (menu : MissionMenu) : List MissionMenuR
       { id := 2000000 + i, label := p.title, icon := "folder",
         action := some (.move card.missionId (p.rowId.drop 8).toString) }
   | .rename =>
-    return [{ id := 1, label := menu.draft.text ++ menu.draft.imePreeditText, icon := "rename" },
+    return [{ id := 1, label := menu.draft.displayText, icon := "rename" },
       { id := 716, label := "Save", icon := "check", action := some (.rename card.missionId menu.draft.text) }]
   | .settings => return []
 
@@ -1916,9 +1915,27 @@ def menuFocusChange (before after : DesktopState) : Option Nat :=
     else ((missionMenuRows after menu)[menu.highlighted]?).map (·.id)
   | _, _ => none
 
+/-- Default focusable widget on `st.screen`, respecting `st.sidebarHidden` and live connection state
+    so `desktopFocusChange` never targets an unrendered sidebar item or unrendered composer. -/
+def screenDefaultFocus (st : DesktopState) : Nat :=
+  let sidebarFallback (sidebarId : Nat) : Nat :=
+    if st.sidebarHidden then sidebarToggleId else sidebarId
+  match st.screen with
+  | .controlEmpty | .controlPopulated | .searchDialog | .newMissionDialog | .toastNotifications =>
+    if !st.liveData || st.hasLiveConnection then 1 else sidebarFallback 101
+  | .missionTranscript | .missionSplitDiff => 1
+  | .settingsGeneral => if st.liveData then accountFormId else settingsTabAccountId
+  | .machinesFleet => if st.liveData then sidebarFallback 112 else fleetLocalId
+  | .inference => if st.accountRoutePage.isSome then providersBackId else sidebarFallback 113
+  | .cloud => if !st.cloudMission.isEmpty then 963 else sidebarFallback 111
+  | .resources => sidebarFallback 114
+  | .inbox => if !st.inboxAvailable || st.inboxItems.isEmpty then sidebarFallback 102 else 940
+
 /-- Opening a live draft gives the editor keyboard focus even when New Agent
     was invoked while the empty draft screen was already visible. -/
 def desktopFocusChange (before after : DesktopState) (ev : Event) : Option Nat :=
+  let sidebarFallback (sidebarId : Nat) : Nat :=
+    if after.sidebarHidden then sidebarToggleId else sidebarId
   if before.voicePhase != .idle && before.voicePhase != after.voicePhase && after.voiceDraft then some 1
   else if !(before.modal matches .searchPalette _) && (after.modal matches .searchPalette _) then some 701
   else if let .searchPalette a := after.modal then
@@ -1933,7 +1950,7 @@ def desktopFocusChange (before after : DesktopState) (ev : Event) : Option Nat :
         | _ => false)
     if returnToSearchInput then some a.inputWidgetId else none
   else if (before.modal matches .searchPalette _) && !(after.modal matches .searchPalette _) then
-    if after.screen == .controlEmpty || after.screen == .controlPopulated || after.screen == .missionTranscript then some 1 else some 101
+    some (screenDefaultFocus after)
   else if let some target := menuFocusChange before after then some target
   else if before.screen == .inference && after.screen == .inference then
     match before.accountRoutePage, after.accountRoutePage with
@@ -1943,14 +1960,14 @@ def desktopFocusChange (before after : DesktopState) (ev : Event) : Option Nat :
   else if after.screen == .settingsGeneral && before.screen != after.screen then
     some (if after.liveData then accountFormId else settingsTabAccountId)
   else if after.screen == .machinesFleet && before.screen != .machinesFleet then
-    some (if after.liveData then 112 else fleetLocalId)
-  else if after.screen == .inference && before.screen != .inference then some 113
-  else if after.screen == .cloud && before.screen != .cloud then some 111
-  else if after.screen == .cloud && before.cloudMission != after.cloudMission then some (if after.cloudMission.isEmpty then 111 else 963)
-  else if after.screen == .resources && before.screen != .resources then some 114
+    some (if after.liveData then sidebarFallback 112 else fleetLocalId)
+  else if after.screen == .inference && before.screen != .inference then some (sidebarFallback 113)
+  else if after.screen == .cloud && before.screen != .cloud then some (if !after.cloudMission.isEmpty then 963 else sidebarFallback 111)
+  else if after.screen == .cloud && before.cloudMission != after.cloudMission then some (if after.cloudMission.isEmpty then sidebarFallback 111 else 963)
+  else if after.screen == .resources && before.screen != .resources then some (sidebarFallback 114)
   else if after.screen == .resources && after.resourceRows.isSome && before.resourcePage != after.resourcePage then
     some (if before.resourcePage < after.resourcePage then 947 else 946)
-  else if after.screen == .inbox && before.screen != .inbox then some (if after.inboxItems.isEmpty then 102 else 940)
+  else if after.screen == .inbox && before.screen != .inbox then some (if !after.inboxAvailable || after.inboxItems.isEmpty then sidebarFallback 102 else 940)
   else if after.hasLiveConnection && after.missionMenu.isNone &&
       (after.screen == .controlEmpty || after.screen == .controlPopulated) then
     let shortcut := match ev with
