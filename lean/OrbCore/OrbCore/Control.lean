@@ -2101,6 +2101,9 @@ private def handleNativeAntigravity (st : CoreAppState) (req : HttpRequest) (raw
     and per-account cooldowns (`#1612`). -/
 private def handleProxyRequest (st : CoreAppState) (req : HttpRequest) (cleanPath : String)
     (reqOrigin? : Option String) (nowEpochSec : UInt64) : IO CoreHttpResponse := do
+  let reqStartMs ← IO.monoMsNow
+  let currentProxyEpoch : IO UInt64 := do
+    pure (nowEpochSec + (((← IO.monoMsNow) - reqStartMs) / 1000).toUInt64)
   let mkJson (code : Nat) (b : String) : CoreHttpResponse := jsonResponse code b #[] reqOrigin?
   let mkJsonHdr (code : Nat) (b : String) (hdrs : Array (String × String)) : CoreHttpResponse :=
     jsonResponse code b hdrs reqOrigin?
@@ -2278,6 +2281,9 @@ private def handleProxyRequest (st : CoreAppState) (req : HttpRequest) (cleanPat
     if headersAlreadyCommitted then some pinnedAcctHdr else none
   let authEvidence ← IO.mkRef (#[] : Array (String × String))
   let bodyTimedOutRef ← IO.mkRef false
+  let startClearSeq? ← match st.healthTracker? with
+    | some htr => some <$> currentClearSeq htr
+    | none => pure none
   let prevStreaks ← match st.healthTracker? with
     | some htr =>
       dispatchChain.targets.mapM (fun t => do
@@ -2294,6 +2300,7 @@ private def handleProxyRequest (st : CoreAppState) (req : HttpRequest) (cleanPat
     (authEvidence? := some authEvidence)
     (streamLimits? := st.proxyStreamLimits?)
     (bodyTimedOutRef? := some bodyTimedOutRef)
+    (attemptClearSeq? := startClearSeq?)
     (resolveTransport := fun target => do
       let some owner := target.sidecarCredential? |
         return ← AccountVpnPool.resolve st.vpnPool? st.store st.vpnCoordinatorDir target.accountId
@@ -2338,22 +2345,28 @@ private def handleProxyRequest (st : CoreAppState) (req : HttpRequest) (cleanPat
     { out with body := loginErrorBody, contentType := "application/json" }
     else out
   -- Provider status follows what real requests saw: a refused login is recorded per
-  -- upstream account, and an account that actually completed a 2xx request is cleared.
+  -- upstream account (unless fenced by a concurrent clear/reconnect), and an account that
+  -- actually completed a 2xx request is cleared.
+  let postAttemptEpoch ← currentProxyEpoch
   for (accountKey, code) in (← authEvidence.get) do
-    discard <| execParamQuery st.store.missionsDb
-      ("INSERT INTO provider_auth_health(account_key,code,observed_at) VALUES(?1,?2,?3) " ++
-       "ON CONFLICT(account_key) DO UPDATE SET code=excluded.code,observed_at=excluded.observed_at;")
-      #[accountKey, code, formatEpochIso8601Utc nowEpochSec]
+    let fenced ← match st.healthTracker?, startClearSeq? with
+      | some htr, some s => accountClearedSince htr accountKey s
+      | _, _ => pure false
+    if !fenced then
+      discard <| execParamQuery st.store.missionsDb
+        ("INSERT INTO provider_auth_health(account_key,code,observed_at) VALUES(?1,?2,?3) " ++
+         "ON CONFLICT(account_key) DO UPDATE SET code=excluded.code,observed_at=excluded.observed_at;")
+        #[accountKey, code, formatEpochIso8601Utc postAttemptEpoch]
   if out.stream?.isNone && out.status ≥ 200 && out.status < 300 && !out.selectedAccount.isEmpty then
     clearRequestAuthEvidenceForAccount st.providerHub? st.store st.cfg.workingDir out.selectedAccount
   match st.healthTracker? with
   | some htr =>
-    syncCooldownsFromHealthTracker htr st.proxyCooldownsRef nowEpochSec
+    syncCooldownsFromHealthTracker htr st.proxyCooldownsRef postAttemptEpoch
   | none =>
     st.proxyCooldownsRef.modify fun cooldowns =>
-      let stillActive := activeCooldowns cooldowns nowEpochSec
+      let stillActive := activeCooldowns cooldowns postAttemptEpoch
       let withoutSelected := stillActive.filter (fun c => c.accountId != out.selectedAccount)
-      match cooldownForOutcome out nowEpochSec with
+      match cooldownForOutcome out postAttemptEpoch with
       | some c => withoutSelected.push c
       | none => withoutSelected
   if let some mid := stopMid? then
@@ -2484,10 +2497,11 @@ private def handleProxyRequest (st : CoreAppState) (req : HttpRequest) (cleanPat
                        "UPDATE proxy_outcomes SET status=?2 WHERE id=?1;" #[oid, streamStatus]
                    if !finalAccount.isEmpty then
                      if let some htr := st.healthTracker? then
+                       let streamEndEpoch ← currentProxyEpoch
                        let finalPrevStreak :=
                          (prevStreaks.find? (fun (aid, _) => aid == finalAccount)).map Prod.snd |>.getD prevSelectedStreak
-                       discard <| recordStreamCutHealth htr finalAccount finalPrevStreak nowEpochSec
-                       syncCooldownsFromHealthTracker htr st.proxyCooldownsRef nowEpochSec }
+                       discard <| recordStreamCutHealth htr finalAccount finalPrevStreak streamEndEpoch startClearSeq?
+                       syncCooldownsFromHealthTracker htr st.proxyCooldownsRef streamEndEpoch }
   | none =>
     accountBody out.body
     return { status := out.status, contentType := out.contentType, corsOrigin? := reqOrigin?, extraHdrs := diagHdrs, body := out.body }
@@ -3981,9 +3995,8 @@ private def collectResourcesPoolHealthHints
   if let some ht := st.healthTracker? then
     for hp in enabledHps do
       let slugs := poolSlugsForHp hp
-      let keys := providerHealthKeys hp
-      for k in keys do
-        let rec ← lookupAccountHealthRecord ht k
+      let recs ← snapshotMatchingHealthRecords ht (matchesProviderHealthKey hps hp)
+      for rec in recs do
         if rec.disabledByProvider then
           for slug in slugs do
             hints := hints.push { provider := slug, health := "disabled_by_provider" }

@@ -580,6 +580,8 @@ structure AccountHealthRecord where
   lastVerdictCode     : UInt8  := 0
   disabledByProvider  : Bool   := false
   disabledMessage     : String := ""
+  clearedAtSeq        : UInt64 := 0
+  clearedOutcomeId    : Nat    := 0
   deriving Repr, DecidableEq, Inhabited
 
 /-- Single-owner provider health, circuit-breaker, route-generation, and pacing state (`SM-21`). -/
@@ -587,6 +589,10 @@ structure ProviderHealthState where
   routeGeneration    : UInt64 := 1
   transientThreshold : UInt32 := 2
   accounts           : Array AccountHealthRecord := #[]
+  clearSeq           : UInt64 := 0
+  /-- Bounded history of `(clearSeq, exactKeys, nonHashPrefixes)` used to fence in-flight
+      requests that started before an operator clear or completed OAuth sign-in. -/
+  clearEvents        : Array (UInt64 × Array String × Array String) := #[]
   deriving Repr, Inhabited
 
 /-- Unified single-owner runtime tracker consolidating `proxy.rs` commitment, `provider_health.rs`
@@ -661,32 +667,117 @@ def snapshotDisabledHealthAccountIds (tracker : ProviderHealthTracker) : IO (Arr
     let st ← get
     return st.accounts.filterMap (fun r => if r.disabledByProvider then some r.accountId else none)
 
+/-- Read current `clearSeq` from `ProviderHealthTracker`. -/
+def currentClearSeq (tracker : ProviderHealthTracker) : IO UInt64 :=
+  tracker.health.atomically do
+    return (← get).clearSeq
+
+private def isHex64 (s : String) : Bool :=
+  s.length == 64 && s.toList.all (fun c => ('0' ≤ c && c ≤ '9') || ('a' ≤ c && c ≤ 'f'))
+
+private def accountClearedSincePure (hst : ProviderHealthState) (accountId : String) (seq : UInt64) : Bool :=
+  let rec0 := lookupAccountHealth hst.accounts accountId
+  if rec0.clearedAtSeq > seq then
+    true
+  else
+    hst.clearEvents.any fun (evSeq, exacts, prefixes) =>
+      evSeq > seq && (
+        exacts.contains accountId ||
+        prefixes.any (fun p =>
+          accountId.startsWith p && !isHex64 (accountId.drop p.length).toString))
+
+/-- Whether `accountId` was cleared (directly or via matching prefix) after `seq`. -/
+def accountClearedSince (tracker : ProviderHealthTracker) (accountId : String) (seq : UInt64) : IO Bool :=
+  tracker.health.atomically do
+    return accountClearedSincePure (← get) accountId seq
+
+/-- Snapshot every `AccountHealthRecord` in `ProviderHealthTracker` matching `pick`
+    (including uncooled records carrying transient streaks, trips, or clear watermarks). -/
+def snapshotMatchingHealthRecords (tracker : ProviderHealthTracker) (pick : String → Bool) :
+    IO (Array AccountHealthRecord) :=
+  tracker.health.atomically do
+    let st ← get
+    return st.accounts.filter (fun r => pick r.accountId)
+
 /-- Operator reset: forget the cooldown, quota park, poison, provider disable and streaks of every account whose
     id satisfies `pick`. Used by the health "clear" route and after a completed login. -/
 def clearAccountHealthWhere (tracker : ProviderHealthTracker) (pick : String → Bool) : IO Unit :=
   tracker.health.atomically do
     let st ← get
-    set { st with accounts := st.accounts.filter (fun r => !pick r.accountId) }
+    let nextClearSeq := if st.clearSeq < 0xFFFFFFFFFFFFFFFF then st.clearSeq + 1 else st.clearSeq
+    let nextAccounts := st.accounts.map fun r =>
+      if pick r.accountId then
+        { accountId := r.accountId, slotId := r.slotId,
+          clearedAtSeq := nextClearSeq, clearedOutcomeId := r.clearedOutcomeId }
+      else r
+    set { st with clearSeq := nextClearSeq, accounts := nextAccounts }
 
 /-- Atomically clear matching account health records from BOTH `ProviderHealthTracker` and legacy
-    `proxyCooldownsRef` under `tracker.health`'s mutex (when present), preventing a concurrent
-    proxy request from resurrecting a cleared cooldown via a stale `snapshotActiveHealthCooldowns`. -/
+    `proxyCooldownsRef` under `tracker.health`'s mutex (when present), advancing `clearSeq` so
+    pre-clear in-flight proxy requests cannot resurrect cleared cooldowns, streaks, bans, or
+    persisted auth-rejection evidence. -/
 def clearAccountCooldowns
     (tracker? : Option ProviderHealthTracker)
     (cooldownsRef : IO.Ref (Array AccountCooldown))
-    (pick : String → Bool) : IO Unit :=
+    (pick : String → Bool)
+    (explicitKeys : Array String := #[])
+    (explicitPrefixes : Array String := #[])
+    (maxOutcomeId : Nat := 0)
+    (clearDisabledByProvider : Bool := true) : IO Unit :=
   match tracker? with
   | some tracker =>
     tracker.health.atomically do
       let st ← get
-      set { st with accounts := st.accounts.filter (fun r => !pick r.accountId) }
+      let nextClearSeq := if st.clearSeq < 0xFFFFFFFFFFFFFFFF then st.clearSeq + 1 else st.clearSeq
+      let mut nextAccounts : Array AccountHealthRecord := Array.mkEmpty st.accounts.size
+      let mut clearedExact : Array String := #[]
+      for r in st.accounts do
+        if pick r.accountId then
+          if !clearedExact.contains r.accountId then clearedExact := clearedExact.push r.accountId
+          nextAccounts := nextAccounts.push {
+            accountId := r.accountId
+            slotId := r.slotId
+            disabledByProvider := if clearDisabledByProvider then false else r.disabledByProvider
+            disabledMessage := if clearDisabledByProvider then "" else r.disabledMessage
+            clearedAtSeq := nextClearSeq
+            clearedOutcomeId := max r.clearedOutcomeId maxOutcomeId
+          }
+        else
+          nextAccounts := nextAccounts.push r
+      let prevLegacy ← cooldownsRef.get
+      for c in prevLegacy do
+        if pick c.accountId then
+          if !clearedExact.contains c.accountId then clearedExact := clearedExact.push c.accountId
+          if !nextAccounts.any (fun r => r.accountId == c.accountId) then
+            nextAccounts := nextAccounts.push {
+              accountId := c.accountId
+              slotId := accountSlotId c.accountId
+              clearedAtSeq := nextClearSeq
+              clearedOutcomeId := maxOutcomeId
+            }
+      for k in explicitKeys do
+        let ck := k.trimAscii.toString
+        if !ck.isEmpty then
+          if !clearedExact.contains ck then clearedExact := clearedExact.push ck
+          if !nextAccounts.any (fun r => r.accountId == ck) then
+            nextAccounts := nextAccounts.push {
+              accountId := ck
+              slotId := accountSlotId ck
+              clearedAtSeq := nextClearSeq
+              clearedOutcomeId := maxOutcomeId
+            }
+      let nextEventsRaw := st.clearEvents.push (nextClearSeq, clearedExact, explicitPrefixes)
+      let nextEvents :=
+        if nextEventsRaw.size > 64 then nextEventsRaw.extract (nextEventsRaw.size - 64) nextEventsRaw.size
+        else nextEventsRaw
+      set { st with clearSeq := nextClearSeq, accounts := nextAccounts, clearEvents := nextEvents }
       cooldownsRef.modify (fun cs => cs.filter (fun c => !pick c.accountId))
   | none =>
     cooldownsRef.modify (fun cs => cs.filter (fun c => !pick c.accountId))
 
 /-- Atomically expire elapsed cooldowns in `ProviderHealthTracker` and mirror the active set into
-    `proxyCooldownsRef` under `tracker.health`'s mutex so a pre-clear snapshot can never overwrite
-    `proxyCooldownsRef` after `clearAccountCooldowns`. -/
+    `proxyCooldownsRef` under `tracker.health`'s mutex, preserving active legacy-only cooldowns
+    whose account has no record in `ProviderHealthTracker`. -/
 def syncCooldownsFromHealthTracker
     (tracker : ProviderHealthTracker)
     (cooldownsRef : IO.Ref (Array AccountCooldown))
@@ -705,8 +796,14 @@ def syncCooldownsFromHealthTracker
           updated := updated.push { rec with cooldown? := none, parkedQuota := false, poisonedSub := false }
       | none =>
         updated := updated.push rec
+    let trackedIds := updated.map (·.accountId)
     set { st with accounts := updated }
-    cooldownsRef.set active
+    cooldownsRef.modify fun prev =>
+      let legacyOnly := prev.filter fun c =>
+        c.untilEpoch > nowEpoch &&
+        !trackedIds.contains c.accountId &&
+        !active.any (fun a => a.accountId == c.accountId)
+      legacyOnly ++ active
 
 /-- Plan a `RoutingChain` directly from `ProviderHealthTracker`'s single-owner state at `nowEpoch`.
     Provider-disabled accounts are removed from `eligible` and are not reported as cooling down. -/
@@ -833,7 +930,9 @@ def stepHealthAttemptPure
     }
     ({ hst with accounts := upsertAccountHealth hst.accounts rec1 }, sliceOut, verdict, effs)
 
-/-- Record an attempt outcome atomically on `ProviderHealthTracker`. -/
+/-- Record an attempt outcome atomically on `ProviderHealthTracker`.
+    When `attemptClearSeq?` is supplied and the target account was cleared after that sequence,
+    non-2xx outcomes are fenced off so a pre-clear failure cannot resurrect cooldowns or bans. -/
 def recordHealthAttempt
     (tracker : ProviderHealthTracker)
     (slice : ProviderAttemptSliceState)
@@ -844,13 +943,20 @@ def recordHealthAttempt
     (chunkCommits : Bool)
     (maxRetries : UInt32)
     (attemptGeneration : UInt64)
-    (nowEpoch : UInt64) :
+    (nowEpoch : UInt64)
+    (attemptClearSeq? : Option UInt64 := none) :
     IO (ProviderAttemptSliceState × UInt8 × List ProviderAttemptEffect) :=
   tracker.health.atomically do
     let hst ← get
     let (hst', slice', v, effs) :=
       stepHealthAttemptPure hst slice accountId status respHeaders respBody
         chunkCommits maxRetries attemptGeneration nowEpoch
+    let clearedDuringAttempt :=
+      match attemptClearSeq? with
+      | some s => accountClearedSincePure hst accountId s
+      | none => false
+    if clearedDuringAttempt && !(status ≥ 200 && status < 300) then
+      return (slice', v, effs)
     set hst'
     return (slice', v, effs)
 
@@ -888,14 +994,23 @@ def stepStreamCutHealthPure
     }
     ({ hst with accounts := upsertAccountHealth hst.accounts rec1 }, breakerWord, nextCool?)
 
-/-- Atomically record a post-head stream cut (`stream_incomplete` or `upstream_idle_timeout`) on `ProviderHealthTracker`. -/
+/-- Atomically record a post-head stream cut (`stream_incomplete` or `upstream_idle_timeout`) on `ProviderHealthTracker`.
+    If the account was cleared after `attemptClearSeq?`, skip mutating so a pre-clear stream
+    cannot resurrect a wiped streak or cooldown. -/
 def recordStreamCutHealth
     (tracker : ProviderHealthTracker)
     (accountId : String)
     (prevTransientStreak : UInt32)
-    (nowEpoch : UInt64) : IO (UInt32 × Option AccountCooldown) :=
+    (nowEpoch : UInt64)
+    (attemptClearSeq? : Option UInt64 := none) : IO (UInt32 × Option AccountCooldown) :=
   tracker.health.atomically do
     let hst ← get
+    let clearedDuringAttempt :=
+      match attemptClearSeq? with
+      | some s => accountClearedSincePure hst accountId s
+      | none => false
+    if clearedDuringAttempt then
+      return (0, none)
     let (hst', bw, cool?) := stepStreamCutHealthPure hst accountId prevTransientStreak nowEpoch
     set hst'
     return (bw, cool?)
@@ -2550,7 +2665,8 @@ def forwardProxyChain
     (authEvidence? : Option (IO.Ref (Array (String × String))) := none)
     (streamLimits? : Option StreamLimits := none)
     (bodyTimedOutRef? : Option (IO.Ref Bool) := none)
-    (resolveTransport : ResolveAccountTransport := fun _ => pure (.ok none)) :
+    (resolveTransport : ResolveAccountTransport := fun _ => pure (.ok none))
+    (attemptClearSeq? : Option UInt64 := none) :
     IO ProxyOutcome := do
   let body := applyStripThinkingToChatBody chain.stripThinking relPath body
   let wantsStream := requestWantsStream relPath body
@@ -2561,6 +2677,8 @@ def forwardProxyChain
   let nowSec ← match nowEpoch? with
     | some ep => pure ep
     | none => coreEpochSec
+  let currentNowSec : IO UInt64 := do
+    pure (nowSec + (((← IO.monoMsNow) - callStartMs) / 1000).toUInt64)
   let healthCooldownIds ← match healthTracker? with
     | none => pure #[]
     | some htr => do
@@ -2746,7 +2864,7 @@ def forwardProxyChain
       let (nextSlice, vCode, _) ← match healthTracker? with
         | some htr =>
           recordHealthAttempt htr attemptSlice tgt.accountId 429 #[] "provider_pacing_limit_exceeded"
-            false maxRetriesU32 attemptGen nowSec
+            false maxRetriesU32 attemptGen (← currentNowSec) attemptClearSeq?
         | none =>
           let ev : ProviderAttemptSliceEvent := {
             chunkCommits := 0
@@ -2853,7 +2971,7 @@ def forwardProxyChain
           let (nextSlice, vCode, _) ← match healthTracker? with
             | some htr =>
               recordHealthAttempt htr attemptSlice tgt.accountId resp.status resp.headers respBodyStr
-                true maxRetriesU32 attemptGen nowSec
+                true maxRetriesU32 attemptGen (← currentNowSec) attemptClearSeq?
             | none =>
               let ev : ProviderAttemptSliceEvent := {
                 chunkCommits := 1
@@ -3031,7 +3149,7 @@ def forwardProxyChain
               pure (attemptSlice, ProviderAttemptVerdict.encode .dispatchFresh, [])
             else
               recordHealthAttempt htr attemptSlice tgt.accountId resp.status resp.headers respBodyStr
-                false maxRetriesU32 attemptGen nowSec
+                false maxRetriesU32 attemptGen (← currentNowSec) attemptClearSeq?
           | none =>
             let effFail : UInt8 := if isCommitted && failCode == 0 then 4 else failCode
             let ev : ProviderAttemptSliceEvent := {
@@ -3146,7 +3264,7 @@ def forwardProxyChain
         let (nextSlice, vCode, _) ← match healthTracker? with
           | some htr =>
             recordHealthAttempt htr attemptSlice tgt.accountId 503 #[] errMsg
-              false maxRetriesU32 attemptGen nowSec
+              false maxRetriesU32 attemptGen (← currentNowSec) attemptClearSeq?
           | none =>
             let ev : ProviderAttemptSliceEvent := {
               chunkCommits := 0
