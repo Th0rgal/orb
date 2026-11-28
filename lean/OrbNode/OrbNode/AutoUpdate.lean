@@ -364,14 +364,14 @@ private def resolveCliBinPath? (stateDir bin : String) : IO (Option String) := d
       return some cand.toString
   return none
 
-/-- Probe installed harness CLI versions (`agy`, `claude`, `codex`, `opencode`), cached for 60s. -/
+/-- Probe installed harness CLI versions (`agy`, `claude`, `codex`, `opencode`, `pi`), cached for 60s. -/
 def collectLocalCliVersions (stateDir : String) (force : Bool := false) : IO (Array (String × String)) := do
   let nowSec ← OrbNode.Posix.nowEpoch
   if !force then
     let (cachedAt, cached) ← cliVersionCache.atomically get
     if cachedAt > 0 && nowSec < cachedAt + 60 && !cached.isEmpty then
       return cached
-  let tools := #[("agy", "agy"), ("claude", "claude"), ("codex", "codex"), ("opencode", "opencode")]
+  let tools := #[("agy", "agy"), ("claude", "claude"), ("codex", "codex"), ("opencode", "opencode"), ("pi", "pi")]
   let mut out : Array (String × String) := #[]
   for (name, bin) in tools do
     let mut ver := ""
@@ -635,7 +635,7 @@ private def installDownloadedHarness
     if let .error e ← (IO.FS.writeBinFile tmpTar archiveBytes).toBaseIO then
       return .error s!"write archive failed: {e}"
     let mut tarArgs : Array String := #["-xzf", tmpTar, "-C", destDir.toString, "--no-same-owner"]
-    if spec.format == "npm-tgz" || spec.format == "codex-npm-tgz" then
+    if spec.format == "npm-tgz" || spec.format == "codex-npm-tgz" || spec.format == "pi-tar.gz" then
       tarArgs := tarArgs.push "--strip-components=1"
     if !spec.entry.isEmpty then
       tarArgs := tarArgs.push spec.entry
