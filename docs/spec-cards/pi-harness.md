@@ -2,8 +2,8 @@
 
 - **Repository & sync commit:** `Th0rgal/orb@81c7075` (branch `feat/pi-harness`, issue `#2258`)
 - **Covered files:**
-  - `lean/Orb/Kernel.lean` (`PiRpcPhase`, `PiRpcSession`, `PiRpcEvent`, `PiRpcOutcome`, `piRpcStep`, `PiMcpPolicyInput`, `piMcpConfigGate`, `piSessionRelPathSafe`, `PiExtractedEventTag`, `PiNormalizedKind`, `piNormalizeTag`)
-  - `lean/Orb/Spec.lean` (`piRpcStickyFence`, `PiRpcContract`, `piMcpPolicyMetaGate`, `piMcpScopedAuthority`, two-sided regression theorems & mutants)
+  - `lean/Orb/PiHarness.lean` (`PiRpcPhase`, `PiRpcSession`, `PiRpcEvent`, `PiRpcOutcome`, `piRpcStep`, `PiMcpPolicyInput`, `piMcpConfigGate`, `piSessionRelPathSafe`, `PiExtractedEventTag`, `PiNormalizedKind`, `piNormalizeTag`)
+  - `lean/Orb/PiHarnessSpec.lean` (`piRpcStickyFence`, `PiRpcContract`, `piMcpPolicyMetaGate`, `piMcpScopedAuthority`, two-sided regression theorems & mutants)
   - `lean/OrbNode/OrbNode/PiRpc.lean` (`sandboxed-node pi-rpc` subprocess driver)
   - `lean/OrbCore/OrbCore/Harness.lean` (`stepPiJsonLine` + contract tests)
   - `pi/orb-extension/index.ts` (minimal MCP & policy bridge)
@@ -13,12 +13,12 @@
 
 | Req | Domain requirement | Formal declaration / theorem | Location |
 | --- | --- | --- | --- |
-| `R1` | Mutually exclusive `set_model`: immediate in `idle`, deterministically queued in `running`, never mutating mid-tool-call | `pi_rpc_set_model_idle_immediate`, `pi_rpc_set_model_running_queues_without_mutating_active`, `pi_rpc_turn_end_enters_switching_model`, `pi_rpc_turn_end_blocked_during_tool_call` | `lean/Orb/Spec.lean` |
-| `R2` | Irreversible `StickyFence` on `aborted` / `closed` (no output, no turn reuse) | `piRpcStickyFence`, `pi_rpc_fenced_forbids_output`, `pi_rpc_contract_forbids_post_abort_output` | `lean/Orb/Spec.lean` |
-| `R3` | Correlated RPC `id` rollback on `set_model` failure (`success: false`) | `pi_rpc_response_failure_rolls_back_switching`, `pi_rpc_response_failure_rolls_back_idle`, `pi_rpc_response_wrong_id_noop`, `pi_rpc_contract_forbids_rollback_drop` | `lean/Orb/Spec.lean` |
-| `R4` | Dual-MCP / secret hygiene (`0` secrets in `argv`, `0700` agent dir, `0600` config, `readonly` blocks mutations) | `piMcpPolicyMetaGate`, `piMcpScopedAuthority`, `pi_mcp_spec_forbids_argv_secret`, `pi_mcp_spec_forbids_readonly_mutation` | `lean/Orb/Spec.lean` |
-| `R5` | Mission session `.jsonl` path confinement (zero `..`, zero leading `/`, zero NUL/backslash) | `piSessionRelPathSafe`, `pi_session_rel_path_safe_no_parent_escape`, `pi_session_rel_path_accepts_mission_jsonl`, `pi_session_rel_path_rejects_traversal` | `lean/Orb/Kernel.lean`, `lean/Orb/Spec.lean` |
-| `R6` | Strict `Thinking` vs. `TextDelta` separation & fail-closed RPC/process errors | `pi_thinking_never_leaks_to_text_delta`, `pi_errors_always_turn_error`, `pi_normalize_tag_forbids_thinking_leak`, `OrbCore.Harness.stepPiJsonLine` | `lean/Orb/Spec.lean`, `lean/OrbCore/OrbCore/Harness.lean` |
+| `R1` | Mutually exclusive `set_model`: immediate in `idle`, deterministically queued in `running`, never mutating mid-tool-call | `pi_rpc_set_model_idle_immediate`, `pi_rpc_set_model_running_queues_without_mutating_active`, `pi_rpc_turn_end_enters_switching_model`, `pi_rpc_turn_end_blocked_during_tool_call` | `lean/Orb/PiHarnessSpec.lean` |
+| `R2` | Irreversible `StickyFence` on `aborted` / `closed` (no output, no turn reuse) | `piRpcStickyFence`, `pi_rpc_fenced_forbids_output`, `pi_rpc_contract_forbids_post_abort_output` | `lean/Orb/PiHarnessSpec.lean` |
+| `R3` | Correlated RPC `id` rollback on `set_model` failure (`success: false`) | `pi_rpc_response_failure_rolls_back_switching`, `pi_rpc_response_failure_rolls_back_idle`, `pi_rpc_response_wrong_id_noop`, `pi_rpc_contract_forbids_rollback_drop` | `lean/Orb/PiHarnessSpec.lean` |
+| `R4` | Dual-MCP / secret hygiene (`0` secrets in `argv`, `0700` agent dir, `0600` config, `readonly` blocks mutations) | `piMcpPolicyMetaGate`, `piMcpScopedAuthority`, `pi_mcp_spec_forbids_argv_secret`, `pi_mcp_spec_forbids_readonly_mutation` | `lean/Orb/PiHarnessSpec.lean` |
+| `R5` | Mission session `.jsonl` path confinement (zero `..`, zero leading `/`, zero NUL/backslash) | `piSessionRelPathSafe`, `pi_session_rel_path_safe_no_parent_escape`, `pi_session_rel_path_accepts_mission_jsonl`, `pi_session_rel_path_rejects_traversal` | `lean/Orb/PiHarness.lean`, `lean/Orb/PiHarnessSpec.lean` |
+| `R6` | Strict `Thinking` vs. `TextDelta` separation & fail-closed RPC/process errors | `pi_thinking_never_leaks_to_text_delta`, `pi_errors_always_turn_error`, `pi_normalize_tag_forbids_thinking_leak`, `OrbCore.Harness.stepPiJsonLine` | `lean/Orb/PiHarnessSpec.lean`, `lean/OrbCore/OrbCore/Harness.lean` |
 
 ## Reachable Positive Trace
 

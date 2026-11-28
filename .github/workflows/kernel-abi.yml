@@ -135,6 +135,12 @@ jobs:
           LEAN_PATH=.lake/build/lib/lean lean -DwarningAsError=true -DautoImplicit=false Orb/ManagedNodeMutants.lean \
             -o .lake/build/lib/lean/Orb/ManagedNodeMutants.olean \
             -i .lake/build/lib/lean/Orb/ManagedNodeMutants.ilean
+          LEAN_PATH=.lake/build/lib/lean lean -DwarningAsError=true -DautoImplicit=false Orb/PiHarness.lean \
+            -o .lake/build/lib/lean/Orb/PiHarness.olean \
+            -i .lake/build/lib/lean/Orb/PiHarness.ilean
+          LEAN_PATH=.lake/build/lib/lean lean -DwarningAsError=true -DautoImplicit=false Orb/PiHarnessSpec.lean \
+            -o .lake/build/lib/lean/Orb/PiHarnessSpec.olean \
+            -i .lake/build/lib/lean/Orb/PiHarnessSpec.ilean
           LEAN_PATH=.lake/build/lib/lean lean -DwarningAsError=true audit/AuditSpec.lean
           lean -DwarningAsError=true -DautoImplicit=false Orb/Transcript.lean \
             -o .lake/build/lib/lean/Orb/Transcript.olean \
@@ -313,6 +319,8 @@ jobs:
           python3 scripts/check_spec_audit.py audit-results/managed-node-spec-audit.json
           ./scripts/turbo_lean.sh --json audit-spec lean/Orb/ManagedNodeMutants.lean > audit-results/managed-node-mutant-audit.json
           python3 scripts/check_spec_audit.py audit-results/managed-node-mutant-audit.json
+          ./scripts/turbo_lean.sh --json audit-spec lean/Orb/PiHarnessSpec.lean > audit-results/pi-harness-spec-audit.json
+          python3 scripts/check_spec_audit.py audit-results/pi-harness-spec-audit.json
           ./scripts/turbo_lean.sh --json audit-spec lean/Orb/Stream.lean > audit-results/stream-audit.json
           python3 scripts/check_spec_audit.py audit-results/stream-audit.json
           ./scripts/turbo_lean.sh --json audit-spec lean/Orb/Transcript.lean > audit-results/transcript-audit.json

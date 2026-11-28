@@ -7,6 +7,7 @@
   process group (including any child `turbo-lean mcp` stdio server) on exit or abort.
 -/
 import Orb.Kernel
+import Orb.PiHarness
 import OrbBin.Json
 import OrbBin.PosixExt
 

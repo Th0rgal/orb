@@ -76,6 +76,7 @@ paths = [
   "lean/OrbNetLeaf/*",
   "lean/LeanUI.lean",
   "lean/LeanUI/*",
+  "pi/*",
   "c/lean_ui*",
   "shaders/*",
   "scripts/test_account_vpn_transport.py",
