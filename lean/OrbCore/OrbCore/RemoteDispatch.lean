@@ -295,7 +295,16 @@ def resolveConcreteRemoteTargetNode
     return .ok clean
   if clean == "auto" || clean.startsWith "auto:" then
     let canary ← NativeCanary.load
-    if let some sn := staticNodes.find? (fun n => n.dedicatedOwner?.isNone && !canary.reserves n.id) then
+    let poolStatic := staticNodes.filter fun n => !canary.reserves n.id
+    if let some (store, missionId) := scope? then
+      if !poolStatic.isEmpty then
+        let excluded ← OrbCore.AutoPlacement.lineageExclusions store missionId
+        let cands ← OrbCore.AutoPlacement.candidates store poolStatic
+        if let some chosen := OrbCore.AutoPlacement.choose cands excluded then
+          return .ok chosen
+        if poolStatic.any (fun n => n.dedicatedOwner?.isNone) then
+          return .error "no_eligible_node"
+    else if let some sn := poolStatic.find? (fun n => n.dedicatedOwner?.isNone && !OrbCore.AutoPlacement.reserved n) then
       return .ok sn.id
     if let some mc := mc? then
       if let some node ← scopedReadyManagedMachine? mc scope? then return .ok node
@@ -344,6 +353,17 @@ def resolveMissionRemoteNode?
       parentMid := (cell mRows[1]! 2).trimAscii.toString
   if let some rn := (extractTagValue? tags "remote-node:").orElse (fun _ => extractTagValue? tags "remote_node:") then
     if rn != "local" && rn != "client" then
+      let rnLow := rn.toLower
+      if rnLow == "auto" || rnLow.startsWith "auto:" then
+        -- Prefer the concrete node recorded on an existing job ledger row over a legacy `auto` tag
+        -- so resume / hang-cause checks name the node that actually owns the mission's job.
+        if let .ok jRows ← execParamQuery store.missionsDb
+            "SELECT COALESCE(node_id,'') FROM remote_node_jobs WHERE mission_id=?1 AND COALESCE(node_id,'')<>'' ORDER BY updated_at DESC LIMIT 1;"
+            #[mid] then
+          if jRows.size > 1 then
+            let jn := (cell jRows[1]! 0).trimAscii.toString
+            if !jn.isEmpty && jn != "local" then
+              return some jn
       return some rn
   if placeKind.startsWith "managed-" && placeKind != "managed" then
     return some placeKind
@@ -2370,8 +2390,12 @@ partial def spawnRemoteJobPoller
               #[jobId, nowIso]
             if !unreachableNotified && (← pollerOwnsGeneration) then
               unreachableNotified := true
-              emitMissionEventAndBroadcast store broadcastHub? missionId "error"
-                (renderCompact (.obj #[("message", .str s!"Lost contact with remote node `{effNodeId}`; the turn remains owned and will reconcile when the node is reachable: {netErr}")])) nowIso
+              -- When the static-node API monitor already flagged this node as hung,
+              -- avoid emitting a second generic unreachable error on the same mission.
+              let alreadyHung ← try (pure (← nodeApiHangCause? store effNodeId).isSome) catch _ => pure false
+              if !alreadyHung then
+                emitMissionEventAndBroadcast store broadcastHub? missionId "error"
+                  (renderCompact (.obj #[("message", .str s!"Lost contact with remote node `{effNodeId}`; the turn remains owned and will reconcile when the node is reachable: {netErr}")])) nowIso
             IO.sleep 2000
         else if let .ok (jStatus, _, jJv?, _, _) := jobStatus then
           if 200 ≤ jStatus && jStatus < 300 then

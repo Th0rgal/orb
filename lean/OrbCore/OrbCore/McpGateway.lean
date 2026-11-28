@@ -1711,6 +1711,16 @@ def dispatchMcpToolCall
       | none =>
         return ← failReservedOrErr store claims callerUserId toolName idemKeyTop "unsupported"
           s!"Mission `{mid}` has no remote delivery target (placement={mr.placementKind}); send_message_to_mission cannot silently fall back to a note." nowIso
+    let mut willQueue := false
+    if let (some _, some (mr, targetNode)) := (remoteSup?, deliveryTarget?) then
+      let hasInflight : Bool ← match ← execParamQuery store.missionsDb
+          "SELECT 1 FROM remote_node_jobs WHERE mission_id=?1 AND state NOT IN ('succeeded','failed','cancelled','lost','terminal','completed','aborted') LIMIT 1;" #[mid] with
+        | .ok rows => pure (decide (rows.size > 1))
+        | .error _ => pure false
+      willQueue := mr.status == "active" || mr.status == "pending" || mr.status == "waiting_background" || mr.status == "waiting_rate_limit" || hasInflight
+      if !willQueue then
+        if let some cause ← nodeApiHangCause? store targetNode then
+          return ← settleReservedMcpAction store claims callerUserId toolName idemKeyTop "failed" cause nowIso "hung_node"
     let noteId ← if idemKeyTop.isEmpty then newUuidV4
       else pure s!"mcp-msg-{(LeanSys.Auth.bytesToHexLower (LeanSys.Auth.sha256Bytes (s!"{actionScope claims callerUserId toolName}:{idemKeyTop}".toUTF8))).take 24}"
     let .ok _ ← execParamQuery store.askDb
@@ -1721,11 +1731,7 @@ def dispatchMcpToolCall
       | return ← settleReservedMcpAction store claims callerUserId toolName idemKeyTop "uncertain" "note event failed" nowIso
     let mut queued := false
     if let (some sup, some (mr, targetNode)) := (remoteSup?, deliveryTarget?) then
-      let hasInflight : Bool ← match ← execParamQuery store.missionsDb
-          "SELECT 1 FROM remote_node_jobs WHERE mission_id=?1 AND state NOT IN ('succeeded','failed','cancelled','lost','terminal','completed','aborted') LIMIT 1;" #[mid] with
-        | .ok rows => pure (decide (rows.size > 1))
-        | .error _ => pure false
-      if mr.status == "active" || mr.status == "pending" || mr.status == "waiting_background" || mr.status == "waiting_rate_limit" || hasInflight then
+      if willQueue then
         match ← enqueueStructuredFollowup store "core" noteId mid content "mcp" nowIso with
         | .ok _ => queued := true
         | .error e => return ← settleReservedMcpAction store claims callerUserId toolName idemKeyTop "uncertain" e nowIso

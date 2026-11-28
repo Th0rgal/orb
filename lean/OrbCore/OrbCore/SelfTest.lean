@@ -7017,6 +7017,86 @@ private def runProdParityAndMissionMoveTests (_baseCfg : CoreConfig) : IO UInt32
       s!"(b) bAllAnsOk={bAllAnsOk}; " ++
       s!"(c) cCachedOk={cCachedOk} (elapsedMsC={elapsedMsC}, nippurC={nippurC?.map OrbBin.Json.renderCompact})"))
 
+  -- R19 HTTP end-to-end integration test:
+  -- hung static node (`lagash`) is cordoned in `GET /api/remote-nodes` and skipped by `POST /api/control/missions`
+  -- (`remote_node_id: "auto"`), explicit placement and `POST /api/control/missions/:id/resume` (both `active` and
+  -- `interrupted`) return 503 naming `lagash` without appending phantom `user_message` events, affected missions
+  -- are flagged exactly once, and recovery (`online`) uncordons cleanly.
+  let .ok (r19OkFd, r19OkPort) ← tcpListen "127.0.0.1" 0 8
+    | return (← fail "tcpListen r19OkFd failed")
+  let .ok (r19ClosedFd, r19ClosedPort) ← tcpListen "127.0.0.1" 0 4
+    | do discard <| closeFd r19OkFd; return (← fail "tcpListen r19ClosedFd failed")
+  discard <| closeFd r19ClosedFd
+  let r19HbTask ← IO.asTask (prio := .dedicated) do
+    for _ in [0:2] do
+      if let .ok cfd ← tcpAcceptPoll r19OkFd 4000 then
+        discard <| readCoreHttpRequestFromFd cfd 1000
+        let hbJson := "{\"version\":\"1.3.0-lean4\",\"protocol_version\":2,\"capacity_total\":4,\"capacity_available\":4,\"active_jobs\":0,\"queued_jobs\":0,\"cordoned\":false}"
+        discard <| writeAll cfd (encodeCoreHttpResponse (jsonResponse 200 hbJson)) false
+        discard <| closeFd cfd
+    discard <| closeFd r19OkFd
+  OrbBin.PosixExt.setenvVar "SANDBOXED_REMOTE_NODES_ENABLED" "true"
+  OrbBin.PosixExt.setenvVar "SANDBOXED_REMOTE_NODES"
+    s!"lagash=http://localhost:{r19ClosedPort}|ORB_TEST_LAGASH_TOK,uruk=http://localhost:{r19OkPort}|ORB_TEST_URUK_TOK"
+  OrbBin.PosixExt.setenvVar "ORB_TEST_LAGASH_TOK" "tok-lagash-r19"
+  OrbBin.PosixExt.setenvVar "ORB_TEST_URUK_TOK" "tok-uruk-r19"
+  discard <| execParamQuery store.missionsDb
+    "INSERT INTO missions(id,title,status,backend,working_directory,tags,updated_at,owner_user_id) VALUES('m-r19-active','R19 Active','active','opencode','/tmp','[\"remote-node:lagash\"]','2026-11-28T00:00:00Z',?1);"
+    #[hsAdminId]
+  discard <| execParamQuery store.missionsDb
+    "INSERT INTO missions(id,title,status,backend,working_directory,tags,updated_at,owner_user_id) VALUES('m-r19-int','R19 Interrupted','interrupted','opencode','/tmp','[\"remote-node:lagash\"]','2026-11-28T00:00:00Z',?1);"
+    #[hsAdminId]
+  OrbCore.RemoteFleetAndRelay.ensureDurableJobsTable store
+  discard <| execParamQuery store.missionsDb
+    "INSERT INTO remote_node_jobs(job_id,mission_id,node_id,state,created_at,updated_at) VALUES('j-r19-act','m-r19-active','Lagash','running','2026-11-28T00:00:00Z','');" #[]
+  discard <| execParamQuery store.missionsDb
+    "INSERT INTO remote_node_jobs(job_id,mission_id,node_id,state,created_at,updated_at) VALUES('j-r19-int','m-r19-int','lagash','unreachable','2026-11-28T00:00:00Z','');" #[]
+  for ts in #["2026-11-28T00:01:00Z", "2026-11-28T00:01:30Z", "2026-11-28T00:02:00Z"] do
+    OrbCore.RemoteFleetAndRelay.observeNodeApi store "Lagash" "offline" ts (pure true)
+  let (r19FleetSt, r19FleetBody) ← sendJson "GET" "/api/remote-nodes" hsJwt ""
+  let r19LagashCordoned :=
+    match OrbBin.Json.parse r19FleetBody with
+    | .ok jv =>
+      let ns := (jv.fieldArr? "nodes").getD #[]
+      (ns.find? (·.fieldStr? "id" == some "lagash")).bind (·.fieldBool? "cordoned") == some true &&
+      (ns.find? (·.fieldStr? "id" == some "uruk")).bind (·.fieldBool? "cordoned") == some false
+    | .error _ => false
+  let (r19AutoSt, r19AutoBody) ← sendJson "POST" "/api/control/missions" hsJwt
+    "{\"title\":\"R19 Auto Placement\",\"backend\":\"opencode\",\"remote_node_id\":\"auto\"}"
+  let (r19ExplicitSt, r19ExplicitBody) ← sendJson "POST" "/api/control/missions" hsJwt
+    "{\"title\":\"R19 Explicit Hung\",\"backend\":\"opencode\",\"remote_node_id\":\"lagash\"}"
+  let (r19ResActSt, r19ResActBody) ← sendJson "POST" "/api/control/missions/m-r19-active/resume" hsJwt "{}"
+  let (r19ResIntSt, r19ResIntBody) ← sendJson "POST" "/api/control/missions/m-r19-int/resume" hsJwt "{}"
+  let r19FlagRows := (← execParamQuery store.missionsDb
+    "SELECT mission_id FROM mission_events WHERE mission_id IN ('m-r19-active','m-r19-int') AND event_type='error' AND json_extract(payload,'$.reason')='hung_node' ORDER BY mission_id;" #[]).toOption.getD #[]
+  let r19UserMsgs := (← execParamQuery store.missionsDb
+    "SELECT COUNT(*) FROM mission_events WHERE mission_id IN ('m-r19-active','m-r19-int') AND event_type='user_message';" #[]).toOption.getD #[]
+  -- Now recover `lagash` (`online`) and confirm uncordoning + resume unblocked.
+  OrbCore.RemoteFleetAndRelay.observeNodeApi store "lagash" "online" "2026-11-28T00:03:00Z" (pure false)
+  let (r19FleetRecSt, r19FleetRecBody) ← sendJson "GET" "/api/remote-nodes" hsJwt ""
+  let r19LagashUncordoned :=
+    match OrbBin.Json.parse r19FleetRecBody with
+    | .ok jv =>
+      let ns := (jv.fieldArr? "nodes").getD #[]
+      (ns.find? (·.fieldStr? "id" == some "lagash")).bind (·.fieldBool? "cordoned") == some false
+    | .error _ => false
+  let (r19ResRecSt, r19ResRecBody) ← sendJson "POST" "/api/control/missions/m-r19-int/resume" hsJwt "{}"
+  OrbBin.PosixExt.unsetenvVar "SANDBOXED_REMOTE_NODES_ENABLED"
+  OrbBin.PosixExt.unsetenvVar "SANDBOXED_REMOTE_NODES"
+  OrbBin.PosixExt.unsetenvVar "ORB_TEST_LAGASH_TOK"
+  OrbBin.PosixExt.unsetenvVar "ORB_TEST_URUK_TOK"
+  discard <| execParamQuery store.missionsDb "DELETE FROM remote_node_jobs WHERE job_id IN ('j-r19-act','j-r19-int');" #[]
+  let _ := r19HbTask.get
+  if r19FleetSt != 200 || !r19LagashCordoned ||
+     r19AutoSt != 201 || (r19AutoBody.splitOn "\"remote_node_id\":\"uruk\"").length < 2 ||
+     r19ExplicitSt != 503 || !r19ExplicitBody.contains "lagash" || !r19ExplicitBody.contains "hung_node" ||
+     r19ResActSt != 503 || !r19ResActBody.contains "lagash" || !r19ResActBody.contains "API is unresponsive" ||
+     r19ResIntSt != 503 || !r19ResIntBody.contains "lagash" || !r19ResIntBody.contains "API is unresponsive" ||
+     r19FlagRows.size != 3 || (r19UserMsgs[1]?.bind (·[0]?)).getD "" != "0" ||
+     r19FleetRecSt != 200 || !r19LagashUncordoned ||
+     r19ResRecSt == 503 then
+    return (← fail s!"R19 HTTP integration test failed: fleet={r19FleetSt}/{r19LagashCordoned} auto={r19AutoSt}:{r19AutoBody} explicit={r19ExplicitSt}:{r19ExplicitBody} resAct={r19ResActSt}:{r19ResActBody} resInt={r19ResIntSt}:{r19ResIntBody} flags={reprStr r19FlagRows} userMsgs={reprStr r19UserMsgs} recFleet={r19FleetRecSt}/{r19LagashUncordoned} recRes={r19ResRecSt}:{r19ResRecBody}")
+
   -- Plain-HTTP connect timeout (`OrbBin.HttpClient.sendRequest`):
   -- (a) Listener with backlog 1 + 2 fillers so `connect()` never completes: `sendRequest` with `timeoutMs = 500`
   --     returns an error within < 3000 ms and the error names a connect timeout (`timed out`).

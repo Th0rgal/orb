@@ -508,11 +508,15 @@ private def optBoolJVal (v? : Option Bool) : JVal :=
   | some b => .bool b
   | none => .null
 
+private def cordonedContains (cordons : Array String) (nodeId : String) : Bool :=
+  let needle := nodeId.trimAscii.toString.toLower
+  !needle.isEmpty && cordons.any (fun c => c.trimAscii.toString.toLower == needle)
+
 private def mkStaticNodeOfflineOrDegraded
     (sn : StaticRemoteNode)
     (persistedCordons : Array String)
     (statusStr errMsg : String) : JVal :=
-  let persistedCordoned := persistedCordons.contains sn.id
+  let persistedCordoned := cordonedContains persistedCordons sn.id
   let baseColocated :=
     sn.id == "sepolia" || sn.id == "agent-core" || sn.id == "orb-core" ||
     sn.baseUrl.contains "10.88.0.1:" || sn.baseUrl.endsWith "10.88.0.1" ||
@@ -560,7 +564,7 @@ def probeStaticNodeHeartbeat
     (nowIso : String := "")
     (isAdmin : Bool := false)
     (timeoutMs : UInt32 := 2500) : IO JVal := do
-  let persistedCordoned := persistedCordons.contains sn.id
+  let persistedCordoned := cordonedContains persistedCordons sn.id
   let baseColocated :=
     sn.id == "sepolia" || sn.id == "agent-core" || sn.id == "orb-core" ||
     sn.baseUrl.contains "10.88.0.1:" || sn.baseUrl.endsWith "10.88.0.1" ||
@@ -676,6 +680,10 @@ def nodeApiHangCause? (store : CoreStore) (node : String) : IO (Option String) :
     | throw (IO.userError "node health read failed")
   return rows[1]?.map fun r => s!"Node `{cell r 0}` answers ping but its API is unresponsive."
 
+def ensureDurableJobsTable (store : CoreStore) : IO Unit := do
+  discard <| execParamQuery store.missionsDb
+    "CREATE TABLE IF NOT EXISTS remote_node_jobs (job_id TEXT PRIMARY KEY, mission_id TEXT NOT NULL DEFAULT '', node_id TEXT NOT NULL DEFAULT '', state TEXT NOT NULL DEFAULT 'queued', payload_json TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL DEFAULT '');" #[]
+
 /-- True when an active job observer on `node` recorded a successful HTTP status poll
     within the last 20 seconds, proving the node API is serving requests right now. -/
 private def nodeHasFreshApiActivity (store : CoreStore) (node now : String) : IO Bool := do
@@ -693,6 +701,7 @@ private def nodeHasFreshApiActivity (store : CoreStore) (node now : String) : IO
     timeout never starts one. Two consecutive pingable API misses without fresh
     job-poll activity confirm the hang. -/
 def observeNodeApi (store : CoreStore) (node status now : String) (ping : IO Bool) : IO Unit := do
+  ensureDurableJobsTable store
   let query := fun q args => do
     match ← execParamQuery store.missionsDb q args with
     | .ok rows => pure rows
@@ -703,7 +712,12 @@ def observeNodeApi (store : CoreStore) (node status now : String) (ping : IO Boo
     if ← nodeHasFreshApiActivity store node now then
       discard <| query "DELETE FROM node_api_hangs WHERE node_id=?1" #[node]
       return
-    unless ← ping do return
+    unless ← ping do
+      -- An unreachable host clears any unconfirmed single-strike blip so a later
+      -- transient timeout cannot falsely accumulate to 2 strikes, while preserving
+      -- already-confirmed hangs (`strikes>=2`) until a healthy heartbeat arrives.
+      discard <| query "DELETE FROM node_api_hangs WHERE node_id=?1 AND strikes<2" #[node]
+      return
     discard <| query
       ("INSERT INTO node_api_hangs(node_id,incident_id,strikes) VALUES(?1,?2,1) " ++
        "ON CONFLICT(node_id) DO UPDATE SET strikes=node_api_hangs.strikes+1")
@@ -711,10 +725,10 @@ def observeNodeApi (store : CoreStore) (node status now : String) (ping : IO Boo
     -- The single monitor processes observations sequentially. The committed
     -- event is also its restart receipt; never flag twice for two live jobs.
     let pending ← query ("SELECT m.id,h.incident_id " ++
-      "FROM missions m JOIN node_api_hangs h ON h.node_id=?1 AND h.strikes>=2 WHERE EXISTS (SELECT 1 FROM remote_node_jobs j WHERE j.node_id=?1 AND j.mission_id=m.id " ++
+      "FROM missions m JOIN node_api_hangs h ON h.node_id=?1 AND h.strikes>=2 WHERE EXISTS (SELECT 1 FROM remote_node_jobs j WHERE j.node_id=?1 COLLATE NOCASE AND j.mission_id=m.id " ++
       "AND j.state NOT IN ('terminal','completed','succeeded','failed','aborted','cancelled','lost')) AND NOT EXISTS " ++
       "(SELECT 1 FROM mission_events e WHERE e.mission_id=m.id AND e.event_type='error' AND CASE WHEN json_valid(e.payload) THEN json_extract(e.payload,'$.incident_id') END=h.incident_id) " ++
-      "AND COALESCE((SELECT CASE WHEN le.event_type='error' AND json_valid(le.payload) AND json_extract(le.payload,'$.reason')='hung_node' AND json_extract(le.payload,'$.node_id')=?1 THEN 1 ELSE 0 END FROM mission_events le WHERE le.mission_id=m.id ORDER BY le.id DESC LIMIT 1),0)=0") #[node]
+      "AND COALESCE((SELECT CASE WHEN le.event_type='error' AND json_valid(le.payload) AND json_extract(le.payload,'$.reason')='hung_node' AND json_extract(le.payload,'$.node_id')=?1 COLLATE NOCASE THEN 1 ELSE 0 END FROM mission_events le WHERE le.mission_id=m.id ORDER BY le.id DESC LIMIT 1),0)=0") #[node]
     for r in pending.extract 1 pending.size do
       let payload := renderCompact (.obj #[("reason", .str "hung_node"), ("node_id", .str node),
         ("incident_id", .str (cell r 1)), ("message", .str s!"Node `{node}` answers ping but its API is unresponsive.")])
@@ -1615,10 +1629,6 @@ def deleteManagedSnapshot (mc : ManagedComputeStore) (dataRoot snapId : String) 
   | .error _ => return false
 
 /-! ## Durable Node Job Ledger Queries (`/api/durable-jobs*`) -/
-
-def ensureDurableJobsTable (store : CoreStore) : IO Unit := do
-  discard <| execParamQuery store.missionsDb
-    "CREATE TABLE IF NOT EXISTS remote_node_jobs (job_id TEXT PRIMARY KEY, mission_id TEXT NOT NULL DEFAULT '', node_id TEXT NOT NULL DEFAULT '', state TEXT NOT NULL DEFAULT 'queued', payload_json TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL DEFAULT '');" #[]
 
 private def durableJobVisibleSql : String :=
   "(m.owner_user_id = ?1 OR EXISTS (SELECT 1 FROM mission_shares s WHERE s.mission_id = m.id AND s.user_id = ?1))"

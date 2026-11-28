@@ -3234,7 +3234,12 @@ def updateMissionBoundManagedNode (store : CoreStore) (missionId concreteNode no
     Shared by `POST /api/control/missions/:id/btw/agent` and the `ask_mission` MCP tool.
     The caller has already been authorized for `srcMid`. Returns (HTTP status, JSON body). -/
 private def remoteDispatchHttpStatus (error : String) : Nat :=
-  if error == "node_owner_required" then 403 else 502
+  if error == "node_owner_required" then 403
+  else if error == "no_eligible_node" || error.contains "answers ping but its API is unresponsive" then 503
+  else 502
+
+private def hungNodeJsonBody (nodeId cause : String) : String :=
+  renderCompact (.obj #[("error", .str cause), ("reason", .str "hung_node"), ("node_id", .str nodeId)])
 
 private def launchBtwSideAgent (st : CoreAppState) (caller : CallerPrincipal) (srcMid : String)
     (jv : JVal) (hdrIdemKey : String) (nowEpochSec : UInt64) : IO (Nat × String) := do
@@ -6130,6 +6135,30 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
       if let some (cCode, cBody) := checkPlacementForCaller caller tKind nAdmin then
         abortIdem
         return .ok (mkJson cCode cBody)
+      let autoResolveRes : Except CoreHttpResponse (Option String × Array String) ← do
+        if !clientPlaced && !isCloudBackendName backend then
+          match remoteNodeId? with
+          | some rn =>
+            let rnLow := rn.toLower
+            if rnLow == "auto" || rnLow.startsWith "auto:" then
+              match ← AutoPlacement.decide st.store (AutoPlacement.exclusionsOfTags baseReqTags) with
+              | .node chosen =>
+                let stripped := baseReqTags.filter (fun t => !(t.startsWith "remote-node:") && !(t.startsWith "remote_node:"))
+                pure (.ok (some chosen, stripped.push s!"remote-node:{chosen}"))
+              | .noneEligible =>
+                abortIdem
+                pure (.error (mkJson 503 "{\"error\":\"no_eligible_node\"}"))
+              | .noFleet => pure (.ok (remoteNodeId?, reqTags))
+            else
+              if let some cause ← nodeApiHangCause? st.store rn then
+                abortIdem
+                pure (.error (mkJson 503 (hungNodeJsonBody rn cause)))
+              else pure (.ok (remoteNodeId?, reqTags))
+          | none => pure (.ok (remoteNodeId?, reqTags))
+        else pure (.ok (remoteNodeId?, reqTags))
+      let (remoteNodeId?, reqTags) ← match autoResolveRes with
+        | .error resp => return .ok resp
+        | .ok pair => pure pair
       let placeKind :=
         match rawPlaceKind? with
         | some _ => if tKind == 3 then "managed_vm" else prelimPlaceKind
@@ -6693,6 +6722,8 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
             let (resolvedNode, rentedVmId) ← match ← resolveOrProvisionAutoManagedTarget st caller mid mRec.ownerUserId mRec.project targetNode jv nowEpochSec with
               | .ok pair => pure pair
               | .error (errCode, errBody) => return .ok (mkJson errCode errBody)
+            if let some cause ← nodeApiHangCause? st.store resolvedNode then
+              return .ok (mkJson 503 (hungNodeJsonBody resolvedNode cause))
             let effTagsJson ← if !rentedVmId.isEmpty then
               updateMissionBoundManagedNode st.store mid resolvedNode nowIso
             else pure mRec.tagsJson
@@ -8046,6 +8077,11 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
                   return .ok (mkJson 500 "{\"error\":\"message_receipt_unconfirmed\"}")
               return .ok (mkJson errCode errBody)
             | .error (.provisioning (errCode, errBody)) => return .ok (mkJson errCode errBody)
+          if let some cause ← nodeApiHangCause? st.store resolvedNode then
+            if keyed && rentedVmId.isEmpty then
+              if let .error _ ← abortIdempotencySlot st.store receiptScope msgId then
+                return .ok (mkJson 500 "{\"error\":\"message_receipt_unconfirmed\"}")
+            return .ok (mkJson 503 (hungNodeJsonBody resolvedNode cause))
           let effTagsJson ← if !rentedVmId.isEmpty then
             updateMissionBoundManagedNode st.store mid resolvedNode nowIso
           else pure m.tagsJson
@@ -8190,12 +8226,16 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
       let rawBody := String.fromUTF8? req.bodySlice.toByteArray |>.getD "{}"
       let bodyJv := (OrbBin.Json.parse rawBody).toOption.getD (.obj #[])
       let content? := bodyJv.fieldStr? "content"
+      let resumeTargetNode? ← resolveMissionRemoteNode? st.store st.managedStore? mid
+      if let some targetNode := resumeTargetNode? then
+        if let some cause ← nodeApiHangCause? st.store targetNode then
+          return .ok (mkJson 503 (hungNodeJsonBody targetNode cause))
       let mut goalGeneration? : Option UInt64 := none
       if goalResumeRoute.isSome then
         let some generation := bodyJv.fieldUInt64? "run_generation"
           | return .ok (mkJson 400 "{\"error\":\"goal_generation_required\"}")
         unless content?.isNone && st.remoteSup?.isSome && RemoteGoal.harnesses.contains m.backend &&
-            (← resolveMissionRemoteNode? st.store st.managedStore? mid).isSome do
+            resumeTargetNode?.isSome do
           return .ok (mkJson 400 "{\"error\":\"remote_goal_unsupported\"}")
         unless m.goalMode && (["interrupted", "awaiting_user", "failed"].contains m.status) && m.runGeneration == generation do
           return .ok (mkJson 409 "{\"error\":\"remote_goal_resume_conflict\"}")
@@ -8253,7 +8293,7 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
       let rawPrompt := content?.getD "Continue."
       let deliv := if selectedSkills.isEmpty then rawPrompt else withDirective rawPrompt selectedSkills
       let nowIso := formatEpochIso8601Utc nowEpochSec
-      if let (some sup, some targetNode) := (st.remoteSup?, ← resolveMissionRemoteNode? st.store st.managedStore? mid) then
+      if let (some sup, some targetNode) := (st.remoteSup?, resumeTargetNode?) then
         if m.status != "active" && m.status != "pending" then
           let (resolvedNode, rentedVmId) ← match ← resolveOrProvisionAutoManagedTarget st caller mid m.ownerUserId m.project targetNode bodyJv nowEpochSec with
             | .ok pair => pure pair
@@ -10130,12 +10170,14 @@ def runCoreServer (cfg : CoreConfig) (maxRequests? : Option Nat := none) : IO UI
           IO.sleep 2000
       discard <| IO.asTask (prio := .dedicated) (providerUsageUpkeepLoop providerHub store cfg.workingDir)
       discard <| IO.asTask (prio := .dedicated) do
+        let rawIntervalMs := ((← IO.getEnv "SANDBOXED_NODE_API_MONITOR_INTERVAL_MS").bind String.toNat?).getD 30000
+        let monitorIntervalMs : UInt32 := (Nat.max 500 rawIntervalMs).toUInt32
         while !(← store.closedRef.get) do
           try
             monitorStaticNodeApis store
             discard <| reconcileUncertainRemoteSubmissions store (some managedStore) (some relayHub) (some broadcastHub) remoteSup cfg.workingDir false
           catch e => IO.eprintln s!"[sandboxed-sh] node API health check failed: {e}"
-          IO.sleep 30000
+          IO.sleep monitorIntervalMs
       discard <| IO.asTask (prio := .dedicated) do
         let mut lastInventory : UInt64 := 0
         let mut checkedDestroyed : Array String := #[]
