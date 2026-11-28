@@ -1970,16 +1970,12 @@ def dispatchMcpToolCall
             resumeSessionId? := resumeSid?
           }
           if let .error dispErr ← submitRemoteMissionTurn store mc? relayHub? broadcastHub? sup workingDir spec nowEpochSec then
-<<<<<<< HEAD
-            let outcome := if dispErr.startsWith "remote_dispatch_uncertain:" || dispErr.startsWith "remote_accept_persist_failed:" then "uncertain" else "failed"
-            return ← settleReservedMcpAction store claims callerUserId toolName idemKeyTop outcome dispErr nowIso
-=======
             if dispErr.startsWith "remote_dispatch_busy:" then
               return ← settleReservedMcpAction store claims callerUserId toolName idemKeyTop "failed" dispErr nowIso "mission_already_active"
-            return ← settleReservedMcpAction store claims callerUserId toolName idemKeyTop "uncertain" dispErr nowIso
+            let outcome := if dispErr.startsWith "remote_dispatch_uncertain:" || dispErr.startsWith "remote_accept_persist_failed:" then "uncertain" else "failed"
+            return ← settleReservedMcpAction store claims callerUserId toolName idemKeyTop outcome dispErr nowIso
           discard <| appendMissionEvent store mid "user_message"
             (renderCompact (.obj #[("content", .str effPrompt), ("source", .str "mcp_resume")])) nowIso
->>>>>>> ebf4b9ff3 (fix(core): fence concurrent remote jobs on active missions and resume_mission)
           let .ok settled ← recordSettledMcpAction store claims callerUserId toolName args
             (.obj #[("ok", .bool true), ("mission_id", .str mid), ("status", .str "active")]) nowIso mid
             | return mcpErr "receipt_record_failed" "The mutation completed but its receipt could not be recorded. Reconcile the action." false
