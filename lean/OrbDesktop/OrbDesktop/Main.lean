@@ -189,11 +189,15 @@ def shapeStreamRuns (atlas : Text.GlyphAtlasCache) (font : Text.FontHandle) (sca
   return (ac, runs.toList)
 
 /-- Recursively shape any synthetic `.text` runs in `WidgetNode` into real HarfBuzz/FreeType
-glyph runs so every label, badge, table cell, composer text, modal, and toast renders with `Inter`. -/
-partial def shapeWidgetTree (ac : Text.GlyphAtlasCache) (font mono bold medium semibold : Text.FontHandle) (scale120 : Nat)
-    (node : WidgetNode) : IO (Text.GlyphAtlasCache × WidgetNode) := do
+glyph runs so every label, badge, table cell, composer text, modal, and toast renders with `Inter`.
+When `skipWidgetId` matches a node's `wid` (e.g. an already-shaped `CachedLiveTranscript` subtree),
+that subtree is returned unchanged in O(1) so zero-bitmap glyphs like spaces are never re-shaped. -/
+private partial def shapeWidgetTreeWithSkip (ac : Text.GlyphAtlasCache) (font mono bold medium semibold : Text.FontHandle)
+    (scale120 : Nat) (skipWidgetId : Option WidgetId) (node : WidgetNode) : IO (Text.GlyphAtlasCache × WidgetNode) := do
   match node with
   | .mk wid focusable hitTestable style payload children =>
+    if skipWidgetId.isSome && wid == skipWidgetId then
+      return (ac, node)
     let mut curAc := ac
     let newPayload ←
       match payload with
@@ -250,10 +254,16 @@ partial def shapeWidgetTree (ac : Text.GlyphAtlasCache) (font mono bold medium s
       | other => pure other
     let mut shapedChildren : Array WidgetNode := #[]
     for c in children do
-      let (ac', c') ← shapeWidgetTree curAc font mono bold medium semibold scale120 c
+      let (ac', c') ← shapeWidgetTreeWithSkip curAc font mono bold medium semibold scale120 skipWidgetId c
       curAc := ac'
       shapedChildren := shapedChildren.push c'
     return (curAc, .mk wid focusable hitTestable style newPayload shapedChildren.toList)
+
+/-- Recursively shape any synthetic `.text` runs in `WidgetNode` into real HarfBuzz/FreeType
+glyph runs so every label, badge, table cell, composer text, modal, and toast renders with `Inter`. -/
+def shapeWidgetTree (ac : Text.GlyphAtlasCache) (font mono bold medium semibold : Text.FontHandle) (scale120 : Nat)
+    (node : WidgetNode) : IO (Text.GlyphAtlasCache × WidgetNode) :=
+  shapeWidgetTreeWithSkip ac font mono bold medium semibold scale120 none node
 
 private partial def scrollRegionsOf (b : ComputedBox) : List Runtime.ScrollRegion :=
   match b.id, b.scrollLimitXY with
@@ -547,11 +557,34 @@ private def buildCachedLiveTranscript (rt : Runtime.RuntimeState DesktopState)
       for r in sp.rows do allRows := allRows.push r
       let tailStr := utf8Slice bytes sp.committedBytes bytes.size
       if !tailStr.isEmpty then
-        if (splitMermaidFences tailStr).any (·.1) then
-          let (tailRaw, _) := buildOneLiveTurn theme colW width sp.midBand tailStr
-          let (ac', tailShaped) ← shapeAndMeasureRows curAc rt.primaryFont rt.monoFont rt.boldFont rt.mediumFont rt.semiboldFont sc colW tailRaw
-          curAc := ac'
-          for r in tailShaped do allRows := allRows.push r
+        if hasMermaid then
+          -- Mirror `buildOneLiveTurn` segmentation on `tailStr` so unclosed `` ```mermaid ``
+          -- snippets inside an outer code fence split identically to uncached full repaints,
+          -- while still caching unchanged prose/code lines via `lineCache`.
+          let mut tailBand := sp.midBand
+          for (isFence, seg) in splitMermaidFences tailStr do
+            if isFence then
+              match parseMermaidFlowchart seg with
+              | some spec0 =>
+                let spec := { spec0 with nodes := spec0.nodes.mapIdx fun i n =>
+                  { n with widgetId := some (tailBand + i) } }
+                let (ac', diagShaped) ← shapeAndMeasureRows curAc rt.primaryFont rt.monoFont rt.boldFont rt.mediumFont rt.semiboldFont sc colW
+                  [buildMermaidDiagramWidget theme colW spec]
+                curAc := ac'
+                for r in diagShaped do allRows := allRows.push r
+                tailBand := tailBand + liveDiagramStride
+              | none =>
+                let (cache', ac', segShaped) ← shapeOpenTailLinesCached cache curAc
+                  rt.primaryFont rt.monoFont rt.boldFont rt.mediumFont rt.semiboldFont sc theme colW width seg
+                cache := cache'
+                curAc := ac'
+                for r in segShaped do allRows := allRows.push r
+            else
+              let (cache', ac', segShaped) ← shapeOpenTailLinesCached cache curAc
+                rt.primaryFont rt.monoFont rt.boldFont rt.mediumFont rt.semiboldFont sc theme colW width seg
+              cache := cache'
+              curAc := ac'
+              for r in segShaped do allRows := allRows.push r
         else
           let (cache', ac', tailShaped) ← shapeOpenTailLinesCached cache curAc
             rt.primaryFont rt.monoFont rt.boldFont rt.mediumFont rt.semiboldFont sc theme colW width tailStr
@@ -740,7 +773,8 @@ def renderDesktopView (rt : Runtime.RuntimeState DesktopState) :
   }
 
   let widgetRootRaw := buildDesktopScreen st availW availH shapedRuns liveWindow hoverRow
-  let (ac6, widgetRoot) ← shapeWidgetTree ac5 rt.primaryFont rt.monoFont rt.boldFont rt.mediumFont rt.semiboldFont sc widgetRootRaw
+  let skipId : Option WidgetId := if cachedLive?.isSome then some transcriptViewportId else none
+  let (ac6, widgetRoot) ← shapeWidgetTreeWithSkip ac5 rt.primaryFont rt.monoFont rt.boldFont rt.mediumFont rt.semiboldFont sc skipId widgetRootRaw
   let layoutRoot := widgetRoot.toLayoutNode
   let t1 ← IO.monoNanosNow
   let rootBox := layoutNode sc rt.focus.owner pal.focusRing 0 0 availW availH layoutRoot
@@ -1737,6 +1771,29 @@ private def u7CacheParitySelfTest (cfg : Runtime.RuntimeConfig) : IO Unit := do
       sidePanelOpen := true
       liveData := false
       stream := { shown := ["word1 word2 word3 word4 word5 word6 word7 word8 word9 word10"], pending := [], renders := 2 } }
+
+  -- 5. Space-only runs in cached live turns (must not be double-shaped into `.notdef` tofu boxes)
+  checkParity "cached-space-only-runs"
+    { baseLive with
+      liveTurns :=
+        [ "**bold** `code` and **a** *b*"
+        , "```lean\ndef f :=\n  \n  1\n```" ] }
+  -- 6. Open outer code fence containing an unclosed ```mermaid snippet after an earlier committed Mermaid diagram
+  let rtSeg0 ← Runtime.initRuntime { cfg with headless := true, width := 1280, height := 800 } baseLive
+  try
+    let mut rtSeg := { rtSeg0 with focus := baseLive.initialFocusState }
+    for chunk in [ "```mermaid\nflowchart LR\n  A --> B\n```\n\n"
+                 , "```markdown\n```mermaid\nflowchart LR\n  C --> D" ] do
+      let (nextSt, dmg) := applyStreamFrame cfg.scale120 rtSeg.viewportDeviceRect rtSeg.app [chunk]
+      let rtNext := { rtSeg with app := nextSt, damage := dmg.elim rtSeg.damage (Damage.add rtSeg.damage) }
+      let rtFull ← Runtime.stepFrame rtNext.markFullDamage (desktopReducer rtNext) renderDesktopFrame
+      rtSeg ← Runtime.stepFrame rtNext (desktopReducer rtNext) renderDesktopFrame
+      unless rtSeg.vulkan.framebuffer == rtFull.vulkan.framebuffer do
+        throw <| IO.userError "u7 cache parity (committed mermaid + unclosed nested mermaid): framebuffer mismatch"
+      unless rtSeg.focusableOrder == rtFull.focusableOrder do
+        throw <| IO.userError "u7 cache parity (committed mermaid + unclosed nested mermaid): focusableOrder mismatch"
+  finally
+    Runtime.shutdownRuntime rtSeg0
 
 /-- `--self-test`: check live viewports, embedded palette, window effects, U7 cache parity, and quiescent rendering. -/
 def runSelfTest (cfg : Runtime.RuntimeConfig) (initSt : DesktopState) : IO UInt32 := do
