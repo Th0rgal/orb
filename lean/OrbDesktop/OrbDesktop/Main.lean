@@ -152,7 +152,7 @@ def shapeDesktopRuns (ac : Text.GlyphAtlasCache) (font : Text.FontHandle)
         curAc := { curAc with resolved := entries, resolvedMap := map' }
     return (curAc, [run])
   else
-    return (ac, [overlaySynthRun style text])
+    return (ac, [{ overlaySynthRun style text with isSynthetic := false }])
 
 /-- Shape words independently so the layout engine can break between them. Keep
 spaces and explicit empty lines; split oversized tokens only between clusters. -/
@@ -213,8 +213,7 @@ private partial def shapeWidgetTreeWithSkip (ac : Text.GlyphAtlasCache) (font mo
       | .text lineHeightSub runs caret =>
         let mut shapedRuns : Array InlineRun := #[]
         for r in runs do
-          let isSynth := !r.glyphs.isEmpty && r.glyphs.all (fun g => g.sizePx.1 == 0 && g.sizePx.2 == 0)
-          if isSynth then
+          if r.isSynthetic && !r.glyphs.isEmpty then
             let txt := String.ofList (r.glyphs.map (fun g => Char.ofNat g.glyphId))
             let face := if r.style.monospace then mono else if r.style.weight >= 700 then bold else if r.style.weight >= 600 then semibold else if r.style.weight >= 500 then medium else font
             let (ac', rs) ← shapeDesktopRuns curAc face scale120 r.style txt
@@ -265,12 +264,15 @@ def shapeWidgetTree (ac : Text.GlyphAtlasCache) (font mono bold medium semibold 
     (node : WidgetNode) : IO (Text.GlyphAtlasCache × WidgetNode) :=
   shapeWidgetTreeWithSkip ac font mono bold medium semibold scale120 none node
 
-private partial def scrollRegionsOf (b : ComputedBox) : List Runtime.ScrollRegion :=
-  match b.id, b.scrollLimitXY with
-  | some id, some (_, limitY) =>
-    let lines := (b.children.head?.map (·.lines)).getD []
-    [{ id, bounds := b.contentRectSub, limitY, offsetY := (b.scrollOffset.getD (0, 0)).2, textLines := lines }]
-  | _, _ => b.children.flatMap scrollRegionsOf
+private partial def scrollRegionsOf : WidgetNode → ComputedBox → List Runtime.ScrollRegion
+  | .mk _ _ _ _ payload wChildren, b =>
+    match payload, b.id, b.scrollLimitXY with
+    | .scrollClip sc, some id, some (_, limitY) =>
+      let lines := (b.children.head?.map (·.lines)).getD []
+      let hasScrollbar := sc.showScrollbar && sc.scrollbarOpacity > 0
+      [{ id, bounds := b.contentRectSub, limitY, offsetY := (b.scrollOffset.getD (0, 0)).2, textLines := lines, hasScrollbar }]
+    | _, _, _ =>
+      (wChildren.zip b.children).flatMap fun (wc, bc) => scrollRegionsOf wc bc
 
 /-- Regions of the visible running (`loader`) mission rows. An overlay that takes over input keeps
     them beneath its full-window backdrop region: `hitTest` never returns them, and the spinner tick
@@ -825,11 +827,11 @@ def renderDesktopView (rt : Runtime.RuntimeState DesktopState) :
       (availH - chromeComposerHeightSub - h - pxToSub 8 : Nat) w h widget.toLayoutNode
     let overlay := buildSceneFromLayout sc rt.focus theme widget box (recordNodes := false) (focusVisible := rt.focusVisible)
     return ((ac7.finishUploads, if liveWindow then 0 else pal.canvas, sceneOut.prims ++ clipOverlay overlay.prims,
-      sceneOut.hitRegionsSub ++ overlay.hitRegionsSub, sceneOut.focusableOrder ++ overlay.focusableOrder), scrollRegionsOf rootBox)
+      sceneOut.hitRegionsSub ++ overlay.hitRegionsSub, sceneOut.focusableOrder ++ overlay.focusableOrder), scrollRegionsOf widgetRoot rootBox)
   else
     let clearColor := if liveWindow then 0x00000000 else pal.canvas
     return ((ac6.finishUploads, clearColor, sceneOut.prims, sceneOut.hitRegionsSub, sceneOut.focusableOrder),
-      scrollRegionsOf rootBox)
+      scrollRegionsOf widgetRoot rootBox)
 
 def renderDesktopFrame (rt : Runtime.RuntimeState DesktopState) : IO Runtime.FrameView :=
   Prod.fst <$> renderDesktopView rt
@@ -845,9 +847,8 @@ def desktopReducer (rt : Runtime.RuntimeState DesktopState) :
       if state != .released then
         if let .searchPalette spec := st.modal then
           if rt.focus.owner == some spec.inputWidgetId then
-            if let some buf := st.searchBuffer.editKey? key mods then
-              let spec' := { spec with query := buf.displayText, selectedIdx := 0 }
-              return ({ st with searchBuffer := buf, modal := .searchPalette spec' }, if buf == st.searchBuffer then none else some viewport)
+            if let some res := stepSearchEditKey viewport st spec key mods then
+              return res
         else if !st.liveData && st.screen == .settingsGeneral && rt.focus.owner == some settingsApiUrlId then
           if let some buf := st.settingsApiUrl.editKey? key mods then
             return ({ st with settingsApiUrl := buf }, if buf == st.settingsApiUrl then none else some viewport)
@@ -896,14 +897,14 @@ def desktopReducer (rt : Runtime.RuntimeState DesktopState) :
           let some (_, r) := rt.hitRegions.find? (fun (entry : EntityId × Rect) => entry.1 == id) | return (st, none)
           let draft : Widgets.ComposerBuffer := { text := st.draftDirectory, cursorOffset := st.draftDirectory.length }
           let menu : MissionMenu := { mission := "", x := r.x, y := r.bottom, trigger := id, page := .draftDirectory, draft, browsePath := st.draftDirectory }
-          return ({ st with missionMenu := some menu }, some viewport)
+          return ({ st.clearAllPreedit with missionMenu := some menu }, some viewport)
         if id == 714 || (id == draftProjectPickerId && st.openMission.isNone) then
           let some (_, r) := rt.hitRegions.find? (fun (entry : EntityId × Rect) => entry.1 == id) | return (st, none)
-          return ({ st with missionMenu := some { mission := st.openMission.getD "", x := r.x, y := r.bottom, trigger := id, page := if id == draftProjectPickerId then .draftProject else .settings } }, some viewport)
+          return ({ st.clearAllPreedit with missionMenu := some { mission := st.openMission.getD "", x := r.x, y := r.bottom, trigger := id, page := if id == draftProjectPickerId then .draftProject else .settings } }, some viewport)
         if let some field := settingTrigger id then
           let some (_, r) := rt.hitRegions.find? (fun (entry : EntityId × Rect) => entry.1 == id) | return (st, none)
           let st := if field == .machine then { st with launchMachines := none, launchMachinesFailed := false } else st
-          return ({ st with missionMenu := some {
+          return ({ st.clearAllPreedit with missionMenu := some {
             mission := st.openMission.getD "", x := r.x, y := r.bottom, trigger := id,
             page := .picker field } }, some viewport)
     let menuTarget : Option (EntityId × Int × Int) := match ev with
@@ -927,7 +928,26 @@ def desktopReducer (rt : Runtime.RuntimeState DesktopState) :
         let targets := if group then
             st.multiRows.filterMap fun r => if r.startsWith "mission:" then some (r.drop 8).toString else none
           else [mid]
-        return ({ st with missionMenu := some { mission := mid, x, y, trigger := id, targets, mixed } }, some viewport)
+        return ({ st.clearAllPreedit with missionMenu := some { mission := mid, x, y, trigger := id, targets, mixed } }, some viewport)
+    if let .key key mods state := ev then
+      if state != .released && mods == 0 && (key == 0xff55 || key == 0xff56) &&
+          st.missionMenu.isNone && st.modal == .none &&
+          st.composer.imePreeditText.isEmpty &&
+          (st.screen == .missionTranscript || st.screen == .missionSplitDiff) then
+        if let some r := regions.find? (·.id == transcriptViewportId) then
+          let h := r.bounds.h.toNat
+          let content := r.limitY + h
+          let stepSub : Int := Int.ofNat (max (pxToSub 120) (h * 4 / 5))
+          let dy : Int := if key == 0xff55 then -stepSub else stepSub
+          let damage := some (roundRectOut scale r.bounds)
+          if st.liveData then
+            let some st' := stepTranscriptScroll st content h dy | return (st, none)
+            return (st', damage)
+          else
+            let current := if !st.scrolledManually then { pinned := false, topSub := 0 } else st.scroll.onLayout content h
+            let next := current.onUserScroll content h dy
+            if next == current && st.scrolledManually then return (st, none)
+            return ({ st with scroll := next, scrolledManually := true }, damage)
     if let .scrollTo regionId targetY := ev then
       if st.missionMenu.isNone && st.modal == .none then
         let some r := regions.find? (·.id == regionId) | return (st, none)
@@ -1497,7 +1517,7 @@ def liveViewportRegression : Bool := Id.run do
     let box := layoutNode 120 none 0 0 0 w h widget.toLayoutNode
     let scene := buildSceneFromLayout 120 {} st.theme widget box (recordNodes := false)
     let rt : Runtime.RuntimeState DesktopState :=
-      { app := st, scrollRegions := scrollRegionsOf box, hitRegions := scene.hitRegionsSub }
+      { app := st, scrollRegions := scrollRegionsOf widget box, hitRegions := scene.hitRegionsSub }
     return (rt, scene.prims)
   let wheel (rt : Runtime.RuntimeState DesktopState) (id : Nat) (dy : Int) : Option DesktopState := do
     let r ← rt.scrollRegions.find? (fun (r : Runtime.ScrollRegion) => r.id == id)
@@ -1772,12 +1792,19 @@ private def u7CacheParitySelfTest (cfg : Runtime.RuntimeConfig) : IO Unit := do
       liveData := false
       stream := { shown := ["word1 word2 word3 word4 word5 word6 word7 word8 word9 word10"], pending := [], renders := 2 } }
 
-  -- 5. Space-only runs in cached live turns (must not be double-shaped into `.notdef` tofu boxes)
+  -- 5. Space-only runs in cached live turns and pre-shaped plain streams (must never be double-shaped)
   checkParity "cached-space-only-runs"
     { baseLive with
       liveTurns :=
         [ "**bold** `code` and **a** *b*"
         , "```lean\ndef f :=\n  \n  1\n```" ] }
+  checkParity "plain-stream-leading-double-spaces"
+    { baseLive with
+      stream := { shown := ["  Hello  world"], pending := [], renders := 2 } }
+  checkParity "plain-stream-nonlive-spaces"
+    { baseLive with
+      liveData := false
+      stream := { shown := ["  Hello  world   "], pending := [], renders := 2 } }
   -- 6. Open outer code fence containing an unclosed ```mermaid snippet after an earlier committed Mermaid diagram
   let rtSeg0 ← Runtime.initRuntime { cfg with headless := true, width := 1280, height := 800 } baseLive
   try
@@ -1926,7 +1953,8 @@ def main (args : List String) : IO UInt32 := do
               return (voiced, if updated.isSome || voiced.voiceAvailable != next.voiceAvailable ||
                 voiced.voicePhase != next.voicePhase then some vp else damage))
             (·.liveData) desktopFocusChange (some wakeFd) (·.writeRequest.isSome)
-            (fun rt => animations && (runningBadgeDamage rt).isSome) desktopFocusTraps
+            (fun rt => animations && (runningBadgeDamage rt).isSome) desktopFocusTraps desktopImeSessionKey
+            DesktopState.clearAllPreeditChecked
         finally
           discard (IO.wait probe)
           closeVoice voiceSlot

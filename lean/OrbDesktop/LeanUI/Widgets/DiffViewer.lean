@@ -64,7 +64,7 @@ structure DiffFileSpec where
       cluster := idx
       xAdvance := charAdv
     }
-  { glyphs := glyphs, style := style, allowBreakAfter := false, hardBreakAfter := false }
+  { glyphs := glyphs, style := style, allowBreakAfter := false, hardBreakAfter := false, isSynthetic := true }
 
 /-- Background fill color for a `DiffLineKind`. -/
 @[inline] def diffLineBg (pal : Palette) : DiffLineKind → Color

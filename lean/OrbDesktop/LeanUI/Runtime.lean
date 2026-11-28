@@ -96,6 +96,7 @@ structure ScrollRegion where
   limitY : SubPx
   offsetY : SubPx := 0
   textLines : List WrappedLine := []
+  hasScrollbar : Bool := true
   deriving Inhabited
 
 /-- Active pointer drag state for an overlay scrollbar thumb or track-jump drag. -/
@@ -107,19 +108,21 @@ structure ScrollbarDragState where
   deriving DecidableEq, Repr, Inhabited
 
 /-- Refresh an active scrollbar drag's geometry against the latest `scrollRegions` produced by
-`view`, clearing the drag if its region vanished or became non-scrollable (`limitY == 0`). -/
+`view`, clearing the drag if its region vanished, hid its scrollbar, or became non-scrollable (`limitY == 0`). -/
 def reconcileScrollbarDrag (drag? : Option ScrollbarDragState)
     (scrollRegions : List ScrollRegion) : Option ScrollbarDragState :=
   drag?.bind fun drag =>
     (scrollRegions.find? (·.id == drag.regionId)).bind fun r =>
-      (scrollbarGeometry r.bounds r.limitY r.offsetY).map fun geom =>
+      if !r.hasScrollbar then none
+      else (scrollbarGeometry r.bounds r.limitY r.offsetY).map fun geom =>
         { drag with geom }
 
-/-- Find the topmost scrollable `ScrollRegion` whose right-edge scrollbar gutter contains `(px, py)`. -/
+/-- Find the topmost scrollable `ScrollRegion` with a visible scrollbar whose right-edge gutter contains `(px, py)`. -/
 def hitTestScrollbar (regions : List ScrollRegion) (px py : Int) :
     Option (ScrollRegion × ScrollbarGeometry) :=
   regions.foldl (fun acc r =>
-    match scrollbarGeometry r.bounds r.limitY r.offsetY with
+    if !r.hasScrollbar then acc
+    else match scrollbarGeometry r.bounds r.limitY r.offsetY with
     | some g => if g.trackRectSub.contains px py then some (r, g) else acc
     | none => acc) none
 
@@ -141,11 +144,17 @@ structure RuntimeState (σ : Type) where
   focusVisible : Bool := true
   windowFocused : Bool := true
   lastImeOwner : Option EntityId := none
+  lastImeContext : String := ""
+  /-- Set when an intra-batch focus/context switch occurred so `runWindow` cycles `zwp_text_input_v3`
+      even if focus returns to the same `EntityId` within the same `pumpEvents` batch. -/
+  imeCyclePending : Bool := false
   hoveredEntity : Option EntityId := none
   hitRegions : List (EntityId × Rect) := []
   scrollRegions : List ScrollRegion := []
   activeScrollbarDrag : Option ScrollbarDragState := none
   focusableOrder : List EntityId := []
+  /-- Focus target just requested by `focusChange` before the next `view` pass rebuilds `focusableOrder`. -/
+  pendingFocusTarget : Option EntityId := none
   pressedEntity : Option EntityId := none
   scrollOffsetSub : Nat := 0
   contentHeightSub : Nat := 64000
@@ -184,12 +193,18 @@ def entityDeviceRect (rt : RuntimeState σ) (id : EntityId) : Rect :=
   | some (_, r) => roundRectOut rt.wayland.scale120 r
   | none => rt.viewportDeviceRect
 
+/-- Whether `id` is focusable in the latest layout or was just focused programmatically by
+`focusChange` before the next `view` pass rebuilt `focusableOrder`. -/
+@[inline] def isFocusPresent (rt : RuntimeState σ) (id : EntityId) : Bool :=
+  rt.focusableOrder.isEmpty || rt.focusableOrder.contains id || rt.pendingFocusTarget == some id
+
 /-- Update modal focus traps; whenever traps change (e.g. a modal/menu opens or closes),
 cancel any active scrollbar drag and pressed entity and damage the viewport. -/
 def applyFocusTraps (rt : RuntimeState σ) (traps' : List (List EntityId)) : RuntimeState σ :=
   if traps' != rt.focus.traps then
     { rt with
       focus := { rt.focus with traps := traps' }
+      pendingFocusTarget := none
       activeScrollbarDrag := none
       pressedEntity := none
       damage := Damage.add rt.damage rt.viewportDeviceRect }
@@ -314,7 +329,8 @@ where
             let focused := if rt.focusableOrder.isEmpty || rt.focusableOrder.contains id then
                 rt.requestFocusWithVisibility id devR false
               else rt.clearFocusVisible
-            { focused with pressedEntity := some id }
+            let pending' := rt.pendingFocusTarget.filter (fun t => focused.focus.owner == some t)
+            { focused with pendingFocusTarget := pending', pressedEntity := some id }
           | none => rt.clearFocusVisible
         else
           match hitTest rt.hitRegions px py, rt.pressedEntity with
@@ -354,30 +370,33 @@ where
                 match focus'.owner with
                 | some nextId => Damage.add d0 (rt.entityDeviceRect nextId)
                 | none => d0
-            { rt with focus := focus', focusVisible := true, damage := dmg' }
+            let pending' := rt.pendingFocusTarget.filter (fun t => focus'.owner == some t)
+            { rt with focus := focus', focusVisible := true, pendingFocusTarget := pending', damage := dmg' }
           else if keysym == 0xff0d || keysym == 0xff8d || keysym == 0x20 then
             match rt.focus.owner with
             | some id =>
-              let isInput := isTextInputEntity id && (rt.focusableOrder.isEmpty || rt.focusableOrder.contains id)
-              -- Space inserts a space character into focused text inputs rather than activating them.
-              if isInput && keysym == 0x20 then rt
+              if !rt.isFocusPresent id then rt
               else
-                let editorReturn := isInput && keysym != 0x20
-                if state == .repeated then rt else
-                let action := if editorReturn then
-                    Event.composerReturn (mods &&& 1 != 0)
-                  else Event.activate id
-                let (app', appDmg) := onEvent rt.app action
-                let finalDmg := match appDmg with
-                  | none => rt.damage
-                  | some r => Damage.add rt.damage r
-                { rt with app := app', damage := finalDmg }
+                let isInput := isTextInputEntity id
+                -- Space inserts a space character into focused text inputs rather than activating them.
+                if isInput && keysym == 0x20 then rt
+                else
+                  let editorReturn := isInput && keysym != 0x20
+                  if state == .repeated then rt else
+                  let action := if editorReturn then
+                      Event.composerReturn (mods &&& 1 != 0)
+                    else Event.activate id
+                  let (app', appDmg) := onEvent rt.app action
+                  let finalDmg := match appDmg with
+                    | none => rt.damage
+                    | some r => Damage.add rt.damage r
+                  { rt with app := app', damage := finalDmg }
             | none => rt
           else rt
         else rt
       | _ => rt
     let isActiveInput (st : RuntimeState σ) : Bool :=
-      st.focus.owner.any (fun id => isTextInputEntity id && (st.focusableOrder.isEmpty || st.focusableOrder.contains id))
+      st.focus.owner.any (fun id => isTextInputEntity id && st.isFocusPresent id)
     let wasInput := isActiveInput rt
     let isInputNow := isActiveInput rt1
     let lostEditor := wasInput &&
@@ -410,11 +429,13 @@ def effectiveEvent (rt : RuntimeState σ) (ev : Event) : Event :=
         (keysym == 0xff0d || keysym == 0xff8d || keysym == 0x20) then
       match rt.focus.owner with
       | some id =>
-        let isInput := isTextInputEntity id && (rt.focusableOrder.isEmpty || rt.focusableOrder.contains id)
-        if isInput && keysym == 0x20 then ev
-        else if state == .repeated then ev
-        else if isInput then .composerReturn (mods &&& 1 != 0)
-        else .activate id
+        if !rt.isFocusPresent id then ev
+        else
+          let isInput := isTextInputEntity id
+          if isInput && keysym == 0x20 then ev
+          else if state == .repeated then ev
+          else if isInput then .composerReturn (mods &&& 1 != 0)
+          else .activate id
       | none => ev
     else ev
   | _ => ev
@@ -427,7 +448,7 @@ def stepEventWithFocus (rt : RuntimeState σ) (onEvent : σ → Event → σ × 
   let dispatched := rt.effectiveEvent ev
   let rt' := rt.stepEvent onEvent ev
   match focusChange before rt'.app dispatched with
-  | some target => rt'.requestFocus target rt'.viewportDeviceRect
+  | some target => { rt'.requestFocus target rt'.viewportDeviceRect with pendingFocusTarget := some target }
   | none => rt'
 
 end RuntimeState
@@ -461,6 +482,60 @@ def coalesceScrollEvents (evs : Array Event) : Array Event :=
         | _ => acc.push ev
     | _ => acc.push ev
 
+/-- Whether an event originates from Wayland `zwp_text_input_v3` IME delivery. -/
+def isImeEvent : Event → Bool
+  | .imeBatch .. | .preedit .. => true
+  | _ => false
+
+/-- Apply one `pumpEvents` batch to `rt`, dropping trailing `.imeBatch`/`.preedit` events once
+focus ownership or logical IME context changes within the frame (or changed during `pollFrame`
+before `Wayland.syncTextFocus` cycled `disable`/`enable` and advanced `imeEnableSerial`). -/
+def applyEventBatch {σ : Type} (rt : RuntimeState σ) (evs : Array Event)
+    (onEvent : RuntimeState σ → σ → Event → σ × Damage)
+    (focusChange : σ → σ → Event → Option Nat := fun _ _ _ => none)
+    (focusTraps : σ → List (List EntityId) := fun _ => [])
+    (imeSessionKey : σ → String := fun _ => "")
+    (clearPreedit : σ → σ × Bool := fun s => (s, false)) : RuntimeState σ := Id.run do
+  let mut st := rt
+  let mut imeContextSwitched :=
+    rt.imeCyclePending ||
+    (rt.lastImeOwner.isSome && (rt.focus.owner != rt.lastImeOwner || imeSessionKey rt.app != rt.lastImeContext))
+  let mut suppressActivatedSpaceText := false
+  for ev in evs do
+    if imeContextSwitched && isImeEvent ev then
+      continue
+    if suppressActivatedSpaceText then
+      suppressActivatedSpaceText := false
+      if ev matches .text " " then
+        continue
+    let before := st.app
+    let prevOwner := st.focus.owner
+    let prevCtx := imeSessionKey before
+    let dispatched := st.effectiveEvent ev
+    let spaceActivated : Bool :=
+      match ev, dispatched with
+      | .key 0x20 _ .pressed, .activate _ => true
+      | _, _ => false
+    st := st.stepEvent (onEvent st) ev
+    st := st.applyFocusTraps (focusTraps st.app)
+    if let some target := focusChange before st.app dispatched then
+      st := { st.requestFocus target st.viewportDeviceRect with pendingFocusTarget := some target }
+    if spaceActivated then
+      suppressActivatedSpaceText := true
+    let switched := st.focus.owner != prevOwner || imeSessionKey st.app != prevCtx
+    if switched then
+      imeContextSwitched := true
+      if st.lastImeOwner.isSome || prevOwner.any isTextInputEntity then
+        st := { st with imeCyclePending := true }
+      if prevOwner.any isTextInputEntity || st.focus.owner != prevOwner then
+        let (app', cleared) := clearPreedit st.app
+        if cleared then
+          st := { st with app := app', damage := Damage.add st.damage st.viewportDeviceRect }
+        else if prevOwner.any isTextInputEntity && st.focus.owner != prevOwner then
+          let (app'', dmg'') := onEvent st st.app (.preedit "" 0 0)
+          st := { st with app := app'', damage := dmg''.elim st.damage (Damage.add st.damage) }
+  return st
+
 /-- Execute one frame tick:
 1. Pump Wayland events (`Wayland.pumpEvents`) and reduce them through `stepEvent`.
 2. Check `needsRedraw rt.damage`: if `false`, skip rendering completely (`quiescentSkips + 1`).
@@ -470,22 +545,13 @@ def stepFrameWithRegions {σ : Type} (rt : RuntimeState σ)
     (onEvent : RuntimeState σ → σ → Event → σ × Damage)
     (view : RuntimeState σ → IO (FrameView × List ScrollRegion))
     (focusChange : σ → σ → Event → Option Nat := fun _ _ _ => none)
-    (focusTraps : σ → List (List EntityId) := fun _ => []) :
+    (focusTraps : σ → List (List EntityId) := fun _ => [])
+    (imeSessionKey : σ → String := fun _ => "")
+    (clearPreedit : σ → σ × Bool := fun s => (s, false)) :
     IO (RuntimeState σ) := do
   let (wl1, evs) ← Wayland.pumpEvents rt.wayland
   let evs := coalesceScrollEvents evs
-  let mut st := { rt with wayland := wl1 }
-  for ev in evs do
-    let before := st.app
-    let prevOwner := st.focus.owner
-    let dispatched := st.effectiveEvent ev
-    st := st.stepEvent (onEvent st) ev
-    st := st.applyFocusTraps (focusTraps st.app)
-    if let some target := focusChange before st.app dispatched then
-      st := st.requestFocus target st.viewportDeviceRect
-      if prevOwner.any isTextInputEntity && st.focus.owner != prevOwner then
-        let (app', dmg') := onEvent st st.app (.preedit "" 0 0)
-        st := { st with app := app', damage := dmg'.elim st.damage (Damage.add st.damage) }
+  let mut st := applyEventBatch { rt with wayland := wl1 } evs onEvent focusChange focusTraps imeSessionKey clearPreedit
   if !needsRedraw st.damage then
     return { st with quiescentSkips := st.quiescentSkips + 1 }
   if !st.wayland.headless && st.wayland.frameCallbackPending && !st.wayland.configurePendingCommit then
@@ -528,6 +594,7 @@ def stepFrameWithRegions {σ : Type} (rt : RuntimeState σ)
           scrollRegions
           activeScrollbarDrag
           focusableOrder := focusOrder
+          pendingFocusTarget := none
           damage := none
           forceFullRepaint := false
           framesRendered := st.framesRendered + 1
@@ -547,6 +614,7 @@ def stepFrameWithRegions {σ : Type} (rt : RuntimeState σ)
           scrollRegions
           activeScrollbarDrag
           focusableOrder := focusOrder
+          pendingFocusTarget := none
           damage := retainedDamage
           lastFrameTotalNs := (frameT1 - frameT0).toUInt64
         }
@@ -562,6 +630,7 @@ def stepFrameWithRegions {σ : Type} (rt : RuntimeState σ)
       scrollRegions
       activeScrollbarDrag
       focusableOrder := focusOrder
+      pendingFocusTarget := none
       damage := none
       forceFullRepaint := false
       framesRendered := st.framesRendered + 1
@@ -579,6 +648,7 @@ def stepFrameWithRegions {σ : Type} (rt : RuntimeState σ)
     scrollRegions
     activeScrollbarDrag
     focusableOrder := focusOrder
+    pendingFocusTarget := none
     damage := none
     forceFullRepaint := false
     framesRendered := st.framesRendered + 1
@@ -778,7 +848,9 @@ def runWindow {σ : Type} (rt0 : RuntimeState σ)
     (focusChange : σ → σ → Event → Option Nat := fun _ _ _ => none)
     (wakeFd : Option UInt32 := none) (workPending : σ → Bool := fun _ => false)
     (animationVisible : RuntimeState σ → Bool := fun _ => false)
-    (focusTraps : σ → List (List EntityId) := fun _ => []) : IO (RuntimeState σ) := withWindowWait rt0 wakeFd fun timedWait => do
+    (focusTraps : σ → List (List EntityId) := fun _ => [])
+    (imeSessionKey : σ → String := fun _ => "")
+    (clearPreedit : σ → σ × Bool := fun s => (s, false)) : IO (RuntimeState σ) := withWindowWait rt0 wakeFd fun timedWait => do
   let mut rt := rt0
   while rt.running do
     if !rt.wayland.configured then
@@ -793,9 +865,9 @@ def runWindow {σ : Type} (rt0 : RuntimeState σ)
       rt := ({ rt with app }).applyFocusTraps (focusTraps app)
       if let some rect := damage then rt := rt.markDirty rect
       if let some target := focusChange before app (.time 0) then
-        rt := rt.requestFocus target rt.viewportDeviceRect
+        rt := { rt.requestFocus target rt.viewportDeviceRect with pendingFocusTarget := some target }
       let rendered := rt.framesRendered
-      rt ← stepFrameWithRegions rt onEvent view focusChange focusTraps
+      rt ← stepFrameWithRegions rt onEvent view focusChange focusTraps imeSessionKey clearPreedit
       let shape : UInt32 :=
         if rt.activeScrollbarDrag.isSome then 1
         else match rt.hoveredEntity with
@@ -806,13 +878,21 @@ def runWindow {σ : Type} (rt0 : RuntimeState σ)
       let wl ← Wayland.syncCursor rt.wayland shape
       let textOwner : Option EntityId :=
         if rt.windowFocused then
-          rt.focus.owner.filter (fun id => isTextInputEntity id && rt.focusableOrder.contains id)
+          rt.focus.owner.filter (fun id => isTextInputEntity id && (rt.focusableOrder.contains id || rt.pendingFocusTarget == some id))
         else none
-      let wl ← if textOwner.isSome && rt.lastImeOwner.isSome && textOwner != rt.lastImeOwner then
+      let imeCtx := imeSessionKey rt.app
+      let imeWillDisableOrCycle :=
+        rt.lastImeOwner.isSome && (rt.imeCyclePending || textOwner != rt.lastImeOwner || imeCtx != rt.lastImeContext)
+      if imeWillDisableOrCycle then
+        let (appCleared, cleared) := clearPreedit rt.app
+        if cleared then
+          rt := ({ rt with app := appCleared }).markDirty rt.viewportDeviceRect
+      let wl ← if textOwner.isSome && rt.lastImeOwner.isSome &&
+          (rt.imeCyclePending || textOwner != rt.lastImeOwner || imeCtx != rt.lastImeContext) then
           Wayland.syncTextFocus wl false
         else pure wl
       let wl ← Wayland.syncTextFocus wl textOwner.isSome
-      rt := { rt with wayland := wl, lastImeOwner := textOwner }
+      rt := { rt with wayland := wl, lastImeOwner := textOwner, lastImeContext := imeCtx, imeCyclePending := false }
       if rt.framesRendered != rendered && rt.vulkan.backend == .cpuShm then
         let presentDirty : Option Rect :=
           if rt.vulkan.lastDamagePixels == 0 then some ⟨0, 0, 0, 0⟩

@@ -76,6 +76,15 @@ def buildNewAgentBody (st : DesktopState) (mainW bodyH : SubPx) : WidgetNode :=
   let dispText := if hasText then composedText else st.composer.placeholder
   let sendBgCol := pal.sendBg
 
+  let pickerLine (w : SubPx) (text : String) (clip : Bool) (col : Color := pal.textSecondary) : WidgetNode :=
+    let base := BoxStyle.row 0 |>.withFixedSize w (pxToSub 18)
+    let boxSt := if clip then { base with maxWidth := w, clip := true } else base
+    let txtSt : TextStyle := { (Theme.bodyText theme) with sizeSub := pxToSub 13, lineHeightSub := pxToSub 18, color := col, weight := 400 }
+    WidgetNode.text boxSt (pxToSub 18) [overlaySynthRun txtSt text]
+  let projectLabel := if st.draftProject.isEmpty then "Default" else st.draftProject
+  let machineLabel := if st.draftSettings.machine.isEmpty then "Core (agent-core)" else st.draftSettings.machine
+  let folderLabel := if st.draftDirectory.isEmpty then "Folder" else st.draftDirectory
+  let modelLabel := if st.draftSettings.model.isEmpty then "Orb Lorem 4.6 High Fast" else st.draftSettings.model
   let dropBar : WidgetNode :=
     WidgetNode.box
       (BoxStyle.row (pxToSub 16)
@@ -84,17 +93,17 @@ def buildNewAgentBody (st : DesktopState) (mainW bodyH : SubPx) : WidgetNode :=
         |>.withFixedSize colW (pxToSub 24))
        [ WidgetNode.focusable draftProjectPickerId <|
            WidgetNode.box (BoxStyle.row (pxToSub 4) |>.withAlign .center |>.withFixedSize (pxToSub 60) (pxToSub 24))
-             [screenTextLine theme (pxToSub 46) (pxToSub 18) (pxToSub 13) (pxToSub 18) pal.textSecondary "Default",
+             [pickerLine (pxToSub 46) projectLabel (!st.draftProject.isEmpty),
               chromeIcon "chevron-down" pal.textMuted 10]
         , WidgetNode.focusable 720 <|
            WidgetNode.box (BoxStyle.row (pxToSub 4) |>.withAlign .center |>.withFixedSize (pxToSub 150) (pxToSub 24))
              [chromeIcon "server" pal.textMuted 14,
-             screenTextLine theme (pxToSub 112) (pxToSub 18) (pxToSub 13) (pxToSub 18) pal.textSecondary "Core (agent-core)",
+             pickerLine (pxToSub 112) machineLabel (!st.draftSettings.machine.isEmpty),
              chromeIcon "chevron-down" pal.textMuted 10]
         , WidgetNode.focusable draftDirectoryPickerId <|
            WidgetNode.box (BoxStyle.row (pxToSub 4) |>.withAlign .center |>.withFixedSize (pxToSub 60) (pxToSub 24))
              [chromeIcon "folder" pal.textMuted 14,
-             screenTextLine theme (pxToSub 42) (pxToSub 18) (pxToSub 13) (pxToSub 18) pal.textSecondary "Folder"]
+             pickerLine (pxToSub 42) folderLabel (!st.draftDirectory.isEmpty)]
       ]
 
   let buttonStyle : BoxStyle :=
@@ -103,7 +112,7 @@ def buildNewAgentBody (st : DesktopState) (mainW bodyH : SubPx) : WidgetNode :=
   let plusBtn : WidgetNode :=
     WidgetNode.focusable 3 <|
       WidgetNode.rrect buttonStyle pal.plusBg (CornerRadii.uniform (pxToSub 12)) BorderStyle.none
-        [chromeIcon "plus" pal.textMuted 16]
+        [chromeIcon "plus" (if st.attachCount > 0 then pal.accent else pal.textMuted) 16]
   let sendBtn : WidgetNode :=
     WidgetNode.focusable 2 <|
       if hasText then
@@ -121,7 +130,7 @@ def buildNewAgentBody (st : DesktopState) (mainW bodyH : SubPx) : WidgetNode :=
        , WidgetNode.focusable 722 <|
            WidgetNode.box (BoxStyle.row (pxToSub 5) |>.withAlign .center
              |>.withPadding (Edges.xy (pxToSub 4) 0) |>.withFixedSize (pxToSub 518) (pxToSub 24))
-             [screenTextLine theme (pxToSub 151) (pxToSub 18) (pxToSub 13) (pxToSub 18) pal.textMuted "Orb Lorem 4.6 High Fast",
+             [pickerLine (pxToSub 151) modelLabel (!st.draftSettings.model.isEmpty) pal.textMuted,
               chromeIcon "chevron-down" pal.textMuted 12]
       , sendBtn
       ]
@@ -425,7 +434,7 @@ def buildMissionTranscriptBody (st : DesktopState) (mainW bodyH : SubPx)
 def buildSplitDiffRightPane (theme : Theme) (paneW paneH : SubPx)
     (delRuns : List InlineRun := []) (addRuns : List InlineRun := [])
     (diffMode : String := "split") (diffRef : String := "Working tree vs HEAD")
-    (showClose : Bool := false) (refreshCount : Nat := 0) : WidgetNode :=
+    (showClose : Bool := false) (refreshCount : Nat := 0) (diffSelectedFile : Nat := 0) : WidgetNode :=
   let pal := theme.palette
   let bdr := theme.borderWidth
   let cardW := paneW - pxToSub 24
@@ -495,7 +504,7 @@ def buildSplitDiffRightPane (theme : Theme) (paneW paneH : SubPx)
               |>.withFixedSize (pxToSub 229) (pxToSub 24))
             pal.elevatedSurface
             (CornerRadii.uniform (pxToSub 6))
-            (BorderStyle.uniform bdr pal.border)
+            (BorderStyle.uniform bdr (if diffSelectedFile != 0 then pal.accent else pal.border))
             [ screenTextLine theme (pxToSub 210) (pxToSub 16) (pxToSub 12) (pxToSub 16) pal.textPrimary
                  "M  lean/OrbDesktop/OrbDesktop/Main.lean  +1 -1" ]
       ]
@@ -663,6 +672,7 @@ def buildMachinesFleetBody (st : DesktopState) (mainW bodyH : SubPx) : WidgetNod
       ]
 
   let swCard : WidgetNode :=
+    let swSelected := st.selectedMachineId == "agent-software"
     WidgetNode.focusable fleetSoftwareId <|
       WidgetNode.rrect
         (BoxStyle.row 0
@@ -672,9 +682,9 @@ def buildMachinesFleetBody (st : DesktopState) (mainW bodyH : SubPx) : WidgetNod
           |>.withFixedSize colW (pxToSub 44))
         pal.elevatedSurface
         (CornerRadii.uniform (pxToSub 10))
-        (BorderStyle.uniform bdr pal.borderSubtle)
+        (BorderStyle.uniform bdr (if swSelected then pal.accent else pal.borderSubtle))
         [ screenTextLine theme (pxToSub 200) (pxToSub 18) (pxToSub 13) (pxToSub 18) pal.textPrimary "Agent software"
-        , screenTextLine theme (pxToSub 16) (pxToSub 18) (pxToSub 14) (pxToSub 18) pal.textFaint "›"
+        , screenTextLine theme (pxToSub (if swSelected then 56 else 16)) (pxToSub 18) (pxToSub (if swSelected then 12 else 14)) (pxToSub 18) (if swSelected then pal.textSecondary else pal.textFaint) (if swSelected then "Selected" else "›")
         ]
 
   let keyCard : WidgetNode :=
@@ -881,7 +891,8 @@ private def buildLiveInventory (st : DesktopState) (hover : Option WidgetId) (wi
            (screenTextLine theme settingsW (pxToSub 20) (pxToSub 13) (pxToSub 20) theme.palette.textSecondary "Settings ›")]
     else ((st.fleetMachines.drop first).take limit).mapIdx fun i m =>
       let detail := String.intercalate " · " ([m.roleLabel, m.cpuRamSpec].filter (!·.isEmpty))
-      let row := buildMachineRow theme colW rowH (if m.name.isEmpty then m.machineId else m.name) detail m.state true false
+      let rightLabel := if st.selectedMachineId == m.machineId then "Selected · " ++ m.state else m.state
+      let row := buildMachineRow theme colW rowH (if m.name.isEmpty then m.machineId else m.name) detail rightLabel true false
       inventoryTarget theme hover (liveMachineWidgetId (first + i)) colW rowH row
   let content := WidgetNode.box (BoxStyle.col 0 |>.withAlign .center)
     ([spacer first] ++ rows ++ [spacer (count - first - rows.length)])
@@ -935,7 +946,7 @@ def buildSettingsGeneralBody (st : DesktopState) (mainW bodyH : SubPx) : WidgetN
       (BoxStyle.col (pxToSub 8)
         |>.withPadding (Edges.xy (pxToSub 8) 0)
         |>.withFixedSize colW (pxToSub 122))
-      [ screenTextLine theme (pxToSub 584) (pxToSub 22) (pxToSub 16) (pxToSub 22) pal.textPrimary "Account" 500
+      [ screenTextLine theme (pxToSub 584) (pxToSub 22) (pxToSub 16) (pxToSub 22) pal.textPrimary (if st.settingsSection.isEmpty then "Account" else st.settingsSection) 500
       , screenTextLine theme (pxToSub 584) (pxToSub 26) (pxToSub 13) (pxToSub 18) pal.textSecondary
           "Your server connection, connected accounts, how Orb looks and usage telemetry."
       , tabsBar
@@ -1387,6 +1398,17 @@ def buildDesktopScreen (st : DesktopState) (availW availH : SubPx)
       return WidgetNode.box (BoxStyle.col 0 |>.withFixedSize mainW availH |>.withBg mainFill) (headerNode :: content)
     | .missionTranscript =>
       let splitH := availH - headerH
+      let fixtureUnderLabels : Option (String × String × String × String × String) :=
+        if st.liveData then none
+        else
+          let ds := st.draftSettings
+          some (
+            if ds.machine.isEmpty then "selected machine" else ds.machine,
+            if ds.backend.isEmpty then "claudecode" else ds.backend,
+            if ds.model.isEmpty then "Default" else ds.model,
+            if ds.effort.isEmpty then "Default" else ds.effort,
+            if ds.permission == "supervised" || ds.permission.isEmpty then "Supervised" else ds.permission
+          )
       if st.sidePanelOpen then
         let rightW : SubPx := min (pxToSub 480) (mainW / 2)
         let leftW : SubPx := mainW - rightW
@@ -1396,6 +1418,7 @@ def buildDesktopScreen (st : DesktopState) (availW availH : SubPx)
         let leftComposer := buildComposerWidget theme leftW composerH
           { st.composer with isRunning := st.composer.isRunning && !retrySend } []
           (if st.liveData then some (liveComposerControls st (min (pxToSub 748) (leftW - pxToSub 68))) else none)
+          none none (attachActive := st.attachCount > 0) (underLabels := fixtureUnderLabels)
         let leftPane : WidgetNode :=
           WidgetNode.rrect
             (BoxStyle.col 0 |>.withFixedSize leftW splitH)
@@ -1405,7 +1428,7 @@ def buildDesktopScreen (st : DesktopState) (availW availH : SubPx)
             [leftTranscript, leftComposer]
         let rightPane : WidgetNode :=
           if st.sidePanelTab == "diff" then
-            buildSplitDiffRightPane st.theme rightW splitH runs.diffDelRuns runs.diffAddRuns st.diffMode st.diffRef true st.diffRefreshCount
+            buildSplitDiffRightPane st.theme rightW splitH runs.diffDelRuns runs.diffAddRuns st.diffMode st.diffRef true st.diffRefreshCount st.diffSelectedFile
           else
             let title := if st.sidePanelTab == "files" then "Files" else "Side question"
             let bodyMsg := if st.sidePanelTab == "files" then "Workspace files for this mission" else "Ask a side question without interrupting the main turn"
@@ -1432,6 +1455,7 @@ def buildDesktopScreen (st : DesktopState) (availW availH : SubPx)
         let composerNode := buildComposerWidget theme mainW composerH
           { st.composer with isRunning := st.composer.isRunning && !retrySend } []
           (if st.liveData then some (liveComposerControls st (min (pxToSub 748) (mainW - pxToSub 68))) else none)
+          none none (attachActive := st.attachCount > 0) (underLabels := fixtureUnderLabels)
         WidgetNode.box
           (BoxStyle.col 0 |>.withFixedSize mainW availH |>.withBg mainFill)
           [headerNode, bodyNode, composerNode]
@@ -1441,7 +1465,17 @@ def buildDesktopScreen (st : DesktopState) (availW availH : SubPx)
       let rightW : SubPx := mainW - leftW
       let leftBodyH := splitH - composerH
       let leftTranscript := buildMissionTranscriptBody st leftW leftBodyH runs hoverRow
-      let leftComposer := buildComposerWidget theme leftW composerH st.composer
+      let ds := st.draftSettings
+      let fixtureUnderLabels : Option (String × String × String × String × String) :=
+        some (
+          if ds.machine.isEmpty then "selected machine" else ds.machine,
+          if ds.backend.isEmpty then "claudecode" else ds.backend,
+          if ds.model.isEmpty then "Default" else ds.model,
+          if ds.effort.isEmpty then "Default" else ds.effort,
+          if ds.permission == "supervised" || ds.permission.isEmpty then "Supervised" else ds.permission
+        )
+      let leftComposer := buildComposerWidget theme leftW composerH st.composer [] none none none
+        (attachActive := st.attachCount > 0) (underLabels := fixtureUnderLabels)
       let leftPane : WidgetNode :=
         WidgetNode.rrect
           (BoxStyle.col 0 |>.withFixedSize leftW splitH)
@@ -1450,10 +1484,8 @@ def buildDesktopScreen (st : DesktopState) (availW availH : SubPx)
           { widths := Edges.trbl 0 theme.borderWidth 0 0, color := pal.borderSubtle }
           [leftTranscript, leftComposer]
       let rightPane :=
-        if st.diffMode == "split" && st.diffRef == "Working tree vs HEAD" && st.diffRefreshCount == 0 then
-          buildSplitDiffRightPane st.theme rightW splitH runs.diffDelRuns runs.diffAddRuns
-        else
-          buildSplitDiffRightPane st.theme rightW splitH runs.diffDelRuns runs.diffAddRuns st.diffMode st.diffRef false st.diffRefreshCount
+        buildSplitDiffRightPane st.theme rightW splitH runs.diffDelRuns runs.diffAddRuns
+          st.diffMode st.diffRef false st.diffRefreshCount st.diffSelectedFile
       let splitBody : WidgetNode :=
         WidgetNode.box
           (BoxStyle.row 0 |>.withFixedSize mainW splitH |>.withBg st.theme.palette.canvas)
@@ -1536,7 +1568,7 @@ def buildDesktopScreen (st : DesktopState) (availW availH : SubPx)
              | .finishing => voiceButton voiceButtonId "close"
              else none
            WidgetNode.box (BoxStyle.col 0 |>.withJustify .center |>.withAlign .center |>.withFixedSize mainW bodyH)
-             [buildComposerWidget theme mainW composerH { st.composer with placeholder := "Describe a task, / for commands, @ for context" } [] (some (liveComposerControls st (width - pxToSub (if mic.isNone then 90 else if st.voicePhase == .idle || st.voicePhase == .choosing then 158 else if st.voicePhase == .recording then 150 else 122)) true)) (some header) mic]
+             [buildComposerWidget theme mainW composerH { st.composer with placeholder := "Describe a task, / for commands, @ for context" } [] (some (liveComposerControls st (width - pxToSub (if mic.isNone then 90 else if st.voicePhase == .idle || st.voicePhase == .choosing then 158 else if st.voicePhase == .recording then 150 else 122)) true)) (some header) mic (attachActive := st.attachCount > 0)]
            else if st.initialRosterPending then
              WidgetNode.box (BoxStyle.col 0 |>.withJustify .center |>.withAlign .center |>.withFixedSize mainW bodyH)
                [WidgetNode.rrect (BoxStyle.row 0 |>.withFixedSize (min (pxToSub 748) (mainW - pxToSub 68)) (pxToSub 42))

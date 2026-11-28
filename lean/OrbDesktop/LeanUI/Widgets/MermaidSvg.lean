@@ -244,7 +244,7 @@ structure PositionedDiagramNode where
       cluster := idx
       xAdvance := charAdv
     }
-  { glyphs := glyphs, style := style, allowBreakAfter := false, hardBreakAfter := false }
+  { glyphs := glyphs, style := style, allowBreakAfter := false, hardBreakAfter := false, isSynthetic := true }
 
 /-- Compute the Sugiyama-style layered `(xSub, ySub, wSub, hSub)` coordinates for every `DiagramNode`. -/
 def layoutDiagramNodes (spec : DiagramSpec) : List PositionedDiagramNode :=
