@@ -2943,4 +2943,553 @@ def r27_stream_cut_truth_fixtures_and_breaker : IO Unit := do
     closeCoreStore r27Store
     discard <| (IO.FS.removeDirAll r27Root).toBaseIO
 
+/-- R7: A 429 from a chain with one cooling target deterministically surfaces as a mission
+    `error` within a minute across `ProviderHealthTracker` + `proxyCooldownsRef` merging,
+    on-demand store-loaded chains, `sandboxed-sh/` / default-Claude model ownership,
+    JSON-body retry-after fields, and live loopback HTTP replay — without regressing
+    multi-target failover or R33 transient rate-limit preservation. -/
+def r7_single_cooling_target_429_mission_error : IO Unit := do
+  -- 1. Pure retry-after parsing (integer, decimal ceiling, UInt64 saturation, Retry-After: 0 body fallback, header clamping)
+  check (parseRetryAfterValue? "120" == some 120) "r7: integer Retry-After parses cleanly"
+  check (parseRetryAfterValue? "120.5" == some 121) "r7: fractional Retry-After rounds up"
+  check (parseRetryAfterValue? "60.0" == some 60) "r7: exact .0 decimal Retry-After preserves value"
+  check (parseRetryAfterValue? "18446744073709551616" == some 0xFFFFFFFFFFFFFFFF)
+    "r7: 2^64 Retry-After saturates to UInt64 max instead of wrapping to 0"
+  check (parseRetryAfterValue? "18446744073709551626.5" == some 0xFFFFFFFFFFFFFFFF)
+    "r7: >2^64 fractional Retry-After saturates to UInt64 max instead of wrapping"
+  check (parseRetryAfterValue? "" == none && parseRetryAfterValue? "not-a-number" == none)
+    "r7: invalid Retry-After values return none"
+  check (retryAfterBodySecs? "{\"error\":{\"type\":\"usage_limit_reached\",\"resets_in_seconds\":900}}" == some 900)
+    "r7: JSON error.resets_in_seconds parses cleanly"
+  check (retryAfterBodySecs? "{\"retry_after_secs\":240}" == some 240)
+    "r7: JSON top-level retry_after_secs parses cleanly"
+  check (announcedRetryAfterSecs? #[("Retry-After", "180")] "{\"resets_in_seconds\":900}" == some 180)
+    "r7: positive HTTP Retry-After header takes precedence over JSON body"
+  check (announcedRetryAfterSecs? #[("Retry-After", "0")] "{\"error\":{\"resets_in_seconds\":900}}" == some 900)
+    "r7: Retry-After: 0 falls back to JSON body resets_in_seconds"
+  check (announcedRetryAfterSecs? #[("Retry-After", "0.0")] "{\"retry_after_secs\":240}" == some 240)
+    "r7: Retry-After: 0.0 falls back to JSON body retry_after_secs"
+  let (_, sanDecHdrs) := sanitizeUpstreamHeaders #[("Retry-After", "101648.5")]
+  check (sanDecHdrs.any (fun h => h.1.toLower == "retry-after" && h.2 == "3600"))
+    "r7: fractional Retry-After above maxCooldownRetryAfterSecs clamps to 3600"
+  let (_, sanOverflowHdrs) := sanitizeUpstreamHeaders #[("Retry-After", "18446744073709551616")]
+  check (sanOverflowHdrs.any (fun h => h.1.toLower == "retry-after" && h.2 == "3600"))
+    "r7: 2^64 Retry-After saturates and clamps to 3600"
+  let (_, sanZeroHdrs) := sanitizeUpstreamHeaders #[("Retry-After", "0")]
+  check (sanZeroHdrs.any (fun h => h.1.toLower == "retry-after" && h.2 == "0"))
+    "r7: Retry-After: 0 is preserved as 0 rather than rewritten to 1"
+
+  let r7Root := s!"/tmp/orb-r7-cooling-{← newUuidV4}"
+  let .ok r7Store ← openCoreStore r7Root
+    | throw (IO.userError "r7: openCoreStore failed")
+  try
+    let nowT : UInt64 := 1700005000
+    let nowIso := formatEpochIso8601Utc nowT
+    let r7Managed ← IO.mkRef ({} : ManagedFleetState)
+    let r7Chains ← IO.mkRef (#[] : Array RoutingChain)
+    let r7Cooldowns ← IO.mkRef (#[] : Array AccountCooldown)
+    let r7Seq ← IO.mkRef (1 : UInt64)
+    let r7Htr ← newProviderHealthTracker 1 2
+    let r7Cfg : CoreConfig := {
+      workingDir := r7Root
+      dashboardPassword := "r7-cooling-test-password"
+      proxySecret := "r7-cooling-proxy-secret-0123456789"
+      jwtSecret := "r7-cooling-jwt-secret-0123456789"
+    }
+    let baseApp : CoreAppState := {
+      cfg := r7Cfg, store := r7Store, searchIdx? := none,
+      managedRef := r7Managed, chainsRef := r7Chains,
+      proxyCooldownsRef := r7Cooldowns, seqRef := r7Seq,
+      pacingTracker? := some r7Htr.pacing, healthTracker? := some r7Htr
+    }
+    let seedMissionAt := fun (mid backend modelOverride : String) (tsEpoch : UInt64) => do
+      let tsIso := formatEpochIso8601Utc tsEpoch
+      let .ok _ ← execParamQuery r7Store.missionsDb
+        ("INSERT INTO missions(id,title,status,backend,model_override,working_directory,owner_user_id,run_generation,state_revision,created_at,updated_at) " ++
+         "VALUES(?1,?2,'active',?3,?4,?5,'',1,1,?6,?6);")
+        #[mid, s!"R7 {mid}", backend, modelOverride, r7Root, tsIso]
+        | throw (IO.userError s!"r7: seed mission {mid} failed")
+      let .ok _ ← execParamQuery r7Store.missionsDb
+        ("INSERT INTO mission_runs(id,mission_id,generation,execution_state,terminal_reason,remote_job_id,updated_at) " ++
+         "VALUES(?1,?2,1,'running','','',?3);")
+        #[s!"run-{mid}-1", mid, tsIso]
+        | throw (IO.userError s!"r7: seed mission_run {mid} failed")
+      let .ok mpt ← mintMissionProxyToken r7Store mid "" (tsEpoch + 3600)
+        | throw (IO.userError s!"r7: mint proxy token {mid} failed")
+      return mpt
+    let seedMission := fun (mid backend modelOverride : String) =>
+      seedMissionAt mid backend modelOverride nowT
+    let readMission := fun (mid : String) => do
+      let .ok mRows ← execParamQuery r7Store.missionsDb
+        "SELECT status, COALESCE(terminal_reason,''), COALESCE(run_generation,1) FROM missions WHERE id=?1;" #[mid]
+        | throw (IO.userError "r7: mission state query failed")
+      let st := (mRows[1]?.bind (·[0]?)).getD ""
+      let tr := (mRows[1]?.bind (·[1]?)).getD ""
+      let gen := ((mRows[1]?.bind (·[2]?)).bind String.toNat?).getD 0
+      let .ok rRows ← execParamQuery r7Store.missionsDb
+        "SELECT COUNT(*) FROM mission_runs WHERE mission_id=?1 AND execution_state NOT IN ('terminal','completed','failed','aborted');" #[mid]
+        | throw (IO.userError "r7: live runs query failed")
+      let liveRuns := ((rRows[1]?.bind (·[0]?)).bind String.toNat?).getD 0
+      let .ok eRows ← execParamQuery r7Store.missionsDb
+        "SELECT payload FROM mission_events WHERE mission_id=?1 AND event_type='error' ORDER BY seq ASC;" #[mid]
+        | throw (IO.userError "r7: error events query failed")
+      let errs := (eRows.drop 1).map (fun r => (r[0]?).getD "")
+      return (st, tr, gen, liveRuns, errs)
+    let postProxy := fun (app : CoreAppState) (path bearer model : String) => do
+      let body := renderCompact (.obj #[("model", .str model), ("messages", .arr #[])])
+      let raw := s!"POST {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {bearer}\r\nContent-Length: {body.utf8ByteSize}\r\n\r\n{body}"
+      let .ok req := parseRequest raw.toUTF8 none
+        | throw (IO.userError "r7: proxy request parse failed")
+      let .ok resp ← dispatchCoreRequest app req nowT
+        | throw (IO.userError "r7: unexpected websocket upgrade")
+      return resp
+
+    -- 2. Stale `proxyCooldownsRef` `.rateLimit` (15s) must NOT shadow `ProviderHealthTracker`'s
+    --    `.usageLimit` (300s) for the same single cooling account.
+    let shadowAcct := "acct-r7-shadow-secret@example.test"
+    let shadowChain : RoutingChain := {
+      id := "r7-shadow", name := "R7 Shadow",
+      targets := #[{
+        accountId := shadowAcct, provider := "openai",
+        baseUrl := "http://127.0.0.1:1", apiKey := "sk-r7-shadow", modelId := "gpt-6-astra"
+      }]
+    }
+    r7Chains.set #[shadowChain]
+    let initSlice : Orb.HarnessCloud.ProviderAttemptSliceState := {
+      firstByteCommitted := 0, pinnedAccountId := 0, attemptsUsed := 0,
+      transientStreak := 0, routeGeneration := 1, cooldownUntilEpoch := 0
+    }
+    discard <| recordHealthAttempt r7Htr initSlice shadowAcct 429 #[]
+      "{\"error\":{\"type\":\"insufficient_quota\",\"message\":\"quota exceeded\"}}" false 0 1 nowT
+    r7Cooldowns.set #[{ accountId := shadowAcct, untilEpoch := nowT + 15, reason := .rateLimit, label := "" }]
+    let tokShadow ← seedMission "m-r7-shadow" "opencode" "r7-shadow"
+    let rShadow ← postProxy baseApp "/v1/chat/completions" tokShadow "r7-shadow"
+    let (stS, trS, genS, liveS, errsS) ← readMission "m-r7-shadow"
+    let errTextS := errsS[0]?.getD ""
+    let shadowBody := (String.fromUTF8? rShadow.body).getD ""
+    check (rShadow.status == 429 && (shadowBody.splitOn "usage_limit_reached").length > 1 &&
+           stS == "interrupted" && trS == "remote_quota" && genS == 2 && liveS == 0 && errsS.size == 1 &&
+           (errTextS.splitOn "r7-shadow").length > 1 &&
+           (errTextS.splitOn "acct-r7-shadow").length == 1)
+      s!"r7 shadow: expected 429 usage_limit_reached + interrupted/remote_quota with 1 error event and zero account leak; http={rShadow.status} st={stS} tr={trS} gen={genS} live={liveS} errs={errsS.size} text={errTextS}"
+
+    -- 3. `disabledByProvider` account in `ProviderHealthTracker` must NOT be resurrected into
+    --    `eligible` when `proxyCooldownsRef` holds a cooldown for a sibling target.
+    let bannedAcct := "acct-r7-banned"
+    let coolSibling := "acct-r7-cool-sibling"
+    discard <| recordHealthAttempt r7Htr initSlice bannedAcct 403 #[]
+      "{\"error\":{\"status\":\"PERMISSION_DENIED\",\"message\":\"TOS_VIOLATION\"}}" false 0 1 nowT
+    r7Cooldowns.set #[{ accountId := coolSibling, untilEpoch := nowT + 600, reason := .usageLimit, label := "" }]
+    let disabledMixChain : RoutingChain := {
+      id := "r7-disabled-mix", name := "R7 Disabled Mix",
+      targets := #[
+        { accountId := bannedAcct, provider := "google", baseUrl := "http://127.0.0.1:1", apiKey := "k-b", modelId := "gemini-4-neon" },
+        { accountId := coolSibling, provider := "google", baseUrl := "http://127.0.0.1:1", apiKey := "k-c", modelId := "gemini-4-neon" }
+      ]
+    }
+    r7Chains.modify (·.push disabledMixChain)
+    let tokDis ← seedMission "m-r7-disabled-mix" "opencode" "r7-disabled-mix"
+    let rDis ← postProxy baseApp "/v1/chat/completions" tokDis "r7-disabled-mix"
+    let (stD, trD, genD, liveD, errsD) ← readMission "m-r7-disabled-mix"
+    check (rDis.status == 429 && stD == "interrupted" && trD == "remote_quota" && genD == 2 && liveD == 0 && errsD.size == 1)
+      s!"r7 disabled-mix: disabled account must not be resurrected; http={rDis.status} st={stD} tr={trD} gen={genD} live={liveD} errs={errsD.size}"
+
+    -- 4. On-demand store-loaded chain (absent from initial `chainsRef`) still matches
+    --    `isMissionOwnedChain` and stops the turn on 429 quota exhaustion.
+    let storeModelsJson := "[{\"provider_id\":\"openai\",\"account_id\":\"acct-r7-store-only\",\"model_id\":\"r7-store-model\",\"base_url\":\"http://127.0.0.1:1\",\"api_key\":\"k-store\"}]"
+    let .ok _ ← execParamQuery r7Store.missionsDb
+      "INSERT INTO model_routing_chains(id,name,models_json,updated_at,created_at,is_default,strip_thinking) VALUES('r7-store-only','R7 Store Only',?1,?2,?2,0,0);"
+      #[storeModelsJson, nowIso]
+      | throw (IO.userError "r7: insert store-only chain failed")
+    let storeMock : ProviderTarget → IO (Except String HttpsResponse) := fun tgt => do
+      if tgt.modelId == "r7-store-model" then
+        return .ok {
+          status := 429
+          headers := #[("Content-Type", "application/json")]
+          body := "{\"error\":{\"type\":\"insufficient_quota\",\"message\":\"quota exhausted\"}}".toUTF8
+        }
+      else if tgt.modelId == "r7-body-mc" then
+        return .ok {
+          status := 429
+          headers := #[("Content-Type", "application/json")]
+          body := "{\"error\":{\"type\":\"model_cooldown\",\"message\":\"All credentials for model r7-body-mc are cooling down\",\"resets_in_seconds\":900}}".toUTF8
+        }
+      else if tgt.modelId == "r7-body-mc-zero-ra" then
+        return .ok {
+          status := 429
+          headers := #[("Content-Type", "application/json"), ("Retry-After", "0")]
+          body := "{\"error\":{\"type\":\"model_cooldown\",\"message\":\"All credentials for model r7-body-mc-zero-ra are cooling down\",\"resets_in_seconds\":900}}".toUTF8
+        }
+      else if tgt.modelId == "r7-dec-quota" then
+        return .ok {
+          status := 429
+          headers := #[("Content-Type", "application/json"), ("Retry-After", "120.5")]
+          body := "{\"error\":{\"type\":\"usage_limit_reached\",\"message\":\"usage limit reached\"}}".toUTF8
+        }
+      else if tgt.modelId == "r7-transient-429" then
+        return .ok {
+          status := 429
+          headers := #[("Content-Type", "application/json"), ("Retry-After", "300")]
+          body := "{\"error\":{\"type\":\"rate_limit_exceeded\",\"message\":\"slow down\",\"retry_after_secs\":300}}".toUTF8
+        }
+      else
+        return .ok {
+          status := 200
+          headers := #[("Content-Type", "application/json")]
+          body := "{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}".toUTF8
+        }
+    let mockApp := { baseApp with proxyMockTransport? := some storeMock }
+    let tokStore ← seedMission "m-r7-store-only" "opencode" "r7-store-only"
+    let rStore ← postProxy mockApp "/v1/chat/completions" tokStore "r7-store-only"
+    let (stSt, trSt, genSt, liveSt, errsSt) ← readMission "m-r7-store-only"
+    check (rStore.status == 429 && stSt == "interrupted" && trSt == "remote_quota" && genSt == 2 && liveSt == 0 && errsSt.size == 1)
+      s!"r7 store-only: on-demand store chain 429 must stop mission; http={rStore.status} st={stSt} tr={trSt} gen={genSt} live={liveSt} errs={errsSt.size}"
+
+    -- 5. `isMissionOwnedChain`: `sandboxed-sh/` prefix (opencode) and empty `model_override` (`claudecode`),
+    --    excluding auxiliary Haiku side-calls from stopping a healthy default Claude turn.
+    let slashAcct := "acct-r7-slash"
+    let claudeAcct := "acct-r7-claude"
+    let claudeHaikuAcct := "acct-r7-claude-haiku"
+    r7Chains.modify fun cs =>
+      ((cs.push {
+        id := "team/r7-slash", name := "Team Slash",
+        targets := #[{ accountId := slashAcct, provider := "openai", baseUrl := "http://127.0.0.1:1", apiKey := "k-sl", modelId := "gpt-6-astra" }]
+      }).push {
+        id := "r7-claude-holder", name := "Claude Holder",
+        targets := #[{ accountId := claudeAcct, provider := "anthropic", baseUrl := "http://127.0.0.1:1", apiKey := "k-cl", modelId := "claude-sonnet-4-6" }]
+      }).push {
+        id := "r7-claude-haiku-holder", name := "Claude Haiku Holder",
+        targets := #[{ accountId := claudeHaikuAcct, provider := "anthropic", baseUrl := "http://127.0.0.1:1", apiKey := "k-hk", modelId := "claude-haiku-4-5-20251001" }]
+      }
+    r7Cooldowns.set #[
+      { accountId := slashAcct, untilEpoch := nowT + 900, reason := .usageLimit, label := "" },
+      { accountId := claudeAcct, untilEpoch := nowT + 1800, reason := .usageLimit, label := "" },
+      { accountId := claudeHaikuAcct, untilEpoch := nowT + 1800, reason := .usageLimit, label := "" }
+    ]
+    let tokSlash ← seedMission "m-r7-slash" "opencode" "sandboxed-sh/team/r7-slash"
+    let rSlash ← postProxy baseApp "/v1/chat/completions" tokSlash "team/r7-slash"
+    let (stSl, trSl, genSl, liveSl, errsSl) ← readMission "m-r7-slash"
+    check (rSlash.status == 429 && stSl == "interrupted" && trSl == "remote_quota" && genSl == 2 && liveSl == 0 && errsSl.size == 1)
+      s!"r7 sandboxed-sh prefix: opencode mission with sandboxed-sh/ prefix must stop; http={rSlash.status} st={stSl} tr={trSl} errs={errsSl.size}"
+
+    let tokClaudeHaiku ← seedMission "m-r7-claude-haiku-neg" "claudecode" ""
+    let rClaudeHaiku ← postProxy baseApp "/v1/messages" tokClaudeHaiku "claude-haiku-4-5-20251001"
+    let (stHk, trHk, genHk, liveHk, errsHk) ← readMission "m-r7-claude-haiku-neg"
+    check (rClaudeHaiku.status == 429 && stHk == "active" && trHk == "" && genHk == 1 && liveHk == 1 && errsHk.isEmpty)
+      s!"r7 claudecode auxiliary haiku negative control: cooling Haiku side-call must NOT stop default claudecode mission; http={rClaudeHaiku.status} st={stHk} tr={trHk} errs={errsHk.size}"
+
+    let tokClaude ← seedMission "m-r7-claude-default" "claudecode" ""
+    let rClaude ← postProxy baseApp "/v1/messages" tokClaude "claude-sonnet-4-6"
+    let (stCl, trCl, genCl, liveCl, errsCl) ← readMission "m-r7-claude-default"
+    check (rClaude.status == 429 && stCl == "interrupted" && trCl == "remote_quota" && genCl == 2 && liveCl == 0 && errsCl.size == 1)
+      s!"r7 claudecode default: empty model_override claudecode mission hitting cooling Anthropic Sonnet target must stop; http={rClaude.status} st={stCl} tr={trCl} errs={errsCl.size}"
+
+    -- 5b. 17-target chain failover: when targets 0..15 are disabled/cooling across both
+    --     `ProviderHealthTracker` and `proxyCooldownsRef`, target 16 remains eligible and serves 200.
+    let bigRouteGen ← currentRouteGeneration r7Htr
+    let bigSlice := { initSlice with routeGeneration := bigRouteGen }
+    let mut bigTargets : Array ProviderTarget := #[]
+    let mut bigExtraCooldowns : Array AccountCooldown := #[]
+    for idx in [0:17] do
+      let aid := s!"acct-r7-big-{idx}"
+      bigTargets := bigTargets.push {
+        accountId := aid, provider := "openai", baseUrl := "http://127.0.0.1:1",
+        apiKey := s!"k-big-{idx}", modelId := s!"r7-big-model-{idx}"
+      }
+      if idx == 0 then
+        discard <| recordHealthAttempt r7Htr bigSlice aid 403 #[]
+          "{\"error\":{\"status\":\"PERMISSION_DENIED\",\"message\":\"TOS_VIOLATION\"}}" false 0 bigRouteGen nowT
+      else if idx < 9 then
+        discard <| recordHealthAttempt r7Htr bigSlice aid 429 #[]
+          "{\"error\":{\"type\":\"insufficient_quota\",\"message\":\"quota exceeded\"}}" false 0 bigRouteGen nowT
+      else if idx < 16 then
+        bigExtraCooldowns := bigExtraCooldowns.push {
+          accountId := aid, untilEpoch := nowT + 900, reason := .usageLimit, label := ""
+        }
+    let bigChain : RoutingChain := { id := "r7-big-17", name := "R7 Big 17", targets := bigTargets }
+    r7Chains.modify (·.push bigChain)
+    r7Cooldowns.set bigExtraCooldowns
+    let bigSelectedRef ← IO.mkRef ""
+    let bigMock : ProviderTarget → IO (Except String HttpsResponse) := fun tgt => do
+      bigSelectedRef.set tgt.accountId
+      return .ok {
+        status := 200
+        headers := #[("Content-Type", "application/json")]
+        body := "{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"t16 ok\"},\"finish_reason\":\"stop\"}]}".toUTF8
+      }
+    let tokBig ← seedMission "m-r7-big-17" "opencode" "r7-big-17"
+    let rBig ← postProxy { baseApp with proxyMockTransport? := some bigMock } "/v1/chat/completions" tokBig "r7-big-17"
+    let (stBig, trBig, genBig, liveBig, errsBig) ← readMission "m-r7-big-17"
+    check (rBig.status == 200 && (← bigSelectedRef.get) == "acct-r7-big-16" &&
+           stBig == "active" && trBig == "" && genBig == 1 && liveBig == 1 && errsBig.isEmpty)
+      s!"r7 17-target failover: healthy target 16 must survive disabled+cooling 0..15; http={rBig.status} sel={← bigSelectedRef.get} st={stBig} errs={errsBig.size}"
+
+    -- 6. JSON body `resets_in_seconds` on shared `cliproxyapi:openai` 429 `model_cooldown`
+    --    (without `Retry-After` header AND with `Retry-After: 0`) + decimal `Retry-After: 120.5` + R33 transient preservation.
+    r7Cooldowns.set #[]
+    r7Chains.modify fun cs =>
+      ((((cs.push {
+        id := "r7-body-mc", name := "R7 Body MC",
+        targets := #[{ accountId := "cliproxyapi:openai", provider := "openai", baseUrl := "http://127.0.0.1:1", apiKey := "k-mc", modelId := "r7-body-mc" }]
+      }).push {
+        id := "r7-body-mc-zero-ra", name := "R7 Body MC Zero RA",
+        targets := #[{ accountId := "cliproxyapi:openai", provider := "openai", baseUrl := "http://127.0.0.1:1", apiKey := "k-mc", modelId := "r7-body-mc-zero-ra" }]
+      }).push {
+        id := "r7-body-sib", name := "R7 Body Sibling",
+        targets := #[{ accountId := "cliproxyapi:openai", provider := "openai", baseUrl := "http://127.0.0.1:1", apiKey := "k-mc", modelId := "gpt-5.4" }]
+      }).push {
+        id := "r7-dec-quota", name := "R7 Dec Quota",
+        targets := #[{ accountId := "acct-r7-dec", provider := "openai", baseUrl := "http://127.0.0.1:1", apiKey := "k-dec", modelId := "r7-dec-quota" }]
+      }).push {
+        id := "r7-transient-429", name := "R7 Transient 429",
+        targets := #[{ accountId := "acct-r7-transient", provider := "openai", baseUrl := "http://127.0.0.1:1", apiKey := "k-tr", modelId := "r7-transient-429" }]
+      }
+    let tokBodyMc ← seedMission "m-r7-body-mc" "opencode" "r7-body-mc"
+    let rBodyMc ← postProxy mockApp "/v1/chat/completions" tokBodyMc "r7-body-mc"
+    let (stBm, trBm, genBm, liveBm, errsBm) ← readMission "m-r7-body-mc"
+    check (rBodyMc.status == 429 && stBm == "interrupted" && trBm == "remote_quota" && genBm == 2 && liveBm == 0 && errsBm.size == 1 &&
+           ((errsBm[0]?.getD "").splitOn "900s").length > 1)
+      s!"r7 body-mc: shared cliproxyapi 429 model_cooldown with JSON resets_in_seconds=900 must stop mission; http={rBodyMc.status} st={stBm} tr={trBm} errs={errsBm.size} text={errsBm[0]?.getD ""}"
+    let tokBodyMcZero ← seedMission "m-r7-body-mc-zero" "opencode" "r7-body-mc-zero-ra"
+    let rBodyMcZero ← postProxy mockApp "/v1/chat/completions" tokBodyMcZero "r7-body-mc-zero-ra"
+    let (stBmz, trBmz, genBmz, liveBmz, errsBmz) ← readMission "m-r7-body-mc-zero"
+    check (rBodyMcZero.status == 429 && stBmz == "interrupted" && trBmz == "remote_quota" && genBmz == 2 && liveBmz == 0 && errsBmz.size == 1 &&
+           ((errsBmz[0]?.getD "").splitOn "900s").length > 1)
+      s!"r7 body-mc zero-ra: Retry-After: 0 must fall back to JSON resets_in_seconds=900 and stop mission; http={rBodyMcZero.status} st={stBmz} tr={trBmz} errs={errsBmz.size} text={errsBmz[0]?.getD ""}"
+    let tokSib ← seedMission "m-r7-body-sib" "opencode" "r7-body-sib"
+    let rSib ← postProxy mockApp "/v1/chat/completions" tokSib "r7-body-sib"
+    check (rSib.status == 200) s!"r7 body-mc sibling: gpt-5.4 on cliproxyapi:openai must stay eligible (got {rSib.status})"
+
+    let tokDec ← seedMission "m-r7-dec-quota" "opencode" "r7-dec-quota"
+    let rDec ← postProxy mockApp "/v1/chat/completions" tokDec "r7-dec-quota"
+    let (stDec, trDec, genDec, liveDec, errsDec) ← readMission "m-r7-dec-quota"
+    let decRa := ((rDec.extraHdrs.find? (fun h => h.1.toLower == "retry-after")).map (·.2)).getD ""
+    let decRec ← lookupAccountHealthRecord r7Htr "acct-r7-dec"
+    check (rDec.status == 429 && decRa == "121" &&
+           (match decRec.cooldown? with | some c => c.untilEpoch == nowT + 121 && c.reason == .usageLimit | none => false) &&
+           stDec == "interrupted" && trDec == "remote_quota" && genDec == 2 && liveDec == 0 && errsDec.size == 1)
+      s!"r7 dec-quota: fractional Retry-After 120.5 must ceil to 121 and stop mission; http={rDec.status} ra={decRa} st={stDec} tr={trDec} errs={errsDec.size}"
+
+    let tokTr ← seedMission "m-r7-transient" "opencode" "r7-transient-429"
+    let rTr ← postProxy mockApp "/v1/chat/completions" tokTr "r7-transient-429"
+    let (stTr, trTr, genTr, liveTr, errsTr) ← readMission "m-r7-transient"
+    let trRec ← lookupAccountHealthRecord r7Htr "acct-r7-transient"
+    check (rTr.status == 429 && stTr == "active" && trTr == "" && genTr == 1 && liveTr == 1 && errsTr.isEmpty &&
+           (match trRec.cooldown? with | some c => c.reason == .rateLimit && c.untilEpoch == nowT + maxTransientCooldownSecs | none => false))
+      s!"r7 transient R33: plain 429 rate_limit_exceeded must cap cooldown to 120s and keep mission active; http={rTr.status} st={stTr} errs={errsTr.size}"
+
+    -- 7. Live loopback TCP replay: single-target chain hitting a real mock HTTP upstream returning
+    --    429 surfaces a mission error in < 5s (well within 1 minute), short-circuits subsequent
+    --    requests without re-hitting upstream, and multi-target failover still succeeds.
+    let .ok (u429Lfd, u429Port) ← tcpListen "127.0.0.1" 0 4
+      | throw (IO.userError "r7 loopback: upstream 429 listen failed")
+    let u429Hits ← IO.mkRef (0 : Nat)
+    let u429Task ← IO.asTask (prio := .dedicated) do
+      if let .ok ufd ← tcpAcceptPoll u429Lfd 5000 then
+        u429Hits.modify (· + 1)
+        discard <| pollReadable ufd 2000
+        discard <| readStreamChunk ufd 65536
+        let body := "{\"error\":{\"type\":\"insufficient_quota\",\"message\":\"quota exceeded\",\"resets_in_seconds\":600}}"
+        let respWire := s!"HTTP/1.1 429 Too Many Requests\r\nContent-Type: application/json\r\nRetry-After: 600\r\nContent-Length: {body.utf8ByteSize}\r\nConnection: close\r\n\r\n{body}"
+        discard <| writeAll ufd respWire.toUTF8 false
+        discard <| closeFd ufd
+      discard <| closeFd u429Lfd
+    let .ok (u200Lfd, u200Port) ← tcpListen "127.0.0.1" 0 4
+      | throw (IO.userError "r7 loopback: upstream 200 listen failed")
+    let u200Task ← IO.asTask (prio := .dedicated) do
+      if let .ok ufd ← tcpAcceptPoll u200Lfd 5000 then
+        discard <| pollReadable ufd 2000
+        discard <| readStreamChunk ufd 65536
+        let body := "{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"failover ok\"},\"finish_reason\":\"stop\"}]}"
+        let respWire := s!"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {body.utf8ByteSize}\r\nConnection: close\r\n\r\n{body}"
+        discard <| writeAll ufd respWire.toUTF8 false
+        discard <| closeFd ufd
+      discard <| closeFd u200Lfd
+
+    let liveHtr ← newProviderHealthTracker 1 2
+    let liveCooldowns ← IO.mkRef (#[] : Array AccountCooldown)
+    let liveChains ← IO.mkRef #[
+      ({
+        id := "r7-live-single", name := "R7 Live Single",
+        targets := #[{
+          accountId := "acct-r7-live-429", provider := "openai",
+          baseUrl := s!"http://127.0.0.1:{u429Port}", apiKey := "k-live-429", modelId := "r7-live-model"
+        }]
+      } : RoutingChain),
+      ({
+        id := "r7-live-failover", name := "R7 Live Failover",
+        targets := #[
+          { accountId := "acct-r7-live-429", provider := "openai",
+            baseUrl := s!"http://127.0.0.1:{u429Port}", apiKey := "k-live-429", modelId := "r7-live-model" },
+          { accountId := "acct-r7-live-200", provider := "openai",
+            baseUrl := s!"http://127.0.0.1:{u200Port}", apiKey := "k-live-200", modelId := "r7-live-ok" }
+        ]
+      } : RoutingChain)
+    ]
+    let liveApp : CoreAppState := {
+      cfg := r7Cfg, store := r7Store, searchIdx? := none,
+      managedRef := r7Managed, chainsRef := liveChains,
+      proxyCooldownsRef := liveCooldowns, seqRef := r7Seq,
+      pacingTracker? := some liveHtr.pacing, healthTracker? := some liveHtr
+    }
+    let liveNow ← coreEpochSec
+    let tokLive1 ← seedMissionAt "m-r7-live-1" "opencode" "r7-live-single" liveNow
+    let tokLive2 ← seedMissionAt "m-r7-live-2" "opencode" "r7-live-single" liveNow
+    let tokLiveFo ← seedMissionAt "m-r7-live-fo" "opencode" "r7-live-failover" liveNow
+    let sendLoopback := fun (bearer model : String) => do
+      let .ok (cLfd, cPort) ← tcpListen "127.0.0.1" 0 4
+        | throw (IO.userError "r7 loopback: client listen failed")
+      let srv ← IO.asTask (prio := .dedicated) do
+        if let .ok sfd ← tcpAcceptPoll cLfd 5000 then
+          handleClientConn liveApp sfd false
+        discard <| closeFd cLfd
+      let reqBody := renderCompact (.obj #[("model", .str model), ("messages", .arr #[])])
+      let reqWire := s!"POST /v1/chat/completions HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {bearer}\r\nContent-Length: {reqBody.utf8ByteSize}\r\nConnection: close\r\n\r\n{reqBody}"
+      let mut respBuf := ByteArray.empty
+      if let .ok cfd ← tcpConnect "127.0.0.1" cPort then
+        discard <| writeAll cfd reqWire.toUTF8 false
+        let mut done := false
+        while !done do
+          match ← pollReadable cfd 5000 with
+          | .ok () =>
+            let part ← readStreamChunk cfd 65536
+            if part.isEmpty then done := true else respBuf := respBuf ++ part
+          | .error _ => done := true
+        discard <| closeFd cfd
+      let _ := srv.get
+      return (String.fromUTF8? respBuf).getD ""
+
+    let tStart ← IO.monoMsNow
+    let wire1 ← sendLoopback tokLive1 "r7-live-single"
+    let elapsed1 := (← IO.monoMsNow) - tStart
+    let (stL1, trL1, genL1, liveL1, errsL1) ← readMission "m-r7-live-1"
+    check ((wire1.splitOn "HTTP/1.1 429").length > 1 && elapsed1 < 5000 &&
+           stL1 == "interrupted" && trL1 == "remote_quota" && genL1 == 2 && liveL1 == 0 && errsL1.size == 1 &&
+           ((errsL1[0]?.getD "").splitOn "acct-r7-live-429").length == 1)
+      s!"r7 live 1: first 429 must surface mission error quickly (<5s); elapsed={elapsed1}ms st={stL1} tr={trL1} errs={errsL1.size} wire={(wire1.take 120).toString}"
+
+    -- Second mission hitting the now-cooling single target gets immediate 429 + mission error
+    -- without re-hitting the upstream TCP server (`u429Hits == 1`).
+    let tStart2 ← IO.monoMsNow
+    let wire2 ← sendLoopback tokLive2 "r7-live-single"
+    let elapsed2 := (← IO.monoMsNow) - tStart2
+    let (stL2, trL2, genL2, liveL2, errsL2) ← readMission "m-r7-live-2"
+    check ((wire2.splitOn "HTTP/1.1 429").length > 1 && (wire2.splitOn "usage_limit_reached").length > 1 &&
+           elapsed2 < 5000 && stL2 == "interrupted" && trL2 == "remote_quota" && genL2 == 2 && liveL2 == 0 && errsL2.size == 1)
+      s!"r7 live 2: pre-cooled single target must immediately surface mission error; elapsed={elapsed2}ms st={stL2} tr={trL2} errs={errsL2.size}"
+
+    -- Multi-target failover chain skips the cooling primary and succeeds on healthy backup.
+    let wireFo ← sendLoopback tokLiveFo "r7-live-failover"
+    let (stFo, trFo, genFo, liveFo, errsFo) ← readMission "m-r7-live-fo"
+    let _ := u429Task.get
+    let _ := u200Task.get
+    check ((wireFo.splitOn "HTTP/1.1 200").length > 1 && (wireFo.splitOn "failover ok").length > 1 &&
+           (← u429Hits.get) == 1 && stFo == "active" && trFo == "" && genFo == 1 && liveFo == 1 && errsFo.isEmpty)
+      s!"r7 live failover: cooling primary must fail over to healthy backup with 0 mission errors; hits={← u429Hits.get} st={stFo} errs={errsFo.size} wire={(wireFo.take 120).toString}"
+
+    -- 8. HTTP control API & sync-replay visibility (guards against SQL 3-valued NULL filter
+    --    swallowing `error` events without a `reason` field, and missing `terminal_reason` on
+    --    `GET /api/control/missions/:id`).
+    let .ok r7Admin ← createUserRecord r7Store "r7-admin" "r7-admin-pass-1234" "admin" none none nowIso
+      | throw (IO.userError "r7: createUserRecord failed")
+    discard <| execParamQuery r7Store.missionsDb
+      "UPDATE missions SET owner_user_id=?2 WHERE id=?1;" #["m-r7-live-1", r7Admin.id]
+    let r7Jwt := mintSessionTokenV2 r7Cfg.jwtSecret r7Admin.id "admin" r7Admin.sessionEpoch (liveNow + 3600)
+    let apiApp := { liveApp with bootstrapAdminId := r7Admin.id }
+    let apiGet := fun (path : String) => do
+      let raw := s!"GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {r7Jwt}\r\n\r\n"
+      let .ok req := parseRequest raw.toUTF8 none
+        | throw (IO.userError s!"r7: parse GET {path} failed")
+      let .ok resp ← dispatchCoreRequest apiApp req liveNow
+        | throw (IO.userError s!"r7: unexpected ws on GET {path}")
+      return resp
+    let m1DetailResp ← apiGet "/api/control/missions/m-r7-live-1"
+    let m1DetailBody := (String.fromUTF8? m1DetailResp.body).getD ""
+    let .ok m1DetailJv := OrbBin.Json.parse m1DetailBody
+      | throw (IO.userError s!"r7: parse mission detail failed: {m1DetailBody}")
+    check (m1DetailResp.status == 200 &&
+           m1DetailJv.fieldStr? "status" == some "interrupted" &&
+           m1DetailJv.fieldStr? "terminal_reason" == some "remote_quota")
+      s!"r7 detail API: expected status=interrupted terminal_reason=remote_quota, got http={m1DetailResp.status} body={m1DetailBody}"
+    -- Historical `mission_terminal_evidence` must NOT override `missions.terminal_reason` on an
+    -- interrupted mission, nor leak `terminal_reason` onto reactivated (`active`) or `completed` turns.
+    discard <| execParamQuery r7Store.missionsDb
+      ("INSERT INTO mission_terminal_evidence(mission_id,terminal_reason,summary,artifact_ref,verified,evidence,recorded_at) " ++
+       "VALUES('m-r7-live-1','completed','prior run','',1,'{}',?1) " ++
+       "ON CONFLICT(mission_id) DO UPDATE SET terminal_reason='completed',recorded_at=excluded.recorded_at;") #[nowIso]
+    let m1WithHistResp ← apiGet "/api/control/missions/m-r7-live-1"
+    let m1WithHistBody := (String.fromUTF8? m1WithHistResp.body).getD ""
+    let .ok m1WithHistJv := OrbBin.Json.parse m1WithHistBody
+      | throw (IO.userError s!"r7: parse detail with hist evidence failed: {m1WithHistBody}")
+    check (m1WithHistResp.status == 200 && m1WithHistJv.fieldStr? "terminal_reason" == some "remote_quota")
+      s!"r7 detail API: historical terminal_evidence must not clobber mReason; body={m1WithHistBody}"
+    -- Reactivate via `beginMissionRun` -> `terminal_reason` cleared and omitted in JSON detail.
+    let .ok _ ← OrbCore.QueueCont.beginMissionRun r7Store "m-r7-live-1" "run-reactivate-1" nowIso 1
+      | throw (IO.userError "r7: beginMissionRun reactivation failed")
+    let m1ActiveResp ← apiGet "/api/control/missions/m-r7-live-1"
+    let m1ActiveBody := (String.fromUTF8? m1ActiveResp.body).getD ""
+    let .ok m1ActiveJv := OrbBin.Json.parse m1ActiveBody
+      | throw (IO.userError s!"r7: parse reactivated detail failed: {m1ActiveBody}")
+    check (m1ActiveResp.status == 200 && m1ActiveJv.fieldStr? "status" == some "active" &&
+           (m1ActiveJv.field? "terminal_reason").isNone)
+      s!"r7 detail API: reactivated non-goal mission must omit terminal_reason; body={m1ActiveBody}"
+    -- Completed non-goal mission with historical evidence must also omit top-level `terminal_reason`,
+    -- and a subsequent failed turn must NOT inherit stale `remote_quota`.
+    discard <| execParamQuery r7Store.missionsDb
+      "UPDATE missions SET status='completed',terminal_reason='' WHERE id='m-r7-live-1';" #[]
+    let m1CompResp ← apiGet "/api/control/missions/m-r7-live-1"
+    let m1CompBody := (String.fromUTF8? m1CompResp.body).getD ""
+    let .ok m1CompJv := OrbBin.Json.parse m1CompBody
+      | throw (IO.userError s!"r7: parse completed detail failed: {m1CompBody}")
+    check (m1CompResp.status == 200 && m1CompJv.fieldStr? "status" == some "completed" &&
+           (m1CompJv.field? "terminal_reason").isNone)
+      s!"r7 detail API: completed non-goal mission must omit terminal_reason; body={m1CompBody}"
+    discard <| execParamQuery r7Store.missionsDb
+      "UPDATE missions SET status='failed',terminal_reason='' WHERE id='m-r7-live-1';" #[]
+    let m1FailResp ← apiGet "/api/control/missions/m-r7-live-1"
+    let m1FailBody := (String.fromUTF8? m1FailResp.body).getD ""
+    let .ok m1FailJv := OrbBin.Json.parse m1FailBody
+      | throw (IO.userError s!"r7: parse failed detail failed: {m1FailBody}")
+    check (m1FailResp.status == 200 && m1FailJv.fieldStr? "status" == some "failed" &&
+           (m1FailJv.field? "terminal_reason").isNone)
+      s!"r7 detail API: failed Turn 2 without terminal_reason must not leak historical evidence or stale remote_quota; body={m1FailBody}"
+
+    -- Insert: (a) a resolved hung_node error (no node_api_hangs row -> MUST stay hidden),
+    --         (b) an unresolved hung_node error (node_api_hangs strikes=2 -> MUST stay visible),
+    --         (c) a non-JSON error payload (MUST stay visible),
+    -- alongside the real R7 429 error event (JSON without `reason` field -> MUST stay visible).
+    let .ok _ ← execParamQuery r7Store.missionsDb
+      "INSERT OR REPLACE INTO node_api_hangs(node_id,incident_id,strikes) VALUES('active-hung-node','inc-r7-1',2);" #[]
+      | throw (IO.userError "r7: insert node_api_hangs failed")
+    discard <| appendMissionEvent r7Store "m-r7-live-1" "error"
+      "{\"reason\":\"hung_node\",\"node_id\":\"resolved-node\",\"message\":\"cleared node hang\"}" nowIso
+    discard <| appendMissionEvent r7Store "m-r7-live-1" "error"
+      "{\"reason\":\"hung_node\",\"node_id\":\"active-hung-node\",\"message\":\"active node hang\"}" nowIso
+    discard <| appendMissionEvent r7Store "m-r7-live-1" "error"
+      "plain non-json error text" nowIso
+    let m1EventsResp ← apiGet "/api/control/missions/m-r7-live-1/events"
+    let m1EventsBody := (String.fromUTF8? m1EventsResp.body).getD ""
+    let .ok m1EventsJv := OrbBin.Json.parse m1EventsBody
+      | throw (IO.userError s!"r7: parse mission events failed: {m1EventsBody}")
+    let m1EvArr := m1EventsJv.asArr?.getD #[]
+    let m1ErrEvs := m1EvArr.filter (fun e => e.fieldStr? "event_type" == some "error")
+    check (m1EventsResp.status == 200 && m1ErrEvs.size == 3 &&
+           (m1EventsBody.splitOn "r7-live-single").length > 1 &&
+           (m1EventsBody.splitOn "active node hang").length > 1 &&
+           (m1EventsBody.splitOn "plain non-json error text").length > 1 &&
+           (m1EventsBody.splitOn "cleared node hang").length == 1)
+      s!"r7 events API: expected 3 visible error events (R7 + unresolved hung_node + non-JSON) and resolved hung_node hidden; http={m1EventsResp.status} errCount={m1ErrEvs.size} body={m1EventsBody}"
+    let .ok (replayFrames, _, replayLagged) ← queryMissionSyncReplayFrames r7Store "m-r7-live-1" (some 0)
+      | throw (IO.userError "r7: queryMissionSyncReplayFrames failed")
+    let replayJoined := String.intercalate "\n" replayFrames.toList
+    check (!replayLagged && replayFrames.size == 3 &&
+           (replayJoined.splitOn "r7-live-single").length > 1 &&
+           (replayJoined.splitOn "active node hang").length > 1 &&
+           (replayJoined.splitOn "plain non-json error text").length > 1 &&
+           (replayJoined.splitOn "cleared node hang").length == 1)
+      s!"r7 sync replay: expected 3 visible error frames and resolved hung_node hidden; count={replayFrames.size} frames={replayJoined}"
+  finally
+    closeCoreStore r7Store
+    discard <| (IO.FS.removeDirAll r7Root).toBaseIO
+
 end OrbCore.ProxyRoutingTests

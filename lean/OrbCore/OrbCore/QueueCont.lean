@@ -1161,7 +1161,7 @@ def beginMissionRun
       let .ok supCrs := supCh | return .error "begin_run_changes_failed"
       if changesOf supCrs == 0 then return .error "begin_run_cas_lost"
     let upd ← execParamQueryUnlocked st.missionsDb
-      "UPDATE missions SET run_generation=?2,status='active',state_revision=?3,updated_at=?4 WHERE id=?1 AND status=?5 AND COALESCE(run_generation,0)=CAST(?6 AS INTEGER) AND COALESCE(state_revision,1)=CAST(?7 AS INTEGER);"
+      "UPDATE missions SET run_generation=?2,status='active',terminal_reason='',state_revision=?3,updated_at=?4 WHERE id=?1 AND status=?5 AND COALESCE(run_generation,0)=CAST(?6 AS INTEGER) AND COALESCE(state_revision,1)=CAST(?7 AS INTEGER);"
       #[missionId, s!"{proposed}", s!"{nextMState.stateRevision}", updatedAt, status, s!"{curGen}", s!"{stateRev}"]
     if let .error e := upd then return .error e
     let ch ← execParamQueryUnlocked st.missionsDb "SELECT changes();" #[]
@@ -1378,7 +1378,8 @@ def missionDetailJson
       s!"\"run_generation\":{cellNat r 19},\"health_verdict\":{jsonEscape verdict}," ++
       s!"\"terminal_evidence\":{evJson},\"continuation\":{contJson},\"tags\":{tagsOut},\"history\":{histOut}," ++
       s!"\"goal_mode\":{if goalMode then "true" else "false"},\"goal_objective\":{jsonEscape goalObjective},\"goal_iteration\":{cellNat r 51}" ++
-      (if goalMode then s!",\"terminal_reason\":{jsonEscape mReason}" else "") ++ "}"))
+      (if goalMode || (!mReason.isEmpty && (status == "interrupted" || status == "failed" || status == "cancelled" || status == "canceled" || status == "not_feasible"))
+       then s!",\"terminal_reason\":{jsonEscape mReason}" else "") ++ "}"))
 
 def ensureQueueContSchema (st : CoreStore) : IO (Except String Unit) := do
   match ← st.missionsDb.mu.atomically (sqliteExecRaw st.missionsDb.handle queueContSchemaSql) with
