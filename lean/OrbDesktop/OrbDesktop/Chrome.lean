@@ -57,6 +57,12 @@ def chromeIconPaths (name : String) : List (List (Int × Int)) :=
   | "list" => [[(30,40),(130,40)],[(30,80),(100,80)],[(30,120),(130,120)]]
   | "project-folder-open" => [[(40,93),(50,74),(61,67),(133,67),(146,71),(147,83),(136,123),(129,133),(26,133),(13,120),(13,33),(26,20),(53,20),(65,27),(74,40),(120,40),(133,53),(133,67)]]
   | "project-folder" => [[(133,133),(143,129),(147,120),(147,53),(143,44),(133,40),(81,40),(74,38),(69,34),(64,26),(59,22),(53,20),(27,20),(17,24),(13,33),(13,120),(17,129),(27,133),(133,133)]]
+  | "laptop" => [[(28,36),(132,36),(132,108),(28,108),(28,36)],[(14,124),(146,124)]]
+  | "alert-circle" => [[(80,20),(110,28),(132,50),(140,80),(132,110),(110,132),(80,140),(50,132),(28,110),(20,80),(28,50),(50,28),(80,20)],[(80,52),(80,86)],[(80,108),(80,112)]]
+  | "expand" => [[(95,25),(135,25),(135,65)],[(135,25),(90,70)],[(65,135),(25,135),(25,95)],[(25,135),(70,90)]]
+  | "split-pane" => [[(24,30),(136,30),(136,130),(24,130),(24,30)],[(80,30),(80,130)]]
+  | "refresh" => [[(130,80),(124,106),(106,124),(80,130),(54,124),(36,106),(30,80),(36,54),(54,36),(80,30),(106,36),(122,52)],[(126,28),(126,56),(98,56)]]
+  | "chevrons-up-down" => [[(54,62),(80,38),(106,62)],[(54,98),(80,122),(106,98)]]
   | _ => [[(20,48),(20,38),(28,30),(61,30),(76,46),(122,46),(140,64),(140,114),(132,132),(38,132),(20,114),(20,48)]]
 
 def chromeIcon (name : String) (color : Color) (size : Nat := 16) : WidgetNode :=
@@ -174,9 +180,9 @@ def liveMissionLead (theme : Theme) (status : String) (phase : Nat) : WidgetNode
 def chromeText (theme : Theme) (color : Color) : TextStyle :=
   { (Theme.bodyText theme) with sizeSub := pxToSub 13, lineHeightSub := pxToSub 18, color := color }
 
-/-- Text of the title row (`.tb-title`): chrome body text in `--fg-2`. -/
+/-- Text of the title row (`.tb-title`): chrome body text in `--fg-2`, lifted 1px to match sidebar optical baseline. -/
 def chromeTitleStyle (theme : Theme) : TextStyle :=
-  chromeText theme theme.palette.textSecondary
+  { (chromeText theme theme.palette.textSecondary) with lineHeightSub := pxToSub 17 }
 
 /-- One line of text: as tall as its line, as wide as its glyphs, or the free space with `grow`. -/
 def chromeLabel (lineH : SubPx) (runs : List InlineRun) (grow : Nat := 0) : WidgetNode :=
@@ -478,15 +484,24 @@ def buildHeaderChrome (st : DesktopState) (mainW : SubPx)
         ]
       else
         let mutedSt : TextStyle := { (Theme.mutedText theme) with sizeSub := pxToSub 12, lineHeightSub := pxToSub 16 }
+        let fileBtn :=
+          if st.screen == .missionSplitDiff then
+            WidgetNode.focusable sidePanelFilesId <|
+              WidgetNode.rrect
+                (BoxStyle.row 0 |>.withAlign .center |>.withJustify .center |>.withFixedSize (pxToSub 26) (pxToSub 26))
+                pal.rowActive (CornerRadii.uniform (pxToSub 6)) BorderStyle.none
+                [chromeIcon "file" pal.textPrimary 14] (some sidePanelFilesId)
+          else
+            WidgetNode.focusable sidePanelFilesId (chromeIcon "file" pal.textSecondary 14)
         [ WidgetNode.box
-            (BoxStyle.row (pxToSub 14) |>.withAlign .center |>.withFixedSize (pxToSub 122) (pxToSub 26))
+            (BoxStyle.row (pxToSub 10) |>.withAlign .center |>.withFixedSize (pxToSub 126) (pxToSub 26))
             [ WidgetNode.focusable sidePanelDiffId <|
                 WidgetNode.rrect
                   (BoxStyle.row (pxToSub 5) |>.withAlign .center |>.withJustify .center |>.withFixedSize (pxToSub 54) (pxToSub 26))
                   0 (CornerRadii.uniform (pxToSub 13)) (BorderStyle.uniform theme.borderWidth pal.borderSubtle)
                   [chromeIcon "list" pal.textMuted 12, chromeLabel (pxToSub 16) [overlaySynthRun mutedSt "20"]]
                   (some sidePanelDiffId)
-            , WidgetNode.focusable sidePanelFilesId (chromeIcon "file" pal.textSecondary 14)
+            , fileBtn
             , WidgetNode.focusable sidePanelChatId (chromeIcon "chat" pal.textSecondary 14)
             ]
         ]

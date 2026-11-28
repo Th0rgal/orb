@@ -436,18 +436,30 @@ def buildComposerWidget (theme : Theme) (availW composerH : SubPx)
   let sep := metaText "·" (pxToSub 3)
   let (lblMachine, lblBackend, lblModel, lblEffort, lblPerm) :=
     underLabels.getD ("selected machine", "claudecode", "Default", "Default", "Supervised")
+  let machineIconPaths : List (List (Int × Int)) :=
+    [[(42,125),(25,121),(16,108),(17,92),(26,79),(43,73),(51,53),(68,44),(87,45),(104,56),(111,73),(126,74),(140,86),(143,103),(135,119),(122,125),(42,125)]]
+  let ctxRingPaths : List (List (Int × Int)) :=
+    [[(80,25),(110,33),(130,55),(135,80),(127,108),(106,128),(80,135),(52,127),(32,106),(25,80),(33,52),(54,32),(80,25)]]
   let underRow : WidgetNode :=
     WidgetNode.box
       (BoxStyle.row (pxToSub 6)
         |>.withAlign .center
         |>.withPadding (Edges.trbl 0 (pxToSub 12) (pxToSub 2) (pxToSub 12))
         |>.withFixedSize colW (pxToSub 36))
-      [ WidgetNode.box (BoxStyle.row 0 |>.withFixedSize (pxToSub 11) (pxToSub 13)) []
+      [ .mk none false false (BoxStyle.row 0 |>.withFixedSize (pxToSub 12) (pxToSub 12))
+          (.vectorIcon machineIconPaths pal.textMuted) []
       , selector 720 lblMachine 99 (lblMachine != "selected machine"), sep
       , selector 721 lblBackend 66 (lblBackend != "claudecode"), sep
       , WidgetNode.focusable 722 (metaText lblModel (pxToSub 40) (lblModel != "Default")), sep
       , selector 723 lblEffort 40 (lblEffort != "Default"), sep
-      , selector 724 lblPerm 65 (lblPerm != "Supervised") ]
+      , selector 724 lblPerm 65 (lblPerm != "Supervised")
+      , WidgetNode.box { BoxStyle.row 0 with grow := 1 } []
+      , WidgetNode.box (BoxStyle.row (pxToSub 5) |>.withAlign .center |>.withFixedSize (pxToSub 34) (pxToSub 18))
+          [ .mk none false false (BoxStyle.row 0 |>.withFixedSize (pxToSub 11) (pxToSub 11))
+              (.vectorIcon ctxRingPaths pal.textMuted) []
+          , metaText "3%" (pxToSub 18)
+          ]
+      ]
   let chipBar : List WidgetNode :=
     if hasChips then
       [WidgetNode.box

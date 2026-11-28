@@ -688,14 +688,14 @@ def renderDesktopView (rt : Runtime.RuntimeState DesktopState) :
   let needDiffRuns := st.screen == .missionSplitDiff || (st.screen == .missionTranscript && st.sidePanelOpen)
   let (ac2, delRuns) ←
     if needDiffRuns then
-      shapeDesktopRuns ac1 rt.primaryFont sc
-        { (Theme.codeText theme) with color := pal.diffDelText }
+      shapeDesktopRuns ac1 rt.monoFont sc
+        { (Theme.codeText theme) with sizeSub := pxToSub 12, lineHeightSub := pxToSub 17, color := pal.textPrimary }
         "- webkit_web_view_load_uri(wv, orb_dev_url);"
     else pure (ac1, [])
   let (ac3, addRuns) ←
     if needDiffRuns then
-      shapeDesktopRuns ac2 rt.primaryFont sc
-        { (Theme.codeText theme) with color := pal.diffAddText }
+      shapeDesktopRuns ac2 rt.monoFont sc
+        { (Theme.codeText theme) with sizeSub := pxToSub 12, lineHeightSub := pxToSub 17, color := pal.textPrimary }
         "+ buildDesktopScreen st availW availH shapedRuns"
     else pure (ac2, [])
   let useLiveCache := st.liveData && !rt.forceFullRepaint &&
@@ -789,6 +789,21 @@ def renderDesktopView (rt : Runtime.RuntimeState DesktopState) :
   let winRadii : Nat × Nat × Nat × Nat := (winRad, winRad, winRad, winRad)
   let clipOverlay (prims : Scene) : Scene :=
     if liveWindow then #[.clipPushRounded winClipRect winRadii] ++ prims ++ #[.clipPop] else prims
+  let scenePrims : Scene :=
+    if !liveWindow && (st.screen == .missionTranscript || st.screen == .missionSplitDiff) then
+      let mainW := availW - st.sidebarWidth
+      let paneW :=
+        if st.screen == .missionSplitDiff then pxToSub 688 - theme.borderWidth
+        else if st.sidePanelOpen then mainW - min (pxToSub 480) (mainW / 2) - theme.borderWidth
+        else mainW
+      let fadeRect : Rect := {
+        x := Int.ofNat (scaleSubPx sc st.sidebarWidth),
+        y := Int.ofNat (scaleSubPx sc chromeHeaderHeightSub),
+        w := Int.ofNat (scaleSubPx sc paneW),
+        h := Int.ofNat (scaleSubPx sc (pxToSub 14))
+      }
+      sceneOut.prims ++ #[Prim.linear fadeRect pal.canvas (withAlpha pal.canvas 0) 180 0]
+    else sceneOut.prims
   if let some menu := st.missionMenu then
     let w := min availW (pxToSub (if menu.page == .picker .model then 440 else 228))
     let count := min (max 1 ((availH - pxToSub 10) / pxToSub 26)) (missionMenuRows st menu).length
@@ -800,7 +815,7 @@ def renderDesktopView (rt : Runtime.RuntimeState DesktopState) :
     let box := layoutNode sc rt.focus.owner pal.focusRing left top w h widget.toLayoutNode
     let overlay := buildSceneFromLayout sc rt.focus theme widget box (recordNodes := false) (focusVisible := rt.focusVisible)
     let outside : Rect := { x := 0, y := 0, w := availW, h := availH }
-    return ((ac7.finishUploads, if liveWindow then 0 else pal.canvas, sceneOut.prims ++ clipOverlay overlay.prims,
+    return ((ac7.finishUploads, if liveWindow then 0 else pal.canvas, scenePrims ++ clipOverlay overlay.prims,
       runningRowRegions st sceneOut.hitRegionsSub ++ (719, outside) :: overlay.hitRegionsSub, overlay.focusableOrder), [])
   if let .searchPalette spec := st.modal then
     let overRaw := buildSearchModalOverlay theme availW availH spec st.searchFilterTab
@@ -811,7 +826,7 @@ def renderDesktopView (rt : Runtime.RuntimeState DesktopState) :
     let clearColor := if liveWindow then 0x00000000 else pal.canvas
     let outside : Rect := { x := 0, y := 0, w := availW, h := availH }
     let modalPrims :=
-      let inner := sceneOut.prims ++ #[.backdropBlur (scaleSubPx sc (pxToSub 6))] ++ overScene.prims
+      let inner := scenePrims ++ #[.backdropBlur (scaleSubPx sc (pxToSub 6))] ++ overScene.prims
       if liveWindow then
         #[.clipPushRounded winClipRect winRadii, .layerPush 255] ++ inner ++ #[.layerPop, .clipPop]
       else inner
@@ -826,11 +841,11 @@ def renderDesktopView (rt : Runtime.RuntimeState DesktopState) :
     let box := layoutNode sc rt.focus.owner pal.focusRing (availW - w - pxToSub 8 : Nat)
       (availH - chromeComposerHeightSub - h - pxToSub 8 : Nat) w h widget.toLayoutNode
     let overlay := buildSceneFromLayout sc rt.focus theme widget box (recordNodes := false) (focusVisible := rt.focusVisible)
-    return ((ac7.finishUploads, if liveWindow then 0 else pal.canvas, sceneOut.prims ++ clipOverlay overlay.prims,
+    return ((ac7.finishUploads, if liveWindow then 0 else pal.canvas, scenePrims ++ clipOverlay overlay.prims,
       sceneOut.hitRegionsSub ++ overlay.hitRegionsSub, sceneOut.focusableOrder ++ overlay.focusableOrder), scrollRegionsOf widgetRoot rootBox)
   else
     let clearColor := if liveWindow then 0x00000000 else pal.canvas
-    return ((ac6.finishUploads, clearColor, sceneOut.prims, sceneOut.hitRegionsSub, sceneOut.focusableOrder),
+    return ((ac6.finishUploads, clearColor, scenePrims, sceneOut.hitRegionsSub, sceneOut.focusableOrder),
       scrollRegionsOf widgetRoot rootBox)
 
 def renderDesktopFrame (rt : Runtime.RuntimeState DesktopState) : IO Runtime.FrameView :=
