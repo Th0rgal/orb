@@ -3297,6 +3297,7 @@ def updateMissionBoundManagedNode (store : CoreStore) (missionId concreteNode no
     The caller has already been authorized for `srcMid`. Returns (HTTP status, JSON body). -/
 private def remoteDispatchHttpStatus (error : String) : Nat :=
   if error == "node_owner_required" then 403
+  else if error.startsWith "remote_dispatch_busy:" then 409
   else if error.startsWith "REMOTE_HARNESS_UNSUPPORTED:" ||
           error.startsWith "REMOTE_PROMPT_REQUIRED:" ||
           error.startsWith "REMOTE_GOAL_UNSUPPORTED:" ||
