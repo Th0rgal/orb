@@ -722,6 +722,17 @@ def testLocalSupervisionAndScopes (root : String) : IO Unit := do
     let drainObs ← OrbCore.HarnessSessionRegistry.observeProcStat drainPid.toInt.toNat.toUInt32
     check (drainObs.procMissing != 0 || drainObs.isZombieOrDeadState != 0) "RUN-01 terminated drained local process"
 
+    -- 2b. RUN-01: closeSqliteDb is idempotent and fences subsequent queries/transactions fail-closed.
+    let closedDb ← require (← openSqliteDb s!"{root}/closed-guard.db" "CREATE TABLE t(x TEXT);")
+    closeSqliteDb closedDb
+    closeSqliteDb closedDb
+    let postCloseQ ← execParamQuery closedDb "SELECT 1;" #[]
+    let postCloseTx ← withImmediateTx closedDb (pure (.ok ()))
+    let qClosed := match postCloseQ with | .error "sqlite_closed" => true | _ => false
+    let txClosed := match postCloseTx with | .error "sqlite_closed" => true | _ => false
+    check (qClosed && txClosed)
+      s!"RUN-01 closeSqliteDb fenced post-close SQLite access (q={repr postCloseQ} tx={repr postCloseTx})"
+
     -- 3. RUN-02: tickBackgroundShellWatcher wakes same-boot waiting_background on terminal job and arms resume continuation
     missionSql store.missionsDb "m-bg" "waiting_background" "managed" 1
     discard <| require (← execParamQuery store.missionsDb

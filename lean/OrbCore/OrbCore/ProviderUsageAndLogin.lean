@@ -2515,7 +2515,7 @@ def runProviderUsageUpkeepPass (hub : ProviderRuntimeHub) (store : CoreStore) (w
 def providerUsageUpkeepLoop (hub : ProviderRuntimeHub) (store : CoreStore) (workingDir : String) : IO Unit := do
   if ← isHermeticTestMode then return
   IO.sleep 20000
-  while true do
+  while !(← store.closedRef.get) do
     try discard <| runProviderUsageUpkeepPass hub store workingDir
     catch e => IO.eprintln s!"[sandboxed-sh] provider usage upkeep pass failed: {e}"
     IO.sleep (usageRefreshAfterSecs * 1000).toUInt32

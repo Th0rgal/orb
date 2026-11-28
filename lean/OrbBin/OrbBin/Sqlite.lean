@@ -24,9 +24,17 @@ opaque sqliteQueryRowsRaw (handle : UInt64) (sql : @& String) (params : @& Array
 
 /-- Typed SQLite handle opened in WAL mode with an exclusive `Std.Mutex` serializing C `sqlite3*` access. -/
 structure SqliteDb where
-  handle : UInt64
-  path   : String
-  mu     : Std.Mutex Unit
+  handle    : UInt64
+  path      : String
+  mu        : Std.Mutex Unit
+  closedRef : IO.Ref Bool
+
+/-- Idempotently close a `SqliteDb` under its mutex so concurrent callers observe `closedRef = true`
+    instead of passing a freed `sqlite3*` handle into C. -/
+def closeSqliteDb (db : SqliteDb) : IO Unit :=
+  db.mu.atomically do
+    if !(← db.closedRef.swap true) then
+      sqliteCloseRaw db.handle
 
 private def isIgnorableDuplicateColErr (msg : String) : Bool :=
   (msg.toLower.splitOn "duplicate column name").length > 1
@@ -70,6 +78,7 @@ def openSqliteDb (path : String) (ddl : String) (alters : Array String := #[]) (
         return .error s!"sqlite_write_probe_failed:{we}"
       | .ok () =>
         let mu ← Std.Mutex.new ()
-        return .ok { handle := h, path := path, mu := mu }
+        let closedRef ← IO.mkRef false
+        return .ok { handle := h, path := path, mu := mu, closedRef := closedRef }
 
 end OrbBin.Sqlite

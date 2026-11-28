@@ -10574,14 +10574,16 @@ def runCoreServer (cfg : CoreConfig) (maxRequests? : Option Nat := none) : IO UI
     unsubSseBridge
     discard <| closeFd listenFd
     stopMacTetherRuntime macTetherRt
-    closeManagedComputeStore managedStore
     if let some listener := vpnRelay? then listener.stop
     AccountVpnPool.shutdown vpnPool
     closeCoreStore store
+    closeManagedComputeStore managedStore
     -- All stores, listeners, tunnels, and telemetry batches are drained and closed.
     -- Exit immediately in daemon mode so Lean's task manager does not block waiting
-    -- on sleeping background upkeep loops (30s+ intervals) after SIGTERM.
+    -- on sleeping background upkeep loops (30s+ intervals) after SIGTERM (`RUN-01`).
     if maxRequests?.isNone then
+      (← IO.getStdout).flush
+      (← IO.getStderr).flush
       IO.Process.exit 0
     return 0
 

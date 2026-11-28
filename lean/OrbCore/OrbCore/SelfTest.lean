@@ -4562,7 +4562,8 @@ private def runR4cHarnessSessionTests (store : CoreStore) (tmpRoot : String) : I
   -- Fail-closed error propagation in `bootstrapAskSidecarOnStartup`:
   -- Case 1: unopen/null SQLite handle (`handle = 0`) MUST propagate `.error` rather than masking as `.ok (0, _)`.
   let bogusMu ← Std.Mutex.new ()
-  let bogusDb : SqliteDb := { handle := 0, path := s!"{tmpRoot}/null-ask.db", mu := bogusMu }
+  let bogusClosed ← IO.mkRef false
+  let bogusDb : SqliteDb := { handle := 0, path := s!"{tmpRoot}/null-ask.db", mu := bogusMu, closedRef := bogusClosed }
   if (← bootstrapAskSidecarOnStartup bogusDb sbxRoot).isOk then
     IO.eprintln "[orb-core-test] FAIL: SM-18 bootstrapAskSidecarOnStartup masked null-handle SQLite error"
     return 1

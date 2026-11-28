@@ -17,7 +17,7 @@ def main (args : List String) : IO UInt32 := do
   let h ← sqliteOpenReadOnlyRaw dbFile
   if h == 0 then return 2
   try
-    let db : SqliteDb := ⟨h, dbFile, ← Std.Mutex.new ()⟩
+    let db : SqliteDb := ⟨h, dbFile, ← Std.Mutex.new (), ← IO.mkRef false⟩
     let store : CoreStore := {
       rootDir := root
       missionsDb := db

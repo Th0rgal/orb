@@ -32,7 +32,7 @@ private def withStore {α : Type} (root : String) (action : SqliteDb → IO (Exc
   let handle ← sqliteOpenRaw missions
   if handle == 0 then return .error "settings_store_unavailable"
   try
-    let db : SqliteDb := { handle, path := missions, mu := ← Std.Mutex.new () }
+    let db : SqliteDb := { handle, path := missions, mu := ← Std.Mutex.new (), closedRef := ← IO.mkRef false }
     let .ok _ ← execParamQuery db "ATTACH DATABASE ?1 AS cfg_managed;" #[managed]
       | return .error "settings_store_unavailable"
     action db
