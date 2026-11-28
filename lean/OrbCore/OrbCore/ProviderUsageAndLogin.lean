@@ -128,6 +128,7 @@ def liveUsageHttp : UsageHttp :=
 
 structure ProviderRuntimeHub where
   mu : Std.Mutex ProviderHubState
+  legacyClearFence : Std.Mutex LegacyClearFenceState
   usageProbe? : Option (String → IO JVal) := none
   resolveTransport? : Option (String → String → ResolveTransport) := none
   accountRelayUrl? : Option (String → String → Option String) := none
@@ -136,7 +137,8 @@ structure ProviderRuntimeHub where
 
 def newProviderRuntimeHub : IO ProviderRuntimeHub := do
   let mu ← Std.Mutex.new ({} : ProviderHubState)
-  return { mu }
+  let legacyClearFence ← Std.Mutex.new ({} : LegacyClearFenceState)
+  return { mu, legacyClearFence }
 
 /-! ## Shared Helpers -/
 
@@ -3010,9 +3012,13 @@ def clearRequestAuthEvidenceForAccount
     (!hp.modelPrefix.isEmpty && hp.modelPrefix == cleanKey) ||
     (hp.providerType == "custom" && s!"custom:{hp.id}" == cleanKey)
   let poolMatches := hps.filter (fun hp => matchesProviderHealthKey hps hp cleanKey)
+  -- Disabled and `nativeOnly` accounts never receive shared proxy pool traffic, so they must not
+  -- inflate `poolMatches` and block clearing the sole active routable OAuth account.
+  let routablePoolMatches := poolMatches.filter (fun hp => hp.enabled && !hp.nativeOnly)
+  let activePoolMatches := if !routablePoolMatches.isEmpty then routablePoolMatches else poolMatches
   let singleOwners : Array HydratedProvider :=
     if !exactMatches.isEmpty then exactMatches
-    else if poolMatches.size == 1 then poolMatches
+    else if activePoolMatches.size == 1 then activePoolMatches
     else #[]
   let mut keysToDelete : Array String := #[cleanKey]
   let pushDel (xs : Array String) (k : String) : Array String :=
@@ -3024,8 +3030,8 @@ def clearRequestAuthEvidenceForAccount
       for k in existingKeys do
         if matchesProviderHealthKey hps hp k then
           keysToDelete := pushDel keysToDelete k
-  else if poolMatches.size > 1 then
-    let pType := poolMatches[0]!.providerType
+  else if activePoolMatches.size > 1 then
+    let pType := activePoolMatches[0]!.providerType
     let sharedTypeKey := s!"cliproxyapi:{pType}"
     let sharedTypePrefix := s!"{sharedTypeKey}:"
     keysToDelete := pushDel keysToDelete sharedTypeKey
@@ -3047,16 +3053,18 @@ def clearRequestAuthEvidenceForAccount
           usageEntries := st.usageEntries.filter fun e =>
             !(clearIds.contains e.providerId && e.payload.fieldStr? "status" == some "needs_reauth")
         }
-    else if poolMatches.size > 1 then
-      -- In a multi-account OAuth pool, if EVERY member in the pool is marked `needs_reauth`
-      -- in `usageEntries`, a real 200 OK through that shared pool proves the cached state is stale.
-      let poolIds := poolMatches.map (·.id)
+    else if activePoolMatches.size > 1 then
+      -- In a multi-account routable OAuth pool, if every probed routable member is marked
+      -- `needs_reauth` in `usageEntries` (no known-healthy sibling exists), a real 200 OK
+      -- through that shared pool proves those stale `needs_reauth` cache rows must be cleared.
+      let poolIds := activePoolMatches.map (·.id)
       hub.mu.atomically do
         let st ← get
-        let allMarkedReauth := poolIds.all fun pid =>
-          (st.usageEntries.find? (fun e => e.providerId == pid)).any
-            (fun e => e.payload.fieldStr? "status" == some "needs_reauth")
-        if allMarkedReauth then
+        let probedEntries := st.usageEntries.filter (fun e => poolIds.contains e.providerId)
+        let allProbedMarkedReauth :=
+          !probedEntries.isEmpty &&
+          probedEntries.all (fun e => e.payload.fieldStr? "status" == some "needs_reauth")
+        if allProbedMarkedReauth then
           set {
             st with
             usageEntries := st.usageEntries.filter fun e =>
@@ -3157,29 +3165,63 @@ def reconcileCliLoginCompletion
             updatedAt := formatEpochIso8601Utc now
             createdByUserId := sess.userId
           }
+    let sessIsAdmin : Bool ←
+      if sess.userId.isEmpty then pure true
+      else match ← getUserById? store sess.userId with
+        | some u => pure (u.role == "admin")
+        | none => pure false
     let typeKey := s!"cliproxyapi:{providerType}"
     let typePrefix := s!"{typeKey}:"
-    let mut oauthRowIds := (affected.filter (fun hp => hp.hasOAuth && !hp.hasApiKey)).map (·.id)
+    let ownedAffected :=
+      if sessIsAdmin || target?.isSome then affected
+      else affected.filter (fun hp => providerAddedBy hp sess.userId)
+    let mut oauthRowIds := (ownedAffected.filter (fun hp => hp.hasOAuth && !hp.hasApiKey)).map (·.id)
     if !completedProvId.isEmpty && !oauthRowIds.contains completedProvId then
       oauthRowIds := oauthRowIds.push completedProvId
     let targetedCodex := sess.authFileType == "codex" && sess.targetProvId?.isSome
     if targetedCodex then
       if let some file := matchedFile? then
-        oauthRowIds := oauthRowIds.push (fileAccountId providerType file.fileName)
+        let fId := fileAccountId providerType file.fileName
+        if !oauthRowIds.contains fId then oauthRowIds := oauthRowIds.push fId
+    let otherRowIds := (providers.filter (fun p => !oauthRowIds.contains p.id)).map (·.id)
+    -- Only non-hash shared pool keys (e.g. `cliproxyapi:antigravity:<model>`) match the shared pool;
+    -- dedicated 64-hex per-file hashes and other providers' row IDs are never wiped cross-tenant.
+    let isSharedPoolKey (k : String) : Bool :=
+      k == typeKey ||
+      (!targetedCodex &&
+        k.startsWith typePrefix &&
+        !isFileAccountHash (k.drop typePrefix.length).toString &&
+        !otherRowIds.contains k)
     let matchesLoginKey (k : String) : Bool :=
-      oauthRowIds.contains k || k == typeKey || (!targetedCodex && k.startsWith typePrefix)
-    let explicitLoginKeys := if oauthRowIds.contains typeKey then oauthRowIds else oauthRowIds.push typeKey
+      oauthRowIds.contains k || isSharedPoolKey k
     let explicitLoginPrefixes := if targetedCodex then #[] else #[typePrefix]
     let maxOutcomeId ← latestProxyOutcomeId store
     -- Fence in-flight requests FIRST by advancing `clearSeq`, then wipe persisted auth rejections.
-    clearAccountCooldowns tracker? cooldowns matchesLoginKey
-      (explicitKeys := explicitLoginKeys) (explicitPrefixes := explicitLoginPrefixes)
-      (maxOutcomeId := maxOutcomeId)
-    discard <| execParamQuery store.missionsDb
-      "DELETE FROM provider_auth_health WHERE account_key=?1 OR (?3='all' AND substr(account_key, 1, length(?2))=?2);"
-      #[typeKey, typePrefix, if targetedCodex then "selected" else "all"]
+    if sessIsAdmin then
+      let explicitLoginKeys := if oauthRowIds.contains typeKey then oauthRowIds else oauthRowIds.push typeKey
+      clearAccountCooldowns tracker? cooldowns matchesLoginKey
+        (explicitKeys := explicitLoginKeys) (explicitPrefixes := explicitLoginPrefixes)
+        (excludedIds := otherRowIds) (maxOutcomeId := maxOutcomeId)
+        (clearDisabledByProvider := true) (fallbackFence? := some hub.legacyClearFence)
+    else
+      if !oauthRowIds.isEmpty then
+        clearAccountCooldowns tracker? cooldowns (fun k => oauthRowIds.contains k)
+          (explicitKeys := oauthRowIds) (maxOutcomeId := maxOutcomeId)
+          (clearDisabledByProvider := true) (fallbackFence? := some hub.legacyClearFence)
+      clearAccountCooldowns tracker? cooldowns isSharedPoolKey
+        (explicitKeys := #[typeKey]) (explicitPrefixes := explicitLoginPrefixes)
+        (excludedIds := otherRowIds) (maxOutcomeId := 0)
+        (clearDisabledByProvider := false) (fallbackFence? := some hub.legacyClearFence)
+    let existingAuthKeys := (← loadProviderAuthHealthRows store).map Prod.fst
+    let authDeletePick (k : String) : Bool :=
+      if sessIsAdmin then matchesLoginKey k else oauthRowIds.contains k
+    for k in existingAuthKeys do
+      if authDeletePick k then
+        discard <| execParamQuery store.missionsDb "DELETE FROM provider_auth_health WHERE account_key=?1;" #[k]
     for k in oauthRowIds do
       discard <| execParamQuery store.missionsDb "DELETE FROM provider_auth_health WHERE account_key=?1;" #[k]
+    if sessIsAdmin then
+      discard <| execParamQuery store.missionsDb "DELETE FROM provider_auth_health WHERE account_key=?1;" #[typeKey]
     let freshProviders ← loadHydratedProviders store workingDir
     let freshAffected :=
       let byId := freshProviders.filter (fun hp => ids.contains hp.id || (!completedProvId.isEmpty && hp.id == completedProvId))
@@ -3463,10 +3505,12 @@ private def usageEntrySignals (u? : Option CachedUsageEntry) : Bool × Bool × B
   | some u =>
     let st := ((u.payload.fieldStr? "status").getD "").trimAscii.toString.toLower
     let errMsg := ((u.payload.fieldStr? "error").getD "").trimAscii.toString
-    let isReauth := st == "needs_reauth"
-    let isError := !isReauth && (st == "error" || st == "needs_verification" || !errMsg.isEmpty)
+    let statusCode := (u.payload.fieldNat? "status_code").getD 0
+    let isHttpErr := statusCode >= 400
+    let isReauth := st == "needs_reauth" || statusCode == 401
+    let isError := !isReauth && (st == "error" || st == "needs_verification" || !errMsg.isEmpty || isHttpErr)
     let hasWindows := !(((u.payload.fieldOrNull "optimize").fieldArr? "windows").getD #[]).isEmpty
-    let hasStatusCode := (u.payload.fieldNat? "status_code").getD 0 >= 200
+    let hasOkStatusCode := 200 ≤ statusCode && statusCode < 300
     let hasUsageMetrics :=
       (u.payload.field? "usage_percent").isSome ||
       (u.payload.field? "unified_5h_utilization").isSome ||
@@ -3477,8 +3521,12 @@ private def usageEntrySignals (u? : Option CachedUsageEntry) : Bool × Bool × B
       (u.payload.field? "balance_usd").isSome ||
       (u.payload.field? "credits_remaining").isSome ||
       (u.payload.field? "quota_remaining").isSome
-    let verifiedProbe := st == "connected" && !isError && (hasWindows || hasStatusCode || hasUsageMetrics)
+    let verifiedProbe := st == "connected" && !isError && !isReauth && (hasWindows || hasOkStatusCode || hasUsageMetrics)
     (isReauth, isError, verifiedProbe)
+
+private def isQuotaReasonSlug (s : String) : Bool :=
+  s == "credential_quota" || s == "quota_exhausted" || s == "usage_limit" ||
+  s == "quota" || s == "model_quota"
 
 private def evaluateProviderHealthEvidence
     (hps : Array HydratedProvider)
@@ -3578,9 +3626,7 @@ private def evaluateProviderHealthEvidence
     parkedOrPoisoned || latestOutcomeFailedActive || usageErrorActive || failCnt > 0
   let isQuotaParked : Bool :=
     parkedQuota ||
-    parkedReasonJv == .str "credential_quota" ||
-    parkedReasonJv == .str "quota_exhausted" ||
-    parkedReasonJv == .str "usage_limit"
+    (match parkedReasonJv with | .str s => isQuotaReasonSlug s | _ => false)
   let accountState : String :=
     if disabledByProvider then "disabled_by_provider"
     else if sidecarDisabled then "disabled"
@@ -3615,10 +3661,8 @@ private def providerStatusOverrideOf (ev : ProviderHealthEvidence) (rejected : B
   else if ev.cdRem > 0 || ev.parkedQuota then
     let isQuota :=
       ev.parkedQuota ||
-      ev.coreReason? == some "usage_limit" ||
-      ev.sidecarReason? == some "credential_quota" ||
-      ev.sidecarReason? == some "quota_exhausted" ||
-      ev.sidecarReason? == some "quota"
+      ev.coreReason?.any isQuotaReasonSlug ||
+      ev.sidecarReason?.any isQuotaReasonSlug
     if isQuota then
       let msg :=
         if ev.cdRem > 0 then s!"Provider quota exhausted (cooling down for {ev.cdRem}s)"
@@ -4016,12 +4060,15 @@ def dispatchProviderAndAiRoute
         (hp.providerType == "custom" && s!"custom:{hp.id}" == acctId)))
       |>.orElse (fun _ =>
         let matching := hps.filter (fun hp => matchesHealthKey hps hp acctId)
-        if matching.size == 1 then matching[0]? else none)
+        let routable := matching.filter (fun hp => hp.enabled && !hp.nativeOnly)
+        let effMatching := if !routable.isEmpty then routable else matching
+        if effMatching.size == 1 then effMatching[0]? else none)
     let matchClear (k : String) : Bool :=
       k == acctId ||
       (acctId == "cliproxyapi:antigravity" &&
         k.startsWith "cliproxyapi:antigravity:" &&
-        !isFileAccountHash (k.drop "cliproxyapi:antigravity:".length).toString) ||
+        !isFileAccountHash (k.drop "cliproxyapi:antigravity:".length).toString &&
+        !hps.any (fun other => other.id == k)) ||
       match matchedProv? with
       | some hp => matchesHealthKey hps hp k
       | none => false
@@ -4039,10 +4086,12 @@ def dispatchProviderAndAiRoute
         else #[]
       | none =>
         if acctId == "cliproxyapi:antigravity" then #["cliproxyapi:antigravity:"] else #[]
+    let excludedClearIds := (hps.filter (fun p => !explicitClearKeys.contains p.id)).map (·.id)
     let maxOutcomeId ← latestProxyOutcomeId store
     clearAccountCooldowns healthTracker? proxyCooldownsRef matchClear
       (explicitKeys := explicitClearKeys) (explicitPrefixes := explicitClearPrefixes)
-      (maxOutcomeId := maxOutcomeId)
+      (excludedIds := excludedClearIds) (maxOutcomeId := maxOutcomeId)
+      (fallbackFence? := some hub.legacyClearFence)
     if let some hp := matchedProv? then
       let sidecarFiles ← fetchSidecarAuthFiles
       -- Recovery retains enabled-only matching even when reporting also sees old disabled files.
@@ -4649,11 +4698,15 @@ def dispatchProviderAndAiRoute
           return some (jsonErr 403 "Provider is disabled")
         let maxOutcomeId ← latestProxyOutcomeId store
         if effAdmin then
+          let adminKeys := providerHealthKeys hp
+          let excludedIds := (hps.filter (fun p => !adminKeys.contains p.id)).map (·.id)
           clearAccountCooldowns healthTracker? proxyCooldownsRef (matchesHealthKey hps hp)
-            (explicitKeys := providerHealthKeys hp)
+            (explicitKeys := adminKeys)
             (explicitPrefixes := #["cliproxyapi:antigravity:"])
+            (excludedIds := excludedIds)
             (maxOutcomeId := maxOutcomeId)
             (clearDisabledByProvider := true)
+            (fallbackFence? := some hub.legacyClearFence)
         else
           let ownKeys : Array String :=
             if hp.modelPrefix.isEmpty then #[hp.id] else #[hp.id, hp.modelPrefix]
@@ -4661,6 +4714,7 @@ def dispatchProviderAndAiRoute
             (explicitKeys := ownKeys)
             (maxOutcomeId := 0)
             (clearDisabledByProvider := false)
+            (fallbackFence? := some hub.legacyClearFence)
         let live ← probeProviderUsage hub hp
         let projected := if effAdmin || providerAddedBy hp callerUserId then live else projectMemberProviderUsageJv live (memberProviderDisplayName hps hp)
         return some (jsonResp 200 projected)

@@ -2281,9 +2281,10 @@ private def handleProxyRequest (st : CoreAppState) (req : HttpRequest) (cleanPat
     if headersAlreadyCommitted then some pinnedAcctHdr else none
   let authEvidence ← IO.mkRef (#[] : Array (String × String))
   let bodyTimedOutRef ← IO.mkRef false
-  let startClearSeq? ← match st.healthTracker? with
-    | some htr => some <$> currentClearSeq htr
-    | none => pure none
+  let startClearSeq? ← match st.healthTracker?, st.providerHub? with
+    | some htr, _ => some <$> currentClearSeq htr
+    | none, some hub => some <$> currentLegacyClearSeq hub.legacyClearFence
+    | none, none => pure none
   let prevStreaks ← match st.healthTracker? with
     | some htr =>
       dispatchChain.targets.mapM (fun t => do
@@ -2349,9 +2350,10 @@ private def handleProxyRequest (st : CoreAppState) (req : HttpRequest) (cleanPat
   -- actually completed a 2xx request is cleared.
   let postAttemptEpoch ← currentProxyEpoch
   for (accountKey, code) in (← authEvidence.get) do
-    let fenced ← match st.healthTracker?, startClearSeq? with
-      | some htr, some s => accountClearedSince htr accountKey s
-      | _, _ => pure false
+    let fenced ← match st.healthTracker?, st.providerHub?, startClearSeq? with
+      | some htr, _, some s => accountClearedSince htr accountKey s (bansOrAuth := true)
+      | none, some hub, some s => legacyAccountClearedSince hub.legacyClearFence accountKey s (bansOrAuth := true)
+      | _, _, _ => pure false
     if !fenced then
       discard <| execParamQuery st.store.missionsDb
         ("INSERT INTO provider_auth_health(account_key,code,observed_at) VALUES(?1,?2,?3) " ++
@@ -2363,24 +2365,30 @@ private def handleProxyRequest (st : CoreAppState) (req : HttpRequest) (cleanPat
   | some htr =>
     syncCooldownsFromHealthTracker htr st.proxyCooldownsRef postAttemptEpoch
   | none =>
+    let fenced ← match st.providerHub?, startClearSeq? with
+      | some hub, some s =>
+        if out.selectedAccount.isEmpty then pure false
+        else legacyAccountClearedSince hub.legacyClearFence out.selectedAccount s (bansOrAuth := false)
+      | _, _ => pure false
     st.proxyCooldownsRef.modify fun cooldowns =>
       let stillActive := activeCooldowns cooldowns postAttemptEpoch
       let withoutSelected := stillActive.filter (fun c => c.accountId != out.selectedAccount)
-      match cooldownForOutcome out postAttemptEpoch with
-      | some c => withoutSelected.push c
-      | none => withoutSelected
+      if fenced then withoutSelected
+      else match cooldownForOutcome out postAttemptEpoch with
+        | some c => withoutSelected.push c
+        | none => withoutSelected
   if let some mid := stopMid? then
     if out.status ≥ 400 && !out.firstByteCommitted && out.stream?.isNone then
       if ← isMissionOwnedChain st mid chains cleanPath activeChain.id then
-        let postPlan ← planChainState st activeChain nowEpochSec
+        let postPlan ← planChainState st activeChain postAttemptEpoch
         let stopReason? :=
           (if postPlan.eligible.isEmpty then
-            chainCooldownStopReason? activeChain.id postPlan.cooling nowEpochSec (allowUnconfigured := false)
+            chainCooldownStopReason? activeChain.id postPlan.cooling postAttemptEpoch (allowUnconfigured := false)
           else none).orElse fun _ =>
             let rawWait := (announcedRetryAfterSecs? out.headers rawOutBodyStr).getD 0
             let waitSecs := if rawWait == 0 then 0 else clampCooldownRetryAfter rawWait
             if waitSecs > 60 then
-              let returnIso := formatEpochIso8601Utc (nowEpochSec + waitSecs)
+              let returnIso := formatEpochIso8601Utc (postAttemptEpoch + waitSecs)
               let exhaustedModelCooldown := lookupHeader? out.headers "x-orb-retry-reason" == some "model_cooldown"
               if (out.status == 503 || out.status == 429) &&
                   (exhaustedModelCooldown || modelCooldownHint rawOutBodyStr || quotaHint rawOutBodyStr) then
@@ -2392,7 +2400,7 @@ private def handleProxyRequest (st : CoreAppState) (req : HttpRequest) (cleanPat
               else none
             else none
         if let some (termReason, rawErrMsg) := stopReason? then
-          interruptMissionTurn st mid termReason rawErrMsg nowEpochSec
+          interruptMissionTurn st mid termReason rawErrMsg postAttemptEpoch
   -- Usage, spend and access-program receipts read the reply body, so for a relayed
   -- stream they run once the stream has ended.
   let accountBody : ByteArray → IO Unit := fun body => do
@@ -2442,12 +2450,15 @@ private def handleProxyRequest (st : CoreAppState) (req : HttpRequest) (cleanPat
   let outcomeId? ← match ← execParamQuery st.store.missionsDb
       ("INSERT INTO proxy_outcomes(timestamp,chain_id,provider,account_id,model,requested_model,status,http_status,retries) " ++
        "VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9) RETURNING id;")
-      #[formatEpochIso8601Utc nowEpochSec, (if routeKind == "chain" then dispatchChain.id else routeKind),
+      #[formatEpochIso8601Utc postAttemptEpoch, (if routeKind == "chain" then dispatchChain.id else routeKind),
         (servedTarget?.map (·.provider)).getD "", out.selectedAccount, effectiveModel, rawRequestedModel,
         initOutcomeStatus, toString out.status,
         toString (out.attemptsUsed - 1)] with
     | .ok rows => pure ((rows[1]?.bind (·[0]?)).filter (!·.isEmpty))
     | .error _ => pure none
+  if initOutcomeStatus != "ok" && !out.selectedAccount.isEmpty then
+    if let (some htr, some s, some oid) := (st.healthTracker?, startClearSeq?, outcomeId?) then
+      advanceClearedOutcomeIfFenced htr out.selectedAccount s (oid.toNat?.getD 0)
   let attribution := #[
     ("X-Orb-Requested-Model", rawRequestedModel),
     ("X-Orb-Effective-Model", effectiveModel),
@@ -2500,6 +2511,8 @@ private def handleProxyRequest (st : CoreAppState) (req : HttpRequest) (cleanPat
                        let streamEndEpoch ← currentProxyEpoch
                        let finalPrevStreak :=
                          (prevStreaks.find? (fun (aid, _) => aid == finalAccount)).map Prod.snd |>.getD prevSelectedStreak
+                       if let (some s, some oid) := (startClearSeq?, outcomeId?) then
+                         advanceClearedOutcomeIfFenced htr finalAccount s (oid.toNat?.getD 0)
                        discard <| recordStreamCutHealth htr finalAccount finalPrevStreak streamEndEpoch startClearSeq?
                        syncCooldownsFromHealthTracker htr st.proxyCooldownsRef streamEndEpoch }
   | none =>
