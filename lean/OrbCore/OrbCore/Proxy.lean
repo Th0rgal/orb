@@ -597,8 +597,9 @@ structure ClearFenceEvent where
 
 /-- Fallback fence state used when `CoreAppState.healthTracker? = none` (legacy cooldown-ref mode). -/
 structure LegacyClearFenceState where
-  clearSeq : UInt64 := 0
-  events   : Array ClearFenceEvent := #[]
+  clearSeq        : UInt64 := 0
+  events          : Array ClearFenceEvent := #[]
+  clearedOutcomes : Array (String × Nat) := #[]
   deriving Repr, Inhabited
 
 /-- Single-owner provider health, circuit-breaker, route-generation, and pacing state (`SM-21`). -/
@@ -744,6 +745,103 @@ def advanceClearedOutcomeIfFenced
         let rec1 := { rec0 with clearedOutcomeId := max rec0.clearedOutcomeId outcomeId }
         set { hst with accounts := upsertAccountHealth hst.accounts rec1 }
 
+private def upsertClearedOutcomePair (xs : Array (String × Nat)) (k : String) (oid : Nat) : Array (String × Nat) :=
+  if xs.any (fun p => p.1 == k) then
+    xs.map (fun p => if p.1 == k then (k, max p.2 oid) else p)
+  else
+    xs.push (k, oid)
+
+/-- Legacy fallback equivalent of `advanceClearedOutcomeIfFenced` when `healthTracker? = none`. -/
+def advanceLegacyClearedOutcomeIfFenced
+    (fence : Std.Mutex LegacyClearFenceState) (accountId : String) (attemptClearSeq : UInt64) (outcomeId : Nat) : IO Unit :=
+  if accountId.isEmpty || outcomeId == 0 then pure ()
+  else
+    fence.atomically do
+      let st ← get
+      if st.events.any (fun ev => clearEventMatchesAccount ev accountId attemptClearSeq (bansOrAuth := true)) then
+        set { st with clearedOutcomes := upsertClearedOutcomePair st.clearedOutcomes accountId outcomeId }
+
+/-- Read the highest `clearedOutcomeId` watermark in `LegacyClearFenceState` matching `pick`. -/
+def lookupLegacyClearedOutcomeId
+    (fence : Std.Mutex LegacyClearFenceState) (pick : String → Bool) : IO Nat :=
+  fence.atomically do
+    let st ← get
+    return st.clearedOutcomes.foldl (fun acc (k, oid) => if pick k then max acc oid else acc) 0
+
+/-- Atomically check the legacy clear fence and update `proxyCooldownsRef` under the same
+    `LegacyClearFenceState` mutex used by `clearAccountCooldowns`, eliminating TOCTOU races
+    when `healthTracker? = none`. -/
+def applyLegacyCooldownIfNotFenced
+    (fence? : Option (Std.Mutex LegacyClearFenceState))
+    (cooldownsRef : IO.Ref (Array AccountCooldown))
+    (accountId : String)
+    (attemptClearSeq? : Option UInt64)
+    (bansOrAuth : Bool)
+    (nowEpoch : UInt64)
+    (newCooldown? : Option AccountCooldown) : IO Unit :=
+  let updateRef (fenced : Bool) : IO Unit :=
+    cooldownsRef.modify fun cooldowns =>
+      let stillActive := activeCooldowns cooldowns nowEpoch
+      let withoutSelected := stillActive.filter (fun c => c.accountId != accountId)
+      if fenced then withoutSelected
+      else match newCooldown? with
+        | some c => withoutSelected.push c
+        | none => withoutSelected
+  match fence?, attemptClearSeq? with
+  | some fence, some s =>
+    fence.atomically do
+      let st ← get
+      let fenced :=
+        if accountId.isEmpty then false
+        else st.events.any (fun ev => clearEventMatchesAccount ev accountId s bansOrAuth)
+      updateRef fenced
+  | _, _ => updateRef false
+
+/-- Advance `clearedOutcomeId` watermarks AFTER `clearAccountCooldowns` has already bumped `clearSeq`
+    and `latestProxyOutcomeId` has been sampled (Dekker-linearizable order: clear bumps `clearSeq`
+    first, then samples `MAX(id)`, then advances watermarks; proxy inserts `proxy_outcomes` first,
+    then checks `clearSeq`). -/
+def advanceClearedOutcomeWatermarks
+    (tracker? : Option ProviderHealthTracker)
+    (pick : String → Bool)
+    (explicitKeys : Array String := #[])
+    (maxOutcomeId : Nat)
+    (fallbackFence? : Option (Std.Mutex LegacyClearFenceState) := none) : IO Unit :=
+  if maxOutcomeId == 0 then pure ()
+  else
+    match tracker? with
+    | some tracker =>
+      tracker.health.atomically do
+        let st ← get
+        let mut nextAccounts := st.accounts.map fun r =>
+          if pick r.accountId || explicitKeys.contains r.accountId then
+            { r with clearedOutcomeId := max r.clearedOutcomeId maxOutcomeId }
+          else r
+        for k in explicitKeys do
+          let ck := k.trimAscii.toString
+          if !ck.isEmpty && !nextAccounts.any (fun r => r.accountId == ck) then
+            nextAccounts := nextAccounts.push {
+              accountId := ck
+              slotId := accountSlotId ck
+              clearedAtSeq := st.clearSeq
+              banAuthClearedAtSeq := st.clearSeq
+              clearedOutcomeId := maxOutcomeId
+            }
+        set { st with accounts := nextAccounts }
+    | none =>
+      match fallbackFence? with
+      | some fence =>
+        fence.atomically do
+          let st ← get
+          let mut nextPairs := st.clearedOutcomes.map fun (k, oid) =>
+            if pick k || explicitKeys.contains k then (k, max oid maxOutcomeId) else (k, oid)
+          for k in explicitKeys do
+            let ck := k.trimAscii.toString
+            if !ck.isEmpty then
+              nextPairs := upsertClearedOutcomePair nextPairs ck maxOutcomeId
+          set { st with clearedOutcomes := nextPairs }
+      | none => pure ()
+
 /-- Snapshot every `AccountHealthRecord` in `ProviderHealthTracker` matching `pick`
     (including uncooled records carrying transient streaks, trips, or clear watermarks). -/
 def snapshotMatchingHealthRecords (tracker : ProviderHealthTracker) (pick : String → Bool) :
@@ -864,7 +962,13 @@ def clearAccountCooldowns
         let nextEvents :=
           if nextEventsRaw.size > 64 then nextEventsRaw.extract (nextEventsRaw.size - 64) nextEventsRaw.size
           else nextEventsRaw
-        set ({ clearSeq := nextClearSeq, events := nextEvents } : LegacyClearFenceState)
+        let mut nextCleared := st.clearedOutcomes
+        if clearDisabledByProvider && maxOutcomeId > 0 then
+          nextCleared := nextCleared.map fun (k, oid) =>
+            if pick k || clearedExact.contains k then (k, max oid maxOutcomeId) else (k, oid)
+          for k in clearedExact do
+            nextCleared := upsertClearedOutcomePair nextCleared k maxOutcomeId
+        set ({ clearSeq := nextClearSeq, events := nextEvents, clearedOutcomes := nextCleared } : LegacyClearFenceState)
         cooldownsRef.modify (fun cs => cs.filter (fun c => !pick c.accountId))
     | none =>
       cooldownsRef.modify (fun cs => cs.filter (fun c => !pick c.accountId))

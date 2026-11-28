@@ -2998,6 +2998,12 @@ private def loadAccountOutcomeSummaries (store : CoreStore) : IO (Array AccountO
       }
   return out
 
+/-- Whether a cached provider usage payload indicates an authentication rejection (`needs_reauth`
+    or HTTP `401`). Shared across `loginRejected`, `usageEntrySignals`, and `clearRequestAuthEvidenceForAccount`. -/
+private def usagePayloadIsReauth (payload : JVal) : Bool :=
+  ((payload.fieldStr? "status").getD "").trimAscii.toString.toLower == "needs_reauth" ||
+  (payload.fieldNat? "status_code").getD 0 == 401
+
 /-- Clear persisted `provider_auth_health` and any stale `needs_reauth` cached usage entry
     for the account (or shared OAuth pool) that just succeeded on a real proxied request. -/
 def clearRequestAuthEvidenceForAccount
@@ -3051,31 +3057,31 @@ def clearRequestAuthEvidenceForAccount
         modify fun st => {
           st with
           usageEntries := st.usageEntries.filter fun e =>
-            !(clearIds.contains e.providerId && e.payload.fieldStr? "status" == some "needs_reauth")
+            !(clearIds.contains e.providerId && usagePayloadIsReauth e.payload)
         }
     else if activePoolMatches.size > 1 then
       -- In a multi-account routable OAuth pool, if every probed routable member is marked
-      -- `needs_reauth` in `usageEntries` (no known-healthy sibling exists), a real 200 OK
-      -- through that shared pool proves those stale `needs_reauth` cache rows must be cleared.
+      -- `needs_reauth` / `401` in `usageEntries` (no known-healthy sibling exists), a real 200 OK
+      -- through that shared pool proves those stale auth-rejection cache rows must be cleared.
       let poolIds := activePoolMatches.map (·.id)
       hub.mu.atomically do
         let st ← get
         let probedEntries := st.usageEntries.filter (fun e => poolIds.contains e.providerId)
         let allProbedMarkedReauth :=
           !probedEntries.isEmpty &&
-          probedEntries.all (fun e => e.payload.fieldStr? "status" == some "needs_reauth")
+          probedEntries.all (fun e => usagePayloadIsReauth e.payload)
         if allProbedMarkedReauth then
           set {
             st with
             usageEntries := st.usageEntries.filter fun e =>
-              !(poolIds.contains e.providerId && e.payload.fieldStr? "status" == some "needs_reauth")
+              !(poolIds.contains e.providerId && usagePayloadIsReauth e.payload)
           }
 
 /-- The last usage probe of this account was refused for authentication. -/
 def loginRejected (hub : ProviderRuntimeHub) (providerId : String) : IO Bool := do
   let entries ← hub.mu.atomically (do return (← get).usageEntries)
   return (entries.find? (fun e => e.providerId == providerId)).any
-    (fun e => e.payload.fieldStr? "status" == some "needs_reauth")
+    (fun e => usagePayloadIsReauth e.payload)
 
 /-- The login of this provider is known to be refused: by its last usage probe, or by the
     last real request the proxy sent with it. When CLIProxyAPI holds the login the proxy's
@@ -3172,10 +3178,23 @@ def reconcileCliLoginCompletion
         | none => pure false
     let typeKey := s!"cliproxyapi:{providerType}"
     let typePrefix := s!"{typeKey}:"
-    let ownedAffected :=
-      if sessIsAdmin || target?.isSome then affected
-      else affected.filter (fun hp => providerAddedBy hp sess.userId)
-    let mut oauthRowIds := (ownedAffected.filter (fun hp => hp.hasOAuth && !hp.hasApiKey)).map (·.id)
+    -- On targeted reconnects, clear only the reconnected row; on untargeted "Add subscription"
+    -- logins, clear ONLY the newly created/matched file's row (never sweeping unrelated existing
+    -- accounts, 64-hex `fileAccountId` rows, or `TOS_VIOLATION`-banned sibling accounts).
+    let mut oauthRowIds : Array String :=
+      match target? with
+      | some hp =>
+        if hp.hasOAuth && !hp.hasApiKey then #[hp.id] else #[]
+      | none =>
+        match matchedFile? with
+        | some nf =>
+          let linked := providers.filter (fun hp =>
+            hp.hasOAuth && !hp.hasApiKey &&
+            (hp.oauthFile == nf.fileName || hp.boundOauthFile == nf.fileName))
+          let linkedIds := linked.map (·.id)
+          let nfId := fileAccountId providerType nf.fileName
+          if linkedIds.contains nfId then linkedIds else linkedIds.push nfId
+        | none => #[]
     if !completedProvId.isEmpty && !oauthRowIds.contains completedProvId then
       oauthRowIds := oauthRowIds.push completedProvId
     let targetedCodex := sess.authFileType == "codex" && sess.targetProvId?.isSome
@@ -3195,33 +3214,38 @@ def reconcileCliLoginCompletion
     let matchesLoginKey (k : String) : Bool :=
       oauthRowIds.contains k || isSharedPoolKey k
     let explicitLoginPrefixes := if targetedCodex then #[] else #[typePrefix]
-    let maxOutcomeId ← latestProxyOutcomeId store
-    -- Fence in-flight requests FIRST by advancing `clearSeq`, then wipe persisted auth rejections.
+    -- Dekker-linearizable fencing: bump `clearSeq` & clear stores FIRST, then sample
+    -- `latestProxyOutcomeId` and advance outcome watermarks, then wipe persisted auth rejections.
     if sessIsAdmin then
       let explicitLoginKeys := if oauthRowIds.contains typeKey then oauthRowIds else oauthRowIds.push typeKey
       clearAccountCooldowns tracker? cooldowns matchesLoginKey
         (explicitKeys := explicitLoginKeys) (explicitPrefixes := explicitLoginPrefixes)
-        (excludedIds := otherRowIds) (maxOutcomeId := maxOutcomeId)
+        (excludedIds := otherRowIds) (maxOutcomeId := 0)
         (clearDisabledByProvider := true) (fallbackFence? := some hub.legacyClearFence)
+      let maxOutcomeId ← latestProxyOutcomeId store
+      advanceClearedOutcomeWatermarks tracker? matchesLoginKey explicitLoginKeys maxOutcomeId
+        (fallbackFence? := some hub.legacyClearFence)
     else
       if !oauthRowIds.isEmpty then
         clearAccountCooldowns tracker? cooldowns (fun k => oauthRowIds.contains k)
-          (explicitKeys := oauthRowIds) (maxOutcomeId := maxOutcomeId)
+          (explicitKeys := oauthRowIds) (maxOutcomeId := 0)
           (clearDisabledByProvider := true) (fallbackFence? := some hub.legacyClearFence)
+        let maxOutcomeId ← latestProxyOutcomeId store
+        advanceClearedOutcomeWatermarks tracker? (fun k => oauthRowIds.contains k) oauthRowIds maxOutcomeId
+          (fallbackFence? := some hub.legacyClearFence)
       clearAccountCooldowns tracker? cooldowns isSharedPoolKey
         (explicitKeys := #[typeKey]) (explicitPrefixes := explicitLoginPrefixes)
         (excludedIds := otherRowIds) (maxOutcomeId := 0)
         (clearDisabledByProvider := false) (fallbackFence? := some hub.legacyClearFence)
+    -- A verified new auth file on disk recovers the shared pool's auth-rejection status too
+    -- (for both admin and member logins), while never touching other tenants' dedicated rows.
     let existingAuthKeys := (← loadProviderAuthHealthRows store).map Prod.fst
-    let authDeletePick (k : String) : Bool :=
-      if sessIsAdmin then matchesLoginKey k else oauthRowIds.contains k
     for k in existingAuthKeys do
-      if authDeletePick k then
+      if matchesLoginKey k then
         discard <| execParamQuery store.missionsDb "DELETE FROM provider_auth_health WHERE account_key=?1;" #[k]
     for k in oauthRowIds do
       discard <| execParamQuery store.missionsDb "DELETE FROM provider_auth_health WHERE account_key=?1;" #[k]
-    if sessIsAdmin then
-      discard <| execParamQuery store.missionsDb "DELETE FROM provider_auth_health WHERE account_key=?1;" #[typeKey]
+    discard <| execParamQuery store.missionsDb "DELETE FROM provider_auth_health WHERE account_key=?1;" #[typeKey]
     let freshProviders ← loadHydratedProviders store workingDir
     let freshAffected :=
       let byId := freshProviders.filter (fun hp => ids.contains hp.id || (!completedProvId.isEmpty && hp.id == completedProvId))
@@ -3507,7 +3531,7 @@ private def usageEntrySignals (u? : Option CachedUsageEntry) : Bool × Bool × B
     let errMsg := ((u.payload.fieldStr? "error").getD "").trimAscii.toString
     let statusCode := (u.payload.fieldNat? "status_code").getD 0
     let isHttpErr := statusCode >= 400
-    let isReauth := st == "needs_reauth" || statusCode == 401
+    let isReauth := usagePayloadIsReauth u.payload
     let isError := !isReauth && (st == "error" || st == "needs_verification" || !errMsg.isEmpty || isHttpErr)
     let hasWindows := !(((u.payload.fieldOrNull "optimize").fieldArr? "windows").getD #[]).isEmpty
     let hasOkStatusCode := 200 ≤ statusCode && statusCode < 300
@@ -3537,7 +3561,8 @@ private def evaluateProviderHealthEvidence
     (sidecarFiles : Array SidecarAuthFileEntry)
     (authHealthRows : Array (String × String))
     (outcomeSummaries : Array AccountOutcomeSummary)
-    (usageEntry? : Option CachedUsageEntry := none) : IO ProviderHealthEvidence := do
+    (usageEntry? : Option CachedUsageEntry := none)
+    (fallbackFence? : Option (Std.Mutex LegacyClearFenceState) := none) : IO ProviderHealthEvidence := do
   let coreCooldowns := cooldowns.filter (fun c => matchesProviderHealthKey hps hp c.accountId)
   let coreRem : UInt64 :=
     coreCooldowns.foldl (fun acc c => max acc (c.remainingSecs nowSec)) 0
@@ -3563,8 +3588,11 @@ private def evaluateProviderHealthEvidence
     | none => ""
   let parkedQuota := trackerRecs.any (·.parkedQuota)
   let poisonedSub := trackerRecs.any (·.poisonedSub)
+  let legacyClearedOutcomeId : Nat ← match healthTracker?, fallbackFence? with
+    | none, some fence => lookupLegacyClearedOutcomeId fence (matchesProviderHealthKey hps hp)
+    | _, _ => pure 0
   let clearedOutcomeId : Nat :=
-    trackerRecs.foldl (fun acc r => max acc r.clearedOutcomeId) 0
+    max legacyClearedOutcomeId (trackerRecs.foldl (fun acc r => max acc r.clearedOutcomeId) 0)
   let matchedOutcomes := outcomeSummaries.filter (fun o => matchesProviderHealthKey hps hp o.accountId)
   let observedRequests := matchedOutcomes.foldl (fun acc o => acc + o.totalCount) 0
   let observedOkRequests := matchedOutcomes.foldl (fun acc o => acc + o.okCount) 0
@@ -3659,17 +3687,18 @@ private def providerStatusOverrideOf (ev : ProviderHealthEvidence) (rejected : B
   else if ev.coreReason? == some "auth_failure" then
     some ("auth_failed", "Provider rejected recent requests (auth failure)")
   else if ev.cdRem > 0 || ev.parkedQuota then
-    let isQuota :=
-      ev.parkedQuota ||
-      ev.coreReason?.any isQuotaReasonSlug ||
-      ev.sidecarReason?.any isQuotaReasonSlug
+    let isQuota := ev.accountState == "quota_exhausted"
     if isQuota then
       let msg :=
         if ev.cdRem > 0 then s!"Provider quota exhausted (cooling down for {ev.cdRem}s)"
         else "Provider quota exhausted"
       some ("quota_exhausted", msg)
     else
-      let reasonStr := ev.coreReason?.orElse (fun _ => ev.sidecarReason?) |>.getD "cooldown"
+      let reasonStr :=
+        (match ev.parkedReasonJv with | .str s => some s | _ => none)
+        |>.orElse (fun _ => ev.coreReason?)
+        |>.orElse (fun _ => ev.sidecarReason?)
+        |>.getD "cooldown"
       some ("error", s!"Provider cooling down after recent request failures ({reasonStr}, {ev.cdRem}s remaining)")
   else if ev.trackerFails > 0 then
     some ("error", s!"Recent proxy requests failed ({ev.trackerFails} consecutive)")
@@ -3997,14 +4026,21 @@ def dispatchProviderAndAiRoute
     for hp in visibleHps do
       let usageHit? := usageCached.find? (fun u => u.providerId == hp.id)
       let ev ← evaluateProviderHealthEvidence hps hp nowSec cooldowns
-        healthTracker? sidecarFiles authHealthRows outcomeSummaries usageHit?
+        healthTracker? sidecarFiles authHealthRows outcomeSummaries usageHit? (some hub.legacyClearFence)
       let isHealthyJv : JVal :=
         if ev.isDegraded then .bool false
         else if ev.latestOutcomeOk || ev.usageVerifiedProbe then .bool true
         else .null
+      -- Emit positive `sample_count` only when active health evidence exists; freshly cleared
+      -- accounts (`is_degraded=false, is_healthy=null`) return `null` so clients render "No data"
+      -- instead of "Unavailable".
       let sampleCountJv : JVal :=
-        if ev.observedRequests > 0 then JVal.nat ev.observedRequests
-        else if ev.usageVerifiedProbe || ev.usageRejected || ev.usageErrorActive then JVal.nat 1
+        if ev.isDegraded then
+          if ev.observedRequests > 0 then JVal.nat ev.observedRequests
+          else if ev.usageVerifiedProbe || ev.usageRejected || ev.usageErrorActive then JVal.nat 1
+          else .null
+        else if ev.latestOutcomeOk then JVal.nat ev.observedRequests
+        else if ev.usageVerifiedProbe then JVal.nat 1
         else .null
       let disabledMsgJv : JVal :=
         if ev.disabledByProvider then
@@ -4087,10 +4123,14 @@ def dispatchProviderAndAiRoute
       | none =>
         if acctId == "cliproxyapi:antigravity" then #["cliproxyapi:antigravity:"] else #[]
     let excludedClearIds := (hps.filter (fun p => !explicitClearKeys.contains p.id)).map (·.id)
-    let maxOutcomeId ← latestProxyOutcomeId store
+    -- Dekker-linearizable order: bump `clearSeq` and clear stores FIRST, then sample `MAX(id)`,
+    -- then advance `clearedOutcomeId` watermarks so no concurrent `INSERT INTO proxy_outcomes` can slip through.
     clearAccountCooldowns healthTracker? proxyCooldownsRef matchClear
       (explicitKeys := explicitClearKeys) (explicitPrefixes := explicitClearPrefixes)
-      (excludedIds := excludedClearIds) (maxOutcomeId := maxOutcomeId)
+      (excludedIds := excludedClearIds) (maxOutcomeId := 0)
+      (fallbackFence? := some hub.legacyClearFence)
+    let maxOutcomeId ← latestProxyOutcomeId store
+    advanceClearedOutcomeWatermarks healthTracker? matchClear explicitClearKeys maxOutcomeId
       (fallbackFence? := some hub.legacyClearFence)
     if let some hp := matchedProv? then
       let sidecarFiles ← fetchSidecarAuthFiles
@@ -4181,12 +4221,14 @@ def dispatchProviderAndAiRoute
         | none => pure #[]
       let cooldowns := (← proxyCooldownsRef.get) ++ tracked
       let authHealthRows ← loadProviderAuthHealthRows store
+      let usageCached ← hub.mu.atomically (do return (← get).usageEntries)
       let mut arr : Array JVal := #[]
       for hp in hps do
         if providerListedFor hp effAdmin callerUserId then
           let uEn? := if isLegacyUnscoped then none else some (isUserProviderEnabled uPrefs hp.id)
+          let usageHit? := usageCached.find? (fun u => u.providerId == hp.id)
           let ev ← evaluateProviderHealthEvidence hps hp nowSec cooldowns
-            healthTracker? sidecarFiles authHealthRows #[]
+            healthTracker? sidecarFiles authHealthRows #[] usageHit? (some hub.legacyClearFence)
           let rejected := (← loginRejected hub hp.id) || ev.loginUnavailable
           let redactDetails := !(effAdmin || providerAddedBy hp callerUserId)
           let statusOverride? := providerStatusOverrideOf ev rejected redactDetails
@@ -4491,8 +4533,9 @@ def dispatchProviderAndAiRoute
           | none => pure #[]
         let cooldowns := (← proxyCooldownsRef.get) ++ tracked
         let authHealthRows ← loadProviderAuthHealthRows store
+        let usageHit? ← hub.mu.atomically (do return (← get).usageEntries.find? (fun u => u.providerId == hp.id))
         let ev ← evaluateProviderHealthEvidence hps hp nowSec cooldowns
-          healthTracker? sidecarFiles authHealthRows #[]
+          healthTracker? sidecarFiles authHealthRows #[] usageHit? (some hub.legacyClearFence)
         let rejected := (← loginRejected hub hp.id) || ev.loginUnavailable
         let redactDetails := !(effAdmin || providerAddedBy hp callerUserId)
         let statusOverride? := providerStatusOverrideOf ev rejected redactDetails
@@ -4577,7 +4620,7 @@ def dispatchProviderAndAiRoute
         let outcomeSummaries ← if effAdmin then loadAccountOutcomeSummaries store else pure #[]
         let usageHit? ← hub.mu.atomically (do return (← get).usageEntries.find? (fun u => u.providerId == hp.id))
         let ev ← evaluateProviderHealthEvidence hps hp nowSec cooldowns
-          healthTracker? sidecarFiles authHealthRows outcomeSummaries usageHit?
+          healthTracker? sidecarFiles authHealthRows outcomeSummaries usageHit? (some hub.legacyClearFence)
         let rejected := (← loginRejected hub hp.id) || ev.loginUnavailable
         let canSeeDiagnostics := effAdmin || providerAddedBy hp callerUserId
         if ev.disabledByProvider then
@@ -4696,7 +4739,6 @@ def dispatchProviderAndAiRoute
           return some (jsonErr 409 "Provider is not an Antigravity account")
         if !effAdmin && !hp.enabled then
           return some (jsonErr 403 "Provider is disabled")
-        let maxOutcomeId ← latestProxyOutcomeId store
         if effAdmin then
           let adminKeys := providerHealthKeys hp
           let excludedIds := (hps.filter (fun p => !adminKeys.contains p.id)).map (·.id)
@@ -4704,8 +4746,11 @@ def dispatchProviderAndAiRoute
             (explicitKeys := adminKeys)
             (explicitPrefixes := #["cliproxyapi:antigravity:"])
             (excludedIds := excludedIds)
-            (maxOutcomeId := maxOutcomeId)
+            (maxOutcomeId := 0)
             (clearDisabledByProvider := true)
+            (fallbackFence? := some hub.legacyClearFence)
+          let maxOutcomeId ← latestProxyOutcomeId store
+          advanceClearedOutcomeWatermarks healthTracker? (matchesHealthKey hps hp) adminKeys maxOutcomeId
             (fallbackFence? := some hub.legacyClearFence)
         else
           let ownKeys : Array String :=
@@ -4715,7 +4760,15 @@ def dispatchProviderAndAiRoute
             (maxOutcomeId := 0)
             (clearDisabledByProvider := false)
             (fallbackFence? := some hub.legacyClearFence)
+        let generation ← hub.mu.atomically (do return (← get).usageGeneration)
         let live ← probeProviderUsage hub hp
+        let ts ← nowEpoch
+        let tsIso := formatEpochIso8601Utc ts
+        hub.mu.atomically do
+          let st ← get
+          if st.usageGeneration == generation then
+            let others := st.usageEntries.filter (fun e => e.providerId != hp.id)
+            set { st with usageEntries := others.push { providerId := hp.id, fetchedSec := ts, fetchedIso := tsIso, payload := live, refreshing := false } }
         let projected := if effAdmin || providerAddedBy hp callerUserId then live else projectMemberProviderUsageJv live (memberProviderDisplayName hps hp)
         return some (jsonResp 200 projected)
 
