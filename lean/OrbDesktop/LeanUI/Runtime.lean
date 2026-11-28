@@ -96,6 +96,7 @@ structure ScrollRegion where
   limitY : SubPx
   offsetY : SubPx := 0
   textLines : List WrappedLine := []
+  hasScrollbar : Bool := true
   deriving Inhabited
 
 /-- Active pointer drag state for an overlay scrollbar thumb or track-jump drag. -/
@@ -107,19 +108,21 @@ structure ScrollbarDragState where
   deriving DecidableEq, Repr, Inhabited
 
 /-- Refresh an active scrollbar drag's geometry against the latest `scrollRegions` produced by
-`view`, clearing the drag if its region vanished or became non-scrollable (`limitY == 0`). -/
+`view`, clearing the drag if its region vanished, hid its scrollbar, or became non-scrollable (`limitY == 0`). -/
 def reconcileScrollbarDrag (drag? : Option ScrollbarDragState)
     (scrollRegions : List ScrollRegion) : Option ScrollbarDragState :=
   drag?.bind fun drag =>
     (scrollRegions.find? (·.id == drag.regionId)).bind fun r =>
-      (scrollbarGeometry r.bounds r.limitY r.offsetY).map fun geom =>
+      if !r.hasScrollbar then none
+      else (scrollbarGeometry r.bounds r.limitY r.offsetY).map fun geom =>
         { drag with geom }
 
-/-- Find the topmost scrollable `ScrollRegion` whose right-edge scrollbar gutter contains `(px, py)`. -/
+/-- Find the topmost scrollable `ScrollRegion` with a visible scrollbar whose right-edge gutter contains `(px, py)`. -/
 def hitTestScrollbar (regions : List ScrollRegion) (px py : Int) :
     Option (ScrollRegion × ScrollbarGeometry) :=
   regions.foldl (fun acc r =>
-    match scrollbarGeometry r.bounds r.limitY r.offsetY with
+    if !r.hasScrollbar then acc
+    else match scrollbarGeometry r.bounds r.limitY r.offsetY with
     | some g => if g.trackRectSub.contains px py then some (r, g) else acc
     | none => acc) none
 
@@ -316,9 +319,10 @@ where
             let r := (rt.hitRegions.find? (·.1 == id)).map (·.2) |>.getD rt.viewportDeviceRect
             let devR := roundRectOut rt.wayland.scale120 r
             let focused := if rt.focusableOrder.isEmpty || rt.focusableOrder.contains id then
-                { rt.requestFocusWithVisibility id devR false with pendingFocusTarget := none }
-              else { rt.clearFocusVisible with pendingFocusTarget := none }
-            { focused with pressedEntity := some id }
+                rt.requestFocusWithVisibility id devR false
+              else rt.clearFocusVisible
+            let pending' := rt.pendingFocusTarget.filter (fun t => focused.focus.owner == some t)
+            { focused with pendingFocusTarget := pending', pressedEntity := some id }
           | none => rt.clearFocusVisible
         else
           match hitTest rt.hitRegions px py, rt.pressedEntity with
@@ -358,7 +362,8 @@ where
                 match focus'.owner with
                 | some nextId => Damage.add d0 (rt.entityDeviceRect nextId)
                 | none => d0
-            { rt with focus := focus', focusVisible := true, pendingFocusTarget := none, damage := dmg' }
+            let pending' := rt.pendingFocusTarget.filter (fun t => focus'.owner == some t)
+            { rt with focus := focus', focusVisible := true, pendingFocusTarget := pending', damage := dmg' }
           else if keysym == 0xff0d || keysym == 0xff8d || keysym == 0x20 then
             match rt.focus.owner with
             | some id =>

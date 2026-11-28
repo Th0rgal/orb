@@ -256,12 +256,15 @@ partial def shapeWidgetTree (ac : Text.GlyphAtlasCache) (font mono bold medium s
       shapedChildren := shapedChildren.push c'
     return (curAc, .mk wid focusable hitTestable style newPayload shapedChildren.toList)
 
-private partial def scrollRegionsOf (b : ComputedBox) : List Runtime.ScrollRegion :=
-  match b.id, b.scrollLimitXY with
-  | some id, some (_, limitY) =>
-    let lines := (b.children.head?.map (·.lines)).getD []
-    [{ id, bounds := b.contentRectSub, limitY, offsetY := (b.scrollOffset.getD (0, 0)).2, textLines := lines }]
-  | _, _ => b.children.flatMap scrollRegionsOf
+private partial def scrollRegionsOf : WidgetNode → ComputedBox → List Runtime.ScrollRegion
+  | .mk _ _ _ _ payload wChildren, b =>
+    match payload, b.id, b.scrollLimitXY with
+    | .scrollClip sc, some id, some (_, limitY) =>
+      let lines := (b.children.head?.map (·.lines)).getD []
+      let hasScrollbar := sc.showScrollbar && sc.scrollbarOpacity > 0
+      [{ id, bounds := b.contentRectSub, limitY, offsetY := (b.scrollOffset.getD (0, 0)).2, textLines := lines, hasScrollbar }]
+    | _, _, _ =>
+      (wChildren.zip b.children).flatMap fun (wc, bc) => scrollRegionsOf wc bc
 
 /-- Regions of the visible running (`loader`) mission rows. An overlay that takes over input keeps
     them beneath its full-window backdrop region: `hitTest` never returns them, and the spinner tick
@@ -363,11 +366,11 @@ def renderDesktopView (rt : Runtime.RuntimeState DesktopState) :
       (availH - chromeComposerHeightSub - h - pxToSub 8 : Nat) w h widget.toLayoutNode
     let overlay := buildSceneFromLayout sc rt.focus theme widget box (recordNodes := false) (focusVisible := rt.focusVisible)
     return ((ac7.finishUploads, if liveWindow then 0 else pal.canvas, sceneOut.prims ++ clipOverlay overlay.prims,
-      sceneOut.hitRegionsSub ++ overlay.hitRegionsSub, sceneOut.focusableOrder ++ overlay.focusableOrder), scrollRegionsOf rootBox)
+      sceneOut.hitRegionsSub ++ overlay.hitRegionsSub, sceneOut.focusableOrder ++ overlay.focusableOrder), scrollRegionsOf widgetRoot rootBox)
   else
     let clearColor := if liveWindow then 0x00000000 else pal.canvas
     return ((ac6.finishUploads, clearColor, sceneOut.prims, sceneOut.hitRegionsSub, sceneOut.focusableOrder),
-      scrollRegionsOf rootBox)
+      scrollRegionsOf widgetRoot rootBox)
 
 def renderDesktopFrame (rt : Runtime.RuntimeState DesktopState) : IO Runtime.FrameView :=
   Prod.fst <$> renderDesktopView rt
@@ -903,7 +906,7 @@ def liveViewportRegression : Bool := Id.run do
     let box := layoutNode 120 none 0 0 0 w h widget.toLayoutNode
     let scene := buildSceneFromLayout 120 {} st.theme widget box (recordNodes := false)
     let rt : Runtime.RuntimeState DesktopState :=
-      { app := st, scrollRegions := scrollRegionsOf box, hitRegions := scene.hitRegionsSub }
+      { app := st, scrollRegions := scrollRegionsOf widget box, hitRegions := scene.hitRegionsSub }
     return (rt, scene.prims)
   let wheel (rt : Runtime.RuntimeState DesktopState) (id : Nat) (dy : Int) : Option DesktopState := do
     let r ← rt.scrollRegions.find? (fun (r : Runtime.ScrollRegion) => r.id == id)

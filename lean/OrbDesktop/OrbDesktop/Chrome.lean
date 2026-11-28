@@ -302,14 +302,15 @@ def buildSidebarRowWidget (theme : Theme) (innerW : SubPx) (row : ChromeSidebarR
 
 /-- Reference SolidJS sidebar rows for each `ScreenId` when rendering full frames. -/
 def referenceSidebarRows (scr : ScreenId) (activeMission : Option String := none)
-    (activeProject : String := "") : List ChromeSidebarRow :=
+    (activeProject : String := "") (settingsSection : String := "") : List ChromeSidebarRow :=
   if scr == .settingsGeneral then
+    let sec := if settingsSection.isEmpty then "Account" else settingsSection
     [ { widgetId := 101, rowId := "s:back", kind := "nav", title := "Back", status := "muted" }
-    , { widgetId := 102, rowId := "s:account", kind := "nav", title := "Account", selected := true }
-    , { widgetId := 111, rowId := "s:models", kind := "nav", title := "Models" }
-    , { widgetId := 112, rowId := "s:agents", kind := "nav", title := "Agents" }
-    , { widgetId := 113, rowId := "s:security", kind := "nav", title := "Security" }
-     , { widgetId := 114, rowId := "s:notifs", kind := "nav", title := "Notifications" }
+    , { widgetId := 102, rowId := "s:account", kind := "nav", title := "Account", selected := sec == "Account" }
+    , { widgetId := 111, rowId := "s:models", kind := "nav", title := "Models", selected := sec == "Models" }
+    , { widgetId := 112, rowId := "s:agents", kind := "nav", title := "Agents", selected := sec == "Agents" }
+    , { widgetId := 113, rowId := "s:security", kind := "nav", title := "Security", selected := sec == "Security" }
+     , { widgetId := 114, rowId := "s:notifs", kind := "nav", title := "Notifications", selected := sec == "Notifications" }
      , { widgetId := 103, rowId := "nav:settings", kind := "footer", title := "Settings", selected := true }
     ]
   else
@@ -363,7 +364,7 @@ def buildSidebarChrome (st : DesktopState) (availH : SubPx) (useReferenceTree : 
   let innerW := width - rightBorder
   let rowW := innerW - pxToSub 12
   let footH := pxToSub 45
-  let rowsSource := if embedded then st.sidebarRows else if useReferenceTree then referenceSidebarRows st.screen st.openMission st.draftProject else st.visibleProjectRows
+  let rowsSource := if embedded then st.sidebarRows else if useReferenceTree then referenceSidebarRows st.screen st.openMission st.draftProject st.settingsSection else st.visibleProjectRows
   let isNav (r : ChromeSidebarRow) : Bool := r.kind == "nav"
   let isFoot (r : ChromeSidebarRow) : Bool := r.kind == "footer"
   let navRows : List WidgetNode :=

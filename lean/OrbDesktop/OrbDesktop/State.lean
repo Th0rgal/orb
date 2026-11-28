@@ -1153,6 +1153,13 @@ def pushNavScreen (st : DesktopState) (next : ScreenId) (nextMission : Option St
   if st.screen == next && st.openMission == nextMission then st
   else { st.clearAllPreedit with screen := next, navHistory := cur :: st.navHistory.take 15, navForward := [] }
 
+private def fixtureMissionRunning (mid : Option String) : Bool :=
+  mid.isNone || mid == some "m:0"
+
+private def fixtureScreenPlaceholder (scr : ScreenId) : String :=
+  if scr == .missionTranscript || scr == .missionSplitDiff then "Send follow-up"
+  else "Describe a task, / for commands, @ for context"
+
 /-- Restore a `NavEntry` cleanly while preserving `openMission`, `sidebarRows.selected`, and live invariants. -/
 def restoreNavEntry (st : DesktopState) (entry : NavEntry) (hist fwd : List NavEntry) : DesktopState :=
   let st := st.clearAllPreedit
@@ -1177,11 +1184,17 @@ def restoreNavEntry (st : DesktopState) (entry : NavEntry) (hist fwd : List NavE
         | _ => none
       { cleared with sidebarRows := cleared.sidebarRows.map fun r => { r with selected := activeWid == some r.widgetId } }
   else
+    let isMission := entry.screen == .missionTranscript || entry.screen == .missionSplitDiff
+    let restoredMission := if isMission then entry.missionId else none
     { st with
       screen := entry.screen
+      openMission := restoredMission
       modal := .none
       navHistory := hist
       navForward := fwd
+      composer := { st.composer with
+        isRunning := isMission && fixtureMissionRunning restoredMission
+        placeholder := fixtureScreenPlaceholder entry.screen }
       sidebarRows := defaultSidebarRows entry.screen }
 
 private def toggleSidePanel (st : DesktopState) (tab : String) : DesktopState :=
@@ -1395,7 +1408,9 @@ private def stepDesktopInput (scale120 : Nat) (viewport : Rect) (st : DesktopSta
     | .activate 104 => { st with draftProject := if st.draftProject == "Project 0" then "lean-ui" else "Project 0" }
     | .activate 105 =>
       let nav := pushNavScreen { st with modal := .none } .missionTranscript (some "m:0")
-      { nav with openMission := some "m:0" }
+      { nav with
+        openMission := some "m:0"
+        composer := { nav.composer with isRunning := true, placeholder := "Send follow-up" } }
     | .activate 112 =>
       if st.screen == .settingsGeneral then { st with settingsSection := "Agents" }
       else pushNavScreen { st with modal := .none } .machinesFleet
@@ -1442,19 +1457,28 @@ private def stepDesktopInput (scale120 : Nat) (viewport : Rect) (st : DesktopSta
           | 122 => "m:40"
           | _ => "m:20"
         let nav := pushNavScreen { st with modal := .none } .missionTranscript (some mid)
-        { nav with openMission := some mid }
+        { nav with
+          openMission := some mid
+          composer := { nav.composer with isRunning := false, placeholder := "Send follow-up" } }
       else if id >= 130 && id <= 149 then { st with draftProject := s!"Project {id - 130}" }
       else st
     | .key 0x1b _ .pressed | .key 0xff1b _ .pressed => { st with modal := .none }
     | _ => st
   let next :=
     match ev with
-    | .activate 2 | .composerReturn false => actionState
+    | .activate 2 | .composerReturn false | .activate 105 => actionState
+    | .activate id => if id >= 120 && id <= 123 then actionState else { actionState with composer := composer }
     | _ => { actionState with composer := composer }
+  let activeSettingsSec := if st.settingsSection.isEmpty then "Account" else st.settingsSection
   let actionChanged :=
     match ev with
     | .activate 2 | .composerReturn false => st.composer.isRunning || !st.composer.text.isEmpty
-    | .activate 101 | .activate 102 | .activate 103 | .activate 104 | .activate 105 | .activate 106 | .activate 111 | .activate 112 | .activate 113 | .activate 114
+    | .activate 102 => st.screen != .settingsGeneral || activeSettingsSec != "Account"
+    | .activate 111 => st.screen != .settingsGeneral || activeSettingsSec != "Models"
+    | .activate 112 => st.screen != .settingsGeneral || activeSettingsSec != "Agents"
+    | .activate 113 => st.screen != .settingsGeneral || activeSettingsSec != "Security"
+    | .activate 114 => st.screen != .settingsGeneral || activeSettingsSec != "Notifications"
+    | .activate 101 | .activate 103 | .activate 104 | .activate 105 | .activate 106
     | .activate 720 | .activate 721 | .activate 722 | .activate 723 | .activate 724 | .activate 738 | .activate 739
     | .activate 804 | .activate 805 | .activate 911 | .activate 912 | .activate 913 => true
     | .activate id => (id >= 120 && id <= 123) || (id >= 130 && id <= 149)
@@ -1465,8 +1489,18 @@ private def stepDesktopInput (scale120 : Nat) (viewport : Rect) (st : DesktopSta
     -- Only the transcript has a fixed bottom composer. Other screens can center
     -- the editor; without its layout bounds use the full viewport.
     let dmg := if composer != st.composer && st.screen == .missionTranscript then composerDamageRect scale120 viewport st.sidebarWidth else viewport
-    let next := if next.openMission.isSome && next.screen != .missionTranscript && next.screen != .missionSplitDiff then
-      resetSelection next none else next
+    let next :=
+      if next.screen != .missionTranscript && next.screen != .missionSplitDiff then
+        if next.liveData then
+          if next.openMission.isSome then resetSelection next none else next
+        else
+          { next with
+            openMission := none
+            composer := { next.composer with isRunning := false, placeholder := fixtureScreenPlaceholder next.screen } }
+      else if !next.liveData && st.screen != .missionTranscript && st.screen != .missionSplitDiff then
+        { next with
+          composer := { next.composer with isRunning := fixtureMissionRunning next.openMission, placeholder := "Send follow-up" } }
+      else next
     return (next, Damage.add none dmg)
 
 /-- Menu rows are resolved against the clicked mission, independently of the transcript selection. -/

@@ -882,6 +882,47 @@ private def verifyWaylandImeSerialGuard : IO Unit := do
   unless !tx600Scene.focusableOrder.contains 144 && tx600Scene.hitRegionsSub.all (fun (wid, r) => wid < 130 || wid > 149 || r.bottom <= pxToSub 555) do
     throw <| IO.userError "1470x600 fixture sidebar failed to clip off-screen project rows above Settings footer"
 
+  -- Hidden scrollbars (hasScrollbar = false) must never intercept pointer hits via hitTestScrollbar or retain drag.
+  let hiddenScrollReg : Runtime.ScrollRegion := {
+    id := rosterViewportId, bounds := { x := 0, y := pxToSub 35, w := pxToSub 219, h := pxToSub 520 },
+    limitY := pxToSub 333, offsetY := 0, hasScrollbar := false
+  }
+  unless (Runtime.hitTestScrollbar [hiddenScrollReg] (pxToSub 210) (pxToSub 519)).isNone do
+    throw <| IO.userError "hitTestScrollbar intercepted click on a ScrollRegion with hasScrollbar := false"
+
+  -- Mid-batch Tab / trapped pointer-down must preserve pendingFocusTarget when focus.owner did not move.
+  let rtMidTab := Runtime.applyEventBatch rtMidBatch
+    #[.key 0x6b 2 .pressed, .key 0xff09 0 .pressed, .text "z"]
+    (fun _ st ev => stepDesktopEvent 120 vpDev st ev) desktopFocusChange desktopFocusTraps desktopImeSessionKey
+    DesktopState.clearAllPreeditChecked
+  unless rtMidTab.focus.owner == some 701 && rtMidTab.pendingFocusTarget == some 701 &&
+      rtMidTab.app.searchBuffer.text == "z" do
+    throw <| IO.userError s!"Mid-batch Ctrl+K + Tab + typing wiped pendingFocusTarget: owner={repr rtMidTab.focus.owner} pending={repr rtMidTab.pendingFocusTarget} text={repr rtMidTab.app.searchBuffer.text}"
+
+  -- Fixture mission switching (120 -> 103 -> Back -> 105 -> Stop) must preserve openMission, placeholder, and Stop.
+  let txM80 := (stepDesktopEvent 120 vpDev tx0 (.activate 120)).1
+  unless txM80.openMission == some "m:80" && !txM80.composer.isRunning do
+    throw <| IO.userError "Activating completed fixture mission 120 did not set openMission=m:80 and isRunning=false"
+  let txSettings := (stepDesktopEvent 120 vpDev txM80 (.activate 103)).1
+  unless txSettings.screen == .settingsGeneral && txSettings.composer.placeholder == "Describe a task, / for commands, @ for context" do
+    throw <| IO.userError s!"Leaving fixture mission to Settings clobbered placeholder: {repr txSettings.composer.placeholder}"
+  let txBack := (stepDesktopEvent 120 vpDev txSettings (.activate 101)).1
+  unless txBack.screen == .missionTranscript && txBack.openMission == some "m:80" && txBack.headerTitle == "Mission 80 doing some work" do
+    throw <| IO.userError s!"Back from Settings lost fixture openMission: screen={repr txBack.screen} open={repr txBack.openMission}"
+  let txLong := (stepDesktopEvent 120 vpDev txBack (.activate 105)).1
+  let (txStopped, stopDmg) := stepDesktopEvent 120 vpDev txLong (.activate 2)
+  unless txLong.composer.isRunning && txStopped.missionStopped && stopDmg.isSome do
+    throw <| IO.userError "Switching back to Long mission (105) broke Stop button (2)"
+
+  -- Settings sidebar section clicks must update selected highlight in referenceSidebarRows (and Account click on initial state is no-op).
+  let s06Models := (stepDesktopEvent 120 vpDev s06 (.activate 111)).1
+  let s06Rows := referenceSidebarRows s06Models.screen s06Models.openMission s06Models.draftProject s06Models.settingsSection
+  unless s06Rows.any (fun r => r.widgetId == 111 && r.selected) && s06Rows.all (fun r => r.widgetId != 102 || !r.selected) do
+    throw <| IO.userError "Settings sidebar section click (111) did not move selected highlight from Account (102) to Models (111)"
+  let (_, acctNoopDmg) := stepDesktopEvent 120 vpDev s06 (.activate 102)
+  unless acctNoopDmg.isNone do
+    throw <| IO.userError "Clicking already-selected Settings Account (102) produced redundant damage"
+
 def main : IO UInt32 := do
   verifyOrbScrollEquivalence
   verifyNineScreenControls
