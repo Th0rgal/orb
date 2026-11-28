@@ -2056,11 +2056,16 @@ def cancelActiveRemoteJobForMission
     ("x-sandboxed-cancel-reason", if reason.isEmpty then "Mission stopped on Core" else reason)
   ]
   match ← callRemoteNodeHttpOpt relayHub? mc? effNode "POST" s!"/jobs/{jobId}/cancel" (some (.obj #[])) hdrs 10000 with
-  | .ok (st, respTxt, _, _, _) =>
-    let confirmed := (200 ≤ st && st < 300) || isOrbNodeJobNotFound st respTxt jobId
-    if confirmed then
+  | .ok (st, respTxt, jv?, _, _) =>
+    match classifyOrbNodeCancelReply st respTxt jobId jv? with
+    | .confirmedCancelled =>
       markCancelState jobId "cancelled"
-    return confirmed
+      return true
+    | .alreadyTerminal termSt =>
+      markCancelState jobId termSt
+      return false
+    | .notConfirmed =>
+      return false
   | .error _ =>
     return false
 
@@ -2280,8 +2285,9 @@ partial def spawnRemoteJobPoller
             -- Only mark cancellation delivered once the node confirms it (`FLT-06`);
             -- during a partition, keep `cancelSent = false` so later ticks retry `/cancel`.
             match ← callRemoteNodeHttpOpt relayHub? mc? effNodeId "POST" s!"/jobs/{jobId}/cancel" (some (.obj #[])) hdrs 8000 with
-            | .ok (cSt, cBody, _, _, _) =>
-              if (200 ≤ cSt && cSt < 300) || isOrbNodeJobNotFound cSt cBody jobId then
+            | .ok (cSt, cBody, cJv?, _, _) =>
+              match classifyOrbNodeCancelReply cSt cBody jobId cJv? with
+              | .confirmedCancelled =>
                 cancelSent := true
                 discard <| execParamQuery store.missionsDb
                   "UPDATE remote_node_jobs SET state='cancelled', updated_at=?2 WHERE job_id=?1 AND state NOT IN ('succeeded','failed','lost','terminal','completed','aborted');"
@@ -2289,6 +2295,15 @@ partial def spawnRemoteJobPoller
                 discard <| execParamQuery store.projectsDb
                   "UPDATE remote_jobs SET state='cancelled', heartbeat_at=?2, finished_at=COALESCE(finished_at,?2), updated_at=?2 WHERE job_id=?1 AND state NOT IN ('succeeded','failed','lost','terminal','completed','aborted');"
                   #[jobId, nowIso]
+              | .alreadyTerminal termSt =>
+                cancelSent := true
+                discard <| execParamQuery store.missionsDb
+                  "UPDATE remote_node_jobs SET state=?2, updated_at=?3 WHERE job_id=?1 AND state NOT IN ('succeeded','failed','cancelled','lost','terminal','completed','aborted');"
+                  #[jobId, termSt, nowIso]
+                discard <| execParamQuery store.projectsDb
+                  "UPDATE remote_jobs SET state=?2, heartbeat_at=?3, finished_at=COALESCE(finished_at,?3), updated_at=?3 WHERE job_id=?1 AND state NOT IN ('succeeded','failed','cancelled','lost','terminal','completed','aborted');"
+                  #[jobId, termSt, nowIso]
+              | .notConfirmed => pure ()
             | .error _ => pure ()
       if keepRunning then
         let ownsGen ← pollerOwnsGeneration
@@ -3227,22 +3242,26 @@ def reattachActiveRemoteJobsOnStartup
       let snid := (cell srow 1).trimAscii.toString
       let smid := (cell srow 2).trimAscii.toString
       if !sjid.isEmpty then
-        let mut confirmed := snid.isEmpty
+        let mut nextSt := if snid.isEmpty then "cancelled" else "cancel_requested"
         if !snid.isEmpty then
           let effNode ← match ← resolveConcreteRemoteTargetNode mc? snid (if smid.isEmpty then none else some (store, smid)) with
             | .ok n => pure n
             | .error _ => pure snid
           let hdrs := #[("x-sandboxed-cancel-actor", "core"), ("x-sandboxed-cancel-reason", "Mission inactive on Core startup")]
           match ← callRemoteNodeHttpOpt relayHub? mc? effNode "POST" s!"/jobs/{sjid}/cancel" (some (.obj #[])) hdrs 6000 with
-          | .ok (cSt, cBody, _, _, _) =>
-            confirmed := (200 ≤ cSt && cSt < 300) || isOrbNodeJobNotFound cSt cBody sjid
-          | .error _ => confirmed := false
-        let nextSt := if confirmed then "cancelled" else "cancel_requested"
+          | .ok (cSt, cBody, cJv?, _, _) =>
+            match classifyOrbNodeCancelReply cSt cBody sjid cJv? with
+            | .confirmedCancelled => nextSt := "cancelled"
+            | .alreadyTerminal termSt => nextSt := termSt
+            | .notConfirmed => nextSt := "cancel_requested"
+          | .error _ => nextSt := "cancel_requested"
         discard <| execParamQuery store.missionsDb
-          "UPDATE remote_node_jobs SET state=?2, updated_at=?3 WHERE job_id=?1;" #[sjid, nextSt, nowIso]
+          "UPDATE remote_node_jobs SET state=?2, updated_at=?3 WHERE job_id=?1 AND state NOT IN ('terminal','completed','succeeded','failed','aborted','cancelled','lost');"
+          #[sjid, nextSt, nowIso]
         discard <| execParamQuery store.projectsDb
           ("UPDATE remote_jobs SET state=?2, heartbeat_at=?3, " ++
-           "finished_at=CASE WHEN ?2='cancelled' THEN COALESCE(finished_at,?3) ELSE finished_at END, updated_at=?3 WHERE job_id=?1;")
+           "finished_at=CASE WHEN ?2 IN ('cancelled','succeeded','failed','completed','aborted','terminal') THEN COALESCE(finished_at,?3) ELSE finished_at END, updated_at=?3 " ++
+           "WHERE job_id=?1 AND state NOT IN ('terminal','completed','succeeded','failed','aborted','cancelled','lost');")
           #[sjid, nextSt, nowIso]
   -- Also reconcile missions still marked active/pending whose current placement_job_id
   -- already reached 'cancelled' or 'lost' in remote_node_jobs (e.g. cancelled via the

@@ -667,7 +667,7 @@ private def dispatchProjectFilesTail?
     (method : String)
     (bodyBytes : ByteArray)
     (callerUserId bootstrapAdminId : String)
-    (isLegacyUnscoped : Bool)
+    (isAdmin isLegacyUnscoped : Bool)
     (nowIso : String) : IO (Option (Nat × String × ByteArray)) := do
     -- `/api/projects/:slug/files`, `/api/projects/:slug/file*`
     if method == "GET" && tail == ["files"] then
@@ -742,11 +742,25 @@ private def dispatchProjectFilesTail?
       let dstClient :=
         if tail.length == 3 then (percentDecodeStrict tail[2]!).getD tail[2]!
         else clientSlug
-      if !validProjectSlug dstClient then
-        return some (jsonErr 400 "invalid_destination_project")
-      let dstScoped :=
-        if isLegacyUnscoped then dstClient
-        else (scopeProjectSlug callerUserId bootstrapAdminId dstClient).getD dstClient
+      if isLegacyUnscoped then
+        if !validProjectSlug dstClient then
+          return some (jsonErr 400 "invalid_destination_project")
+      else
+        if !validRawProjectSlug dstClient then
+          return some (jsonErr 400 "invalid_destination_project")
+      let mut dstScoped := dstClient
+      if !isLegacyUnscoped then
+        let some s := scopeProjectSlug callerUserId bootstrapAdminId dstClient
+          | return some (jsonErr 400 "invalid_destination_project")
+        dstScoped := s
+        if !isAdmin && dstScoped != scopedSlug then
+          let .ok dstOwnerRows ← execParamQuery store.projectsDb
+              "SELECT slug FROM project_owners WHERE (slug=?1 OR slug=?2) AND owner_user_id=?3 ORDER BY (slug=?1) DESC LIMIT 1;"
+              #[dstScoped, dstClient, callerUserId]
+            | return some (jsonErr 500 "db_error")
+          if dstOwnerRows.size ≤ 1 then
+            return some (jsonErr 404 "project_not_found")
+          dstScoped := cell dstOwnerRows[1]! 0
       let rawSrc := ((jv.fieldStr? "path").orElse (fun _ => jv.fieldStr? "source")).getD ""
       let rawDst := (jv.fieldStr? "destination").getD ""
       let isCopy :=
@@ -781,11 +795,26 @@ def dispatchProjectAndControllerRoutes?
       let .ok jv := OrbBin.Json.parseBytes bodyBytes
         | return some (jsonErr 400 "invalid_json")
       let rawSlug := ((jv.fieldStr? "slug").getD "").trimAscii.toString
-      if !validProjectSlug rawSlug then
-        return some (jsonErr 400 "invalid_project_slug")
-      let scopedSlug :=
-        if isLegacyUnscoped then rawSlug
-        else (scopeProjectSlug callerUserId bootstrapAdminId rawSlug).getD rawSlug
+      if isLegacyUnscoped then
+        if !validProjectSlug rawSlug then
+          return some (jsonErr 400 "invalid_project_slug")
+      else
+        if !validRawProjectSlug rawSlug then
+          return some (jsonErr 400 "invalid_project_slug")
+      let mut scopedSlug := rawSlug
+      if !isLegacyUnscoped then
+        let some s := scopeProjectSlug callerUserId bootstrapAdminId rawSlug
+          | return some (jsonErr 400 "invalid_project_slug")
+        scopedSlug := s
+        if !isAdmin then
+          let .ok ownerRows ← execParamQuery store.projectsDb
+              "SELECT COALESCE(o.owner_user_id,'') FROM projects p LEFT JOIN project_owners o ON o.slug=p.slug WHERE p.slug=?1 LIMIT 1;"
+              #[scopedSlug]
+            | return some (jsonErr 500 "db_error")
+          if ownerRows.size > 1 then
+            let existingOwner := (cell ownerRows[1]! 0).trimAscii.toString
+            if existingOwner != callerUserId then
+              return some (jsonErr 403 "forbidden")
       let title := (jv.fieldStr? "title").orElse (fun _ => jv.fieldStr? "name") |>.getD rawSlug
       let obj := (jv.fieldStr? "objective").getD ""
       let status := (jv.fieldStr? "status").getD "active"
@@ -1011,7 +1040,7 @@ def dispatchProjectAndControllerRoutes?
           #[scopedSlug, clientSlug, callerUserId]
         | return some (jsonErr 500 "db_error")
       if ownerRows.size ≤ 1 then return some (jsonErr 404 "not_found")
-    if let some r ← dispatchProjectFilesTail? store broadcastHub? clientSlug scopedSlug tail qMap method bodyBytes callerUserId bootstrapAdminId isLegacyUnscoped nowIso then
+    if let some r ← dispatchProjectFilesTail? store broadcastHub? clientSlug scopedSlug tail qMap method bodyBytes callerUserId bootstrapAdminId isAdmin isLegacyUnscoped nowIso then
       return some r
 
   return none

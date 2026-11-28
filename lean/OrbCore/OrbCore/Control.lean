@@ -3324,6 +3324,10 @@ private def launchBtwSideAgent (st : CoreAppState) (caller : CallerPrincipal) (s
       match out.remoteNodeId? with
       | some targetNode =>
         if let some sup := st.remoteSup? then
+          let (_, proxyBase) ← resolveRemoteCallbackUrls sup targetNode
+          if let .error pErr := validateRemoteLaunchPlan out.backend turnPrompt proxyBase then
+            cleanupUnbornBtw
+            return (remoteDispatchHttpStatus pErr, s!"\{\"error\":{jsonEscape pErr}}")
           let (resolvedNode, rentedVmId) ← match ← resolveOrProvisionAutoManagedTarget st caller out.missionId caller.userId out.project targetNode jv nowEpochSec with
             | .ok pair => pure pair
             | .error (errCode, errBody) =>
@@ -6180,12 +6184,16 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
         if let .error hErr := validateRemoteHarness backend then
           abortIdem
           return .ok (mkJson (remoteDispatchHttpStatus hErr) s!"\{\"error\":{jsonEscape hErr}}")
-        if let (some sup, some targetNode, some rawPrompt) := (st.remoteSup?, remoteNodeId?, prompt?) then
-          if !rawPrompt.trimAscii.toString.isEmpty then
-            let (_, proxyBase) ← resolveRemoteCallbackUrls sup targetNode
-            if let .error pErr := validateRemoteLaunchPlan backend rawPrompt proxyBase then
-              abortIdem
-              return .ok (mkJson (remoteDispatchHttpStatus pErr) s!"\{\"error\":{jsonEscape pErr}}")
+        if let (some sup, some targetNode) := (st.remoteSup?, remoteNodeId?) then
+          let (_, proxyBase) ← resolveRemoteCallbackUrls sup targetNode
+          if let .error pErr := validateRemoteBackendAndProxy backend proxyBase then
+            abortIdem
+            return .ok (mkJson (remoteDispatchHttpStatus pErr) s!"\{\"error\":{jsonEscape pErr}}")
+          if let some rawPrompt := prompt? then
+            if !rawPrompt.trimAscii.toString.isEmpty then
+              if let .error pErr := validateRemoteLaunchPlan backend rawPrompt proxyBase then
+                abortIdem
+                return .ok (mkJson (remoteDispatchHttpStatus pErr) s!"\{\"error\":{jsonEscape pErr}}")
       let mut selectedSkills : Array SelectedSkill := #[]
       if !clientPlaced then
         if let some prompt := prompt? then
@@ -6636,9 +6644,25 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
         | return .ok (mkJson 404 "{\"error\":\"mission_not_found\"}")
       let .ok jv := OrbBin.Json.parseBytes req.bodySlice.toByteArray
         | return .ok (mkJson 400 "{\"error\":\"invalid_json\"}")
-      let settings ← match MissionSettings.resolve existing jv with
+      let settings ← match MissionSettings.resolve existing jv MissionSettings.restAllowedSettingsFields with
         | .ok settings => pure settings
-        | .error e => return .ok (mkJson 400 (renderCompact (.obj #[("error", .str e)])))
+        | .error e =>
+          if e.startsWith "unsupported_field:" then
+            return .ok (mkJson 501 (renderCompact (.obj #[
+              ("ok", .bool false), ("error", .str "unsupported"),
+              ("message", .str s!"Field `{(e.drop "unsupported_field:".length).toString}` is not supported by mission settings; no settings were changed.")
+            ])))
+          return .ok (mkJson 400 (renderCompact (.obj #[("error", .str e)])))
+      if (jv.field? "backend").isSome then
+        let isRemoteMission :=
+          existing.placementKind == "remote" || existing.placementKind == "remote_node" ||
+          existing.placementKind == "managed_vm" ||
+          (← resolveMissionRemoteNode? st.store st.managedStore? mid).isSome
+        if isRemoteMission then
+          if let .error hErr := validateRemoteHarness settings.backend then
+            return .ok (mkJson 400 (renderCompact (.obj #[("error", .str hErr)])))
+          if existing.goalMode && !RemoteGoal.supportsHarness settings.backend then
+            return .ok (mkJson 400 (renderCompact (.obj #[("error", .str "remote_goal_unsupported: This remote harness cannot continue a Goal.")])))
       let nowIso := formatEpochIso8601Utc nowEpochSec
       let sseEv? ←
         match ← MissionSettings.applyPlacementPatch st.store existing jv caller.userId caller.isLegacyUnscoped
@@ -6708,6 +6732,13 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
               return .ok (queueRefusal msgId e)
             queued := true
           else
+            let isAutoManagedTarget :=
+              let tl := targetNode.trimAscii.toString.toLower
+              tl == "auto-managed" || tl.startsWith "auto-managed:"
+            if isAutoManagedTarget && st.managedStore?.isSome then
+              let (_, proxyBase) ← resolveRemoteCallbackUrls sup targetNode
+              if let .error pErr := validateRemoteLaunchPlan mRec.backend content proxyBase then
+                return .ok (mkJson (remoteDispatchHttpStatus pErr) s!"\{\"error\":{jsonEscape pErr}}")
             let (resolvedNode, rentedVmId) ← match ← resolveOrProvisionAutoManagedTarget st caller mid mRec.ownerUserId mRec.project targetNode jv nowEpochSec with
               | .ok pair => pure pair
               | .error (errCode, errBody) => return .ok (mkJson errCode errBody)
@@ -6744,6 +6775,11 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
               sideQuestion     := isSide
             }
             if let .error dispErr ← submitRemoteMissionTurn st.store st.managedStore? st.relayHub? st.broadcastHub? sup st.cfg.workingDir spec nowEpochSec then
+              if !(dispErr.startsWith "remote_dispatch_uncertain:" || dispErr.startsWith "remote_accept_persist_failed:") && !rentedVmId.isEmpty then
+                if let some mst := st.managedStore? then
+                  let mf0 ← st.managedRef.get
+                  discard <| runConfiguredManagedLifecycle mst
+                    { store := st.store, fleet := mf0, override? := st.managedProvisioningOverride? } rentedVmId "destroy" nowEpochSec
               return .ok (mkJson (remoteDispatchHttpStatus dispErr) s!"\{\"error\":{jsonEscape dispErr}}")
         | _, _ =>
           discard <| appendMissionEvent st.store mid "user_message" pl nowIso
@@ -8062,6 +8098,16 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
             return .ok (queueRefusal msgId e)
           queued := true
         else
+          let isAutoManagedTarget :=
+            let tl := targetNode.trimAscii.toString.toLower
+            tl == "auto-managed" || tl.startsWith "auto-managed:"
+          if isAutoManagedTarget && st.managedStore?.isSome then
+            let (_, proxyBase) ← resolveRemoteCallbackUrls sup targetNode
+            if let .error pErr := validateRemoteLaunchPlan m.backend delivContent proxyBase then
+              if keyed then
+                if let .error _ ← abortIdempotencySlot st.store receiptScope msgId then
+                  return .ok (mkJson 500 "{\"error\":\"message_receipt_unconfirmed\"}")
+              return .ok (mkJson (remoteDispatchHttpStatus pErr) s!"\{\"error\":{jsonEscape pErr}}")
           let (resolvedNode, rentedVmId) ← match ← resolveManagedTarget st caller mid m.ownerUserId m.project targetNode bodyJv nowEpochSec with
             | .ok pair => pure pair
             | .error (.preflight (errCode, errBody)) =>
@@ -8133,6 +8179,12 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
               goalDispatch?    := goalDispatch?
             }
             if let .error dispErr ← submitRemoteMissionTurn st.store st.managedStore? st.relayHub? st.broadcastHub? sup st.cfg.workingDir spec nowEpochSec then
+              if !(dispErr == "remote_goal_dispatch_fenced" || dispErr.startsWith "remote_dispatch_uncertain:" ||
+                  dispErr.startsWith "remote_accept_persist_failed:") && !rentedVmId.isEmpty then
+                if let some mst := st.managedStore? then
+                  let mf0 ← st.managedRef.get
+                  discard <| runConfiguredManagedLifecycle mst
+                    { store := st.store, fleet := mf0, override? := st.managedProvisioningOverride? } rentedVmId "destroy" nowEpochSec
               if !(goalDispatch?.isSome && (dispErr == "remote_goal_dispatch_fenced" || dispErr.startsWith "remote_dispatch_uncertain:" ||
                   dispErr.startsWith "remote_accept_persist_failed:")) then
                 return .ok (mkJson (remoteDispatchHttpStatus dispErr) s!"\{\"error\":{jsonEscape dispErr}}")
@@ -8279,6 +8331,13 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
       let nowIso := formatEpochIso8601Utc nowEpochSec
       if let (some sup, some targetNode) := (st.remoteSup?, ← resolveMissionRemoteNode? st.store st.managedStore? mid) then
         if m.status != "active" && m.status != "pending" then
+          let isAutoManagedTarget :=
+            let tl := targetNode.trimAscii.toString.toLower
+            tl == "auto-managed" || tl.startsWith "auto-managed:"
+          if isAutoManagedTarget && st.managedStore?.isSome then
+            let (_, proxyBase) ← resolveRemoteCallbackUrls sup targetNode
+            if let .error pErr := validateRemoteLaunchPlan m.backend deliv proxyBase then
+              return .ok (mkJson (remoteDispatchHttpStatus pErr) s!"\{\"error\":{jsonEscape pErr}}")
           let (resolvedNode, rentedVmId) ← match ← resolveOrProvisionAutoManagedTarget st caller mid m.ownerUserId m.project targetNode bodyJv nowEpochSec with
             | .ok pair => pure pair
             | .error (errCode, errBody) => return .ok (mkJson errCode errBody)
@@ -8313,6 +8372,11 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
             resumeSessionId? := resumeSid?
           }
           if let .error dispErr ← submitRemoteMissionTurn st.store st.managedStore? st.relayHub? st.broadcastHub? sup st.cfg.workingDir spec nowEpochSec then
+            if !(dispErr.startsWith "remote_dispatch_uncertain:" || dispErr.startsWith "remote_accept_persist_failed:") && !rentedVmId.isEmpty then
+              if let some mst := st.managedStore? then
+                let mf0 ← st.managedRef.get
+                discard <| runConfiguredManagedLifecycle mst
+                  { store := st.store, fleet := mf0, override? := st.managedProvisioningOverride? } rentedVmId "destroy" nowEpochSec
             return .ok (mkJson (remoteDispatchHttpStatus dispErr) s!"\{\"error\":{jsonEscape dispErr}}")
       else
         let spawnWanted := (bodyJv.fieldBool? "spawn_harness").getD false

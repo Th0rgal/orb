@@ -491,11 +491,41 @@ def isOrbNodeJobNotFound (status : Nat) (body jobId : String) : Bool :=
   let t := body.trimAscii.toString
   status == 404 && (t == "job not found" || t == s!"job {jobId} not found")
 
+/-- Canonical interpretation of `OrbNode` `POST /jobs/:id/cancel` HTTP replies (`FLT-04`). -/
+inductive OrbNodeCancelOutcome where
+  | confirmedCancelled
+  | alreadyTerminal (state : String)
+  | notConfirmed
+  deriving BEq, Repr
+
+def classifyOrbNodeCancelReply (status : Nat) (body jobId : String) (jv? : Option JVal) : OrbNodeCancelOutcome :=
+  if isOrbNodeJobNotFound status body jobId then
+    .confirmedCancelled
+  else if !(200 ≤ status && status < 300) then
+    .notConfirmed
+  else
+    let nodeState := (jv?.bind (·.fieldStr? "state")).getD ""
+    let nodeCancelReq := (jv?.bind (·.fieldBool? "cancel_requested")).getD false
+    if nodeCancelReq || nodeState == "cancelled" then
+      .confirmedCancelled
+    else if #["succeeded", "failed", "completed", "aborted", "terminal"].contains nodeState then
+      .alreadyTerminal nodeState
+    else
+      -- Includes `{"state":"lost","cancel_requested":false}` (unstopped scope) and unknown 2xx payloads.
+      .notConfirmed
+
 /-- Pure harness preflight validator that runs even when `prompt` is empty (`FLT-14`). -/
 def validateRemoteHarness (backend : String) : Except String String := do
   let harness := normalizeRemoteHarness backend
   if !remoteSupportedHarnesses.contains harness then
     throw s!"REMOTE_HARNESS_UNSUPPORTED: unsupported remote harness `{backend}`"
+  return harness
+
+/-- Validate remote harness AND proxy URL preconditions unconditionally (even when `prompt` is empty) (`FLT-14`). -/
+def validateRemoteBackendAndProxy (backend proxyBase : String) : Except String String := do
+  let harness ← validateRemoteHarness backend
+  if remoteRequiresProxyHarnesses.contains harness && proxyBase.trimAscii.toString.isEmpty then
+    throw s!"REMOTE_AUTH_REQUIRED: SANDBOXED_PUBLIC_URL (or SANDBOXED_PROXY_PUBLIC_URL) must be configured for remote {harness} turns"
   return harness
 
 /-- Pure typed preflight validator matching `buildRemoteLaunchCapabilitiesJVal` (`FLT-14`). -/
@@ -2161,11 +2191,10 @@ def dispatchRemoteFleetAndRelayRoutes?
             ("cancel_requested", .bool true), ("confirmed", .bool false),
             ("message", .str s!"node HTTP {st}: {txt}"), ("job_id", .str jid)
           ]))
-        let nodeState := (jv?.bind (·.fieldStr? "state")).getD ""
-        let nodeCancelReq := (jv?.bind (·.fieldBool? "cancel_requested")).getD false
-        if missingOnNode || nodeCancelReq || nodeState == "cancelled" then
+        match classifyOrbNodeCancelReply st txt jid jv? with
+        | .confirmedCancelled =>
           return some (← markCancelledIfUnsettled)
-        if isTerminalJobState nodeState then
+        | .alreadyTerminal nodeState =>
           -- Job finished on the node before cancellation took effect: reconcile Core's row
           -- to that terminal state and refuse to claim cancellation.
           discard <| execParamQuery store.missionsDb
@@ -2176,10 +2205,11 @@ def dispatchRemoteFleetAndRelayRoutes?
             #[jid, nodeState, nowIso]
           let finalSt ← readCurrentJobState
           return some (settledResp (if isTerminalJobState finalSt then finalSt else nodeState))
-        return some (jsonResp 202 (.obj #[
-          ("ok", .bool false), ("error", .str "cancel_not_confirmed"),
-          ("cancel_requested", .bool true), ("confirmed", .bool false), ("job_id", .str jid)
-        ]))
+        | .notConfirmed =>
+          return some (jsonResp 202 (.obj #[
+            ("ok", .bool false), ("error", .str "cancel_not_confirmed"),
+            ("cancel_requested", .bool true), ("confirmed", .bool false), ("job_id", .str jid)
+          ]))
 
   return none
 

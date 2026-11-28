@@ -710,6 +710,90 @@ private def runCarbonRegressionChecks
     OrbBin.McpCatalog.isMutatingControlTool "secret_move")
     "R17-F10 secret_put/secret_delete/secret_move are classified mutating"
 
+  -- Round 2 regressions (Findings 1–6)
+  -- R2-F1: pending spawn/generic action receipts emit accepted="yes" so sandboxed-mcp classifies them pending (not reconciliation_required)
+  discard <| sql
+    ("INSERT INTO mcp_actions_v1(id,owner,scope,retry_key,fingerprint,principal,tool,arguments,state,result,created_at,updated_at) " ++
+     "VALUES('r17-r2-pend-spawn','m-r17-settings','s','rk-r2-ps','{}','admin','spawn_managed_machine','{}','accepted','{}','2026-11-18T00:00:00Z','2026-11-18T00:00:00Z')," ++
+     "('r17-r2-pend-gen','m-r17-settings','r17-op::test_tool','rk-r2-pg','{}','operator::','test_tool','{}','running','{}','2026-11-18T00:00:00Z','2026-11-18T00:00:00Z');")
+  let getPendSpawn ← call operator "get_action" (.obj #[("action_id", .str "r17-r2-pend-spawn")])
+  let getPendGen ← call operator "get_action" (.obj #[("action_id", .str "r17-r2-pend-gen")])
+  check ((getPendSpawn.fieldOrNull "result").fieldStr? "accepted" == some "yes" &&
+    (getPendSpawn.fieldOrNull "result").fieldStr? "state" == some "accepted" &&
+    (getPendGen.fieldOrNull "result").fieldStr? "accepted" == some "yes" &&
+    (getPendGen.fieldOrNull "result").fieldStr? "state" == some "running")
+    "R17-R2-F1 pending spawn and generic action receipts report accepted=yes"
+
+  -- R2-F2: POST /api/projects and /file/transfer/:dstSlug reject cross-tenant user:slug
+  let (crossPostProjSt, crossPostProjBody) ← restRaw (some memberBJwt) "POST" "/api/projects"
+    "{\"slug\":\"r17-member:secret-proj\",\"title\":\"Hijacked\",\"status\":\"archived\"}"
+  let aliceTitleAfter ← sql "SELECT title, status FROM projects WHERE slug='r17-member:secret-proj';"
+  check (crossPostProjSt == 400 && !crossPostProjBody.contains "Alice Secret" &&
+    aliceTitleAfter.size > 1 && aliceTitleAfter[1]![0]? == some "Alice Secret" && aliceTitleAfter[1]![1]? == some "paused")
+    s!"R17-R2-F2 member-b POST /api/projects cannot overwrite member-a via user:slug (st={crossPostProjSt})"
+  let (mkBProjSt, _) ← restRaw (some memberBJwt) "POST" "/api/projects" "{\"slug\":\"b-proj\",\"title\":\"Bob Proj\"}"
+  check (mkBProjSt == 200) "R17-R2-F2 member-b creates own project"
+  let (crossXferSt, _) ← restRaw (some memberBJwt) "POST" "/api/projects/b-proj/file/transfer/r17-member:secret-proj"
+    "{\"path\":\"x.txt\",\"destination\":\"AGENTS.md\",\"copy\":true}"
+  check (crossXferSt == 400)
+    s!"R17-R2-F2 member-b /file/transfer/:dstSlug rejects foreign user:slug (st={crossXferSt})"
+
+  -- R2-F3: classifyOrbNodeCancelReply distinguishes confirmedCancelled vs alreadyTerminal vs unstopped lost
+  check (OrbCore.RemoteFleetAndRelay.classifyOrbNodeCancelReply 404 "job j-1 not found" "j-1" none == .confirmedCancelled &&
+    OrbCore.RemoteFleetAndRelay.classifyOrbNodeCancelReply 200 "" "j-1" (some (.obj #[("state", .str "cancelled"), ("cancel_requested", .bool false)])) == .confirmedCancelled &&
+    OrbCore.RemoteFleetAndRelay.classifyOrbNodeCancelReply 200 "" "j-1" (some (.obj #[("state", .str "succeeded"), ("cancel_requested", .bool false)])) == .alreadyTerminal "succeeded" &&
+    OrbCore.RemoteFleetAndRelay.classifyOrbNodeCancelReply 200 "" "j-1" (some (.obj #[("state", .str "lost"), ("cancel_requested", .bool false)])) == .notConfirmed)
+    "R17-R2-F3 classifyOrbNodeCancelReply handles 404, cancelled, terminal succeeded, and unstopped lost honestly"
+
+  -- R2-F4: empty-prompt opencode without proxy URL rejected BEFORE VM rental on both MCP and REST
+  let prevPub2 ← IO.getEnv "SANDBOXED_PUBLIC_URL"
+  let prevProxy2 ← IO.getEnv "SANDBOXED_PROXY_PUBLIC_URL"
+  unsetenvVar "SANDBOXED_PUBLIC_URL"
+  unsetenvVar "SANDBOXED_PROXY_PUBLIC_URL"
+  try
+    let (restEmptyOcSt, restEmptyOcBody) ← restRaw (some jwt) "POST" "/api/control/missions"
+      "{\"title\":\"OC Empty\",\"backend\":\"opencode\",\"remote_node_id\":\"auto-managed:boat:small\"}" appWithSup
+    let mcpEmptyOc ← call operator "start_mission" (.obj #[
+      ("title", .str "MCP OC Empty"), ("backend", .str "opencode"), ("prompt", .str ""),
+      ("remote_node_id", .str "auto-managed:boat:small"), ("idempotency_key", .str "r17-r2-f4-mcp-oc")]) (some sup)
+    let mcpEmptyOcMsg := ((mcpEmptyOc.fieldOrNull "error").fieldStr? "message").getD ""
+    let managedCntAfterR2 ← execParamQuery mStore.db "SELECT COUNT(*) FROM managed_machines;" #[]
+    check (restEmptyOcSt == 400 && restEmptyOcBody.contains "REMOTE_AUTH_REQUIRED" &&
+      mcpEmptyOc.fieldBool? "ok" == some false && mcpEmptyOcMsg.contains "REMOTE_AUTH_REQUIRED" &&
+      (managedCntAfterR2.toOption.bind (fun rs => rs[1]?.bind (·[0]?))) == some "0")
+      s!"R17-R2-F4 empty-prompt opencode rejected with REMOTE_AUTH_REQUIRED before VM rental (rest={restEmptyOcSt})"
+  finally
+    match prevPub2 with | some v => setenvVar "SANDBOXED_PUBLIC_URL" v | none => pure ()
+    match prevProxy2 with | some v => setenvVar "SANDBOXED_PROXY_PUBLIC_URL" v | none => pure ()
+
+  -- R2-F5: short_description:null & github_pr:null clear DB; goal/effort backend checks; REST /settings parity
+  discard <| msql
+    "UPDATE missions SET short_description='old-desc', github_pr='owner/repo#1', repo='owner/repo#1', model_effort='xhigh', backend='codex', goal_mode=1, placement_kind='remote_node' WHERE id='m-r17-settings';"
+  let umsClear ← call operator "update_mission_settings" (.obj #[
+    ("mission_id", .str "m-r17-settings"), ("short_description", .null), ("github_pr", .null),
+    ("idempotency_key", .str "r17-r2-f5-clear")])
+  let clearedCols ← msql "SELECT COALESCE(short_description,''), COALESCE(github_pr,''), COALESCE(repo,'') FROM missions WHERE id='m-r17-settings';"
+  check (umsClear.fieldBool? "ok" == some true && clearedCols.size > 1 &&
+    clearedCols[1]![0]? == some "" && clearedCols[1]![1]? == some "" && clearedCols[1]![2]? == some "")
+    s!"R17-R2-F5 update_mission_settings clears short_description and github_pr on null ({renderCompact umsClear})"
+  let umsBadEffortSwitch ← call operator "update_mission_settings" (.obj #[
+    ("mission_id", .str "m-r17-settings"), ("backend", .str "antigravity"),
+    ("idempotency_key", .str "r17-r2-f5-badeff")])
+  let umsBadEffortOpencode ← call operator "update_mission_settings" (.obj #[
+    ("mission_id", .str "m-r17-settings"), ("backend", .str "opencode"),
+    ("idempotency_key", .str "r17-r2-f5-badeff-oc")])
+  let umsBadGoalSwitch ← call operator "update_mission_settings" (.obj #[
+    ("mission_id", .str "m-r17-settings"), ("backend", .str "vibe"), ("model_effort", .null),
+    ("idempotency_key", .str "r17-r2-f5-badgoal")])
+  let (restBadBackendSt, _) ← restRaw (some jwt) "PATCH" "/api/control/missions/m-r17-settings/settings" "{\"backend\":\"bogus\"}"
+  let (restRetiredSt, _) ← restRaw (some jwt) "PATCH" "/api/control/missions/m-r17-settings/settings" "{\"agent\":\"plan\"}"
+  let (restBadEffortSt, _) ← restRaw (some jwt) "PATCH" "/api/control/missions/m-r17-settings/settings" "{\"backend\":\"antigravity\"}"
+  check ((umsBadEffortSwitch.fieldOrNull "error").fieldStr? "code" == some "invalid_arguments" &&
+    (umsBadEffortOpencode.fieldOrNull "error").fieldStr? "code" == some "invalid_arguments" &&
+    (umsBadGoalSwitch.fieldOrNull "error").fieldStr? "code" == some "invalid_arguments" &&
+    restBadBackendSt == 400 && restRetiredSt == 501 && restBadEffortSt == 400)
+    s!"R17-R2-F5 enforces effort/goal compatibility and REST /settings parity (badB={restBadBackendSt}, ret={restRetiredSt}, badEff={restBadEffortSt})"
+
 def run (root : String) : IO Unit := do
   let .ok store ← openCoreStore s!"{root}/r17"
     | throw (IO.userError "R17 store open failed")

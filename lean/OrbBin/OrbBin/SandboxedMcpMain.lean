@@ -1100,8 +1100,11 @@ def McpClient.handleRpc (c : McpClient) (req : JVal) (cancelled : IO.Ref Bool) :
           let dir ← c.secretsDir
           let secDelivered ← deliverSecretIn dir (reply.fieldOrNull "result")
           postProcessMacTetherPayload c toolName pendingTetherKeys? secDelivered
+      let isCancelActionOk := toolName == "cancel_action" && !rawFailed && !transportDropped
       let normalized :=
-        if toolName == "get_action" || toolName == "wait_actions" || toolName == "get_fleet_sweep" ||
+        if isCancelActionOk then
+          rawPayload
+        else if toolName == "get_action" || toolName == "wait_actions" || toolName == "get_fleet_sweep" ||
            isActionReceiptLike rawPayload || (transportDropped && isMutating) then
           normalizeWaitActionsResult rawPayload (transportDropped && isMutating)
         else
@@ -1112,8 +1115,9 @@ def McpClient.handleRpc (c : McpClient) (req : JVal) (cancelled : IO.Ref Bool) :
         | other => JVal.obj #[("data", other)]
       let failed :=
         rawFailed ||
-        (structured.fieldStr? "action_outcome") == some "reconciliation_required" ||
-        ((isActionReceiptLike structured) && (structured.fieldStr? "action_outcome") == some "rejected")
+        (!isCancelActionOk && (
+          (structured.fieldStr? "action_outcome") == some "reconciliation_required" ||
+          ((isActionReceiptLike structured) && (structured.fieldStr? "action_outcome") == some "rejected")))
       let res := JVal.obj #[
         ("isError", .bool failed),
         ("structuredContent", structured),

@@ -326,7 +326,7 @@ def parseWaitMillis (v : JVal) : Option Nat :=
             else
               match String.toNat? digStr with
               | some n =>
-                if n > 100 then (m, none)
+                if !negE && n > 100 then (m, none)
                 else (m, some (if negE then -(Int.ofNat n) else Int.ofNat n))
               | none => (m, none)
         | _ => ("", none)
@@ -353,18 +353,25 @@ def parseWaitMillis (v : JVal) : Option Nat :=
           else
             -- value in milliseconds = trimmedDigits * 10^(expInt + 3 - fracLen)
             let shift : Int := expInt + 3 - Int.ofNat fracLen
-            let msOpt : Option Nat :=
-              if shift ≥ 0 then
-                let z := shift.toNat
-                if trimmedDigits.length + z > 6 then none
-                else (String.toNat? trimmedDigits).map (fun n => n * parsePow10 z)
+            if shift ≥ 0 then
+              let z := shift.toNat
+              if trimmedDigits.length + z > 6 then none
               else
-                let dropN := (-shift).toNat
-                if dropN ≥ trimmedDigits.length then some 0
-                else String.toNat? ((trimmedDigits.take (trimmedDigits.length - dropN)).toString)
-            match msOpt with
-            | some ms => if ms ≤ maxWaitMillis then some ms else none
-            | none => none
+                match (String.toNat? trimmedDigits).map (fun n => n * parsePow10 z) with
+                | some ms => if ms ≤ maxWaitMillis then some ms else none
+                | none => none
+            else
+              let dropN := (-shift).toNat
+              if dropN ≥ trimmedDigits.length then some 0
+              else
+                let keepLen := trimmedDigits.length - dropN
+                let kept := (trimmedDigits.take keepLen).toString
+                let dropped := (trimmedDigits.drop keepLen).toString
+                let hasDroppedNonZero := dropped.any (· != '0')
+                match String.toNat? kept with
+                | some ms =>
+                  if ms < maxWaitMillis || (ms == maxWaitMillis && !hasDroppedNonZero) then some ms else none
+                | none => none
   | _ => none
 
 def validateScreenshotArgs (args : JVal) : Except String (String × Nat × Option (Int × Int × Int × Int)) := do

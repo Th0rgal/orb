@@ -327,6 +327,33 @@ private def runR7bMcpAndPrivdTests (tmpDir : System.FilePath) : IO Unit := do
   assertEq "Live pending receipt receipt_settled == false" (scPend.fieldBool? "receipt_settled") (some false)
   assertEq "Live pending receipt may_retry_fresh_key == false" (scPend.fieldBool? "may_retry_fresh_key") (some false)
 
+  let srvCancelTask ← IO.asTask do
+    match (← LeanSys.Posix.tcpAcceptPoll coreListenFd 5000) with
+    | .error _ => pure false
+    | .ok cfd =>
+      let _ ← LeanSys.Posix.readStreamChunk cfd 8192
+      let bodyCancel :=
+        "{\"ok\":true,\"result\":{\"action_id\":\"a-pend-1\",\"cancelled\":true,\"state\":\"cancelled\",\"accepted\":\"yes\"}}"
+      let respCancel := s!"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {bodyCancel.utf8ByteSize}\r\nConnection: close\r\n\r\n{bodyCancel}"
+      let _ ← LeanSys.Posix.writeAll cfd respCancel.toUTF8
+      let _ ← LeanSys.Posix.closeFd cfd
+      pure true
+  let rpcCancel ← liveClient.handleRpc (.obj #[
+    ("jsonrpc", .str "2.0"),
+    ("id", .nat 20),
+    ("method", .str "tools/call"),
+    ("params", .obj #[
+      ("name", .str "cancel_action"),
+      ("arguments", .obj #[("action_id", .str "a-pend-1"), ("idempotency_key", .str "k-can-1")])
+    ])
+  ]) cancelRef1
+  let _ ← IO.ofExcept srvCancelTask.get
+  let resCancel := rpcCancel.fieldOrNull "result"
+  let scCancel := resCancel.fieldOrNull "structuredContent"
+  assertEq "Live cancel_action sets isError=false" (resCancel.fieldBool? "isError") (some false)
+  assertEq "Live cancel_action preserves cancelled == true" (scCancel.fieldBool? "cancelled") (some true)
+  assertEq "Live cancel_action preserves state == cancelled" (scCancel.fieldStr? "state") (some "cancelled")
+
   let _ ← LeanSys.Posix.closeFd coreListenFd
 
   -- 2. Generation-fenced external stdio MCP lifecycle + `/proc/<pid>/stat` start-ticks reaping
@@ -1368,7 +1395,11 @@ def runAllTests : IO UInt32 := do
   assertEq "MCP-17 parseWaitMillis 1e0" (OrbBin.DesktopMcp.parseWaitMillis (.num "1e0")) (some 1000)
   assertEq "MCP-17 parseWaitMillis 5e-1" (OrbBin.DesktopMcp.parseWaitMillis (.num "5e-1")) (some 500)
   assertEq "MCP-17 parseWaitMillis 30" (OrbBin.DesktopMcp.parseWaitMillis (.num "30")) (some 30000)
+  assertEq "MCP-17 parseWaitMillis 30.0000" (OrbBin.DesktopMcp.parseWaitMillis (.num "30.0000")) (some 30000)
+  assertEq "MCP-17 parseWaitMillis 1e-300" (OrbBin.DesktopMcp.parseWaitMillis (.num "1e-300")) (some 0)
   assertEq "MCP-17 parseWaitMillis rejects above 30s cap" (OrbBin.DesktopMcp.parseWaitMillis (.num "30.001")) none
+  assertEq "MCP-17 parseWaitMillis rejects sub-ms above 30s (30.0009)" (OrbBin.DesktopMcp.parseWaitMillis (.num "30.0009")) none
+  assertEq "MCP-17 parseWaitMillis rejects sci sub-ms above 30s (3.00009e1)" (OrbBin.DesktopMcp.parseWaitMillis (.num "3.00009e1")) none
   assertEq "MCP-17 parseWaitMillis rejects DoS/wraparound 86400" (OrbBin.DesktopMcp.parseWaitMillis (.num "86400")) none
   assertEq "MCP-17 parseWaitMillis rejects 5000000" (OrbBin.DesktopMcp.parseWaitMillis (.num "5000000")) none
   assertEq "MCP-17 parseWaitMillis rejects negative" (OrbBin.DesktopMcp.parseWaitMillis (.num "-1")) none

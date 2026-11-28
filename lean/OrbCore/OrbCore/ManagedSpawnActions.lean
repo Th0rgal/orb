@@ -40,8 +40,8 @@ def canonicalRequest (args : JVal) : JVal := .obj #[
 ]
 
 private def acceptedForState (state : String) : String :=
-  if state == "succeeded" || state == "completed" then "yes"
-  else if #["accepted", "running", "queued", "pending", "uncertain", "reconciliation_required"].contains state then "unknown"
+  if #["succeeded", "completed", "accepted", "running", "queued", "pending", "dispatching"].contains state then "yes"
+  else if state == "uncertain" || state == "reconciliation_required" then "unknown"
   else "no"
 
 private def receipt (id state : String) (result : JVal) : JVal := .obj #[
