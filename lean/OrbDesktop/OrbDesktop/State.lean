@@ -650,6 +650,7 @@ structure DesktopState where
   selectedMachineId : String := ""
   copiedPalomaKey : Bool := false
   settingsTab : String := "Account"
+  settingsSection : String := ""
   settingsApiUrl : ComposerBuffer := { text := "http://127.0.0.1:14470", cursorOffset := 22 }
   settingsSyncMode : String := "Auto"
   settingsActionNote : String := ""
@@ -662,6 +663,10 @@ structure DesktopState where
   navForward : List NavEntry := []
   attachCount : Nat := 0
   scrolledManually : Bool := false
+  /-- Monotonic counter bumped whenever a logical composer session resets (Create, Send,
+      mission switch, `Ctrl+N`, Cloud send) so Wayland `zwp_text_input_v3` cycles disable/enable
+      even when the focused widget keeps the same `EntityId` (`1`). -/
+  imeResetGen : Nat := 0
   deriving Repr, Inhabited
 
 def settingsFooter : ChromeSidebarRow :=
@@ -687,6 +692,13 @@ def DesktopState.headerTitle (st : DesktopState) : String :=
   else if st.liveData && !st.hasLiveConnection then st.connectionIssue.title
   else if (st.screen == .controlEmpty || st.screen == .controlPopulated) && st.openMission.isNone && !st.draftProject.isEmpty then
     ((st.sidebarRows.find? (·.rowId == "project:" ++ st.draftProject)).map (·.title)).getD st.draftProject
+  else if !st.liveData && (st.screen == .missionTranscript || st.screen == .missionSplitDiff) then
+    match st.openMission with
+    | some "m:80" => "Mission 80 doing some work"
+    | some "m:60" => "Mission 60 doing some work"
+    | some "m:40" => "Mission 40 doing some work"
+    | some "m:20" => "Mission 20 doing some work"
+    | _ => (st.selectedCard.map (·.title)).getD st.screen.headerTitle
   else (st.selectedCard.map (·.title)).getD st.screen.headerTitle
 
 def MissionSummaryCard.isArchived (card : MissionSummaryCard) : Bool :=
@@ -700,21 +712,57 @@ def MissionSummaryCard.isRunning (card : MissionSummaryCard) : Bool :=
 
 def DesktopState.openCloud (st : DesktopState) (mission : String) : DesktopState :=
   { st with screen := .cloud, cloudMission := mission, cloudLines := none, cloudFailed := false,
-            cloudPage := 0, cloudActions := [], cloudDraft := {}, cloudAttempt := "", cloudProject := "", writeError := "" }
+            cloudPage := 0, cloudActions := [], cloudDraft := {}, cloudAttempt := "", cloudProject := "", writeError := "",
+            imeResetGen := st.imeResetGen + 1 }
 
 def DesktopState.voiceDraft (st : DesktopState) : Bool :=
   st.hasLiveConnection && st.openMission.isNone && st.writeRequest.isNone &&
     (st.screen == .controlEmpty || st.screen == .controlPopulated)
+
+/-- Cancel any active IME preedit across all editable buffers while preserving committed draft text. -/
+def DesktopState.clearAllPreedit (st : DesktopState) : DesktopState :=
+  { st with
+    composer := st.composer.setPreedit ""
+    cloudDraft := st.cloudDraft.setPreedit ""
+    settingsApiUrl := st.settingsApiUrl.setPreedit ""
+    searchBuffer := st.searchBuffer.setPreedit ""
+    missionMenu := st.missionMenu.map fun m => { m with draft := m.draft.setPreedit "" } }
+
+/-- Like `clearAllPreedit`, also reporting whether any buffer held non-empty preedit text. -/
+def DesktopState.clearAllPreeditChecked (st : DesktopState) : DesktopState × Bool :=
+  let hadPreedit :=
+    !st.composer.imePreeditText.isEmpty ||
+    !st.cloudDraft.imePreeditText.isEmpty ||
+    !st.settingsApiUrl.imePreeditText.isEmpty ||
+    !st.searchBuffer.imePreeditText.isEmpty ||
+    st.missionMenu.any (fun m => !m.draft.imePreeditText.isEmpty)
+  if hadPreedit then (st.clearAllPreedit, true) else (st, false)
+
+/-- Logical text-input session identity for Wayland `zwp_text_input_v3` cycling.
+    Changes whenever the active text buffer switches logically even when its `EntityId`
+    (such as `1` for composer, inline Rename, or draft directory) stays the same. -/
+def desktopImeSessionKey (st : DesktopState) : String :=
+  let modalTag := match st.modal with
+    | .none => "none"
+    | .searchPalette .. => "search"
+    | .newMission .. => "newMission"
+  let menuTag := match st.missionMenu with
+    | none => "none"
+    | some m => s!"{reprStr m.page}:{m.mission}:{m.trigger}"
+  let screenBucket := match st.screen with
+    | .controlEmpty | .controlPopulated | .newMissionDialog => "draft"
+    | s => reprStr s
+  s!"{screenBucket}|{st.openMission.getD ""}|{st.cloudMission}|{modalTag}|{menuTag}|{st.imeResetGen}"
 
 def resetSelection (st : DesktopState) (card : Option MissionSummaryCard) : DesktopState :=
   let cloud := card.filter fun c => st.screen == .missionTranscript && c.backend.startsWith "cloud_"
   let st := cloud.elim st fun c => st.openCloud c.missionId
   let mid := if cloud.isSome then none else card.map (·.missionId)
   { st with
-    unconfirmedSend := none, writeError := ""
+    unconfirmedSend := none, writeError := "", imeResetGen := st.imeResetGen + 1
     voicePhase := .idle, voiceGeneration := st.voiceGeneration + 1, openMission := mid, missionMenu := none, stream := { shown := [], pending := [], renders := 1 }, liveTurns := [], liveTurnIds := [], unmatchedCanonicalTexts := [], livePersistedCount := 0, historyHasMore := false, historyNextCursor := none, historyLoading := false, historyLoadError := false, scroll := {}
     composer := { isRunning := card.any (·.isRunning) }
-    messageSent := false, missionStopped := false, missionArchived := false, sidePanelOpen := false
+    messageSent := false, missionStopped := false, missionArchived := false, sidePanelOpen := false, attachCount := 0
     sidebarRows := st.sidebarRows.map fun row => { row with selected := row.widgetId == (card.map (·.widgetId)).getD 101 } }
 
 def DesktopState.showsHistoryBanner (st : DesktopState) : Bool :=
@@ -1048,21 +1096,28 @@ def transcriptDamageRect (scale120 : Nat) (viewport : Rect) (sidebarWidth := chr
   let bottom := viewport.bottom - ceilDev scale120 (Int.ofNat chromeComposerHeightSub)
   { x := viewport.x + x0, y := viewport.y + y0, w := viewport.w - x0, h := max 0 (bottom - (viewport.y + y0)) }
 
-/-- Filter and order Search Dialog items according to query, filter tab, project filter, and sort order. -/
+/-- Filter and order Search Dialog items according to query, filter tab, project filter, time filter, and sort order. -/
 def filterSearchItemsWithFilters (spec : SearchDialogSpec)
-    (filterTab projectFilter _timeFilter sortOrder : String) : List SearchItem :=
+    (filterTab projectFilter timeFilter sortOrder : String) : List SearchItem :=
   let base := filterSearchItems spec
   let byTab :=
     if filterTab == "All" then base
     else if filterTab == "Titles" then base.filter fun it => it.category == "Mission" || it.category == "Mission (Active)" || it.category == "Diff"
-    else if filterTab == "Tools" then base.filter fun it => it.category == "Compute" || it.category == "Action"
+    else if filterTab == "Tools" then base.filter fun it =>
+      it.category == "Compute" || it.category == "Action" || it.category == "Command" || it.category == "Navigation"
     else if filterTab == "User" then base.filter fun it => it.category == "Action" || it.category == "Mission"
     else if filterTab == "Assistant" then base.filter fun it => it.category != "Action"
     else base
   let byProj :=
     if projectFilter == "All projects" then byTab
     else byTab.filter fun it => containsSubstrCI it.subtitle projectFilter || containsSubstrCI it.title projectFilter
-  if sortOrder == "Newest" then byProj.reverse else byProj
+  let byTime :=
+    if timeFilter == "Any time" then byProj
+    else byProj.filter fun it =>
+      !containsSubstrCI it.subtitle "completed" &&
+      !containsSubstrCI it.subtitle "acknowledged" &&
+      !containsSubstrCI it.subtitle "archived"
+  if sortOrder == "Newest" then byTime.reverse else byTime
 
 /-- Build the search palette specification for the current state (live missions when connected,
     canonical fixture items otherwise). -/
@@ -1082,26 +1137,65 @@ def openSearchModal (st : DesktopState) : DesktopState :=
       query := query
       selectedIdx := 0
       items := items }
-  { st with
+  { st.clearAllPreedit with
     modal := .searchPalette spec
-    composer := st.composer.setPreedit ""
     searchBuffer := { text := query, cursorOffset := query.length } }
 
 private def closeSearchModal (st : DesktopState) : DesktopState :=
   let nextScreen := if st.screen == .searchDialog then .controlPopulated else st.screen
-  { st with
+  { st.clearAllPreedit with
     modal := .none
-    screen := nextScreen
-    searchBuffer := st.searchBuffer.setPreedit "" }
+    screen := nextScreen }
 
-/-- Record current `(screen, openMission)` in `navHistory` before navigating to `next`. -/
+private def fixtureMissionRunning (mid : Option String) : Bool :=
+  mid.isNone || mid == some "m:0"
+
+private def fixtureScreenPlaceholder (scr : ScreenId) : String :=
+  if scr == .missionTranscript || scr == .missionSplitDiff then "Send follow-up"
+  else "Describe a task, / for commands, @ for context"
+
+private def normalizeFixtureScreen (st : DesktopState) (targetMission : Option String := none)
+    (prevScreen : Option ScreenId := none) : DesktopState :=
+  let isMission := st.screen == .missionTranscript || st.screen == .missionSplitDiff
+  let nextMission := if isMission then targetMission else none
+  let nextSidePanelOpen :=
+    if st.screen == .missionSplitDiff then true
+    else if !isMission || prevScreen == some .missionSplitDiff then false
+    else st.sidePanelOpen
+  let nextSidePanelTab :=
+    if st.screen == .missionSplitDiff then "diff" else st.sidePanelTab
+  { st with
+    openMission := nextMission
+    sidePanelOpen := nextSidePanelOpen
+    sidePanelTab := nextSidePanelTab
+    attachCount := 0
+    composer := { st.composer with
+      isRunning := isMission && fixtureMissionRunning nextMission
+      placeholder := fixtureScreenPlaceholder st.screen } }
+
+/-- Record current `(screen, openMission)` in `navHistory` before navigating to `next`.
+    Bumps `imeResetGen` whenever an active IME preedit is cleared so Wayland `zwp_text_input_v3`
+    cycles cleanly even across same-bucket draft transitions. -/
 def pushNavScreen (st : DesktopState) (next : ScreenId) (nextMission : Option String := none) : DesktopState :=
+  let (cleared, hadPreedit) := st.clearAllPreeditChecked
+  let bumpedGen := if hadPreedit then cleared.imeResetGen + 1 else cleared.imeResetGen
   let cur : NavEntry := { screen := st.screen, missionId := st.openMission }
-  if st.screen == next && st.openMission == nextMission then st
-  else { st with screen := next, navHistory := cur :: st.navHistory.take 15, navForward := [] }
+  if st.screen == next && st.openMission == nextMission then
+    if hadPreedit then { cleared with imeResetGen := bumpedGen } else st
+  else
+    let base := { cleared with
+      screen := next
+      imeResetGen := bumpedGen
+      navHistory := cur :: cleared.navHistory.take 15
+      navForward := [] }
+    if st.liveData then base
+    else normalizeFixtureScreen base nextMission (some st.screen)
 
 /-- Restore a `NavEntry` cleanly while preserving `openMission`, `sidebarRows.selected`, and live invariants. -/
 def restoreNavEntry (st : DesktopState) (entry : NavEntry) (hist fwd : List NavEntry) : DesktopState :=
+  let (cleared, hadPreedit) := st.clearAllPreeditChecked
+  let prevScreen := st.screen
+  let st := { cleared with imeResetGen := if hadPreedit then cleared.imeResetGen + 1 else cleared.imeResetGen }
   if st.liveData then
     let base := { st with modal := .none, multiRows := [], selectionAnchor := none, navHistory := hist, navForward := fwd }
     if entry.screen == .missionTranscript then
@@ -1123,12 +1217,14 @@ def restoreNavEntry (st : DesktopState) (entry : NavEntry) (hist fwd : List NavE
         | _ => none
       { cleared with sidebarRows := cleared.sidebarRows.map fun r => { r with selected := activeWid == some r.widgetId } }
   else
-    { st with
-      screen := entry.screen
-      modal := .none
-      navHistory := hist
-      navForward := fwd
-      sidebarRows := defaultSidebarRows entry.screen }
+    normalizeFixtureScreen
+      { st with
+        screen := entry.screen
+        modal := .none
+        navHistory := hist
+        navForward := fwd
+        sidebarRows := defaultSidebarRows entry.screen }
+      entry.missionId (some prevScreen)
 
 private def toggleSidePanel (st : DesktopState) (tab : String) : DesktopState :=
   if st.sidePanelOpen && st.sidePanelTab == tab then
@@ -1167,7 +1263,7 @@ private def stepSharedControls (st : DesktopState) (id : WidgetId) : Option Desk
   else if id == diffUnifiedId then some { st with diffMode := "unified" }
   else if id == diffSplitId then some { st with diffMode := "split" }
   else if id == diffRefreshId then some { st with diffRefreshCount := st.diffRefreshCount + 1 }
-  else if id == diffFileChipId then some { st with diffSelectedFile := 0 }
+  else if id == diffFileChipId then some { st with diffSelectedFile := if st.diffSelectedFile == 0 then 1 else 0 }
   else if id == fleetLocalId then some { st with selectedMachineId := "local" }
   else if id == fleetCoreId then some { st with selectedMachineId := "core" }
   else if id == fleetPrimaryId then some { st with selectedMachineId := "node-core-01" }
@@ -1187,8 +1283,23 @@ private def stepSharedControls (st : DesktopState) (id : WidgetId) : Option Desk
   else if id == settingsSyncId then
     let nextSync := if st.settingsSyncMode == "Auto" then "Paused" else "Auto"
     some { st with settingsSyncMode := nextSync }
-  else if id == 3 then some { st with attachCount := st.attachCount + 1 }
+  else if id == 3 then some { st with attachCount := if st.attachCount == 0 then 1 else 0 }
   else none
+
+/-- Apply an updated Search palette buffer, preserving `selectedIdx` whenever `buf.displayText`
+    matches `spec.query` and returning damage only when the buffer or modal spec actually changed. -/
+def applySearchBuffer (viewport : Rect) (st : DesktopState) (spec : SearchDialogSpec)
+    (buf : ComposerBuffer) : DesktopState × Damage :=
+  let nextIdx := if buf.displayText == spec.query then spec.selectedIdx else 0
+  let spec' := { spec with query := buf.displayText, selectedIdx := nextIdx }
+  let changed := buf != st.searchBuffer || spec' != spec
+  ({ st with searchBuffer := buf, modal := .searchPalette spec' }, if changed then some viewport else none)
+
+/-- Apply an editing key (`Backspace`, `Delete`, caret movement, undo/redo) to the active
+    Search palette buffer, preserving `selectedIdx` whenever the query text itself is unchanged. -/
+def stepSearchEditKey (viewport : Rect) (st : DesktopState) (spec : SearchDialogSpec)
+    (key mods : UInt32) : Option (DesktopState × Damage) :=
+  (st.searchBuffer.editKey? key mods).map (applySearchBuffer viewport st spec)
 
 /-- Handle events while the Search Dialog modal overlay is open (shared across live and fixture modes). -/
 def stepSearchModal (viewport : Rect) (st : DesktopState) (spec : SearchDialogSpec) (ev : Event) :
@@ -1227,41 +1338,43 @@ def stepSearchModal (viewport : Rect) (st : DesktopState) (spec : SearchDialogSp
       return ({ st with modal := .searchPalette { spec with selectedIdx := idx } }, some viewport)
     return (st, none)
   | .composerReturn false =>
+    if !st.searchBuffer.imePreeditText.isEmpty then return (st, none)
     return (openItem spec.selectedIdx, some viewport)
   | .text utf8 =>
-    let buf := st.searchBuffer.insertText utf8
-    let spec' := { spec with query := buf.displayText, selectedIdx := 0 }
-    return ({ st with searchBuffer := buf, modal := .searchPalette spec' }, some viewport)
+    return applySearchBuffer viewport st spec (st.searchBuffer.insertText utf8)
   | .preedit utf8 _ _ =>
-    let buf := st.searchBuffer.setPreedit utf8
-    let spec' := { spec with query := buf.displayText, selectedIdx := 0 }
-    return ({ st with searchBuffer := buf, modal := .searchPalette spec' }, some viewport)
+    return applySearchBuffer viewport st spec (st.searchBuffer.setPreedit utf8)
   | .imeBatch db da commit preedit _ _ =>
-    let buf := st.searchBuffer.applyImeBatch db da commit preedit
-    let spec' := { spec with query := buf.displayText, selectedIdx := 0 }
-    return ({ st with searchBuffer := buf, modal := .searchPalette spec' }, some viewport)
+    return applySearchBuffer viewport st spec (st.searchBuffer.applyImeBatch db da commit preedit)
   | .activate id =>
+    let resetSpec : SearchDialogSpec := { spec with selectedIdx := 0 }
     if id == searchEscId || id == searchBackdropId then
       return (closeSearchModal st, some viewport)
     if id == searchClearId then
       let buf : ComposerBuffer := {}
-      return ({ st with searchBuffer := buf, modal := .searchPalette { spec with query := "", selectedIdx := 0 } }, some viewport)
+      return ({ st with searchBuffer := buf, imeResetGen := st.imeResetGen + 1, modal := .searchPalette { spec with query := "", selectedIdx := 0 } }, some viewport)
     if id == searchOpenId then
       return (openItem spec.selectedIdx, some viewport)
-    if id == searchTabAllId then return ({ st with searchFilterTab := "All" }, some viewport)
-    if id == searchTabUserId then return ({ st with searchFilterTab := "User" }, some viewport)
-    if id == searchTabAssistantId then return ({ st with searchFilterTab := "Assistant" }, some viewport)
-    if id == searchTabTitlesId then return ({ st with searchFilterTab := "Titles" }, some viewport)
-    if id == searchTabToolsId then return ({ st with searchFilterTab := "Tools" }, some viewport)
+    if id == searchTabAllId then return ({ st with searchFilterTab := "All", modal := .searchPalette resetSpec }, some viewport)
+    if id == searchTabUserId then return ({ st with searchFilterTab := "User", modal := .searchPalette resetSpec }, some viewport)
+    if id == searchTabAssistantId then return ({ st with searchFilterTab := "Assistant", modal := .searchPalette resetSpec }, some viewport)
+    if id == searchTabTitlesId then return ({ st with searchFilterTab := "Titles", modal := .searchPalette resetSpec }, some viewport)
+    if id == searchTabToolsId then return ({ st with searchFilterTab := "Tools", modal := .searchPalette resetSpec }, some viewport)
     if id == searchProjectFilterId then
-      let next := if st.searchProjectFilter == "All projects" then "Project 1" else "All projects"
-      return ({ st with searchProjectFilter := next }, some viewport)
+      let choices : List String :=
+        if st.liveData then
+          let slugs := (st.sidebarRows.filter (·.kind == "project")).map fun r => (r.rowId.drop 8).toString
+          "All projects" :: (if slugs.isEmpty then ["lean-ui"] else slugs)
+        else ["All projects", "lean-ui"]
+      let idx := choices.idxOf st.searchProjectFilter
+      let next := choices.getD ((idx + 1) % choices.length) "All projects"
+      return ({ st with searchProjectFilter := next, modal := .searchPalette resetSpec }, some viewport)
     if id == searchTimeFilterId then
       let next := if st.searchTimeFilter == "Any time" then "Last 24h" else "Any time"
-      return ({ st with searchTimeFilter := next }, some viewport)
+      return ({ st with searchTimeFilter := next, modal := .searchPalette resetSpec }, some viewport)
     if id == searchSortOrderId then
       let next := if st.searchSortOrder == "Relevance" then "Newest" else "Relevance"
-      return ({ st with searchSortOrder := next }, some viewport)
+      return ({ st with searchSortOrder := next, modal := .searchPalette resetSpec }, some viewport)
     if let some idx := visible.findIdx? (·.widgetId == id) then
       if idx == spec.selectedIdx then return (openItem idx, some viewport)
       return ({ st with modal := .searchPalette { spec with selectedIdx := idx } }, some viewport)
@@ -1315,25 +1428,58 @@ private def stepDesktopInput (scale120 : Nat) (viewport : Rect) (st : DesktopSta
         { st with
           messageSent := true
           scroll := st.scroll.pinBottom
+          imeResetGen := st.imeResetGen + 1
+          attachCount := 0
           composer := { st.composer with text := "", cursorOffset := 0, imePreeditText := "" } }
       else if st.composer.isRunning then
         { st with missionStopped := true, composer := { st.composer with isRunning := false } }
       else st
-    | .activate 101 => pushNavScreen { st with modal := .none } .controlEmpty
-    | .activate 102 => pushNavScreen { st with modal := .none } .controlPopulated
+    | .activate 101 =>
+      if st.screen == .settingsGeneral then
+        match st.navHistory with
+        | prev :: rest => restoreNavEntry st prev rest ({ screen := st.screen, missionId := st.openMission } :: st.navForward.take 15)
+        | [] => pushNavScreen { st with modal := .none } .controlEmpty
+      else pushNavScreen { st with modal := .none } .controlEmpty
+    | .activate 102 =>
+      if st.screen == .settingsGeneral then { st with settingsSection := "Account" }
+      else pushNavScreen { st with modal := .none } .inbox
     | .activate 103 => pushNavScreen { st with modal := .none } .settingsGeneral
-    | .activate 105 => pushNavScreen { st with modal := .none } .missionTranscript
-    | .activate 112 => pushNavScreen { st with modal := .none } .machinesFleet
-    | .activate 111 => { st with sidePanelOpen := !st.sidePanelOpen }
+    | .activate 104 => { st with draftProject := if st.draftProject == "Project 0" then "lean-ui" else "Project 0" }
+    | .activate 105 =>
+      let nav := pushNavScreen { st with modal := .none } .missionTranscript (some "m:0")
+      { nav with
+        openMission := some "m:0"
+        composer := { nav.composer with isRunning := true, placeholder := "Send follow-up" } }
+    | .activate 112 =>
+      if st.screen == .settingsGeneral then { st with settingsSection := "Agents" }
+      else pushNavScreen { st with modal := .none } .machinesFleet
+    | .activate 111 =>
+      if st.screen == .settingsGeneral then { st with settingsSection := "Models" }
+      else pushNavScreen { st with modal := .none } .cloud
+    | .activate 113 =>
+      if st.screen == .settingsGeneral then { st with settingsSection := "Security" }
+      else pushNavScreen { st with modal := .none } .inference
+    | .activate 114 =>
+      if st.screen == .settingsGeneral then { st with settingsSection := "Notifications" }
+      else pushNavScreen { st with modal := .none } .resources
     | .activate 106 => { st with missionArchived := true }
     | .activate 738 => { st with draftProject := if st.draftProject == "default" then "lean-ui" else "default" }
     | .activate 720 =>
       let m := if st.draftSettings.machine == "core" then "mm-large-a" else "core"
       { st with draftSettings := { st.draftSettings with machine := m } }
+    | .activate 721 =>
+      let b := if st.draftSettings.backend == "codex" then "claudecode" else "codex"
+      { st with draftSettings := { st.draftSettings with backend := b } }
     | .activate 739 => { st with draftDirectory := if st.draftDirectory.isEmpty then "/workspace" else "" }
     | .activate 722 =>
       let m := if st.draftSettings.model == "opus-4-6" then "builtin/smart" else "opus-4-6"
       { st with draftSettings := { st.draftSettings with model := m } }
+    | .activate 723 =>
+      let e := if st.draftSettings.effort == "high" then "medium" else "high"
+      { st with draftSettings := { st.draftSettings with effort := e } }
+    | .activate 724 =>
+      let p := if st.draftSettings.permission == "acceptEdits" then "supervised" else "acceptEdits"
+      { st with draftSettings := { st.draftSettings with permission := p } }
     | .activate 805 =>
       match st.modal with
       | .newMission _ _ _ _ => { st with missionCreated := true, modal := .none }
@@ -1342,27 +1488,50 @@ private def stepDesktopInput (scale120 : Nat) (viewport : Rect) (st : DesktopSta
     | .activate 911 => { st with toasts := st.toasts.filter (·.dismissButtonId != some 911) }
     | .activate 912 => { st with toasts := st.toasts.filter (·.dismissButtonId != some 912) }
     | .activate 913 => { st with toasts := st.toasts.filter (·.dismissButtonId != some 913) }
+    | .activate id =>
+      if id >= 120 && id <= 123 then
+        let mid := match id with
+          | 120 => "m:80"
+          | 121 => "m:60"
+          | 122 => "m:40"
+          | _ => "m:20"
+        let nav := pushNavScreen { st with modal := .none } .missionTranscript (some mid)
+        { nav with
+          openMission := some mid
+          composer := { nav.composer with isRunning := false, placeholder := "Send follow-up" } }
+      else if id >= 130 && id <= 149 then { st with draftProject := s!"Project {id - 130}" }
+      else st
     | .key 0x1b _ .pressed | .key 0xff1b _ .pressed => { st with modal := .none }
     | _ => st
   let next :=
     match ev with
-    | .activate 2 | .composerReturn false => actionState
-    | _ => { actionState with composer := composer }
+    | .text _ | .preedit .. | .imeBatch .. | .composerReturn true =>
+      { actionState with composer := composer }
+    | _ => actionState
+  let activeSettingsSec := if st.settingsSection.isEmpty then "Account" else st.settingsSection
   let actionChanged :=
     match ev with
     | .activate 2 | .composerReturn false => st.composer.isRunning || !st.composer.text.isEmpty
-    | .activate 101 | .activate 102 | .activate 103 | .activate 105 | .activate 106 | .activate 111 | .activate 112
-    | .activate 720 | .activate 722 | .activate 738 | .activate 739
-    | .activate 804 | .activate 805 | .activate 911 | .activate 912 | .activate 913
-    | .key 0x1b _ .pressed | .key 0xff1b _ .pressed => true
+    | .activate 102 => st.screen != .settingsGeneral || activeSettingsSec != "Account"
+    | .activate 111 => st.screen != .settingsGeneral || activeSettingsSec != "Models"
+    | .activate 112 => st.screen != .settingsGeneral || activeSettingsSec != "Agents"
+    | .activate 113 => st.screen != .settingsGeneral || activeSettingsSec != "Security"
+    | .activate 114 => st.screen != .settingsGeneral || activeSettingsSec != "Notifications"
+    | .activate 101 | .activate 103 | .activate 104 | .activate 105 | .activate 106
+    | .activate 720 | .activate 721 | .activate 722 | .activate 723 | .activate 724 | .activate 738 | .activate 739
+    | .activate 804 | .activate 805 | .activate 911 | .activate 912 | .activate 913 => true
+    | .activate id => (id >= 120 && id <= 123) || (id >= 130 && id <= 149)
+    | .key 0x1b _ .pressed | .key 0xff1b _ .pressed => st.modal != .none || st.sidePanelOpen
     | _ => false
   if !actionChanged && composer == st.composer then return (st, none)
   else
     -- Only the transcript has a fixed bottom composer. Other screens can center
     -- the editor; without its layout bounds use the full viewport.
     let dmg := if composer != st.composer && st.screen == .missionTranscript then composerDamageRect scale120 viewport st.sidebarWidth else viewport
-    let next := if next.openMission.isSome && next.screen != .missionTranscript then
-      resetSelection next none else next
+    let next :=
+      if next.liveData && next.openMission.isSome && next.screen != .missionTranscript && next.screen != .missionSplitDiff then
+        resetSelection next none
+      else next
     return (next, Damage.add none dmg)
 
 /-- Menu rows are resolved against the clicked mission, independently of the transcript selection. -/
@@ -1484,6 +1653,8 @@ def DesktopState.hoverTarget (st : DesktopState) (hit : Option WidgetId) : Optio
   if hit == some voiceLanguageId || hit == some voiceButtonId || hit == some voiceCancelId then return ← hit
   let id ← hit
   if st.screen == .missionTranscript && id == loadOlderTurnsId then some id
+  else if st.screen == .settingsGeneral && (id == accountFormId || id == settingsThemeId) then some id
+  else if st.screen == .machinesFleet && id >= liveMachineWidgetId 0 && id < 600000 then some id
   else if st.screen == .cloud && id >= 960 && id < 972 then some id
   else if st.screen == .resources && id >= 945 && id < 960 then some id
   else if st.screen == .inference && id >= providersBackId then some id else st.sidebarHoverRow hit
@@ -1658,7 +1829,7 @@ def contextSelection (st : DesktopState) (rowId : String) : DesktopState :=
 
 def missionMenuRows (st : DesktopState) (menu : MissionMenu) : List MissionMenuRow := Id.run do
   if menu.page == .draftDirectory then
-    let path := menu.draft.text ++ menu.draft.imePreeditText
+    let path := menu.draft.displayText
     let valid := path.isEmpty || path.startsWith "/"
     let children : List MissionMenuRow := (menu.directoryRows.getD []).mapIdx fun i (full, name) =>
       { id := 2000000 + i, label := name, value := full, icon := "folder" }
@@ -1733,7 +1904,7 @@ def missionMenuRows (st : DesktopState) (menu : MissionMenu) : List MissionMenuR
       { id := 2000000 + i, label := p.title, icon := "folder",
         action := some (.move card.missionId (p.rowId.drop 8).toString) }
   | .rename =>
-    return [{ id := 1, label := menu.draft.text ++ menu.draft.imePreeditText, icon := "rename" },
+    return [{ id := 1, label := menu.draft.displayText, icon := "rename" },
       { id := 716, label := "Save", icon := "check", action := some (.rename card.missionId menu.draft.text) }]
   | .settings => return []
 
@@ -1746,14 +1917,42 @@ def menuFocusChange (before after : DesktopState) : Option Nat :=
     else ((missionMenuRows after menu)[menu.highlighted]?).map (·.id)
   | _, _ => none
 
+/-- Default focusable widget on `st.screen`, respecting `st.sidebarHidden` and live connection state
+    so `desktopFocusChange` never targets an unrendered sidebar item or unrendered composer. -/
+def screenDefaultFocus (st : DesktopState) : Nat :=
+  let sidebarFallback (sidebarId : Nat) : Nat :=
+    if st.sidebarHidden then sidebarToggleId else sidebarId
+  match st.screen with
+  | .controlEmpty | .controlPopulated | .searchDialog | .newMissionDialog | .toastNotifications =>
+    if !st.liveData || st.hasLiveConnection then 1 else sidebarFallback 101
+  | .missionTranscript | .missionSplitDiff => 1
+  | .settingsGeneral => if st.liveData then accountFormId else settingsTabAccountId
+  | .machinesFleet => if st.liveData then sidebarFallback 112 else fleetLocalId
+  | .inference => if st.accountRoutePage.isSome then providersBackId else sidebarFallback 113
+  | .cloud => if !st.cloudMission.isEmpty then 963 else sidebarFallback 111
+  | .resources => sidebarFallback 114
+  | .inbox => if !st.inboxAvailable || st.inboxItems.isEmpty then sidebarFallback 102 else 940
+
 /-- Opening a live draft gives the editor keyboard focus even when New Agent
     was invoked while the empty draft screen was already visible. -/
 def desktopFocusChange (before after : DesktopState) (ev : Event) : Option Nat :=
+  let sidebarFallback (sidebarId : Nat) : Nat :=
+    if after.sidebarHidden then sidebarToggleId else sidebarId
   if before.voicePhase != .idle && before.voicePhase != after.voicePhase && after.voiceDraft then some 1
   else if !(before.modal matches .searchPalette _) && (after.modal matches .searchPalette _) then some 701
-  else if (match before.modal, after.modal with | .searchPalette b, .searchPalette a => !b.query.isEmpty && a.query.isEmpty | _, _ => false) then some 701
+  else if let .searchPalette a := after.modal then
+    let returnToSearchInput : Bool :=
+      (match before.modal with | .searchPalette b => !b.query.isEmpty && a.query.isEmpty | _ => false) ||
+      (match ev with
+        | .activate id =>
+          [searchClearId, searchTabAllId, searchTabUserId, searchTabAssistantId,
+           searchTabTitlesId, searchTabToolsId, searchProjectFilterId,
+           searchTimeFilterId, searchSortOrderId].contains id ||
+          a.items.any (·.widgetId == id)
+        | _ => false)
+    if returnToSearchInput then some a.inputWidgetId else none
   else if (before.modal matches .searchPalette _) && !(after.modal matches .searchPalette _) then
-    if after.screen == .controlEmpty || after.screen == .controlPopulated || after.screen == .missionTranscript then some 1 else some 101
+    some (screenDefaultFocus after)
   else if let some target := menuFocusChange before after then some target
   else if before.screen == .inference && after.screen == .inference then
     match before.accountRoutePage, after.accountRoutePage with
@@ -1762,12 +1961,15 @@ def desktopFocusChange (before after : DesktopState) (ev : Event) : Option Nat :
     | _, _ => none
   else if after.screen == .settingsGeneral && before.screen != after.screen then
     some (if after.liveData then accountFormId else settingsTabAccountId)
-  else if after.screen == .cloud && before.screen != .cloud then some 111
-  else if after.screen == .cloud && before.cloudMission != after.cloudMission then some (if after.cloudMission.isEmpty then 111 else 963)
-  else if after.screen == .resources && before.screen != .resources then some 114
+  else if after.screen == .machinesFleet && before.screen != .machinesFleet then
+    some (if after.liveData then sidebarFallback 112 else fleetLocalId)
+  else if after.screen == .inference && before.screen != .inference then some (sidebarFallback 113)
+  else if after.screen == .cloud && before.screen != .cloud then some (if !after.cloudMission.isEmpty then 963 else sidebarFallback 111)
+  else if after.screen == .cloud && before.cloudMission != after.cloudMission then some (if after.cloudMission.isEmpty then sidebarFallback 111 else 963)
+  else if after.screen == .resources && before.screen != .resources then some (sidebarFallback 114)
   else if after.screen == .resources && after.resourceRows.isSome && before.resourcePage != after.resourcePage then
     some (if before.resourcePage < after.resourcePage then 947 else 946)
-  else if after.screen == .inbox && before.screen != .inbox then some (if after.inboxItems.isEmpty then 102 else 940)
+  else if after.screen == .inbox && before.screen != .inbox then some (if !after.inboxAvailable || after.inboxItems.isEmpty then sidebarFallback 102 else 940)
   else if after.hasLiveConnection && after.missionMenu.isNone &&
       (after.screen == .controlEmpty || after.screen == .controlPopulated) then
     let shortcut := match ev with
@@ -1814,7 +2016,9 @@ private def stepMissionMenu (st : DesktopState) (menu : MissionMenu) (ev : Event
       return update { menu with browsePath := row.value, first := 0, highlighted := 1, directoryRows := none,
                                 draft := { text := row.value, cursorOffset := row.value.length } }
     if menu.page == .draftDirectory && id == 716 && menu.draft.imePreeditText.isEmpty then
-      return ({ st with draftDirectory := menu.draft.text, missionMenu := none, voicePhase := .idle }, some viewport)
+      let dir := menu.draft.text.trimAscii.toString
+      if !dir.isEmpty && !dir.startsWith "/" then return (st, none)
+      return ({ st with draftDirectory := dir, missionMenu := none, voicePhase := .idle }, some viewport)
     if menu.page == .draftProject then
       return ({ st with draftProject := row.value, missionMenu := none, voicePhase := .idle }, some viewport)
     if menu.page == .settings then
@@ -1828,7 +2032,9 @@ private def stepMissionMenu (st : DesktopState) (menu : MissionMenu) (ev : Event
     return ({ st with missionMenu := none, writeRequest := some action }, some viewport)
   | .composerReturn false =>
     if menu.page == .draftDirectory then
-      return ({ st with draftDirectory := menu.draft.text.trimAscii.toString, missionMenu := none }, some viewport)
+      let dir := menu.draft.text.trimAscii.toString
+      if !menu.draft.imePreeditText.isEmpty || (!dir.isEmpty && !dir.startsWith "/") then return (st, none)
+      return ({ st with draftDirectory := dir, missionMenu := none, voicePhase := .idle }, some viewport)
     if menu.page == .rename then
       let some row := items.find? (·.id == 716) | return (st, none)
       let some action := row.action | return (st, none)
@@ -1945,10 +2151,16 @@ def stepDesktopEvent (scale120 : Nat) (viewport : Rect) (st : DesktopState) (ev 
     if navId == 102 && !st.inboxEnabled then return (st, none)
     if [101, 102, 111, 112, 113, 114].contains navId then
       let screen := if navId == 111 then ScreenId.cloud else if navId == 114 then .resources else if navId == 102 then .inbox else if navId == 113 then .inference else if navId == 112 then .machinesFleet else .controlEmpty
-      let next := resetSelection (pushNavScreen { st with fleetTopSub := 0, writeError := "", accountRoutePage := none } screen) none
+      let next := resetSelection (pushNavScreen { st.clearAllPreedit with fleetTopSub := 0, writeError := "", accountRoutePage := none } screen) none
       -- These pages share the New Agent draft. A mission follow-up belongs only to its transcript.
+      let sameDraftSession :=
+        navId == 101 && st.openMission.isNone &&
+        (st.screen == .controlEmpty || st.screen == .controlPopulated) &&
+        st.composer.imePreeditText.isEmpty
       let next := if st.openMission.isNone then
-          { next with composer := { st.composer with imePreeditText := "" } }
+          { next with
+            composer := { st.composer with imePreeditText := "" }
+            imeResetGen := if sameDraftSession then st.imeResetGen else next.imeResetGen }
         else { next with draftProject := "" }
       let next := if navId == 111 then next.openCloud "" else next
       let next := if navId == 114 then { next with resourceRows := none, resourceFailed := false, resourcePage := 0 } else next

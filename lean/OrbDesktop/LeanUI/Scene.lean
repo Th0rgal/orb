@@ -574,7 +574,11 @@ def lowerWidgetPair (scale120 : Nat) (focusState : FocusState) (theme : Theme)
       else []
     let selfFocusOrder : List WidgetId :=
       match id with
-      | some wid => if focusable && focusState.admits wid then [wid] else []
+      | some wid =>
+        let inClip := match clipSub with
+          | none => true
+          | some c => !(intersectRect c box.rectSub).isEmpty
+        if focusable && inClip && focusState.admits wid then [wid] else []
       | none => []
     let selfHitSub : List (WidgetId × Rect) :=
       match id with
@@ -632,13 +636,13 @@ where
     | [], _ => ([], [], [], [])
     | _, [] => ([], [], [], [])
     | w :: ws, b :: bs =>
-      -- Rows scrolled out of a clipped viewport emit nothing visible and no hit regions:
-      -- skip lowering them (keeping their tab order) instead of emitting prims to scissor away.
+      -- Rows scrolled completely out of a clipped viewport emit nothing visible, no hit regions,
+      -- and are omitted from keyboard Tab order so Tab never lands on invisible clipped controls.
       let culled := match clipDev with
         | some c => subtreeOutsideClipY scale120 c w b
         | none => false
       let (p1, f1, hs1, hd1) :=
-        if culled then ([], subtreeFocusOrder focusState w b, [], [])
+        if culled then ([], [], [], [])
         else lowerWidgetPair scale120 focusState theme clipSub clipDev focusVisible w b
       let (p2, f2, hs2, hd2) := lowerWidgetChildren scale120 focusState theme clipSub clipDev focusVisible ws bs
       (p1 ++ p2, f1 ++ f2, hs1 ++ hs2, hd1 ++ hd2)

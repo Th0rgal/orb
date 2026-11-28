@@ -473,6 +473,76 @@ def setPersistedNodeCordoned (dataRoot nodeName : String) (cordoned : Bool) : IO
       return false
   return true
 
+/-- Authoritative remote harness & typed-launch capability contract (`FLT-14`),
+    shared between `GET /api/remote-nodes` capability discovery and `RemoteDispatch` preflight. -/
+def remoteSupportedHarnesses : Array String :=
+  #["claudecode", "opencode", "grok", "codex", "antigravity"]
+
+def remoteRequiresProxyHarnesses : Array String :=
+  #["claudecode", "opencode", "codex"]
+
+def remoteLaunchErrorPrefixes : Array String := #[
+  "REMOTE_HARNESS_UNSUPPORTED",
+  "REMOTE_PROMPT_REQUIRED",
+  "remote_goal_unsupported",
+  "REMOTE_AUTH_REQUIRED"
+]
+
+def normalizeRemoteHarness (backend : String) : String :=
+  let bLow := backend.trimAscii.toString.toLower
+  if bLow == "claude" then "claudecode" else bLow
+
+/-- Match `OrbNode` `POST /jobs/:id/cancel` 404 responses (`"job <id> not found"` or legacy `"job not found"`). -/
+def isOrbNodeJobNotFound (status : Nat) (body jobId : String) : Bool :=
+  let t := body.trimAscii.toString
+  status == 404 && (t == "job not found" || t == s!"job {jobId} not found")
+
+/-- Canonical interpretation of `OrbNode` `POST /jobs/:id/cancel` HTTP replies (`FLT-04`). -/
+inductive OrbNodeCancelOutcome where
+  | confirmedCancelled
+  | alreadyTerminal (state : String)
+  | notConfirmed
+  deriving BEq, Repr
+
+def classifyOrbNodeCancelReply (status : Nat) (body jobId : String) (jv? : Option JVal) : OrbNodeCancelOutcome :=
+  if isOrbNodeJobNotFound status body jobId then
+    .confirmedCancelled
+  else if !(200 ≤ status && status < 300) then
+    .notConfirmed
+  else
+    let nodeState := (jv?.bind (·.fieldStr? "state")).getD ""
+    let nodeCancelReq := (jv?.bind (·.fieldBool? "cancel_requested")).getD false
+    if nodeCancelReq || nodeState == "cancelled" then
+      .confirmedCancelled
+    else if #["succeeded", "failed", "completed", "aborted", "terminal"].contains nodeState then
+      .alreadyTerminal nodeState
+    else
+      -- Includes `{"state":"lost","cancel_requested":false}` (unstopped scope) and unknown 2xx payloads.
+      .notConfirmed
+
+/-- Pure harness preflight validator that runs even when `prompt` is empty (`FLT-14`). -/
+def validateRemoteHarness (backend : String) : Except String String := do
+  let harness := normalizeRemoteHarness backend
+  if !remoteSupportedHarnesses.contains harness then
+    throw s!"REMOTE_HARNESS_UNSUPPORTED: unsupported remote harness `{backend}`"
+  return harness
+
+/-- Validate remote harness AND proxy URL preconditions unconditionally (even when `prompt` is empty) (`FLT-14`). -/
+def validateRemoteBackendAndProxy (backend proxyBase : String) : Except String String := do
+  let harness ← validateRemoteHarness backend
+  if remoteRequiresProxyHarnesses.contains harness && proxyBase.trimAscii.toString.isEmpty then
+    throw s!"REMOTE_AUTH_REQUIRED: SANDBOXED_PUBLIC_URL (or SANDBOXED_PROXY_PUBLIC_URL) must be configured for remote {harness} turns"
+  return harness
+
+/-- Pure typed preflight validator matching `buildRemoteLaunchCapabilitiesJVal` (`FLT-14`). -/
+def validateRemoteLaunchPlan (backend prompt proxyBase : String) : Except String String := do
+  let harness ← validateRemoteHarness backend
+  if prompt.trimAscii.toString.isEmpty then
+    throw "REMOTE_PROMPT_REQUIRED: remote mission turn requires a non-empty prompt"
+  if remoteRequiresProxyHarnesses.contains harness && proxyBase.trimAscii.toString.isEmpty then
+    throw s!"REMOTE_AUTH_REQUIRED: SANDBOXED_PUBLIC_URL (or SANDBOXED_PROXY_PUBLIC_URL) must be configured for remote {harness} turns"
+  return harness
+
 /-- Build server-advertised typed remote launch capabilities (`RemoteLaunchCapabilities`). -/
 def buildRemoteLaunchCapabilitiesJVal : IO JVal := do
   let p1 := ((← IO.getEnv "SANDBOXED_PROXY_PUBLIC_URL").getD "").trimAscii.toString
@@ -480,18 +550,12 @@ def buildRemoteLaunchCapabilitiesJVal : IO JVal := do
   let proxyConfigured := !p1.isEmpty || !p2.isEmpty
   return .obj #[
     ("typed", .bool true),
-    ("harnesses", .arr #[.str "claudecode", .str "opencode", .str "grok", .str "codex", .str "antigravity"]),
+    ("harnesses", .arr (remoteSupportedHarnesses.map JVal.str)),
     ("goal_harnesses", .arr (RemoteGoal.harnesses.map JVal.str)),
-    ("requires_proxy_harnesses", .arr #[.str "claudecode", .str "opencode", .str "codex"]),
+    ("requires_proxy_harnesses", .arr (remoteRequiresProxyHarnesses.map JVal.str)),
     ("raw_command", .bool true),
     ("proxy_url_configured", .bool proxyConfigured),
-    ("error_prefixes", .arr #[
-      .str "REMOTE_HARNESS_UNSUPPORTED",
-      .str "REMOTE_PROMPT_REQUIRED",
-      .str "REMOTE_MODEL_REQUIRED",
-      .str "REMOTE_GOAL_UNSUPPORTED",
-      .str "REMOTE_AUTH_REQUIRED"
-    ])
+    ("error_prefixes", .arr (remoteLaunchErrorPrefixes.map JVal.str))
   ]
 
 private def optNatJVal (v? : Option Nat) : JVal :=
@@ -2056,36 +2120,78 @@ def dispatchRemoteFleetAndRelayRoutes?
       let jid := segs[2]!
       unless ← durableJobVisible jid do return some (jsonErr 404 "durable_job_not_found")
       let mut targetNode := ""
+      let mut curState := ""
       let mut found := false
       if let .ok rows ← execParamQuery store.missionsDb
-          "SELECT COALESCE(node_id,'') FROM remote_node_jobs WHERE job_id=?1 LIMIT 1;" #[jid] then
+          "SELECT COALESCE(node_id,''), COALESCE(state,'') FROM remote_node_jobs WHERE job_id=?1 LIMIT 1;" #[jid] then
         if rows.size > 1 then
           found := true
           targetNode := (cell rows[1]! 0).trimAscii.toString
+          curState := (cell rows[1]! 1).trimAscii.toString
       if !found then
         if let .ok pRows ← execParamQuery store.projectsDb
-            "SELECT COALESCE(node_id,'') FROM remote_jobs WHERE job_id=?1 LIMIT 1;" #[jid] then
+            "SELECT COALESCE(node_id,''), COALESCE(state,'') FROM remote_jobs WHERE job_id=?1 LIMIT 1;" #[jid] then
           if pRows.size > 1 then
             found := true
             targetNode := (cell pRows[1]! 0).trimAscii.toString
+            curState := (cell pRows[1]! 1).trimAscii.toString
       if !found then
         return some (jsonErr 404 "durable_job_not_found")
-      if targetNode.isEmpty || targetNode == "local" || targetNode == "client" then
+      let isTerminalJobState (st : String) : Bool :=
+        #["terminal", "completed", "succeeded", "failed", "aborted", "cancelled", "lost"].contains st
+      let settledResp (st : String) : Nat × String × ByteArray :=
+        if st == "cancelled" then
+          jsonResp 200 (.obj #[
+            ("ok", .bool true), ("job_id", .str jid), ("state", .str "cancelled"),
+            ("cancel_requested", .bool true), ("confirmed", .bool true)
+          ])
+        else
+          jsonResp 409 (.obj #[
+            ("ok", .bool false), ("error", .str "job_already_settled"),
+            ("job_id", .str jid), ("state", .str st),
+            ("cancel_requested", .bool false), ("confirmed", .bool false)
+          ])
+      -- Never rewrite an already-settled receipt (`FLT-04` / R17 Done-When).
+      if isTerminalJobState curState then
+        return some (settledResp curState)
+      let readCurrentJobState : IO String := do
+        if let .ok rows ← execParamQuery store.missionsDb
+            "SELECT COALESCE(state,'') FROM remote_node_jobs WHERE job_id=?1 LIMIT 1;" #[jid] then
+          if rows.size > 1 then return (cell rows[1]! 0).trimAscii.toString
+        if let .ok pRows ← execParamQuery store.projectsDb
+            "SELECT COALESCE(state,'') FROM remote_jobs WHERE job_id=?1 LIMIT 1;" #[jid] then
+          if pRows.size > 1 then return (cell pRows[1]! 0).trimAscii.toString
+        return curState
+      let markCancelledIfUnsettled : IO (Nat × String × ByteArray) := do
         discard <| execParamQuery store.missionsDb
-          "UPDATE remote_node_jobs SET state='cancelled',updated_at=?2 WHERE job_id=?1;" #[jid, nowIso]
+          "UPDATE remote_node_jobs SET state='cancelled',updated_at=?2 WHERE job_id=?1 AND state NOT IN ('terminal','completed','succeeded','failed','aborted','lost');" #[jid, nowIso]
+        discard <| execParamQuery store.projectsDb
+          "UPDATE remote_jobs SET state='cancelled', heartbeat_at=?2, finished_at=COALESCE(finished_at,?2), updated_at=?2 WHERE job_id=?1 AND state NOT IN ('terminal','completed','succeeded','failed','aborted','lost');"
+          #[jid, nowIso]
+        let finalSt ← readCurrentJobState
+        if finalSt != "cancelled" && isTerminalJobState finalSt then
+          return settledResp finalSt
         discard <| execParamQuery store.missionsDb
           "UPDATE mission_runs SET execution_state='terminal',terminal_reason='cancelled',updated_at=?2 WHERE remote_job_id=?1 AND execution_state NOT IN ('terminal','completed','failed','aborted');"
           #[jid, nowIso]
         discard <| execParamQuery store.missionsDb
           "UPDATE missions SET status='cancelled',terminal_reason='cancelled',state_revision=state_revision+1,updated_at=?2 WHERE placement_job_id=?1 AND status IN ('active','pending');"
           #[jid, nowIso]
-        discard <| execParamQuery store.projectsDb
-          "UPDATE remote_jobs SET state='cancelled', heartbeat_at=?2, finished_at=COALESCE(finished_at,?2), updated_at=?2 WHERE job_id=?1;"
-          #[jid, nowIso]
-        return some (jsonResp 200 (.obj #[
+        return jsonResp 200 (.obj #[
           ("ok", .bool true), ("job_id", .str jid), ("state", .str "cancelled"),
           ("cancel_requested", .bool true), ("confirmed", .bool true)
-        ]))
+        ])
+      if targetNode.isEmpty || targetNode == "local" || targetNode == "client" then
+        return some (← markCancelledIfUnsettled)
+      -- Record durable cancellation intent BEFORE calling the node (`FLT-04`): if the
+      -- node is partitioned or returns a failure status, pollers/reattach keep retrying
+      -- `/cancel` instead of dropping intent or falsely claiming confirmation.
+      discard <| execParamQuery store.missionsDb
+        "UPDATE remote_node_jobs SET state='cancel_requested', updated_at=?2 WHERE job_id=?1 AND state NOT IN ('terminal','completed','succeeded','failed','aborted','cancelled','lost');"
+        #[jid, nowIso]
+      discard <| execParamQuery store.projectsDb
+        "UPDATE remote_jobs SET state='cancel_requested', heartbeat_at=?2, updated_at=?2 WHERE job_id=?1 AND state NOT IN ('terminal','completed','succeeded','failed','aborted','cancelled','lost');"
+        #[jid, nowIso]
       let hdrs := #[
         ("x-sandboxed-cancel-actor", "core"),
         ("x-sandboxed-cancel-reason", "Durable job cancelled via API")
@@ -2094,37 +2200,36 @@ def dispatchRemoteFleetAndRelayRoutes?
       | .error e =>
         return some (jsonResp 502 (.obj #[
           ("ok", .bool false), ("error", .str "cancel_not_confirmed"),
+          ("cancel_requested", .bool true), ("confirmed", .bool false),
           ("message", .str e), ("job_id", .str jid)
         ]))
       | .ok (st, txt, jv?, _, _) =>
-        if !(200 ≤ st && st < 300) then
+        let missingOnNode := isOrbNodeJobNotFound st txt jid
+        if !(200 ≤ st && st < 300) && !missingOnNode then
           return some (jsonResp 502 (.obj #[
             ("ok", .bool false), ("error", .str "cancel_not_confirmed"),
+            ("cancel_requested", .bool true), ("confirmed", .bool false),
             ("message", .str s!"node HTTP {st}: {txt}"), ("job_id", .str jid)
           ]))
-        let confirmed := match jv? with
-          | some j => (j.fieldBool? "cancel_requested").getD false
-          | none => false
-        if !confirmed then
+        match classifyOrbNodeCancelReply st txt jid jv? with
+        | .confirmedCancelled =>
+          return some (← markCancelledIfUnsettled)
+        | .alreadyTerminal nodeState =>
+          -- Job finished on the node before cancellation took effect: reconcile Core's row
+          -- to that terminal state and refuse to claim cancellation.
+          discard <| execParamQuery store.missionsDb
+            "UPDATE remote_node_jobs SET state=?2, updated_at=?3 WHERE job_id=?1 AND state NOT IN ('terminal','completed','succeeded','failed','aborted','cancelled','lost');"
+            #[jid, nodeState, nowIso]
+          discard <| execParamQuery store.projectsDb
+            "UPDATE remote_jobs SET state=?2, heartbeat_at=?3, finished_at=COALESCE(finished_at,?3), updated_at=?3 WHERE job_id=?1 AND state NOT IN ('terminal','completed','succeeded','failed','aborted','cancelled','lost');"
+            #[jid, nodeState, nowIso]
+          let finalSt ← readCurrentJobState
+          return some (settledResp (if isTerminalJobState finalSt then finalSt else nodeState))
+        | .notConfirmed =>
           return some (jsonResp 202 (.obj #[
             ("ok", .bool false), ("error", .str "cancel_not_confirmed"),
-            ("cancel_requested", .bool false), ("confirmed", .bool false), ("job_id", .str jid)
+            ("cancel_requested", .bool true), ("confirmed", .bool false), ("job_id", .str jid)
           ]))
-        discard <| execParamQuery store.missionsDb
-          "UPDATE remote_node_jobs SET state='cancelled',updated_at=?2 WHERE job_id=?1;" #[jid, nowIso]
-        discard <| execParamQuery store.missionsDb
-          "UPDATE mission_runs SET execution_state='terminal',terminal_reason='cancelled',updated_at=?2 WHERE remote_job_id=?1 AND execution_state NOT IN ('terminal','completed','failed','aborted');"
-          #[jid, nowIso]
-        discard <| execParamQuery store.missionsDb
-          "UPDATE missions SET status='cancelled',terminal_reason='cancelled',state_revision=state_revision+1,updated_at=?2 WHERE placement_job_id=?1 AND status IN ('active','pending');"
-          #[jid, nowIso]
-        discard <| execParamQuery store.projectsDb
-          "UPDATE remote_jobs SET state='cancelled', heartbeat_at=?2, finished_at=COALESCE(finished_at,?2), updated_at=?2 WHERE job_id=?1;"
-          #[jid, nowIso]
-        return some (jsonResp 200 (.obj #[
-          ("ok", .bool true), ("job_id", .str jid), ("state", .str "cancelled"),
-          ("cancel_requested", .bool true), ("confirmed", .bool true)
-        ]))
 
   return none
 

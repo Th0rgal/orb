@@ -3275,6 +3275,7 @@ def renderAIProviderJson (p : AIProviderRecord) (observedKeyRpm? : Option UInt32
     s!"\"enabled\":{enStr}",
     s!"\"has_api_key\":{hasKeyStr}",
     "\"uses_oauth\":false",
+    "\"auto_reset_on_limit\":false",
     s!"\"status\":{statusStr}"
   ]
   if !p.baseUrl.isEmpty then
@@ -4679,6 +4680,7 @@ def renderAIProviderForCallerJson
     s!"\"has_api_key\":{hasKeyStr}",
     "\"has_oauth\":false",
     "\"uses_oauth\":false",
+    "\"auto_reset_on_limit\":false",
     s!"\"status\":{statusStr}",
     s!"\"custom_models\":{renderCustomModelsJson modelsForCaller}"
   ]

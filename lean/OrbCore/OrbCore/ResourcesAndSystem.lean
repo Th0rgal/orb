@@ -2412,6 +2412,22 @@ def dispatchResourcesAndSystemRoute
           return some (code, "application/json", rawTxt.toUTF8)
         | .error e => return some (jsonErr 502 e)
       return some (jsonErr 404 "Remote node not configured")
+    if method == "POST" && segs == ["api", "software", "updates"] then
+      if !effAdmin then return some (jsonErr 403 "admin_required")
+      return some (jsonResp 501 (.obj #[
+        ("ok", .bool false),
+        ("error", .str "unsupported"),
+        ("message", .str "Software update jobs are not implemented; no update was started.")
+      ]))
+
+    if method == "POST" && segs == ["api", "software", "updates", "cancel"] then
+      if !effAdmin then return some (jsonErr 403 "admin_required")
+      return some (jsonResp 501 (.obj #[
+        ("ok", .bool false),
+        ("error", .str "unsupported"),
+        ("message", .str "Software update cancellation is not implemented; no job was changed.")
+      ]))
+
     if !targetNode.isEmpty && targetNode != "local" && targetNode != "core" && targetNode != "orb-core" && targetNode != "agent-core" then
       if let some mc := managedStore? then
         let subPath := "/" ++ String.intercalate "/" (segs.drop 1)
@@ -2424,20 +2440,6 @@ def dispatchResourcesAndSystemRoute
       let force := ((qParam? qMap "force").getD "false") == "true"
       let inv ← buildSoftwareInventoryJson hub force
       return some (jsonResp 200 inv)
-
-    if method == "POST" && segs == ["api", "software", "updates"] then
-      if !effAdmin then return some (jsonErr 403 "admin_required")
-      return some (jsonResp 501 (.obj #[
-        ("error", .str "unsupported"),
-        ("message", .str "Software update jobs are not implemented; no update was started.")
-      ]))
-
-    if method == "POST" && segs == ["api", "software", "updates", "cancel"] then
-      if !effAdmin then return some (jsonErr 403 "admin_required")
-      return some (jsonResp 501 (.obj #[
-        ("error", .str "unsupported"),
-        ("message", .str "Software update cancellation is not implemented; no job was changed.")
-      ]))
 
   -- 5. Library (`/api/library/*` & `PUT /api/settings/library-remote`)
   if !isLegacyUnscoped && callerUserId.isEmpty &&

@@ -1138,9 +1138,13 @@ def handleNonExecRequestCore (rt0 : NodeRuntime) (req : HttpRequest) :
     let inv ← scanSoftwareInventory
     return (rt, jsonResp 200 inv, preLaunches, #[])
   | "POST", ["software", "updates"] =>
-    return (rt, textResp 400 "Automated self-updates are managed out-of-band on native Lean nodes", preLaunches, #[])
+    return (rt, jsonResp 501 (.obj #[
+      ("ok", .bool false), ("error", .str "unsupported"),
+      ("message", .str "Automated self-updates are not implemented on native Lean nodes; no update was started.")]), preLaunches, #[])
   | "POST", ["software", "updates", "cancel"] =>
-    return (rt, jsonResp 200 (.obj #[("ok", .bool true)]), preLaunches, #[])
+    return (rt, jsonResp 501 (.obj #[
+      ("ok", .bool false), ("error", .str "unsupported"),
+      ("message", .str "Software update cancellation is not implemented on native Lean nodes; no job was changed.")]), preLaunches, #[])
   | "POST", ["project-context", "prepare"] =>
     let some bodyStr := String.fromUTF8? req.body
       | return (rt, textResp 400 "invalid UTF-8 body", preLaunches, #[])

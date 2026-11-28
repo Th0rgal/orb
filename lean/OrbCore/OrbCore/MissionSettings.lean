@@ -44,13 +44,67 @@ structure Settings where
   shortDescription? : Option String
   githubPr? : Option String
 
-def resolve (existing : MissionRecord) (patch : JVal) : Except String Settings := do
-  let backend := (patch.fieldStr? "backend").getD existing.backend
-  let model := match patch.field? "model_override" with
-    | some .null => ""
-    | some (.str s) => s
-    | _ => existing.modelOverride
+def supportedMissionBackends : Array String :=
+  #["opencode", "claudecode", "codex", "grok", "antigravity", "vibe"]
+
+def retiredMissionSettingsFields : Array String :=
+  #["agent", "config_profile", "fast_mode"]
+
+def restAllowedSettingsFields : Array String :=
+  #["title", "backend", "model_override", "model_effort", "short_description", "github_pr",
+    "project", "project_slug", "folder", "approval_policy", "descendant_ids",
+    "resume", "service_tier"]
+
+def mcpAllowedSettingsFields : Array String :=
+  #["mission_id", "title", "backend", "model_override", "model_effort",
+    "short_description", "github_pr", "idempotency_key"]
+
+def resolve (existing : MissionRecord) (patch : JVal)
+    (allowedKeys : Array String := restAllowedSettingsFields) : Except String Settings := do
+  let .obj kvs := patch
+    | .error "invalid_arguments:settings patch must be a JSON object"
+  for (k, _) in kvs do
+    if retiredMissionSettingsFields.contains k then
+      .error s!"unsupported_field:{k}"
+    if !allowedKeys.contains k then
+      .error s!"unknown_field:{k}"
+  match patch.field? "resume" with
+  | none | some .null | some (.bool false) => pure ()
+  | some (.bool true) => .error "unsupported_field:resume"
+  | some _ => .error "invalid_resume"
+  match patch.field? "service_tier" with
+  | none | some .null => pure ()
+  | some (.str s) =>
+    let t := s.trimAscii.toString.toLower
+    if t.isEmpty || t == "standard" then pure ()
+    else .error "unsupported_field:service_tier"
+  | some _ => .error "invalid_service_tier"
+  let title ← match patch.field? "title" with
+    | none => pure existing.title
+    | some (.str s) => pure s
+    | some _ => .error "invalid_title"
+  let backend ← match patch.field? "backend" with
+    | none => pure existing.backend
+    | some (.str rawB) =>
+      let bLow := rawB.trimAscii.toString.toLower
+      let bNorm := if bLow == "claude" then "claudecode" else bLow
+      if !supportedMissionBackends.contains bNorm then
+        .error s!"unsupported_backend:{rawB}"
+      pure bNorm
+    | some _ => .error "invalid_backend"
+  let model ← match patch.field? "model_override" with
+    | none => pure existing.modelOverride
+    | some .null => pure ""
+    | some (.str s) => pure s
+    | some _ => .error "invalid_model_override"
   let effort ← match patch.field? "model_effort" with
+    | none =>
+      if backend != existing.backend && !existing.modelEffort.trimAscii.toString.isEmpty then
+        match normalizeModelEffortForBackend (some backend) existing.modelEffort with
+        | some eff => pure eff
+        | none => .error "unsupported_model_effort"
+      else
+        pure existing.modelEffort
     | some .null => pure ""
     | some (.str s) =>
       let t := s.trimAscii.toString
@@ -58,14 +112,24 @@ def resolve (existing : MissionRecord) (patch : JVal) : Except String Settings :
       else match normalizeModelEffortForBackend (some backend) t with
         | some eff => pure eff
         | none => .error "unsupported_model_effort"
-    | _ => pure existing.modelEffort
+    | some _ => .error "invalid_model_effort"
+  let shortDesc? ← match patch.field? "short_description" with
+    | none => pure none
+    | some .null => pure (some "")
+    | some (.str s) => pure (some s)
+    | some _ => .error "invalid_short_description"
+  let githubPr? ← match patch.field? "github_pr" with
+    | none => pure none
+    | some .null => pure (some "")
+    | some (.str s) => pure (some s)
+    | some _ => .error "invalid_github_pr"
   return {
-    title := (patch.fieldStr? "title").getD existing.title
+    title := title
     backend := backend
     modelOverride := model
     modelEffort := effort
-    shortDescription? := patch.fieldStr? "short_description"
-    githubPr? := patch.fieldStr? "github_pr"
+    shortDescription? := shortDesc?
+    githubPr? := githubPr?
   }
 
 def persistQuery (store : CoreStore) (existing : MissionRecord) (settings : Settings)
