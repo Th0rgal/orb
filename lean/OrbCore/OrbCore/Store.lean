@@ -3352,7 +3352,7 @@ def upsertAIProvider (st : CoreStore) (p : AIProviderRecord) (memberEdit : Bool 
         (params.push (if credentialOwner then "1" else "0"))
       return res.bind fun rows => if rows.size == 2 then .ok () else .error "provider_changed"
     let res ← execParamQuery st.missionsDb
-      "INSERT INTO ai_providers(id,provider_type,name,enabled,base_url,api_key,rpm_limit,max_concurrency,custom_models_json,updated_at,created_by_user_id) VALUES(?1,?2,?3,?4,?5,?6,NULLIF(?7,''),NULLIF(?8,''),?9,?10,?11) ON CONFLICT(id) DO UPDATE SET provider_type=excluded.provider_type,name=excluded.name,enabled=excluded.enabled,base_url=excluded.base_url,api_key=excluded.api_key,rpm_limit=excluded.rpm_limit,max_concurrency=excluded.max_concurrency,custom_models_json=excluded.custom_models_json,updated_at=excluded.updated_at;" params
+      "INSERT INTO ai_providers(id,provider_type,name,enabled,base_url,api_key,rpm_limit,max_concurrency,custom_models_json,sort_order,updated_at,created_by_user_id) VALUES(?1,?2,?3,?4,?5,?6,NULLIF(?7,''),NULLIF(?8,''),?9,COALESCE((SELECT MAX(sort_order)+1 FROM ai_providers WHERE provider_type=?2),0),?10,?11) ON CONFLICT(id) DO UPDATE SET provider_type=excluded.provider_type,name=excluded.name,enabled=excluded.enabled,base_url=excluded.base_url,api_key=excluded.api_key,rpm_limit=excluded.rpm_limit,max_concurrency=excluded.max_concurrency,custom_models_json=excluded.custom_models_json,updated_at=excluded.updated_at;" params
     return res.map (fun _ => ())
 
 /-- Append a provider-account audit entry. `fields` names the changed fields only; values

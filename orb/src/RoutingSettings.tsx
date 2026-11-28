@@ -408,7 +408,16 @@ export function RoutingSettings(p: { onOpenClient: () => void; tab?: RoutingTab 
                                 )}
                               </For>
                             </Show>
-                            <For each={chain.entries.filter(entry => !resolved().some(r => r.provider_id === entry.provider_id && r.model_id === entry.model_id))}>
+                            <For each={chain.entries.filter(entry => !resolved().some(r => {
+                              if (r.provider_id !== entry.provider_id) return false;
+                              if (r.model_id === entry.model_id) return true;
+                              const bare = r.model_id.includes("/") ? r.model_id.slice(r.model_id.indexOf("/") + 1) : r.model_id;
+                              if (bare === entry.model_id) return true;
+                              if (entry.provider_id === "antigravity" && bare === `${entry.model_id}-high`) return true;
+                              if (entry.provider_id === "xai" && entry.model_id.endsWith("-latest") && bare === entry.model_id.slice(0, -7)) return true;
+                              if (entry.provider_id === "kimi" && (bare === `kimi-${entry.model_id}` || (entry.model_id === "kimi-for-coding" && bare === "kimi-k3") || (entry.model_id === "kimi-for-coding-highspeed" && bare === "kimi-k2.7-code-highspeed"))) return true;
+                              return false;
+                            }))}>
                               {entry => <p class="routing-muted">{entry.provider_id} / {entry.model_id} — No eligible account. The server did not provide an exclusion reason.</p>}
                             </For>
                             </details>
@@ -766,11 +775,15 @@ export function RoutingSettings(p: { onOpenClient: () => void; tab?: RoutingTab 
                     parked_source?: string | null;
                     login_status?: string | null;
                     login_message?: string | null;
+                    sample_count?: number | null;
                   };
                   const cooldown = () => h.cooldown_remaining_secs ?? h.cooldown_secs_remaining;
                   const disabledByProvider = () =>
                     h.disabled_by_provider === true || h.account_state === "disabled_by_provider";
                   const disabled = () => disabledByProvider() || h.account_state === "disabled";
+                  const hasObservedTraffic = () =>
+                    (h.total_requests != null && h.total_requests > 0) ||
+                    (core.sample_count != null && core.sample_count > 0);
                   const failureReason = () => h.last_failure_reason || core.parked_reason || "None";
                   return (
                   <details
@@ -790,7 +803,7 @@ export function RoutingSettings(p: { onOpenClient: () => void; tab?: RoutingTab 
                       <strong>{accountName(h.account_id)}</strong>
                       <span>{h.provider_id || h.account_id.slice(0, 8)}</span>
                       <span
-                        class={`routing-status ${cooldown() || disabled() ? "bad" : h.is_degraded ? "warn" : h.total_requests && h.is_healthy ? "good" : ""}`}
+                        class={`routing-status ${cooldown() || disabled() ? "bad" : h.is_degraded ? "warn" : hasObservedTraffic() && h.is_healthy ? "good" : ""}`}
                       >
                         {disabledByProvider()
                           ? "Disabled by provider"
@@ -800,7 +813,7 @@ export function RoutingSettings(p: { onOpenClient: () => void; tab?: RoutingTab 
                           ? `Cooldown · ${Math.ceil(cooldown()!)}s`
                           : h.is_degraded
                             ? "Degraded"
-                            : !h.total_requests
+                            : !hasObservedTraffic()
                               ? "No data"
                               : h.is_healthy
                                 ? "Healthy"

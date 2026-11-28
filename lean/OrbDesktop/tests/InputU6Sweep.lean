@@ -173,6 +173,22 @@ private def verifyNineScreenControls : IO Unit := do
     ]
   }
   assertHitTargets "live_inference_list" infBase [providerWidgetId 0, providerSettingsId 0]
+  let infV2 : DesktopState := {
+    infBase with
+    providers := some [
+      { id := "xai-a", name := "xAI A", category := "xAI", userEnabled := true, globallyEnabled := true, providerType := "xai", healthState := "cooldown", cooldownSecs := 90, healthDetail := "usage_limit" },
+      { id := "xai-b", name := "xAI B", category := "xAI", userEnabled := true, globallyEnabled := true, providerType := "xai" }
+    ]
+    routingChains := [
+      { id := "builtin/smart", name := "Smart", isDefault := true, entriesSummary := "xai/grok-4" },
+      { id := "custom/fast", name := "Fast", isDefault := false, entriesSummary := "xai/grok-4" }
+    ]
+  }
+  assertHitTargets "live_inference_v2_accounts" infV2
+    [inferenceTabAccountsId, inferenceTabChainsId, providerWidgetId 0, providerMoveDownId 0, providerClearHealthId 0, providerSettingsId 0, providerMoveUpId 1]
+  let infV2Chains := (stepDesktopEvent 120 vpDev infV2 (.activate inferenceTabChainsId)).1
+  assertHitTargets "live_inference_v2_chains" infV2Chains
+    [inferenceTabAccountsId, inferenceTabChainsId, routingChainDefaultId 1]
   let infRoute : DesktopState := {
     infBase with
     accountRoutePage := some {

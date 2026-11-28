@@ -2239,6 +2239,92 @@ private def v2RoutingEndToEndContract
     if !(← cooldownsRef.get).any (·.accountId == keepKey) ||
        (← lookupAccountHealthRecord tracker keepKey).cooldown?.isNone then
       failures := failures.push "v2: clearing targeted accounts must preserve unrelated cooldowns in both stores"
+
+    -- 6) Default chain selection (`is_default`) governs requests omitting `model`,
+    --    and `POST /api/model-routing/chains` rejects reserved `builtin/` IDs.
+    let (builtinPostSt, _) ← postJson v2App jwt "/api/model-routing/chains"
+      "{\"id\":\"builtin/spoof\",\"name\":\"Spoof\",\"entries\":[{\"provider_id\":\"xai\",\"model_id\":\"grok-4\"}]}" now
+    if builtinPostSt != 400 then
+      failures := failures.push s!"v2: POST builtin/ chain expected 400, got {builtinPostSt}"
+    let (setDefSt, setDefDoc) ← putJson v2App jwt s!"/api/model-routing/chains/{customChainId}" "{\"is_default\":true}" now
+    if setDefSt != 200 || setDefDoc.fieldBool? "is_default" != some true then
+      failures := failures.push s!"v2: set custom chain default expected 200 is_default=true, got {setDefSt} {renderCompact setDefDoc}"
+    tried.set #[]
+    let noModelBody := "{\"messages\":[]}"
+    let noModelRaw := s!"POST /v1/chat/completions HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {jwt}\r\nContent-Length: {noModelBody.utf8ByteSize}\r\n\r\n{noModelBody}"
+    let .ok noModelReq := parseRequest noModelRaw.toUTF8 none | throw (IO.userError "v2 no-model request parse failed")
+    let .ok noModelResp ← dispatchCoreRequest v2App noModelReq now | throw (IO.userError "v2 no-model unexpected upgrade")
+    if noModelResp.status != 200 || (← tried.get) != #[acctB] then
+      failures := failures.push s!"v2: request omitting model must route to custom default chain ({acctB}), got status={noModelResp.status} tried={← tried.get}"
+
+    -- 7) New account added AFTER reorder must append after existing reordered accounts (never jump to rank 0).
+    let acctC := "v2-xai-0-late"
+    match ← upsertAIProvider store {
+      id := acctC, providerType := "xai", name := "xAI Latecomer", enabled := true,
+      apiKey := "sk-v2-c", updatedAt := "1700001001"
+    } with
+    | .error e => throw (IO.userError s!"v2 seed latecomer {acctC} failed: {e}")
+    | .ok () => pure ()
+    let resLate := (← getJson v2App jwt s!"/api/model-routing/chains/{customChainId}/resolve" now).asArr?.getD #[]
+    let idsLate := resLate.filterMap (·.fieldStr? "account_id")
+    if idsLate != #[acctB, acctA, acctC] then
+      failures := failures.push s!"v2: account added after reorder must follow reordered peers [{acctB}, {acctA}, {acctC}], got {idsLate}"
+    discard <| deleteAIProvider store acctC
+
+    -- 8) Per-user `user_provider_prefs` must also filter pooled `cliproxyapi:*` OAuth targets:
+    --    when a member disables all OAuth accounts backing a pooled target, it is excluded;
+    --    when one of two OAuth accounts remains enabled, the pooled target stays eligible.
+    let oaTarget1 : ProviderTarget := {
+      accountId := "cliproxyapi:openai", provider := "openai", baseUrl := "http://127.0.0.1:8317/v1",
+      apiKey := "cli-key", modelId := "gpt-6.1-sol", sourceAccountIds := #["oa-1"]
+    }
+    let oaTarget2 : ProviderTarget := {
+      accountId := "cliproxyapi:openai", provider := "openai", baseUrl := "http://127.0.0.1:8317/v1",
+      apiKey := "cli-key", modelId := "gpt-6.1-sol", sourceAccountIds := #["oa-1", "oa-2"]
+    }
+    let filteredSingle := filterChainTargetsForUserPrefs
+      { id := "oa-single", name := "OA Single", targets := #[oaTarget1] } #[("oa-1", false)]
+    let filteredOneOfTwo := filterChainTargetsForUserPrefs
+      { id := "oa-pair", name := "OA Pair", targets := #[oaTarget2] } #[("oa-1", false)]
+    let filteredBothOfTwo := filterChainTargetsForUserPrefs
+      { id := "oa-pair", name := "OA Pair", targets := #[oaTarget2] } #[("oa-1", false), ("oa-2", false)]
+    if !filteredSingle.targets.isEmpty || filteredOneOfTwo.targets.size != 1 || !filteredBothOfTwo.targets.isEmpty then
+      failures := failures.push s!"v2: pooled OAuth user_provider_prefs filtering failed: single={filteredSingle.targets.size} oneOfTwo={filteredOneOfTwo.targets.size} both={filteredBothOfTwo.targets.size}"
+
+    -- 9) `planChainState` must never resurrect a `disabledByProvider` account when `proxyCooldownsRef`
+    --    has another active cooldown, and stale `.rateLimit` in `proxyCooldownsRef` must not shadow
+    --    an authoritative `.usageLimit` in `healthTracker?`.
+    let bannedId := "v2-banned-acct"
+    let usageId := "v2-usage-acct"
+    let guardTracker ← newProviderHealthTracker 1 2
+    guardTracker.health.atomically do
+      modify fun s => { s with accounts := #[
+        { accountId := bannedId, slotId := accountSlotId bannedId, disabledByProvider := true, disabledMessage := "TOS_VIOLATION" },
+        { accountId := usageId, slotId := accountSlotId usageId, parkedQuota := true,
+          cooldown? := some { accountId := usageId, untilEpoch := now + 1800, reason := .usageLimit } }
+      ] }
+    cooldownsRef.set #[
+      { accountId := usageId, untilEpoch := now + 30, reason := .rateLimit },
+      { accountId := bannedId, untilEpoch := now + 30, reason := .rateLimit }
+    ]
+    let guardChain : RoutingChain := {
+      id := "v2-guard-chain", name := "Guard",
+      targets := #[
+        { accountId := bannedId, provider := "antigravity", baseUrl := "http://127.0.0.1:1", apiKey := "k", modelId := "m" },
+        { accountId := usageId, provider := "openai", baseUrl := "http://127.0.0.1:1", apiKey := "k", modelId := "m" }
+      ]
+    }
+    let guardApp := { v2App with healthTracker? := some guardTracker }
+    let savedChains ← guardApp.chainsRef.get
+    guardApp.chainsRef.set #[guardChain]
+    tried.set #[]
+    let gBody := renderCompact (.obj #[("model", .str "v2-guard-chain"), ("messages", .arr #[])])
+    let gRaw := s!"POST /v1/chat/completions HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {jwt}\r\nContent-Length: {gBody.utf8ByteSize}\r\n\r\n{gBody}"
+    let .ok gReq := parseRequest gRaw.toUTF8 none | throw (IO.userError "v2 guard request parse failed")
+    let .ok gResp ← dispatchCoreRequest guardApp gReq now | throw (IO.userError "v2 guard unexpected upgrade")
+    guardApp.chainsRef.set savedChains
+    if gResp.status != 429 || !(← tried.get).isEmpty || ((String.fromUTF8! gResp.body).splitOn "usage limit").length <= 1 then
+      failures := failures.push s!"v2: disabledByProvider + shadowed usageLimit must short-circuit with usage-limit 429 without resurrecting banned account, got status={gResp.status} tried={← tried.get} body={String.fromUTF8! gResp.body}"
   finally
     cooldownsRef.set #[]
     discard <| execParamQuery store.missionsDb "DELETE FROM model_routing_chains WHERE id=?1;" #[customChainId]

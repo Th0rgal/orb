@@ -481,6 +481,70 @@ describe("Routing settings", () => {
       ).toBe(true),
     );
   });
+  it("renders Healthy for Core health rows with is_healthy=true and sample_count>0 even without total_requests", async () => {
+    const coreRows = [
+      {
+        account_id: "account-one",
+        provider_id: "anthropic",
+        account_state: "healthy",
+        is_healthy: true,
+        is_degraded: false,
+        sample_count: 1,
+        consecutive_failures: 0,
+        cooldown_secs_remaining: 0,
+        cooldown_remaining_secs: 0,
+      },
+      {
+        account_id: "account-two",
+        provider_id: "openai",
+        account_state: "healthy",
+        is_healthy: null,
+        is_degraded: false,
+        sample_count: null,
+        consecutive_failures: 0,
+        cooldown_secs_remaining: 0,
+        cooldown_remaining_secs: 0,
+      },
+    ];
+    cacheReset();
+    const orig = vi.mocked(fetch).getMockImplementation()!;
+    vi.mocked(fetch).mockImplementation(async (input, init) => {
+      const path = new URL(String(input)).pathname;
+      if (path.endsWith("/health")) return new Response(JSON.stringify(coreRows), { status: 200 });
+      return orig(input, init);
+    });
+    const view = render(() => <RoutingSettings onOpenClient={() => {}} tab="health" />);
+    await waitFor(() => expect(view.container.querySelectorAll(".routing-health")).toHaveLength(2));
+    const cards = Array.from(view.container.querySelectorAll(".routing-health"));
+    expect(cards[0].querySelector(".routing-status")?.textContent).toBe("Healthy");
+    expect(cards[0].querySelector(".routing-status")?.className).toContain("good");
+    expect(cards[1].querySelector(".routing-status")?.textContent).toBe("No data");
+  });
+  it("matches normalized CLIProxyAPI model IDs in Resolve without false no-eligible-account warnings", async () => {
+    chains[0].entries = [
+      { provider_id: "antigravity", model_id: "gemini-4-neon" },
+      { provider_id: "kimi", model_id: "kimi-for-coding" },
+    ];
+    const orig = vi.mocked(fetch).getMockImplementation()!;
+    vi.mocked(fetch).mockImplementation(async (input, init) => {
+      const path = new URL(String(input)).pathname;
+      if (path.endsWith("/resolve")) {
+        return new Response(
+          JSON.stringify([
+            { provider_id: "antigravity", model_id: "orb-ag-1/gemini-4-neon-high", account_id: "account-one", has_credentials: true, auth_kind: "oauth", has_base_url: true },
+            { provider_id: "kimi", model_id: "kimi-k3", account_id: "account-two", has_credentials: true, auth_kind: "oauth", has_base_url: true },
+          ]),
+          { status: 200 },
+        );
+      }
+      return orig(input, init);
+    });
+    await mount();
+    fireEvent.click(screen.getByRole("button", { name: /Test chain/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Resolve" }));
+    await screen.findByText("2 eligible accounts");
+    expect(screen.queryByText(/No eligible account\. The server did not provide/)).toBeNull();
+  });
 });
 
 

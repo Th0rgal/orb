@@ -124,11 +124,39 @@ struct OrbRoutingSettings: View {
         Button { Task { await test(chain.selfID) } } label: { Label("Test", systemImage: "play") }
         Button { Task { await resolve(chain.selfID) } } label: { Label("Resolve accounts", systemImage: "list.bullet") }
         Button { UIPasteboard.general.string = chain.selfID } label: { Label("Copy model ID", systemImage: "doc.on.doc") }
-        Button(role: .destructive) { deleting = chain } label: { Label("Delete", systemImage: "trash") }
+        if Self.canDeleteChain(chain.selfID) {
+            Button(role: .destructive) { deleting = chain } label: { Label("Delete", systemImage: "trash") }
+        }
     }
 
-    private func isAttentionHealth(_ h: OrbJSON) -> Bool {
-        !h["is_healthy"].flag || h["is_degraded"].flag || (h["cooldown_remaining_secs"].number ?? 0) > 0
+    static func canDeleteChain(_ id: String) -> Bool {
+        !id.hasPrefix("builtin/")
+    }
+
+    static func cooldownSecs(_ h: OrbJSON) -> Double {
+        h["cooldown_remaining_secs"].number ?? h["cooldown_secs_remaining"].number ?? 0
+    }
+
+    static func isAttentionHealth(_ h: OrbJSON) -> Bool {
+        let explicitlyUnhealthy = (h["is_healthy"] == .bool(false))
+        let state = h["account_state"].text
+        return explicitlyUnhealthy
+            || h["is_degraded"].flag
+            || h["disabled_by_provider"].flag
+            || state == "disabled_by_provider"
+            || state == "disabled"
+            || cooldownSecs(h) > 0
+    }
+
+    static func healthStatusTone(_ h: OrbJSON) -> String {
+        let state = h["account_state"].text
+        if h["is_healthy"] == .bool(false) || h["disabled_by_provider"].flag || state == "disabled_by_provider" || state == "disabled" || cooldownSecs(h) > 0 {
+            return "error"
+        }
+        if h["is_degraded"].flag {
+            return "warning"
+        }
+        return "success"
     }
 
     private func accountTitle(_ h: OrbJSON) -> String {
@@ -149,22 +177,27 @@ struct OrbRoutingSettings: View {
 
     @ViewBuilder
     private func healthRow(_ h: OrbJSON) -> some View {
+        let tone = Self.healthStatusTone(h)
+        let dotColor = tone == "error" ? OrbStyle.error : (tone == "warning" ? OrbStyle.warning : OrbStyle.success)
+        let state = h["account_state"].text
+        let disabledByProvider = h["disabled_by_provider"].flag || state == "disabled_by_provider"
+        let sidecarDisabled = !disabledByProvider && state == "disabled"
         HStack {
             Circle()
-                .fill(h["is_healthy"].flag ? (h["is_degraded"].flag ? OrbStyle.warning : OrbStyle.success) : OrbStyle.error)
+                .fill(dotColor)
                 .frame(width: 8, height: 8)
             VStack(alignment: .leading, spacing: 2) {
                 Text(accountTitle(h))
                     .font(.subheadline)
                     .lineLimit(1)
                     .truncationMode(.middle)
-                Text(healthLine(h))
+                Text(Self.healthLine(h))
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
             }
             Spacer(minLength: 8)
-            if h["disabled_by_provider"].flag || (h["cooldown_remaining_secs"].number ?? 0) > 0 {
+            if disabledByProvider || (!sidecarDisabled && Self.cooldownSecs(h) > 0) {
                 Button("Clear") {
                     Task { await run { _ = try await client.call("/api/model-routing/health/\(OrbCore.escape(h["account_id"].text))/clear", method: "POST") } }
                 }
@@ -174,8 +207,8 @@ struct OrbRoutingSettings: View {
     }
 
     private var healthSection: some View {
-        let attentionRows = health.filter(isAttentionHealth)
-        let healthyRows = health.filter { !isAttentionHealth($0) }
+        let attentionRows = health.filter(Self.isAttentionHealth)
+        let healthyRows = health.filter { !Self.isAttentionHealth($0) }
         return Section("Provider health") {
             if health.isEmpty { Text("No requests recorded yet.").foregroundStyle(.secondary) }
             ForEach(attentionRows, id: \.healthID) { healthRow($0) }
@@ -188,8 +221,11 @@ struct OrbRoutingSettings: View {
         }
     }
 
-    private func healthLine(_ h: OrbJSON) -> String {
-        var parts = ["\(h["total_successes"].display)/\(h["total_requests"].display) ok"]
+    static func healthLine(_ h: OrbJSON) -> String {
+        var parts: [String] = []
+        if h["total_requests"].number != nil {
+            parts.append("\(h["total_successes"].display)/\(h["total_requests"].display) ok")
+        }
         if let rl = h["total_rate_limits"].number, rl > 0 { parts.append("\(Int(rl)) rate limits") }
         if let keyRpm = h["rate_limit_snapshot"]["key_rpm_limit"].number {
             parts.append("\(Int(keyRpm)) RPM")
@@ -201,15 +237,23 @@ struct OrbRoutingSettings: View {
             }
         }
         if let latency = h["avg_latency_ms"].number { parts.append("\(Int(latency)) ms") }
-        if let cooldown = h["cooldown_remaining_secs"].number, cooldown > 0 {
+        let cooldown = cooldownSecs(h)
+        if cooldown > 0 {
             parts.append("cooldown \(OrbActivityCompaction.formatCooldown(Int(cooldown)))")
         }
-        if h["disabled_by_provider"].flag {
+        let state = h["account_state"].text
+        if h["disabled_by_provider"].flag || state == "disabled_by_provider" {
             parts.append("disabled by provider")
             let message = h["disabled_by_provider_message"].text
             if !message.isEmpty { parts.append(message) }
+        } else if state == "disabled" {
+            parts.append("disabled")
         }
-        if !h["last_failure_reason"].text.isEmpty { parts.append(h["last_failure_reason"].text) }
+        let reason = h["last_failure_reason"].text.isEmpty ? h["parked_reason"].text : h["last_failure_reason"].text
+        if !reason.isEmpty && reason != "disabled_by_provider" && reason != "disabled" { parts.append(reason) }
+        if parts.isEmpty {
+            return h["is_healthy"] == .bool(true) ? "healthy" : "no requests yet"
+        }
         return parts.joined(separator: " · ")
     }
 

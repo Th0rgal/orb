@@ -281,6 +281,47 @@ private def providerEsc := (stepDesktopEvent 120 vp providerDetail (.key 0xff1b 
 #guard providerEsc.fleetTopSub == providerList.fleetTopSub && providerEsc.accountRoutePage.isNone
 #guard desktopFocusChange providerDetail providerEsc (.key 0xff1b 0 .pressed) == some (providerSettingsId 1)
 
+-- V2 Pure LeanUI Inference & Resources routing parity checks:
+-- priority reorder, cooldown/disabled clear, fallback chain default switch, and Resources lens/flow filtering.
+private def v2InferenceState : DesktopState :=
+  { inferencePage with
+    providers := some [
+      { id := "xai-a", name := "xAI A", category := "xAI", userEnabled := true, globallyEnabled := true, providerType := "xai", healthState := "cooldown", cooldownSecs := 90, healthDetail := "usage_limit" },
+      { id := "xai-b", name := "xAI B", category := "xAI", userEnabled := true, globallyEnabled := true, providerType := "xai", healthState := "disabled_by_provider", healthDetail := "TOS_VIOLATION" },
+      { id := "ant-1", name := "Claude", category := "Anthropic", userEnabled := true, globallyEnabled := true, providerType := "anthropic" }
+    ]
+    routingChains := [
+      { id := "builtin/smart", name := "Smart", isDefault := true, entriesSummary := "xai/grok-4 → anthropic/claude-opus-5-5" },
+      { id := "custom/fast", name := "Fast", isDefault := false, entriesSummary := "xai/grok-4" }
+    ] }
+#guard (stepDesktopEvent 120 vp v2InferenceState (.activate (providerMoveDownId 0))).1.writeRequest == some (.providerReorder ["xai-b", "xai-a"])
+#guard (stepDesktopEvent 120 vp v2InferenceState (.activate (providerMoveUpId 1))).1.writeRequest == some (.providerReorder ["xai-b", "xai-a"])
+#guard (stepDesktopEvent 120 vp v2InferenceState (.activate (providerMoveUpId 0))).1.writeRequest.isNone
+#guard (stepDesktopEvent 120 vp v2InferenceState (.activate (providerClearHealthId 0))).1.writeRequest == some (.providerClearHealth "xai-a")
+#guard (stepDesktopEvent 120 vp v2InferenceState (.activate (providerClearHealthId 1))).1.writeRequest == some (.providerClearHealth "xai-b")
+private def v2ChainsTab := (stepDesktopEvent 120 vp v2InferenceState (.activate inferenceTabChainsId)).1
+#guard v2ChainsTab.inferenceTab == "chains"
+#guard (stepDesktopEvent 120 vp v2ChainsTab (.activate (routingChainDefaultId 1))).1.writeRequest == some (.chainSetDefault "custom/fast")
+#guard (stepDesktopEvent 120 vp v2ChainsTab (.activate (routingChainDefaultId 0))).1.writeRequest.isNone
+
+private def v2ResourcesState : DesktopState :=
+  { inferencePage with
+    screen := .resources
+    resourceRows := some [
+      ⟨"", "Inference · Anthropic", "1.46 B tok/h · $29.2/h · 62% quota"⟩,
+      ⟨"", "Compute · Boat", "8/16 vCPU · $1.6/h"⟩,
+      ⟨"m1", "Mission · Alpha", "active · 8 vCPU · 1.46 B tok/h"⟩
+    ]
+    resourceFlows := [
+      ⟨"inference", "Anthropic", "Alpha", "1.46", true⟩,
+      ⟨"compute", "Boat", "Alpha", "8", false⟩
+    ]
+    resourceSummary := some ⟨2, "1.46", "8", "16"⟩ }
+#guard (stepDesktopEvent 120 vp v2ResourcesState (.activate resourceLensInferenceId)).1.resourceLens == "inference"
+#guard (stepDesktopEvent 120 vp v2ResourcesState (.activate resourceLensComputeId)).1.resourceLens == "compute"
+#guard (filterResourceRowsByLens (v2ResourcesState.resourceRows.getD []) "inference").length == 2
+#guard (filterResourceRowsByLens (v2ResourcesState.resourceRows.getD []) "compute").length == 2
+
 private def pollingRouteState : DesktopState :=
   { providerDetail with accountRoutePage := providerDetail.accountRoutePage.map fun p =>
       { p with polling := true, options := some [

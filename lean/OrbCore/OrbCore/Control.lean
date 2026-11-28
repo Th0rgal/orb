@@ -937,6 +937,7 @@ def parseChainTargetsJson
                 modelTpmLimit?         := inlineMdlTpm?.orElse (fun _ => matchedModel?.bind (·.tpmLimit?))
                 modelMaxConcurrency?   := inlineMdlConc?.orElse (fun _ => matchedModel?.bind (·.maxConcurrency?))
                 contextLimit           := inlineContextLimit
+                sourceAccountIds       := #[hp.id]
               }
             else
               let url :=
@@ -960,6 +961,7 @@ def parseChainTargetsJson
                   modelTpmLimit?         := inlineMdlTpm?.orElse (fun _ => matchedModel?.bind (·.tpmLimit?))
                   modelMaxConcurrency?   := inlineMdlConc?.orElse (fun _ => matchedModel?.bind (·.maxConcurrency?))
                   contextLimit           := inlineContextLimit
+                  sourceAccountIds       := #[hp.id]
                 }
               else
                 {
@@ -974,9 +976,14 @@ def parseChainTargetsJson
                   modelTpmLimit?         := inlineMdlTpm?.orElse (fun _ => matchedModel?.bind (·.tpmLimit?))
                   modelMaxConcurrency?   := inlineMdlConc?.orElse (fun _ => matchedModel?.bind (·.maxConcurrency?))
                   contextLimit           := inlineContextLimit
+                  sourceAccountIds       := #[hp.id]
                 }
-          if !entryTargets.any (fun t => t.accountId == target.accountId && t.baseUrl == target.baseUrl && t.modelId == target.modelId) then
-            entryTargets := entryTargets.push target
+          match entryTargets.findIdx? (fun t => t.accountId == target.accountId && t.baseUrl == target.baseUrl && t.modelId == target.modelId) with
+          | none => entryTargets := entryTargets.push target
+          | some idx =>
+            let prev := entryTargets[idx]!
+            let mergedIds := target.sourceAccountIds.foldl (fun acc sid => if acc.contains sid then acc else acc.push sid) prev.sourceAccountIds
+            entryTargets := entryTargets.set! idx { prev with sourceAccountIds := mergedIds }
         out := out ++ entryTargets
       else if inlineKey?.isNone && inlineUrl?.isNone && matchedHydratedList.isEmpty && !matchedRows.isEmpty then
         let mut entryTargets : Array ProviderTarget := #[]
@@ -1005,6 +1012,7 @@ def parseChainTargetsJson
                 modelTpmLimit?         := inlineMdlTpm?.orElse (fun _ => matchedModel?.bind (·.tpmLimit?))
                 modelMaxConcurrency?   := inlineMdlConc?.orElse (fun _ => matchedModel?.bind (·.maxConcurrency?))
                 contextLimit           := inlineContextLimit
+                sourceAccountIds       := #[p.id]
               }
             else
               {
@@ -1019,9 +1027,14 @@ def parseChainTargetsJson
                 modelTpmLimit?         := inlineMdlTpm?.orElse (fun _ => matchedModel?.bind (·.tpmLimit?))
                 modelMaxConcurrency?   := inlineMdlConc?.orElse (fun _ => matchedModel?.bind (·.maxConcurrency?))
                 contextLimit           := inlineContextLimit
+                sourceAccountIds       := #[p.id]
               }
-          if !entryTargets.any (fun t => t.accountId == target.accountId && t.baseUrl == target.baseUrl && t.modelId == target.modelId) then
-            entryTargets := entryTargets.push target
+          match entryTargets.findIdx? (fun t => t.accountId == target.accountId && t.baseUrl == target.baseUrl && t.modelId == target.modelId) with
+          | none => entryTargets := entryTargets.push target
+          | some idx =>
+            let prev := entryTargets[idx]!
+            let mergedIds := target.sourceAccountIds.foldl (fun acc sid => if acc.contains sid then acc else acc.push sid) prev.sourceAccountIds
+            entryTargets := entryTargets.set! idx { prev with sourceAccountIds := mergedIds }
         out := out ++ entryTargets
       else
       let effProvType :=
@@ -1050,6 +1063,10 @@ def parseChainTargetsJson
              | some hp => !hp.hasApiKey && hp.hasOAuth
              | none => false)
           )
+        let fallbackSourceIds : Array String :=
+          match matchedHydrated? with
+          | some hp => #[hp.id]
+          | none => match matchedProv? with | some p => #[p.id] | none => #[]
         if useCliProxy then
           let credential? : Option SidecarCredential := if pinned then matchedHydrated?.map (fun hp =>
             ⟨hp.providerType, accountRoutingFile hydratedProvs hp, hp.modelPrefix⟩) else none
@@ -1077,6 +1094,7 @@ def parseChainTargetsJson
             modelTpmLimit?         := inlineMdlTpm?.orElse (fun _ => matchedModel?.bind (·.tpmLimit?))
             modelMaxConcurrency?   := inlineMdlConc?.orElse (fun _ => matchedModel?.bind (·.maxConcurrency?))
             contextLimit          := inlineContextLimit
+            sourceAccountIds      := fallbackSourceIds
           }
         else
           let acct :=
@@ -1108,6 +1126,7 @@ def parseChainTargetsJson
               modelTpmLimit?         := inlineMdlTpm?.orElse (fun _ => matchedModel?.bind (·.tpmLimit?))
               modelMaxConcurrency?   := inlineMdlConc?.orElse (fun _ => matchedModel?.bind (·.maxConcurrency?))
               contextLimit          := inlineContextLimit
+              sourceAccountIds      := fallbackSourceIds
             }
           else
             out := out.push {
@@ -1123,6 +1142,7 @@ def parseChainTargetsJson
               modelTpmLimit?         := inlineMdlTpm?.orElse (fun _ => matchedModel?.bind (·.tpmLimit?))
               modelMaxConcurrency?   := inlineMdlConc?.orElse (fun _ => matchedModel?.bind (·.maxConcurrency?))
               contextLimit          := inlineContextLimit
+              sourceAccountIds      := fallbackSourceIds
             }
     return out
   | _ => return #[]
@@ -1152,21 +1172,23 @@ def loadRoutingChainsFromStore (st : CoreStore) (workingDir : String := "") : IO
   let cliKey := ((← lookupEnvWithFiles? "CLI_PROXY_API_KEY").getD "").trimAscii.toString
   let cliUrl ← resolveCliProxyBaseUrl
   let googleMax ← resolveGoogleMaxConcurrency st.rootDir
-  let .ok rows ← execParamQuery st.missionsDb "SELECT id,name,models_json,COALESCE(strip_thinking,-1) FROM model_routing_chains ORDER BY id ASC;" #[]
+  let .ok rows ← execParamQuery st.missionsDb "SELECT id,name,models_json,COALESCE(strip_thinking,-1),COALESCE(is_default,-1) FROM model_routing_chains ORDER BY id ASC;" #[]
     | throw (IO.userError "routing_chain_store_unavailable")
+  let dataRows := rows.extract 1 rows.size
+  let explicitDefault := dataRows.any (fun r => r[4]? == some "1")
   let mut out : Array RoutingChain := #[]
-  for i in [1:rows.size] do
-    let r := rows[i]!
+  for r in dataRows do
     let cid := (r[0]?).getD ""
     let nm := (r[1]?).getD cid
     let mj := (r[2]?).getD "[]"
     let strip := if r[3]? == some "-1" then cid == "builtin/assistant" else r[3]? == some "1"
-    out := out.push { id := cid, name := nm, targets := parseChainTargetsJson mj providers hydratedProvs cliUrl cliKey (some googleMax), stripThinking := strip }
+    let isDef := if explicitDefault then r[4]? == some "1" else cid == "builtin/smart"
+    out := out.push { id := cid, name := nm, targets := parseChainTargetsJson mj providers hydratedProvs cliUrl cliKey (some googleMax), stripThinking := strip, isDefault := isDef }
   -- Immutable defaults are a derived view, not a second mutable config store.
   -- Persisted ids (even empty/unavailable chains) always win over stock entries.
   for (id, name, entries) in OrbCore.ProxyModelRouting.stockChains do
     if !out.any (fun c => c.id == id) then
-      out := out.push { id := id, name := name, targets := parseChainTargetsJson (OrbCore.ProxyModelRouting.entriesJson entries) providers hydratedProvs cliUrl cliKey (some googleMax), stripThinking := (id == "builtin/assistant") }
+      out := out.push { id := id, name := name, targets := parseChainTargetsJson (OrbCore.ProxyModelRouting.entriesJson entries) providers hydratedProvs cliUrl cliKey (some googleMax), stripThinking := (id == "builtin/assistant"), isDefault := (!explicitDefault && id == "builtin/smart") }
   return out
 
 private def optU32Json (v? : Option UInt32) : String :=
@@ -1261,7 +1283,8 @@ private def selectRoutingChainForBody (chains : Array RoutingChain) (body : Byte
   match reqModel?.bind (findMatchingRoutingChain? chains) with
   | some matched => matched
   | none =>
-    (chains.find? (fun c => c.id == "default" || c.id == "builtin/smart")).getD
+    (chains.find? (·.isDefault)).orElse (fun _ =>
+      chains.find? (fun c => c.id == "default" || c.id == "builtin/smart")) |>.getD
       (chains[0]?.getD { id := "default", name := "default", targets := #[] })
 
 private def scopeRankOf? : String → Option UInt8
@@ -1835,12 +1858,18 @@ private def planChainState (st : CoreAppState) (chain : RoutingChain) (nowEpochS
   match st.healthTracker? with
   | some htr =>
     let hPlan ← planChainFromHealth htr chain nowEpochSec
-    let extra := activeCooldowns (← st.proxyCooldownsRef.get) nowEpochSec
+    let disabledIds ← snapshotDisabledHealthAccountIds htr
+    let extra := (activeCooldowns (← st.proxyCooldownsRef.get) nowEpochSec).filter fun c =>
+      !disabledIds.contains c.accountId && !hPlan.cooling.any (fun h => h.accountId == c.accountId)
     if extra.isEmpty then
       return hPlan
     else
-      let mergedCooling := coolingFor chain.targets (hPlan.cooling ++ extra)
-      return { eligible := capProxyTargets (eligibleTargets chain.targets mergedCooling), cooling := mergedCooling }
+      let extraCooling := coolingFor chain.targets extra
+      let mergedCooling := hPlan.cooling ++ extraCooling
+      return {
+        eligible := capProxyTargets (hPlan.eligible.filter (fun t => !extraCooling.any (fun c => c.accountId == t.accountId)))
+        cooling := mergedCooling
+      }
   | none =>
     let cooldowns ← st.proxyCooldownsRef.get
     return planChain chain cooldowns nowEpochSec
@@ -2083,7 +2112,7 @@ private def handleProxyRequest (st : CoreAppState) (req : HttpRequest) (cleanPat
   let expected? ← match enforceProxySelection selection? requestedModel headerProgram? bodyProgram? with
     | .ok p => pure p
     | .error e => return mkJson 400 s!"\{\"error\":\"unsupported_access_program\",\"detail\":{jsonEscape e}}"
-  let snapRouteGen? ← match st.healthTracker? with
+  let mut snapRouteGen? ← match st.healthTracker? with
     | some htr => some <$> currentRouteGeneration htr
     | none => pure none
   let mut proxyOwnerUserId? : Option String := none
@@ -2114,7 +2143,7 @@ private def handleProxyRequest (st : CoreAppState) (req : HttpRequest) (cleanPat
     userPrefs ← getUserProviderPrefs st.store ownerUid
     if let some denied ← proxySpendDenial? st ownerRec utcDay then return mkJson 429 denied
   let rawRequestedModel := (bodyJv.fieldStr? "model").getD defaultCodexModel
-  let chains ← st.chainsRef.get
+  let mut chains ← st.chainsRef.get
   -- A named model is served by its saved chain or by the provider owning that
   -- exact model. It is NEVER rewritten to another model: only a chain the caller
   -- named may fall back across models. Only a request with no `model` field
@@ -2135,7 +2164,9 @@ private def handleProxyRequest (st : CoreAppState) (req : HttpRequest) (cleanPat
         -- another process). Look at the store once before refusing a name.
         let fresh ← loadRoutingChainsFromStore st.store st.cfg.workingDir
         if let some matched := findMatchingRoutingChain? fresh rawRequestedModel then
-          discard <| publishRoutingChainsUpdate st fresh (forceBump := false)
+          let nextGen ← publishRoutingChainsUpdate st fresh (forceBump := false)
+          if st.healthTracker?.isSome then snapRouteGen? := some nextGen
+          chains := fresh
           routed? := some matched
           routeKind := "chain"
   let some rawActiveChain := routed?
@@ -2297,11 +2328,12 @@ private def handleProxyRequest (st : CoreAppState) (req : HttpRequest) (cleanPat
           (if postPlan.eligible.isEmpty then
             chainCooldownStopReason? activeChain.id postPlan.cooling nowEpochSec (allowUnconfigured := false)
           else none).orElse fun _ =>
-            let waitSecs := (retryAfterSecs? out.headers).getD 0
+            let waitSecs := (announcedRetryAfterSecs? out.headers rawOutBodyStr).getD 0
             if waitSecs > 60 then
               let returnIso := formatEpochIso8601Utc (nowEpochSec + waitSecs)
+              let exhaustedModelCooldown := lookupHeader? out.headers "x-orb-retry-reason" == some "model_cooldown"
               if (out.status == 503 || out.status == 429) &&
-                  (modelCooldownHint rawOutBodyStr || quotaHint rawOutBodyStr) then
+                  (exhaustedModelCooldown || modelCooldownHint rawOutBodyStr || quotaHint rawOutBodyStr) then
                 some ("remote_quota",
                   s!"Model '{activeChain.id}' is cooling down; soonest retry at {returnIso} (in {waitSecs}s). Stopping turn.")
               else if isAuthRejection out.status (upstreamErrorCode rawOutBodyStr) rawOutBodyStr then
@@ -7230,6 +7262,8 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
         | return .ok (mkJson 400 "{\"error\":\"invalid_json\"}")
       let defCid ← nextUniqueId st "chain" nowEpochSec
       let cid := chainId?.orElse (fun _ => (jv.fieldStr? "id").map (·.trimAscii.toString) |>.filter (!·.isEmpty)) |>.getD defCid
+      if req.method == "POST" && cid.startsWith "builtin/" then
+        return .ok (mkJson 400 "{\"error\":\"builtin_chain_id_reserved\"}")
       let existing? := (← loadChainRows).find? (fun c => c.fieldStr? "id" == some cid)
       let .ok storedRows ← execParamQuery st.store.missionsDb "SELECT models_json FROM model_routing_chains WHERE id=?1;" #[cid]
         | return .ok (mkJson 500 "{\"error\":\"routing_chain_store_unavailable\"}")

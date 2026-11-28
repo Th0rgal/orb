@@ -207,7 +207,15 @@ def withLiveSources {α : Type} (isDark : Bool) (notify : IO Unit)
         let rows := lines.filterMap fun line => match splitTab line with
           | ["R", mission, title, usage] => some (⟨mission, title, usage⟩ : ResourceRow)
           | _ => none
-        return some { st with resourceRows := some rows }
+        let flows := lines.filterMap fun line => match splitTab line with
+          | ["F", lens, source, target, value, deg] =>
+            some ({ lens, source, target, value, degraded := deg == "1" } : ResourceFlowLink)
+          | _ => none
+        let summary := lines.findSome? fun line => match splitTab line with
+          | ["S", throttled, bTok, actV, totV] =>
+            some ({ throttled429 := throttled.toNat?.getD 0, bTokPerH := bTok, activeVcpu := actV, totalVcpu := totV } : ResourceSummary)
+          | _ => none
+        return some { st with resourceRows := some rows, resourceFlows := flows, resourceSummary := summary }
       if let .nativeModels machine := source.kind then
         let ok := lines.head? == some "native-models"
         let menu := st.missionMenu.map fun m => { m with nativeCatalogResult := some ok }
@@ -252,12 +260,32 @@ def withLiveSources {α : Type} (isDark : Bool) (notify : IO Unit)
         return some { st with launchMachines := some nodes }
       if source.kind == .providers then
         if lines.head? != some "accounts" then return some { st with providerReadFailed := true }
+        let healthMap : List (String × String × Nat × String) := lines.filterMap fun line =>
+          match splitTab line with
+          | ["H", aid, state, cd, detail] => some (aid, state, cd.toNat?.getD 0, detail)
+          | _ => none
         let rows := lines.filterMap fun line =>
           match splitTab line with
           | ["A", id, name, category, personal, globalFlag, providerType] =>
-            some ({ id, name, category, providerType, userEnabled := personal == "1", globallyEnabled := globalFlag == "1" } : ProviderAccount)
+            let h := healthMap.find? (·.1 == id)
+            let (hState, hCd, hDetail) := match h with
+              | some (_, hs, cd, det) => (hs, cd, det)
+              | none => ("", 0, "")
+            some ({
+              id, name, category, providerType,
+              userEnabled := personal == "1",
+              globallyEnabled := globalFlag == "1",
+              healthState := hState,
+              cooldownSecs := hCd,
+              healthDetail := hDetail
+            } : ProviderAccount)
           | _ => none
-        return some { st with providers := some rows }
+        let chains := lines.filterMap fun line =>
+          match splitTab line with
+          | ["C", cid, cname, isDef, summary] =>
+            some ({ id := cid, name := cname, isDefault := isDef == "1", entriesSummary := summary } : RoutingChainSummary)
+          | _ => none
+        return some { st with providers := some rows, routingChains := chains }
       let models := lines.filterMap fun line =>
         match splitTab line with
         | ["H", backend, harnessName, model, modelName] =>
@@ -520,6 +548,9 @@ def readLiveFrame (slot : IO.Ref (Option LiveSubscription)) (scale : Nat) (viewp
     let (action, mid, text) := match request with
       | .inboxRead item _ => ("inbox-read", item.mission, s!"{item.stamp} {item.version}")
       | .providerPreference account enabled => (if enabled then "use-provider" else "skip-provider", account, "")
+      | .providerReorder ids => ("reorder-providers", "", String.intercalate "\n" ids)
+      | .providerClearHealth account => ("clear-provider-health", account, "")
+      | .chainSetDefault chainId => ("set-default-chain", chainId, "")
       | .create => ("create", "", st.draftDirectory ++ String.singleton (Char.ofNat 0) ++ encode st.draftSettings ++ "\t" ++ st.draftProject ++ "\t" ++ st.composer.text)
       | .cloudCreate provider account project prompt attempt =>
         ("cloud-create", "", String.intercalate "\n" [attempt, provider, account, project, prompt])
@@ -560,7 +591,7 @@ def readLiveFrame (slot : IO.Ref (Option LiveSubscription)) (scale : Nat) (viewp
         return ({ st with cloudAttempt := r.stdout.trimAscii.toString, writeError := "Core did not confirm the request. Submit again to retry." }, some viewport)
       if r.exitCode != 0 then throw (IO.userError "write failed")
       let st ← match request with
-        | .providerPreference .. => pure st
+        | .providerPreference .. | .providerReorder .. | .providerClearHealth .. | .chainSetDefault .. => pure st
         | _ => do
           closeLiveSubscription slot
           pure { st with historyLoading := false }
@@ -582,6 +613,8 @@ def readLiveFrame (slot : IO.Ref (Option LiveSubscription)) (scale : Nat) (viewp
         let providers := st.providers.map fun rows =>
           rows.map fun p => if p.id == account then { p with userEnabled := enabled } else p
         return ({ st with providers, nativeCatalog := none, catalogLoading := true, catalogRevision := st.catalogRevision + 1 }, some viewport)
+      | .providerReorder _ | .providerClearHealth _ | .chainSetDefault _ =>
+        return ({ st with providers := none, providerReadFailed := false, nativeCatalog := none, catalogLoading := true, catalogRevision := st.catalogRevision + 1 }, some viewport)
       | .create =>
         let [id,title,status,machine,backend,model,effort,permissionMode,project] := splitTab (r.stdout.dropEnd 1).toString | throw (IO.userError "invalid mission")
         let wid := nextMissionWidget st

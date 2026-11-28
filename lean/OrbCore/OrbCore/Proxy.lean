@@ -46,6 +46,9 @@ structure ProviderTarget where
   /-- Maximum input context accepted by this target, used before cross-target recovery. -/
   contextLimit            : UInt32 := 128000
   sidecarCredential? : Option SidecarCredential := none
+  /-- Underlying Core provider row IDs that map to this target (including pooled `cliproxyapi:*` targets)
+      so per-user `user_provider_prefs` apply to OAuth/sidecar accounts as well as direct API-key accounts. -/
+  sourceAccountIds        : Array String := #[]
   deriving Repr, DecidableEq, Inhabited
 
 /-- In-memory sliding-window RPM, active in-flight concurrency & learned upstream header state. -/
@@ -230,6 +233,7 @@ structure RoutingChain where
   name          : String
   targets       : Array ProviderTarget
   stripThinking : Bool := false
+  isDefault     : Bool := false
   deriving Repr, DecidableEq
 
 /-- Hands decoded body bytes to the client; `false` means the client went away.
@@ -392,10 +396,48 @@ def lookupHeader? (headers : Array (String × String)) (name : String) : Option 
         if kv.1.trimAscii.toString.toLower == target then some kv.2.trimAscii.toString else none)
     none
 
+/-- Parse a positive integer or decimal `Retry-After` seconds value (rounding fractional seconds up). -/
+def parseRetryAfterValue? (raw : String) : Option UInt64 :=
+  let s := raw.trimAscii.toString
+  if s.isEmpty then none
+  else
+    match s.toNat? with
+    | some n => some n.toUInt64
+    | none =>
+      match s.splitOn "." with
+      | [wholeStr, fracStr] =>
+        if fracStr.isEmpty || !fracStr.toList.all Char.isDigit then none
+        else
+          match wholeStr.toNat? with
+          | none => none
+          | some w =>
+            let hasNonZeroFrac := fracStr.toList.any (· != '0')
+            some (w + if hasNonZeroFrac then 1 else 0).toUInt64
+      | _ => none
+
 def retryAfterSecs? (headers : Array (String × String)) : Option UInt64 :=
   match lookupHeader? headers "retry-after" with
-  | some v => (v.toNat?).map (fun n => n.toUInt64)
+  | some v => parseRetryAfterValue? v
   | none => none
+
+/-- Extract a numeric retry/reset delay in seconds from upstream JSON error bodies
+    (`resets_in_seconds`, `retry_after_secs`, `retry_after`, top-level or nested in `error`). -/
+def retryAfterBodySecs? (body : String) : Option UInt64 :=
+  match OrbBin.Json.parse body with
+  | .error _ => none
+  | .ok jv =>
+    let readField (obj : JVal) (k : String) : Option UInt64 :=
+      match obj.field? k with
+      | some (.num raw) => parseRetryAfterValue? raw
+      | some (.str raw) => parseRetryAfterValue? raw
+      | _ => none
+    let keys := #["resets_in_seconds", "retry_after_secs", "retry_after"]
+    let fromObj (obj : JVal) : Option UInt64 :=
+      keys.foldl (fun acc k => acc.orElse fun _ => readField obj k) none
+    (fromObj (jv.fieldOrNull "error")).orElse fun _ => fromObj jv
+
+def announcedRetryAfterSecs? (headers : Array (String × String)) (body : String) : Option UInt64 :=
+  (retryAfterSecs? headers).orElse fun _ => retryAfterBodySecs? body
 
 def defaultCooldownBaseSecs (reason : CooldownReason) : UInt64 :=
   match reason with
@@ -495,7 +537,7 @@ def cooldownForOutcomeWithBreaker
         match cooldownReasonFor out.status body with
         | none => none
         | some reason =>
-          let announced := (retryAfterSecs? out.headers).getD 0
+          let announced := (announcedRetryAfterSecs? out.headers body).getD 0
           let secs := cooldownSecsFor reason announced (exponentialCooldownSecs reason consecutive)
           some { accountId := out.selectedAccount, untilEpoch := now + secs, reason := reason, label := "" }
 
@@ -667,7 +709,7 @@ def stepHealthAttemptPure
     match cooldownReasonFor status respBody with
     | none => 0
     | some reason =>
-      let announced := (retryAfterSecs? respHeaders).getD 0
+      let announced := (announcedRetryAfterSecs? respHeaders respBody).getD 0
       cooldownSecsFor reason announced (exponentialCooldownSecs reason nextConsecutive)
   let nextCooldownEpoch :=
     if proposedCooldownSecs > 0 then nowEpoch + proposedCooldownSecs else activeCoolUntil
@@ -976,8 +1018,8 @@ def sanitizeUpstreamHeaders (hdrs : Array (String × String)) : String × Array 
       else if !isForbiddenResponseHeader kClean && !kClean.isEmpty then
         let outVal :=
           if kClean.toLower == "retry-after" then
-            match vClean.toNat? with
-            | some secs => toString (clampCooldownRetryAfter secs.toUInt64)
+            match parseRetryAfterValue? vClean with
+            | some secs => toString (clampCooldownRetryAfter secs)
             | none => vClean
           else vClean
         safe := safe.push (kClean, outVal)
@@ -2624,6 +2666,8 @@ def forwardProxyChain
   let mut serverErrorCount : UInt32 := 0
   let mut transportValidationCount : UInt32 := 0
   let mut hasContextOverflow : Bool := false
+  let mut soonestCooldownRetry? : Option UInt64 := none
+  let mut allModelCooldownOrQuota : Bool := true
   while idx < n do
     let tgt := targets[idx]!
     let candSlot := accountSlotId tgt.accountId
@@ -2905,6 +2949,16 @@ def forwardProxyChain
           }
         let upstreamCode := upstreamErrorCode respBodyStr
         failures := failures.push (tgt.provider, tgt.modelId, resp.status, upstreamCode)
+        let isCooldownOrQuota := (resp.status == 503 || resp.status == 429) &&
+          (modelCooldownHint respBodyStr || quotaHint respBodyStr)
+        if !isCooldownOrQuota then
+          allModelCooldownOrQuota := false
+        else if let some ra := announcedRetryAfterSecs? resp.headers respBodyStr then
+          if ra > 0 then
+            let clamped := clampCooldownRetryAfter ra
+            soonestCooldownRetry? := match soonestCooldownRetry? with
+              | none => some clamped
+              | some prev => some (min prev clamped)
         -- The upstream refused this account's login: evidence for the provider's status.
         if let some evidence := authEvidence? then
           if isAuthRejection resp.status upstreamCode respBodyStr then
@@ -2990,13 +3044,26 @@ def forwardProxyChain
                 paymentRequiredCount + rateLimitCount + serverErrorCount > 1 then
           -- Every target of the chain failed: one classified error naming each target's
           -- outcome. A single-target request keeps the upstream's own answer (below).
-          let (st, errCode, errMsg) :=
+          let (st0, errCode0, errMsg0) :=
             classifyExhaustionOutcome rateLimitCount paymentRequiredCount clientAuthErrorCount
               serverErrorCount transportValidationCount hasContextOverflow
+          let (st, errCode, errMsg) :=
+            if allModelCooldownOrQuota && !failures.isEmpty && rateLimitCount == 0 then
+              (503, "model_cooldown", "All providers in routing chain are in model cooldown")
+            else
+              (st0, errCode0, errMsg0)
+          let exhaustedHdrs : Array (String × String) :=
+            #[("X-Orb-Exhaustion-Class", errCode)] ++
+            (if allModelCooldownOrQuota && !failures.isEmpty then
+              (match soonestCooldownRetry? with
+               | some secs => #[("Retry-After", toString secs)]
+               | none => #[]) ++
+              #[("X-Orb-Retry-Reason", "model_cooldown")]
+            else #[])
           return {
             status := st
             contentType := "application/json"
-            headers := #[("X-Orb-Exhaustion-Class", errCode)]
+            headers := exhaustedHdrs
             body := chainExhaustedBody errCode errMsg failures
             selectedAccount := tgt.accountId
             attemptsUsed := idx + 1
@@ -3021,6 +3088,7 @@ def forwardProxyChain
       | .error errMsg =>
         let failLabel := if errMsg == "upstream_idle_timeout" then "upstream_idle_timeout" else "transport_error"
         failures := failures.push (tgt.provider, tgt.modelId, 0, failLabel)
+        allModelCooldownOrQuota := false
         serverErrorCount := serverErrorCount + 1
         if errMsg == "invalid_upstream_port" || errMsg == "plaintext_upstream_disabled" then
           transportValidationCount := transportValidationCount + 1
@@ -3125,13 +3193,26 @@ def forwardProxyChain
             pinnedAccountId := attemptSlice.pinnedAccountId
             verdictCode := vCode
           }
-  let (st, errCode, errMsg) :=
+  let (st0, errCode0, errMsg0) :=
     classifyExhaustionOutcome rateLimitCount paymentRequiredCount clientAuthErrorCount
       serverErrorCount transportValidationCount hasContextOverflow
+  let (st, errCode, errMsg) :=
+    if allModelCooldownOrQuota && !failures.isEmpty && rateLimitCount == 0 then
+      (503, "model_cooldown", "All providers in routing chain are in model cooldown")
+    else
+      (st0, errCode0, errMsg0)
+  let exhaustedHdrs : Array (String × String) :=
+    #[("X-Orb-Exhaustion-Class", errCode)] ++
+    (if allModelCooldownOrQuota && !failures.isEmpty then
+      (match soonestCooldownRetry? with
+       | some secs => #[("Retry-After", toString secs)]
+       | none => #[]) ++
+      #[("X-Orb-Retry-Reason", "model_cooldown")]
+    else #[])
   return {
     status := st
     contentType := "application/json"
-    headers := #[("X-Orb-Exhaustion-Class", errCode)]
+    headers := exhaustedHdrs
     body := chainExhaustedBody errCode errMsg failures
     selectedAccount := ""
     attemptsUsed := n
@@ -3141,8 +3222,8 @@ def forwardProxyChain
   }
 
 /-- Filter `chain.targets` according to a user's `user_provider_prefs` (`(providerId, enabled)` pairs;
-    providers omitted from `prefs` default to `true`). Checks both `tgt.accountId` and `tgt.provider`
-    (plus stripped `custom:<id>`). -/
+    providers omitted from `prefs` default to `true`). Checks `tgt.accountId`, `tgt.provider`
+    (plus stripped `custom:<id>`), and any underlying `sourceAccountIds` backing a pooled target. -/
 def filterChainTargetsForUserPrefs (chain : RoutingChain) (userPrefs : Array (String × Bool)) : RoutingChain :=
   if userPrefs.isEmpty then chain
   else
@@ -3150,7 +3231,8 @@ def filterChainTargetsForUserPrefs (chain : RoutingChain) (userPrefs : Array (St
       let stripped := if tgt.provider.startsWith "custom:" then (tgt.provider.drop 7).toString else tgt.provider
       isUserProviderEnabled userPrefs tgt.accountId &&
       isUserProviderEnabled userPrefs tgt.provider &&
-      isUserProviderEnabled userPrefs stripped
+      isUserProviderEnabled userPrefs stripped &&
+      (tgt.sourceAccountIds.isEmpty || tgt.sourceAccountIds.any (isUserProviderEnabled userPrefs))
     { chain with targets := chain.targets.filter allowed }
 
 /-- Estimate inference cost in USD cents from a `2xx` upstream JSON response body or explicit
