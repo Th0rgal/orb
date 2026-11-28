@@ -776,8 +776,10 @@ def rasterizeSceneInto (vw vh : Nat) (clearColor : Color) (atlas : Text.GlyphAtl
         let (x0, y0, x1, y1) := clampBounds vw vh curClip dst
         if x1 > x0 && y1 > y0 && sa > 0 then
           let saved := if activeRClips.isEmpty then ByteArray.empty else fb
-          let sx := src.x.toNat + (x0.toNat - dst.x.toNat)
-          let sy := src.y.toNat + (y0.toNat - dst.y.toNat)
+          let dx0 := (x0 - dst.x).toNat
+          let dy0 := (y0 - dst.y).toNat
+          let sx := src.x.toNat + dx0
+          let sy := src.y.toNat + dy0
           let w := min (pw-sx) (x1-x0).toNat
           let h := min (ph-sy) (y1-y0).toNat
           if h > 0 && w > 0 && (sy+h-1)*pw+sx+w ≤ page.rgba.size/4 then
@@ -785,10 +787,10 @@ def rasterizeSceneInto (vw vh : Nat) (clearColor : Color) (atlas : Text.GlyphAtl
               vw.toUSize pw.toUSize w.toUSize h.toUSize col isColor
           else
            for py in [y0.toNat : y1.toNat] do
-            let ty := src.y.toNat + (py - dst.y.toNat)
+            let ty := src.y.toNat + ((py : Int) - dst.y).toNat
             if ty < ph then
               for px in [x0.toNat : x1.toNat] do
-                let tx := src.x.toNat + (px - dst.x.toNat)
+                let tx := src.x.toNat + ((px : Int) - dst.x).toNat
                 if tx < pw then
                   let aIdx := (ty * pw + tx) * 4
                   if aIdx + 4 ≤ page.rgba.size then
@@ -829,8 +831,8 @@ def rasterizeSceneInto (vw vh : Nat) (clearColor : Color) (atlas : Text.GlyphAtl
           let saved := if activeRClips.isEmpty then ByteArray.empty else fb
           if sw == dw && sh == dh then
             -- 1:1 coverage mask tinted by `col`: blend natively, clamped strictly inside `src`.
-            let dx0 := x0.toNat - dst.x.toNat
-            let dy0 := y0.toNat - dst.y.toNat
+            let dx0 := (x0 - dst.x).toNat
+            let dy0 := (y0 - dst.y).toNat
             let sx := src.x.toNat + dx0
             let sy := src.y.toNat + dy0
             let mw := min (min (pw - sx) (sw - dx0)) (x1 - x0).toNat
@@ -840,11 +842,11 @@ def rasterizeSceneInto (vw vh : Nat) (clearColor : Color) (atlas : Text.GlyphAtl
                 vw.toUSize pw.toUSize mw.toUSize mh.toUSize col false
             else
               for py in [y0.toNat : y1.toNat] do
-                let dy := py - dst.y.toNat
+                let dy := ((py : Int) - dst.y).toNat
                 let ty := src.y.toNat + dy
                 if dy < sh && ty < ph then
                   for px in [x0.toNat : x1.toNat] do
-                    let dx := px - dst.x.toNat
+                    let dx := ((px : Int) - dst.x).toNat
                     let tx := src.x.toNat + dx
                     if dx < sw && tx < pw then
                       let aIdx := (ty * pw + tx) * 4
@@ -861,12 +863,12 @@ def rasterizeSceneInto (vw vh : Nat) (clearColor : Color) (atlas : Text.GlyphAtl
             -- at 2x HiDPI or tall icons): sample with `VK_FILTER_NEAREST` pixel-center mapping
             -- strictly inside `[src.x, src.x + sw) × [src.y, src.y + sh)` to match `scene_sdf.glsl`.
             for py in [y0.toNat : y1.toNat] do
-              let dy := py - dst.y.toNat
+              let dy := ((py : Int) - dst.y).toNat
               let tyOff := min (sh - 1) (((2 * dy + 1) * sh) / (2 * dh))
               let ty := src.y.toNat + tyOff
               if ty < ph then
                 for px in [x0.toNat : x1.toNat] do
-                  let dx := px - dst.x.toNat
+                  let dx := ((px : Int) - dst.x).toNat
                   let txOff := min (sw - 1) (((2 * dx + 1) * sw) / (2 * dw))
                   let tx := src.x.toNat + txOff
                   if tx < pw then

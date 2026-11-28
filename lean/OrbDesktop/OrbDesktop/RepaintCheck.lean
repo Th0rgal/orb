@@ -59,6 +59,26 @@ def verifyRepaintEdges : IO Unit := do
     for x in [0 : 8] do
       if tallFb.get! ((y * 8 + x) * 4 + 3) > 0 then
         throw <| IO.userError s!"tall .mask leaked lower atlas shelf pixel at ({x},{y})"
+  -- Negative `dst.x` / `dst.y` on 1:1 `.mask`, scaled `.mask`, and `.glyph` must subtract signed
+  -- coordinates before `.toNat` so top/left-clipped icons & glyphs sample the exact right texel.
+  let mut negPageRgba := Text.AtlasPageBuffer.zeroBytes (8 * 8 * 4)
+  for y in [0 : 8] do
+    for x in [0 : 8] do
+      let idx := (y * 8 + x) * 4
+      let alpha : UInt8 := ((y * 8 + x) * 3 + 10).toUInt8
+      negPageRgba := negPageRgba.set! idx 255 |>.set! (idx + 1) 255 |>.set! (idx + 2) 255 |>.set! (idx + 3) alpha
+  let negAtlas : Text.GlyphAtlasCache :=
+    { pages := #[{ atlas := { width := 8, height := 8 }, rgba := negPageRgba }] }
+  let (m1Fb, _) := Vulkan.rasterizeScene 8 8 0 negAtlas #[.mask 0 ⟨0, 0, 8, 8⟩ ⟨-2, -3, 8, 8⟩ 0xFFFFFFFF]
+  unless m1Fb.get! 3 == ((3 * 8 + 2) * 3 + 10).toUInt8 do
+    throw <| IO.userError s!"negative-dst 1:1 .mask sampled wrong texel alpha: got {m1Fb.get! 3}"
+  let (msFb, _) := Vulkan.rasterizeScene 8 16 0 negAtlas #[.mask 0 ⟨0, 0, 8, 8⟩ ⟨0, -8, 8, 24⟩ 0xFFFFFFFF]
+  -- At py=0, dy = (0 - (-8)) = 8, tyOff = ((2*8+1)*8)/(2*24) = 136/48 = 2 -> texel (0, 2)
+  unless msFb.get! 3 == ((2 * 8 + 0) * 3 + 10).toUInt8 do
+    throw <| IO.userError s!"negative-dst scaled .mask sampled wrong texel alpha: got {msFb.get! 3}"
+  let (gNegFb, _) := Vulkan.rasterizeScene 8 8 0 negAtlas #[.glyph ⟨0, 0, 8, 8⟩ ⟨-1, -2, 8, 8⟩ 0xFFFFFFFF false 0]
+  unless gNegFb.get! 3 == ((2 * 8 + 1) * 3 + 10).toUInt8 do
+    throw <| IO.userError s!"negative-dst .glyph sampled wrong texel alpha: got {gNegFb.get! 3}"
   -- Mixed externally-populated `ac.cache` + `insertRasterized` must retain pre-existing cache keys.
   let preKey : GlyphKey := { font := 1, glyph := 42, sizeSub := 12, subpx := 0 }
   let preEntry : Text.AtlasGlyphEntry := { page := 0, uv := ⟨1, 2, 3, 4⟩, bearingX := 0, bearingY := 0, isColor := false }

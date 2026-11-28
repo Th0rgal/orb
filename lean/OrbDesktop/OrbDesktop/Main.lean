@@ -279,17 +279,42 @@ private partial def collectWidgetFocusIds (node : WidgetNode) : List WidgetId :=
       | none => []
     self ++ children.flatMap collectWidgetFocusIds
 
-/-- True when every `` ```mermaid `` fence opened inside `s` is closed by an exact `` ``` `` line
-(matching `OrbDesktop.splitMermaidFences`), so committing `s` never splits a Mermaid block. -/
-def mermaidFenceClosed (s : String) : Bool := Id.run do
-  let mut inFence := false
+/-- Mask backticks and tildes on interior lines of `` ```mermaid ... ``` `` blocks (1:1 ASCII byte
+replacement, preserving exact UTF-8 byte offsets) so `Orb.Stream.committedLen` stays strictly in
+phase with `OrbDesktop.splitMermaidFences` even when a Mermaid diagram contains `>= 4` backticks. -/
+def maskMermaidInteriorForCommit (s : String) : String := Id.run do
+  let mut out : Array String := #[]
+  let mut inMermaid := false
   for line in s.splitOn "\n" do
     let t := mermaidTrim line
-    if !inFence && t.startsWith "```mermaid" then
-      inFence := true
-    else if inFence && t == "```" then
-      inFence := false
-  return !inFence
+    if !inMermaid && t.startsWith "```mermaid" then
+      inMermaid := true
+      out := out.push line
+    else if inMermaid && t == "```" then
+      inMermaid := false
+      out := out.push line
+    else if inMermaid then
+      out := out.push ((line.replace "`" "_").replace "~" "_")
+    else
+      out := out.push line
+  return String.intercalate "\n" out.toList
+
+/-- True when `s` ends with BOTH `splitMermaidFences` and `liveProseLines` fences closed, so
+committing `s` can never split a Mermaid diagram or a fenced code block. -/
+def transcriptCommitSafe (s : String) : Bool := Id.run do
+  let mut inMermaid := false
+  let mut inCodeFence := false
+  for line in s.splitOn "\n" do
+    let t := mermaidTrim line
+    if !inMermaid && t.startsWith "```mermaid" then
+      inMermaid := true
+      inCodeFence := false
+    else if inMermaid && t == "```" then
+      inMermaid := false
+      inCodeFence := false
+    else if !inMermaid && t.startsWith "```" then
+      inCodeFence := !inCodeFence
+  return !inMermaid && !inCodeFence
 
 private structure CachedRowEntry where
   node : WidgetNode
@@ -504,13 +529,12 @@ private def buildCachedLiveTranscript (rt : Runtime.RuntimeState DesktopState)
         if canResume then prev
         else { baseBand := band, committedText := "", committedBytes := 0, midBand := band, rows := #[] }
       let suffix := utf8Slice bytes sp.committedBytes bytes.size
-      let deltaCommit := Orb.Stream.committedLen suffix
+      let deltaCommit := Orb.Stream.committedLen (maskMermaidInteriorForCommit suffix)
       let newCommit := sp.committedBytes + deltaCommit
       if deltaCommit > 0 then
         let newlyCommitted := utf8Slice bytes sp.committedBytes newCommit
-        -- Guard against `Orb.Stream.classify` closing a 3-backtick fence on `>= 4` backticks or
-        -- trailing chars while `splitMermaidFences` only closes on exact `` ``` ``.
-        if mermaidFenceClosed newlyCommitted then
+        -- Verify both `splitMermaidFences` and post-Mermaid `liveProseLines` fences are closed.
+        if transcriptCommitSafe newlyCommitted then
           let (deltaRaw, nextMid) := buildOneLiveTurn theme colW width sp.midBand newlyCommitted
           let (ac', deltaShaped) ← shapeAndMeasureRows curAc rt.primaryFont rt.monoFont rt.boldFont rt.mediumFont rt.semiboldFont sc colW deltaRaw
           curAc := ac'
@@ -1671,12 +1695,29 @@ private def u7CacheParitySelfTest (cfg : Runtime.RuntimeConfig) : IO Unit := do
   -- 1. Single-line opening fence `"```lean"` (no newline yet)
   checkParity "single-line-fence"
     { baseLive with stream := { shown := ["```lean"], pending := [], renders := 2 } }
-  -- 2. Four-backtick line inside a Mermaid fence followed by a blank line
+  -- 2. Four-backtick line inside a Mermaid fence followed by a blank line and a subsequent code fence
   let trickyMermaid := "```mermaid\nflowchart LR\n  A --> B\n````\n\n  B --> C\n```"
-  if mermaidFenceClosed "```mermaid\nflowchart LR\n  A --> B\n````\n\n" then
-    throw <| IO.userError "u7 cache parity: mermaidFenceClosed accepted 4-backtick closer"
+  if transcriptCommitSafe "```mermaid\nflowchart LR\n  A --> B\n````\n\n" then
+    throw <| IO.userError "u7 cache parity: transcriptCommitSafe accepted 4-backtick closer"
   checkParity "mermaid-4tick-fence"
     { baseLive with stream := { shown := [trickyMermaid], pending := [], renders := 2 } }
+  -- Incremental multi-block stream: 4-backtick Mermaid block followed by a fenced code block with blank line
+  let rtInc0 ← Runtime.initRuntime { cfg with headless := true, width := 1280, height := 800 } baseLive
+  try
+    let mut rtInc := { rtInc0 with focus := baseLive.initialFocusState }
+    for chunk in [ "```mermaid\nflowchart LR\n  A --> B\n````\n\n"
+                 , "  B --> C\n```\n\n```lean\ndef foo := 1\n\n"
+                 , "def bar := 2\n```\n\nDone" ] do
+      let (nextSt, dmg) := applyStreamFrame cfg.scale120 rtInc.viewportDeviceRect rtInc.app [chunk]
+      let rtNext := { rtInc with app := nextSt, damage := dmg.elim rtInc.damage (Damage.add rtInc.damage) }
+      let rtFull ← Runtime.stepFrame rtNext.markFullDamage (desktopReducer rtNext) renderDesktopFrame
+      rtInc ← Runtime.stepFrame rtNext (desktopReducer rtNext) renderDesktopFrame
+      unless rtInc.vulkan.framebuffer == rtFull.vulkan.framebuffer do
+        throw <| IO.userError s!"u7 cache parity (incremental 4-tick mermaid + lean fence): framebuffer mismatch"
+      unless rtInc.focusableOrder == rtFull.focusableOrder do
+        throw <| IO.userError s!"u7 cache parity (incremental 4-tick mermaid + lean fence): focusableOrder mismatch"
+  finally
+    Runtime.shutdownRuntime rtInc0
   -- 3. Long transcript with history banner + offscreen Mermaid nodes scrolled to bottom
   checkParity "virtualized-focus-order"
     { baseLive with
