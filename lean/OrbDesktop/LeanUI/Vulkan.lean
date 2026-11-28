@@ -695,28 +695,44 @@ def rasterizeSceneInto (vw vh : Nat) (clearColor : Color) (atlas : Text.GlyphAtl
         let cyF : Float := r.y.toFloat + halfH
         let halfLen : Float := max (Float.abs dirX * halfW + Float.abs dirY * halfH) 1e-4
         let saved := if activeRClips.isEmpty then ByteArray.empty else fb
-        for py in [y0.toNat : y1.toNat] do
-          let pyF : Float := py.toFloat + 0.5 - cyF
-          for px in [x0.toNat : x1.toNat] do
-            let d16 := sdfRoundedRect16 r radii (px : Int) (py : Int)
-            if d16 < 8 then
-              let pxF : Float := px.toFloat + 0.5 - cxF
-              let tRaw : Float := (pxF * dirX + pyF * dirY) / (2.0 * halfLen) + 0.5
-              let tClamped : Float := if tRaw < 0.0 then 0.0 else if tRaw > 1.0 then 1.0 else tRaw
-              let tN : Nat := (tClamped * 1024.0 + 0.5).toUInt32.toNat
-              let tN := min 1024 tN
-              let inv := 1024 - tN
-              let mr := ((r0.toNat * inv + r1.toNat * tN + 512) / 1024).toUInt8
-              let mg := ((g0.toNat * inv + g1.toNat * tN + 512) / 1024).toUInt8
-              let mb := ((b0.toNat * inv + b1.toNat * tN + 512) / 1024).toUInt8
-              let ma := ((a0.toNat * inv + a1.toNat * tN + 512) / 1024).toUInt8
-              let cov : Nat := if d16 ≤ -8 then 255 else ((8 - d16).toNat * 255) / 16
-              let effA := ((ma.toNat * cov + 127) / 255).toUInt8
-              let idx := (py * vw + px) * 4
-              let (nr, ng, nb, na) :=
-                blendOver (fb.get! idx) (fb.get! (idx + 1)) (fb.get! (idx + 2)) (fb.get! (idx + 3))
-                  mr mg mb effA
-              fb := fb.set! idx nr |>.set! (idx + 1) ng |>.set! (idx + 2) nb |>.set! (idx + 3) na
+        if rad == 0 && (angleDeg % 360 == 0 || angleDeg % 360 == 180) then
+          let spanW := (x1 - x0).toNat.toUSize
+          for py in [y0.toNat : y1.toNat] do
+            let pyF : Float := py.toFloat + 0.5 - cyF
+            let tRaw : Float := (pyF * dirY) / (2.0 * halfLen) + 0.5
+            let tClamped : Float := if tRaw < 0.0 then 0.0 else if tRaw > 1.0 then 1.0 else tRaw
+            let tN : Nat := min 1024 (tClamped * 1024.0 + 0.5).toUInt32.toNat
+            let inv := 1024 - tN
+            let mr := ((r0.toNat * inv + r1.toNat * tN + 512) / 1024).toUInt32
+            let mg := ((g0.toNat * inv + g1.toNat * tN + 512) / 1024).toUInt32
+            let mb := ((b0.toNat * inv + b1.toNat * tN + 512) / 1024).toUInt32
+            let ma := ((a0.toNat * inv + a1.toNat * tN + 512) / 1024).toUInt32
+            if ma > 0 then
+              let rowCol : Color := (mr <<< 24) ||| (mg <<< 16) ||| (mb <<< 8) ||| ma
+              fb := FFI.blendRect fb (py * vw + x0.toNat).toUSize vw.toUSize spanW 1 rowCol
+        else
+          for py in [y0.toNat : y1.toNat] do
+            let pyF : Float := py.toFloat + 0.5 - cyF
+            for px in [x0.toNat : x1.toNat] do
+              let d16 := sdfRoundedRect16 r radii (px : Int) (py : Int)
+              if d16 < 8 then
+                let pxF : Float := px.toFloat + 0.5 - cxF
+                let tRaw : Float := (pxF * dirX + pyF * dirY) / (2.0 * halfLen) + 0.5
+                let tClamped : Float := if tRaw < 0.0 then 0.0 else if tRaw > 1.0 then 1.0 else tRaw
+                let tN : Nat := (tClamped * 1024.0 + 0.5).toUInt32.toNat
+                let tN := min 1024 tN
+                let inv := 1024 - tN
+                let mr := ((r0.toNat * inv + r1.toNat * tN + 512) / 1024).toUInt8
+                let mg := ((g0.toNat * inv + g1.toNat * tN + 512) / 1024).toUInt8
+                let mb := ((b0.toNat * inv + b1.toNat * tN + 512) / 1024).toUInt8
+                let ma := ((a0.toNat * inv + a1.toNat * tN + 512) / 1024).toUInt8
+                let cov : Nat := if d16 ≤ -8 then 255 else ((8 - d16).toNat * 255) / 16
+                let effA := ((ma.toNat * cov + 127) / 255).toUInt8
+                let idx := (py * vw + px) * 4
+                let (nr, ng, nb, na) :=
+                  blendOver (fb.get! idx) (fb.get! (idx + 1)) (fb.get! (idx + 2)) (fb.get! (idx + 3))
+                    mr mg mb effA
+                fb := fb.set! idx nr |>.set! (idx + 1) ng |>.set! (idx + 2) nb |>.set! (idx + 3) na
         if !activeRClips.isEmpty then fb := applyRoundedClips vw vh saved fb (intersectRect curClip r) activeRClips
     | .shadow r col rad blur =>
       let radii : CornerRadii := (rad, rad, rad, rad)
@@ -1009,7 +1025,7 @@ private def scrollBand (old new : Scene) (dirty vp : Rect) : Option (Rect × Nat
   for j in [i:old.size] do
     if let some (.glyph s a c k pg1) := old[j]? then
       if a.y > dirty.y + 64 && a.y < dirty.bottom then
-        for n in [max i (j-160):min new.size (j+64)] do
+        for n in [max i (j-320):min new.size (j+64)] do
           if let some (.glyph t b e l pg2) := new[n]? then
             if s == t && a.x == b.x && c == e && k == l && pg1 == pg2 && a.y > b.y && a.y-b.y ≤ 64 then
               shift := (a.y-b.y).toNat
@@ -1024,11 +1040,28 @@ private def scrollBand (old new : Scene) (dirty vp : Rect) : Option (Rect × Nat
     match bandPaint old s, bandPaint new b with
     | some a, some c => a == c
     | _, _ => false
+  let gutter : Int := min (band.w / 8) 32
+  -- Fixed top fade gradients (e.g. transcript top mask) cover a narrow top band of the viewport.
+  -- Skip past that top strip first so `FFI.scrollRows` reuses the scrolling content below it.
+  let maxTopSkip : Int := min (band.h / 8) 32
+  let mut topSkip : Int := 0
+  for p in new do
+    if let .linear r _ _ _ _ := p then
+      if r.y ≤ band.y + 4 && r.bottom > band.y && r.bottom - band.y ≤ maxTopSkip then
+        topSkip := max topSkip (r.bottom - band.y)
+  if topSkip > 0 && band.h > topSkip + 96 then
+    let below := { band with y := band.y + topSkip, h := band.h - topSkip }
+    if matchesBand below then
+      return some (below, shift)
+    if gutter > 0 && below.w > gutter + 96 then
+      let belowInner := { below with w := below.w - gutter }
+      if matchesBand belowInner then
+        return some (belowInner, shift)
+    return none
   if matchesBand band then
     return some (band, shift)
   -- Overlay scrollbars paint inside the right-edge gutter and move opposite to content.
   -- Inset by a narrow right-edge strip so `FFI.scrollRows` still reuses the content body.
-  let gutter : Int := min (band.w / 8) 32
   if gutter > 0 && band.w > gutter + 96 then
     let inner := { band with w := band.w - gutter }
     if matchesBand inner then
@@ -1100,14 +1133,21 @@ def renderFrameDamage (ctx : VulkanContext) (clearColor : Color) (atlas : Text.G
   let mut uploadedUnion : Option Rect := none
   for dRect in dirtyRects do
     let mut paint := dRect
+    let mut topStrip : Option Rect := none
     let mut extraStrip : Option Rect := none
     if let some (band, shift) := scrollBand prev.scene scene dRect vp then
       fb := FFI.scrollRows fb ((band.y.toNat*ctx.width+band.x.toNat)*4).toUSize
         (ctx.width*4).toUSize (band.w.toNat*4).toUSize band.h.toNat.toUSize shift.toUSize
       paint := { dRect with y := band.bottom, h := dRect.bottom - band.bottom }
+      if band.y > dRect.y then
+        topStrip := some { dRect with h := band.y - dRect.y }
       if band.right < dRect.right then
-        extraStrip := some { x := band.right, y := dRect.y, w := dRect.right - band.right, h := band.bottom - dRect.y }
+        extraStrip := some { x := band.right, y := band.y, w := dRect.right - band.right, h := band.bottom - band.y }
       if profile then IO.eprintln s!"u7-scroll-reuse dy={shift} pixels={band.w*band.h}"
+    if let some strip := topStrip then
+      let (fbT, instsT) := rasterizeSceneInto ctx.width ctx.height clearColor atlas (some fb) (some strip) scene
+      fb := fbT
+      insts := insts ++ instsT
     let (fb0, insts0) := rasterizeSceneInto ctx.width ctx.height clearColor atlas (some fb) (some paint) scene
     fb := fb0
     insts := insts ++ insts0

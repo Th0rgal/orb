@@ -363,6 +363,14 @@ def diffUnifiedId : WidgetId := 402
 def diffSplitId : WidgetId := 403
 def diffRefreshId : WidgetId := 404
 def diffFileChipId : WidgetId := 405
+def splitHeaderExpandId : WidgetId := 410
+def splitHeaderSplitId : WidgetId := 411
+def splitHeaderSidebarId : WidgetId := 412
+def splitHeaderSearchId : WidgetId := 413
+def splitHeaderFilesTabId : WidgetId := 414
+def splitHeaderChangesTabId : WidgetId := 415
+def splitHeaderRefreshId : WidgetId := 416
+def splitHeaderCloseId : WidgetId := 417
 
 def fleetLocalId : WidgetId := 501
 def fleetCoreId : WidgetId := 502
@@ -1330,7 +1338,25 @@ private def stepSharedControls (st : DesktopState) (id : WidgetId) : Option Desk
     some { st with diffRef := nextRef }
   else if id == diffUnifiedId then some { st with diffMode := "unified" }
   else if id == diffSplitId then some { st with diffMode := "split" }
-  else if id == diffRefreshId then some { st with diffRefreshCount := st.diffRefreshCount + 1 }
+  else if id == splitHeaderSplitId then
+    if !st.liveData && st.screen == .missionSplitDiff then
+      some { st with screen := .missionTranscript, sidePanelOpen := true, sidePanelTab := "diff" }
+    else
+      some { st with diffMode := if st.diffMode == "split" then "unified" else "split" }
+  else if id == splitHeaderExpandId then
+    some { st with diffMode := if st.diffMode == "unified" then "split" else "unified" }
+  else if id == splitHeaderSidebarId then some { st with sidebarHidden := !st.sidebarHidden }
+  else if id == splitHeaderSearchId then some (openSearchModal st)
+  else if id == splitHeaderFilesTabId then
+    let nextScreen := if !st.liveData && st.screen == .missionSplitDiff then .missionTranscript else st.screen
+    some { st with sidePanelOpen := true, sidePanelTab := "files", screen := nextScreen }
+  else if id == splitHeaderChangesTabId then
+    let nextScreen := if !st.liveData && st.screen == .missionTranscript then .missionSplitDiff else st.screen
+    some { st with sidePanelOpen := true, sidePanelTab := "diff", screen := nextScreen }
+  else if id == diffRefreshId || id == splitHeaderRefreshId then some { st with diffRefreshCount := st.diffRefreshCount + 1 }
+  else if id == splitHeaderCloseId then
+    let nextScreen := if !st.liveData && st.screen == .missionSplitDiff then .missionTranscript else st.screen
+    some { st with sidePanelOpen := false, screen := nextScreen }
   else if id == diffFileChipId then some { st with diffSelectedFile := if st.diffSelectedFile == 0 then 1 else 0 }
   else if id == fleetLocalId then some { st with selectedMachineId := "local" }
   else if id == fleetCoreId then some { st with selectedMachineId := "core" }
@@ -2671,14 +2697,20 @@ def resolvedLogicalSubSize (scale120 : Nat) (viewport : Rect)
     ((viewport.w.toNat * subPerPx * scaleDen) / s,
      (viewport.h.toNat * subPerPx * scaleDen) / s)
 
+/-- Compute the transcript pane logical width in `SubPx`, matching `Screens.buildDesktopScreen`. -/
+@[inline] def DesktopState.transcriptPaneWidth (st : DesktopState) (availW : SubPx) : SubPx :=
+  let mainW : SubPx := availW - st.sidebarWidth
+  if st.screen == .missionSplitDiff then pxToSub 688 - st.theme.borderWidth
+  else if st.screen == .missionTranscript && st.sidePanelOpen then
+    mainW - min (pxToSub 480) (mainW / 2) - st.theme.borderWidth
+  else mainW
+
 /-- Measure the current rendered transcript `(contentH, bodyH)` in `SubPx`, matching
 `buildMissionTranscriptBody` so scroll-anchor updates clamp against the actual layout. -/
 def measureTranscriptContentHeight (st : DesktopState) (scale120 : Nat) (viewport : Rect)
     (logicalSubSize? : Option (SubPx × SubPx) := none) : SubPx × SubPx := Id.run do
   let (availW, availH) := resolvedLogicalSubSize scale120 viewport logicalSubSize?
-  let mainW : SubPx := availW - st.sidebarWidth
-  let transcriptW : SubPx :=
-    if st.sidePanelOpen then mainW - min (pxToSub 480) (mainW / 2) else mainW
+  let transcriptW : SubPx := st.transcriptPaneWidth availW
   let colW : SubPx := min (pxToSub 748) (transcriptW - pxToSub 48)
   let width : SubPx := transcriptTextWidth transcriptW
   let bodyH : SubPx := availH - chromeHeaderHeightSub - chromeComposerHeightSub
@@ -2711,9 +2743,7 @@ def measurePrependedHeightDelta (st : DesktopState) (scale120 : Nat) (viewport :
     (addedTurns : List String) (hadBanner willHaveBanner : Bool)
     (logicalSubSize? : Option (SubPx × SubPx) := none) : Int := Id.run do
   let (availW, _) := resolvedLogicalSubSize scale120 viewport logicalSubSize?
-  let mainW : SubPx := availW - st.sidebarWidth
-  let transcriptW : SubPx :=
-    if st.sidePanelOpen then mainW - min (pxToSub 480) (mainW / 2) else mainW
+  let transcriptW : SubPx := st.transcriptPaneWidth availW
   let colW : SubPx := min (pxToSub 748) (transcriptW - pxToSub 48)
   let width : SubPx := transcriptTextWidth transcriptW
   let (addedRows, _) := buildLiveTurnsNodes st.theme colW width addedTurns

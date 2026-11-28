@@ -120,6 +120,8 @@ private def verifyNineScreenControls : IO Unit := do
   assertHitTargets "04_mission_split_diff" (DesktopState.forScreen .missionSplitDiff)
     [sidebarToggleId, sidebarSearchId, sidebarBackId, sidebarForwardId,
      sidePanelDiffId, sidePanelFilesId, sidePanelChatId,
+     splitHeaderExpandId, splitHeaderSplitId, splitHeaderSidebarId, splitHeaderSearchId,
+     splitHeaderFilesTabId, splitHeaderChangesTabId, splitHeaderRefreshId, splitHeaderCloseId,
      101, 102, 111, 112, 113, 114, 104, 120, 121, 122, 123, 105, 131, 103,
      1, 3, 2, 720, 721, 722, 723, 724, diffRefId, diffUnifiedId, diffSplitId, diffRefreshId, diffFileChipId]
 
@@ -459,15 +461,47 @@ private def verifyInteractionRegressions : IO Unit := do
   let deltaOpen := measurePrependedHeightDelta txOpen 120 narrowVp [longTurn] false false
   unless deltaOpen > deltaClosed do
     throw <| IO.userError s!"measurePrependedHeightDelta with sidePanelOpen=true ({deltaOpen}) must exceed sidePanelOpen=false ({deltaClosed}) for wrapping text"
-  let mainW1200 : SubPx := pxToSub 1200 - txOpen.sidebarWidth
-  let leftW1200 : SubPx := mainW1200 - min (pxToSub 480) (mainW1200 / 2)
+  let leftW1200 : SubPx := txOpen.transcriptPaneWidth (pxToSub 1200)
   let colW1200 : SubPx := min (pxToSub 748) (leftW1200 - pxToSub 48)
   let (expectedRows, _) := buildLiveTurnsNodes txOpen.theme colW1200 (transcriptTextWidth leftW1200) [longTurn]
   let expectedDelta : Int := expectedRows.foldl (fun acc row =>
-    let (_, rowH) := measureNode leftW1200 row.toLayoutNode
+    let (_, rowH) := measureNode colW1200 row.toLayoutNode
     acc + (rowH : Int) + (transcriptColumnGapSub : Int)) 0
   unless deltaOpen == expectedDelta do
     throw <| IO.userError s!"measurePrependedHeightDelta sidePanelOpen mismatch: got {deltaOpen}, expected {expectedDelta}"
+  -- Verify measureTranscriptContentHeight & measurePrependedHeightDelta match buildDesktopScreen's
+  -- laid-out transcriptViewportId scroll limit even on the exact 1px border-width boundary (682px vs 681px at 1470x923).
+  let rec findViewportContentH : Nat → WidgetNode → ComputedBox → Option SubPx
+    | 0, _, _ => none
+    | fuel + 1, .mk wid _ _ _ _ wChildren, b =>
+      if wid == some transcriptViewportId then
+        b.scrollLimitXY.map fun (_, limY) => b.contentRectSub.h.toNat + limY
+      else
+        (wChildren.zip b.children).findSome? fun (cw, cb) => findViewportContentH fuel cw cb
+  let boundaryLine : String := "`cccc`" ++ String.ofList (List.replicate 92 'a') ++ "**bb**"
+  let txBoundaryBase : DesktopState := {
+    txOpen with
+    liveTurns := List.replicate 18 boundaryLine
+  }
+  let txBoundaryMore : DesktopState := {
+    txBoundaryBase with
+    liveTurns := [boundaryLine, boundaryLine] ++ txBoundaryBase.liveTurns
+  }
+  let layoutContentH (st : DesktopState) : IO SubPx := do
+    let tree := buildDesktopScreen st vpW vpH {}
+    let box := layoutNode 120 none st.theme.palette.focusRing 0 0 vpW vpH tree.toLayoutNode
+    match findViewportContentH 64 tree box with
+    | some h => pure h
+    | none => throw <| IO.userError "transcriptViewportId missing in sidePanelOpen layout check"
+  let (measBaseH, _) := measureTranscriptContentHeight txBoundaryBase 120 vpDev
+  let actualBaseH ← layoutContentH txBoundaryBase
+  unless measBaseH == actualBaseH do
+    throw <| IO.userError s!"measureTranscriptContentHeight 1px-boundary mismatch: got {measBaseH}, actual {actualBaseH}"
+  let actualMoreH ← layoutContentH txBoundaryMore
+  let measDelta := measurePrependedHeightDelta txBoundaryBase 120 vpDev [boundaryLine, boundaryLine] false false
+  let actualDelta : Int := (actualMoreH : Int) - (actualBaseH : Int)
+  unless measDelta == actualDelta do
+    throw <| IO.userError s!"measurePrependedHeightDelta 1px-boundary mismatch: got {measDelta}, actual {actualDelta}"
 
 private def verifyScrollbarQuietFocusAndCaret : IO Unit := do
   -- 1. Pure caret positioning (empty, mid-string, multi-byte UTF-8, IME preedit).
@@ -801,7 +835,33 @@ private def verifyWaylandImeSerialGuard : IO Unit := do
   let c0 := DesktopState.forScreen .controlEmpty
   for (lbl, wid, chkP) in [("draftProject", draftProjectPickerId, false), ("draftMachine", 720, false), ("draftFolder", draftDirectoryPickerId, false), ("attach", 3, false), ("draftModel", 722, false)] do
     assertVisualChange s!"01_{lbl}" c0 wid chkP
-  assertVisualChange "04_diffFileChip" (DesktopState.forScreen .missionSplitDiff) diffFileChipId true
+  let s04 := DesktopState.forScreen .missionSplitDiff
+  assertVisualChange "04_diffFileChip" s04 diffFileChipId true
+  for (lbl, wid, chkP) in [
+    ("splitExpand", splitHeaderExpandId, false),
+    ("splitToggle", splitHeaderSplitId, false),
+    ("splitSidebar", splitHeaderSidebarId, false),
+    ("splitFilesTab", splitHeaderFilesTabId, false),
+    ("splitRefresh", splitHeaderRefreshId, false),
+    ("splitClose", splitHeaderCloseId, false)
+  ] do
+    assertVisualChange s!"04_{lbl}" s04 wid chkP
+  -- Search icon (413) opens the Search modal overlay (rendered by Main.lean over buildDesktopScreen).
+  let (s04Search, s04SearchDmg) := stepDesktopEvent 120 vpDev s04 (.activate splitHeaderSearchId)
+  unless s04SearchDmg.isSome && (s04Search.modal matches .searchPalette _) do
+    throw <| IO.userError "04_splitSearch (413) did not open Search modal with damage"
+  -- Clicking the already-selected Changes tab (415) keeps the diff pane open rather than closing it,
+  -- and clicking it after switching to Files restores the full-height split diff view.
+  let (s04ChangesSame, _) := stepDesktopEvent 120 vpDev s04 (.activate splitHeaderChangesTabId)
+  unless s04ChangesSame.sidePanelOpen && s04ChangesSame.sidePanelTab == "diff" && s04ChangesSame.screen == .missionSplitDiff do
+    throw <| IO.userError "04_splitChangesTab (415) unexpectedly closed or altered the Changes tab"
+  let (s04Files, _) := stepDesktopEvent 120 vpDev s04 (.activate splitHeaderFilesTabId)
+  unless s04Files.sidePanelOpen && s04Files.sidePanelTab == "files" && s04Files.screen == .missionTranscript do
+    throw <| IO.userError "04_splitFilesTab (414) did not switch to the Files side panel"
+  assertVisualChange "04_splitChangesTabFromFiles" s04Files splitHeaderChangesTabId false
+  let (s04Restored, _) := stepDesktopEvent 120 vpDev s04Files (.activate splitHeaderChangesTabId)
+  unless s04Restored.sidePanelOpen && s04Restored.sidePanelTab == "diff" && s04Restored.screen == .missionSplitDiff do
+    throw <| IO.userError "04_splitChangesTab (415) from Files did not restore missionSplitDiff"
   assertVisualChange "05_agentSoftware" (DesktopState.forScreen .machinesFleet) fleetSoftwareId true
   let s06 := DesktopState.forScreen .settingsGeneral
   for (lbl, wid) in [("models", 111), ("agents", 112), ("security", 113), ("notifs", 114), ("disconnect", settingsDisconnectId), ("connectGh", settingsConnectGhId), ("refreshCloud", settingsRefreshCloudId)] do
