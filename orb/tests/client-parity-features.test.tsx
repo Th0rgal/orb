@@ -14,6 +14,7 @@ import { signedApi, signedRawRequest } from "../src/deviceApproval";
 import {
   GITHUB_OAUTH_STATE_TTL_MS,
   beginGitHubOAuthAttempt,
+  signInWithGitHubDesktop,
   verifyGitHubOAuthCallback,
   verifyIssuedAuthToken,
 } from "../src/githubSignIn";
@@ -491,7 +492,8 @@ describe("Settings multi-user login & GitHub integration", () => {
 
     render(() => <Settings />);
     const usernameInput = await screen.findByLabelText("Username");
-    expect(await screen.findByRole("button", { name: "Sign in with GitHub" })).toBeTruthy();
+    expect(await screen.findByText("Multi-user account configured on Core.")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Sign in with GitHub" })).toBeNull();
 
     fireEvent.input(usernameInput, { target: { value: "alice" } });
     const pwInput = document.querySelector('input[type="password"]') as HTMLInputElement;
@@ -524,10 +526,6 @@ describe("Settings multi-user login & GitHub integration", () => {
           }),
         );
       }
-      if (url.endsWith("/api/cloud/accounts")) return new Response(JSON.stringify([]));
-      if (url.endsWith("/api/integrations/github/status")) {
-        return new Response(JSON.stringify({ configured: false, connected: false, pending: false, scopes: [] }));
-      }
       return new Response(JSON.stringify({}));
     });
     vi.stubGlobal("fetch", fetchMock);
@@ -542,11 +540,13 @@ describe("Settings multi-user login & GitHub integration", () => {
       invoke: invokeSpy,
     };
 
-    render(() => <Settings />);
-    const ghBtn = await screen.findByRole("button", { name: "Sign in with GitHub" });
-    fireEvent.click(ghBtn);
-
-    await waitFor(() => expect(isConnected()).toBe(true));
+    const ok = await signInWithGitHubDesktop("http://core.test");
+    expect(ok).toBe(true);
+    expect(invokeSpy).toHaveBeenCalledWith("github_oauth_sign_in", {
+      apiUrl: "http://core.test",
+      state: expect.stringMatching(/^[A-Za-z0-9_-]{43}$/),
+    });
+    expect(isConnected()).toBe(true);
   });
 });
 
