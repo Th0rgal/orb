@@ -36,8 +36,7 @@ private def candidateBinaryPaths (name arch : String) : IO (Array String) := do
   let mut cands : Array String := #[]
   if let some relDir ← getEnvNonEmpty "ORB_NODE_RELEASE_DIR" then
     let r := stripTrailingSlash relDir
-    cands := cands.push s!"{r}/{normArch}/{name}"
-    cands := cands.push s!"{r}/{name}"
+    return #[s!"{r}/{normArch}/{name}", s!"{r}/{name}"]
   if !buildSha.isEmpty then
     cands := cands.push s!"/usr/local/share/orb/releases/{buildSha}/bin/{normArch}/{name}"
     cands := cands.push s!"/usr/local/share/orb/releases/{buildSha}/bin/{name}"
