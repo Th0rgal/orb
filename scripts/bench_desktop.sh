@@ -84,6 +84,7 @@ p50_samples_ms = []
 p95_samples_ms = []
 p99_samples_ms = []
 total_work_units = 0
+quiescent_redraws = 0
 error_count = 0
 
 for i in range(runs):
@@ -105,9 +106,22 @@ for i in range(runs):
             p99_samples_ms.append(float(payload.get("frame_p99_ms", 2.0)))
             open_ms = float(payload.get("transcript_open_ms", wall_ms))
             open_samples_ms.append(open_ms)
-            total_work_units += int(payload.get("work_units", 1))
+            wu = int(payload.get("work_units", 1))
+            total_work_units += wu
             error_count += int(payload.get("error_count", 0))
-            if open_ms > 620.0 or int(payload.get("partial_frames", 0)) < int(payload.get("work_units", 1)):
+            if "quiescent_skips" in payload:
+                q_skips = int(payload.get("quiescent_skips", 0))
+                if q_skips < wu:
+                    error_count += 1
+                    quiescent_redraws += max(1, wu - q_skips)
+            if "frames_rendered" in payload:
+                extra_renders = max(0, int(payload.get("frames_rendered", wu + 1)) - (wu + 1))
+                quiescent_redraws += extra_renders
+                if extra_renders > 0:
+                    error_count += 1
+            if int(payload.get("max_icon_raster_pixels", 0)) > 16384:
+                error_count += 1
+            if open_ms > 620.0 or int(payload.get("partial_frames", 0)) < wu:
                 error_count += 1
         except Exception:
             error_count += 1
@@ -127,6 +141,11 @@ for i in range(runs):
         p95_samples_ms.append(wall_ms)
         p99_samples_ms.append(wall_ms)
         total_work_units += 1
+
+# Capture canonical `--bench 20` peak RSS BEFORE running `--bench-long 60` so long-transcript
+# runs never overwrite canonical RSS.
+rusage_canon = resource.getrusage(resource.RUSAGE_CHILDREN)
+peak_rss_mib = round(rusage_canon.ru_maxrss / 1024.0, 2)
 
 long_report = None
 long_ok = True
@@ -156,6 +175,7 @@ if long_cmd_str:
             if (
                 int(p.get("partial_frames", 0)) < wu
                 or int(p.get("quiescent_skips", 0)) < wu
+                or int(p.get("frames_rendered", wu + 1)) != wu + 1
                 or int(p.get("stream_coalesced_deltas", 0)) <= wu
                 or int(p.get("stream_renders", 0)) != wu
                 or int(p.get("icon_raster_hits", 0)) <= 0
@@ -172,6 +192,8 @@ if long_cmd_str:
         s = sorted(xs)
         return round(s[len(s) // 2], 3)
 
+    rusage_long = resource.getrusage(resource.RUSAGE_CHILDREN)
+    long_rss_mib = round(rusage_long.ru_maxrss / 1024.0, 2)
     l_cold_med = med(l_cold)
     l_open_med = med(l_open)
     l_p50_med = med(l_p50)
@@ -182,6 +204,7 @@ if long_cmd_str:
         and len(l_cold) >= runs
         and l_cold_med <= 150.0
         and l_open_med <= 150.0
+        and long_rss_mib <= 96.0
         and l_p50_med <= 5.0
         and l_p95_med <= 16.67
         and l_p99_med <= 16.67
@@ -192,6 +215,7 @@ if long_cmd_str:
         "cold_ms": l_cold_med,
         "startup_ms": l_cold_med,
         "transcript_open_ms": l_open_med,
+        "rss_mib": long_rss_mib,
         "frame_p50_ms": l_p50_med,
         "frame_p95_ms": l_p95_med,
         "frame_p99_ms": l_p99_med,
@@ -205,9 +229,6 @@ if long_cmd_str:
         "error_count": l_errors,
     }
     error_count += l_errors
-
-rusage = resource.getrusage(resource.RUSAGE_CHILDREN)
-peak_rss_mib = round(rusage.ru_maxrss / 1024.0, 2)
 
 cold_samples_ms.sort()
 startup_samples_ms.sort()
@@ -232,6 +253,7 @@ ok = (
     error_count == 0
     and long_ok
     and total_work_units > 0
+    and quiescent_redraws == 0
     and len(cold_samples_ms) >= runs
     and cold_median <= 60.0
     and open_median <= 60.0
@@ -256,7 +278,7 @@ report = {
     "frame_p95_ms": frame_p95,
     "frame_p99_ms": frame_p99,
     "idle_cpu_pct": 0.0,
-    "quiescent_redraws": 0,
+    "quiescent_redraws": quiescent_redraws,
     "long_transcript": long_report,
     "baseline_gtk_webkit": {
         "cold_ms": 620.0,

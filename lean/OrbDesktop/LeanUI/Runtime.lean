@@ -514,7 +514,7 @@ def stepFrameWithRegions {σ : Type} (rt : RuntimeState σ)
       let wlC ← Wayland.cancelFrameCallback (← wlRef.get)
       wlRef.set wlC
     let (vkGpu, atlasGpu, handledByVk, didPresent) ←
-      Vulkan.renderAndPresentGpu vk0 clearColor atlas' scene st.damage prePresent onAborted
+      Vulkan.renderAndPresentGpu vk0 clearColor atlas' scene st.damage prePresent onAborted st.forceFullRepaint
     let wlAfter ← wlRef.get
     if handledByVk then
       let frameT1 ← IO.monoNanosNow

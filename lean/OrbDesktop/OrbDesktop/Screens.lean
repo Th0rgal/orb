@@ -1440,7 +1440,7 @@ def buildDesktopScreen (st : DesktopState) (availW availH : SubPx)
       let leftW : SubPx := pxToSub 688
       let rightW : SubPx := mainW - leftW
       let leftBodyH := splitH - composerH
-      let leftTranscript := buildMissionTranscriptBody st leftW leftBodyH runs
+      let leftTranscript := buildMissionTranscriptBody st leftW leftBodyH runs hoverRow
       let leftComposer := buildComposerWidget theme leftW composerH st.composer
       let leftPane : WidgetNode :=
         WidgetNode.rrect

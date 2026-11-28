@@ -2286,7 +2286,7 @@ def liveProseLine (theme : Theme) (colW width : SubPx) (line0 : String) :
         theme.typo.lineBase runs])
 
 /-- One monospace code row of a non-mermaid fence; blank fence lines become thin spacers. -/
-private def liveCodeRow (theme : Theme) (colW width : SubPx) (line : String) : WidgetNode :=
+def liveCodeRow (theme : Theme) (colW width : SubPx) (line : String) : WidgetNode :=
   let runs := if line.isEmpty then []
     else [synthInlineRun { (Theme.codeText theme) with color := theme.palette.textPrimary } line]
   let (_, _, height) := wrapInlineRuns width theme.typo.lineBase runs

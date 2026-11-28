@@ -718,7 +718,7 @@ private def allocShm (c : WaylandClient) (w h : Nat) : IO ShmBuffers := do
   return { fd, ptr := ptr.toUSize, bytes, pool, bufA := ← mk 0 tagShmBufferA, bufB := ← mk frame tagShmBufferB, w, h,
            bufADirty := some full, bufBDirty := some full }
 
-@[inline] private def clipRect (a b : Rect) : Rect :=
+@[inline] def clipRect (a b : Rect) : Rect :=
   let x0 := max a.x b.x
   let y0 := max a.y b.y
   let x1 := min a.right b.right
@@ -726,7 +726,7 @@ private def allocShm (c : WaylandClient) (w h : Nat) : IO ShmBuffers := do
   if x1 ≤ x0 || y1 ≤ y0 then { x := 0, y := 0, w := 0, h := 0 }
   else { x := x0, y := y0, w := x1 - x0, h := y1 - y0 }
 
-@[inline] private def joinRect (a b : Rect) : Rect :=
+@[inline] def joinRect (a b : Rect) : Rect :=
   let x0 := min a.x b.x
   let y0 := min a.y b.y
   let x1 := max a.right b.right

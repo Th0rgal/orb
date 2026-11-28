@@ -1,4 +1,4 @@
-/* lean_ui_vk_bridge.c — thin Vulkan 1.3 call & strided transfer bridge (<= 120 LOC).
+/* lean_ui_vk_bridge.c — thin Vulkan 1.3 call & strided transfer bridge (<= 220 LOC).
  *
  * LP64 SysV x86_64 / AAPCS64 sound 0..8 integer/pointer-arg trampolines plus
  * bounds-checked zero-allocation strided rectangle copies for staging & readback.

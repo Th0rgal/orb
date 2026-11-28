@@ -42,6 +42,31 @@ def verifyRepaintEdges : IO Unit := do
       acIcon1.iconRasterMisses == 1 && acIcon1.iconRasterHits == 1 &&
       acIcon1.maxIconRasterPixels == Text.maxIconRasterDim * 16 do
     throw <| IO.userError "bounded vector-icon lane caching or clamping mismatch"
+  -- Scaled CPU `.mask` rendering must map the clamped 1022x16 lane across the full 1400x16
+  -- destination (matching GPU VK_FILTER_NEAREST) so the right stub lands at x≈1390..1399,
+  -- and a tall 8x24 icon clamped to 8x8 must never read unrelated lower atlas shelves.
+  let (laneFb, _) := Vulkan.rasterizeScene 1400 16 0 acIcon1 #[.mask eLane1.page eLane1.uv ⟨0, 0, 1400, 16⟩ 0xFFFFFFFF]
+  let mut rightStubInk := false
+  for x in [1385 : 1400] do
+    if laneFb.get! (x * 4 + 3) > 0 then rightStubInk := true
+  unless rightStubInk do
+    throw <| IO.userError "scaled CPU .mask did not stretch clamped lane stub to right destination edge"
+  let (acTall0, eTall) := ({} : Text.GlyphAtlasCache).getOrRasterizeIcon [[(80, 0), (80, 0)]] 8 24 0
+  -- Place a solid opaque icon on a lower shelf of the same page; tall 8x24 blit must never sample it.
+  let (acTall1, _) := acTall0.getOrRasterizeIcon [[(0, 0), (160, 160)]] 16 16 200
+  let (tallFb, _) := Vulkan.rasterizeScene 8 24 0 acTall1 #[.mask eTall.page eTall.uv ⟨0, 0, 8, 24⟩ 0xFFFFFFFF]
+  for y in [8 : 24] do
+    for x in [0 : 8] do
+      if tallFb.get! ((y * 8 + x) * 4 + 3) > 0 then
+        throw <| IO.userError s!"tall .mask leaked lower atlas shelf pixel at ({x},{y})"
+  -- Mixed externally-populated `ac.cache` + `insertRasterized` must retain pre-existing cache keys.
+  let preKey : GlyphKey := { font := 1, glyph := 42, sizeSub := 12, subpx := 0 }
+  let preEntry : Text.AtlasGlyphEntry := { page := 0, uv := ⟨1, 2, 3, 4⟩, bearingX := 0, bearingY := 0, isColor := false }
+  let mixed0 : Text.GlyphAtlasCache := { cache := ({} : HashCache Text.AtlasGlyphEntry).insert Text.hashGlyphKey preKey preEntry }
+  let otherKey : GlyphKey := { font := 1, glyph := 99, sizeSub := 12, subpx := 0 }
+  let (mixed1, _) := mixed0.insertRasterized otherKey { width := 0, height := 0, bearingX := 0, bearingY := 0, format := 1, isColor := false, pixels := ByteArray.empty }
+  unless mixed1.lookupGlyph preKey == some preEntry && (mixed1.lookupGlyph otherKey).isSome do
+    throw <| IO.userError "GlyphAtlasCache.lookupGlyph dropped externally-populated cache entry after insertRasterized"
   -- Verify dirty-rect ARGB presentation matches full-frame conversion on the updated sub-rect
   -- without disturbing pixels outside the sub-rect, and check double-buffer dirty-rect tracking.
   let (pw, ph) := (8, 6)

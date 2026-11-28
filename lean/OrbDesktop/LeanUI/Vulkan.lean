@@ -821,33 +821,65 @@ def rasterizeSceneInto (vw vh : Nat) (clearColor : Color) (atlas : Text.GlyphAtl
         let ph := page.atlas.height
         let (sr, sg, sb, sa) := unpackColor col
         let (x0, y0, x1, y1) := clampBounds vw vh curClip dst
-        if x1 > x0 && y1 > y0 && sa > 0 then
+        let sw := src.w.toNat
+        let sh := src.h.toNat
+        let dw := dst.w.toNat
+        let dh := dst.h.toNat
+        if x1 > x0 && y1 > y0 && sa > 0 && sw > 0 && sh > 0 && dw > 0 && dh > 0 then
           let saved := if activeRClips.isEmpty then ByteArray.empty else fb
-          -- A coverage mask tinted by `col` is a monochrome glyph: blend it natively when its
-          -- atlas rows are in range (same arithmetic as the loop below).
-          let sx := src.x.toNat + (x0.toNat - dst.x.toNat)
-          let sy := src.y.toNat + (y0.toNat - dst.y.toNat)
-          let mw := min (pw - sx) (x1 - x0).toNat
-          let mh := min (ph - sy) (y1 - y0).toNat
-          if mh > 0 && mw > 0 && (sy + mh - 1) * pw + sx + mw ≤ page.rgba.size / 4 then
-            fb := FFI.blitGlyph fb page.rgba (y0.toNat * vw + x0.toNat).toUSize (sy * pw + sx).toUSize
-              vw.toUSize pw.toUSize mw.toUSize mh.toUSize col false
+          if sw == dw && sh == dh then
+            -- 1:1 coverage mask tinted by `col`: blend natively, clamped strictly inside `src`.
+            let dx0 := x0.toNat - dst.x.toNat
+            let dy0 := y0.toNat - dst.y.toNat
+            let sx := src.x.toNat + dx0
+            let sy := src.y.toNat + dy0
+            let mw := min (min (pw - sx) (sw - dx0)) (x1 - x0).toNat
+            let mh := min (min (ph - sy) (sh - dy0)) (y1 - y0).toNat
+            if mh > 0 && mw > 0 && (sy + mh - 1) * pw + sx + mw ≤ page.rgba.size / 4 then
+              fb := FFI.blitGlyph fb page.rgba (y0.toNat * vw + x0.toNat).toUSize (sy * pw + sx).toUSize
+                vw.toUSize pw.toUSize mw.toUSize mh.toUSize col false
+            else
+              for py in [y0.toNat : y1.toNat] do
+                let dy := py - dst.y.toNat
+                let ty := src.y.toNat + dy
+                if dy < sh && ty < ph then
+                  for px in [x0.toNat : x1.toNat] do
+                    let dx := px - dst.x.toNat
+                    let tx := src.x.toNat + dx
+                    if dx < sw && tx < pw then
+                      let aIdx := (ty * pw + tx) * 4
+                      if aIdx + 4 ≤ page.rgba.size then
+                        let cov := page.rgba.get! (aIdx + 3)
+                        let effA := ((sa.toNat * cov.toNat + 127) / 255).toUInt8
+                        let idx := (py * vw + px) * 4
+                        let (nr, ng, nb, na) :=
+                          blendOver (fb.get! idx) (fb.get! (idx + 1)) (fb.get! (idx + 2)) (fb.get! (idx + 3))
+                            sr sg sb effA
+                        fb := fb.set! idx nr |>.set! (idx + 1) ng |>.set! (idx + 2) nb |>.set! (idx + 3) na
           else
+            -- Scaled coverage mask (`src.w != dst.w` or `src.h != dst.h`, e.g. clamped wide lanes
+            -- at 2x HiDPI or tall icons): sample with `VK_FILTER_NEAREST` pixel-center mapping
+            -- strictly inside `[src.x, src.x + sw) × [src.y, src.y + sh)` to match `scene_sdf.glsl`.
             for py in [y0.toNat : y1.toNat] do
-              let ty := src.y.toNat + (py - dst.y.toNat)
+              let dy := py - dst.y.toNat
+              let tyOff := min (sh - 1) (((2 * dy + 1) * sh) / (2 * dh))
+              let ty := src.y.toNat + tyOff
               if ty < ph then
                 for px in [x0.toNat : x1.toNat] do
-                  let tx := src.x.toNat + (px - dst.x.toNat)
+                  let dx := px - dst.x.toNat
+                  let txOff := min (sw - 1) (((2 * dx + 1) * sw) / (2 * dw))
+                  let tx := src.x.toNat + txOff
                   if tx < pw then
                     let aIdx := (ty * pw + tx) * 4
                     if aIdx + 4 ≤ page.rgba.size then
                       let cov := page.rgba.get! (aIdx + 3)
-                      let effA := ((sa.toNat * cov.toNat + 127) / 255).toUInt8
-                      let idx := (py * vw + px) * 4
-                      let (nr, ng, nb, na) :=
-                        blendOver (fb.get! idx) (fb.get! (idx + 1)) (fb.get! (idx + 2)) (fb.get! (idx + 3))
-                          sr sg sb effA
-                      fb := fb.set! idx nr |>.set! (idx + 1) ng |>.set! (idx + 2) nb |>.set! (idx + 3) na
+                      if cov > 0 then
+                        let effA := ((sa.toNat * cov.toNat + 127) / 255).toUInt8
+                        let idx := (py * vw + px) * 4
+                        let (nr, ng, nb, na) :=
+                          blendOver (fb.get! idx) (fb.get! (idx + 1)) (fb.get! (idx + 2)) (fb.get! (idx + 3))
+                            sr sg sb effA
+                        fb := fb.set! idx nr |>.set! (idx + 1) ng |>.set! (idx + 2) nb |>.set! (idx + 3) na
           if !activeRClips.isEmpty then fb := applyRoundedClips vw vh saved fb ⟨x0, y0, x1 - x0, y1 - y0⟩ activeRClips
     | .image _tex src dst rad =>
       let radii : CornerRadii := (rad, rad, rad, rad)
@@ -1014,8 +1046,10 @@ private def samplesUnchanged (scene : Scene) (idx : Nat) (a b : Text.AtlasPageBu
     if let some (src,dst) := pair then
       let x := src.x.toNat
       let y := src.y.toNat
-      let w := min dst.w.toNat (a.atlas.width - x)
-      let h := min dst.h.toNat (a.atlas.height - y)
+      let sw := if src.w > 0 then src.w.toNat else dst.w.toNat
+      let sh := if src.h > 0 then src.h.toNat else dst.h.toNat
+      let w := min sw (a.atlas.width - x)
+      let h := min sh (a.atlas.height - y)
       if w > 0 && h > 0 then
         if ((y+h-1)*a.atlas.width+x+w)*4 > min a.rgba.size b.rgba.size then return false
         if !FFI.sameRows a.rgba b.rgba ((y * a.atlas.width + x) * 4).toUSize
@@ -1120,14 +1154,14 @@ Returns `(ctx', atlas', handledByVulkan, didPresent)`:
 - `(true, false)`: swapchain needs recreate / zero-extent suspended (preserve damage, do not bump `presentCount`).
 - `(false, false)`: runtime `DEVICE_LOST` fell back to `cpuShm` (caller renders CPU + `wl_shm`). -/
 def renderAndPresentGpu (ctx : VulkanContext) (clearColor : Color) (atlas : Text.GlyphAtlasCache)
-    (scene : Scene) (dirty : Option Rect) (prePresent onPresentAborted : IO Unit) :
+    (scene : Scene) (dirty : Option Rect) (prePresent onPresentAborted : IO Unit)
+    (forceFull : Bool := false) :
     IO (VulkanContext × Text.GlyphAtlasCache × Bool × Bool) := do
   let some sess := ctx.gpuSession | return (ctx, atlas, false, false)
   match ctx.backend, sess.pipe with
   | .vkInstanced, some pipe =>
-    -- Backdrop blur and layers spread a change beyond its damage rect: present the whole surface,
-    -- as `renderFrameDamage` does on the CPU path.
-    let presentDirty := if hasGlobalEffect scene then none else dirty
+    -- Backdrop blur, opacity layers, and explicit full-repaint overrides present the whole surface.
+    let presentDirty := if forceFull || hasGlobalEffect scene then none else dirty
     let (wsi', pipe', outcome, primCount, ssboBytes, atlasBytes) ←
       Vk.presentInstancedScene sess.wsi pipe ctx.width ctx.height clearColor atlas scene presentDirty prePresent onPresentAborted
     let allocBytes ← wsi'.dev.allocatedBytes.get
@@ -1159,7 +1193,7 @@ def renderAndPresentGpu (ctx : VulkanContext) (clearColor : Color) (atlas : Text
       return (fbCtx, atlas, false, false)
   | .vkPresent, _ =>
     let ctx1 ← match dirty with
-      | some d => renderFrameDamage ctx clearColor atlas d scene
+      | some d => renderFrameDamage ctx clearColor atlas d scene forceFull
       | none => renderFrame ctx clearColor atlas scene
     let (wsi', outcome) ←
       Vk.presentCpuDirty sess.wsi ctx1.framebuffer ctx1.width ctx1.height ctx1.lastUploadedDirtyRect prePresent onPresentAborted

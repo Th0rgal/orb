@@ -43,7 +43,16 @@ example :
     streamedText { initial with stream := { initial.stream with shown := ["left", "-", "right"] } } = "left-right" := by
   decide
 
-/-- U7: vector-icon lane rasterisation bounds both width (`≤ maxIconRasterDim`) and visible height. -/
+/-- U7: universally quantified bounds theorem for `Text.boundIconRasterSize`:
+every icon or routing lane raster fits strictly within one `1024×1024` padded atlas page
+with `1 ≤ bh ≤ bw ≤ maxIconRasterDim`. -/
+theorem boundIconRasterSize_bounds (w h : Nat) :
+    let (bw, bh) := Text.boundIconRasterSize w h
+    1 ≤ bw ∧ bw ≤ Text.maxIconRasterDim ∧ 1 ≤ bh ∧ bh ≤ bw := by
+  simp only [Text.boundIconRasterSize, Text.maxIconRasterDim]
+  split <;> omega
+
+/-- U7: concrete vector-icon lane rasterisation examples (`542×8`, clamped `1400×16`, `136×40`). -/
 example :
     Text.boundIconRasterSize 542 8 = (542, 8) ∧
     Text.boundIconRasterSize 1400 16 = (Text.maxIconRasterDim, 16) ∧
@@ -69,6 +78,31 @@ example :
   Orb.Stream.committedLen openFence == 0 &&
   Orb.Stream.committedLen closedFence > 0 &&
   Orb.Stream.committedLen closedFence < closedFence.utf8ByteSize
+
+/-- U7: universally quantified double-buffer soundness theorem for `Wayland.computeShmDamageStep`:
+presenting to the target buffer always clears the target buffer's pending dirty rect to `none`. -/
+theorem computeShmDamageStep_clears_target (vp : Rect) (toB : Bool) (a b d : Option Rect) :
+    let res := Wayland.computeShmDamageStep vp toB a b d
+    (if toB then res.2.2.2 else res.2.2.1) = none := by
+  unfold Wayland.computeShmDamageStep
+  cases toB <;> simp
+
+/-- U7: universally quantified clip soundness theorem: `Wayland.computeShmDamageStep` never
+emits negative or out-of-viewport surface damage dimensions when `vp` is non-negative. -/
+theorem computeShmDamageStep_surface_bounded (vp : Rect) (hw : 0 ≤ vp.w) (hh : 0 ≤ vp.h)
+    (toB : Bool) (a b d : Option Rect) :
+    let s := (Wayland.computeShmDamageStep vp toB a b d).2.1
+    0 ≤ s.w ∧ 0 ≤ s.h ∧ s.w ≤ vp.w ∧ s.h ≤ vp.h := by
+  have hSurface : (Wayland.computeShmDamageStep vp toB a b d).2.1 =
+      match d with | some r => Wayland.clipRect vp r | none => vp := by
+    unfold Wayland.computeShmDamageStep
+    cases toB <;> rfl
+  rw [hSurface]
+  cases d with
+  | none => dsimp; omega
+  | some r =>
+    simp only [Wayland.clipRect, Rect.right, Rect.bottom]
+    grind
 
 /-- U7: Wayland `wl_shm` double-buffer dirty-rect tracking copies only the union of the last two
 frames' dirty rects on steady-state frames and reports only the current frame's dirty rect. -/

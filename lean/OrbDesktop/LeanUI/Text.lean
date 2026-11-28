@@ -355,6 +355,10 @@ structure GlyphAtlasCache where
   cache : HashCache AtlasGlyphEntry := {}
   /-- O(1) index mirroring `cache` so glyph and vector-icon lookups never scan linearly. -/
   cacheMap : Std.HashMap GlyphKey AtlasGlyphEntry := {}
+  /-- `true` once every entry in `cache` is known to be indexed in `cacheMap` (set on first
+  insert into an empty `cache` and on `resetAll`). When `false` (externally populated `cache`),
+  `lookupGlyph` falls back to `cache.lookup` on miss so mixed states never drop keys. -/
+  cacheMapSynced : Bool := false
   /-- Shaping results reused across frames; glyph rasterization is cached separately below. -/
   shapeCache : Array ShapeCacheEntry := #[]
   fallbackFonts : Array FontHandle := #[]
@@ -372,11 +376,14 @@ structure GlyphAtlasCache where
 
 namespace GlyphAtlasCache
 
-/-- O(1) glyph/icon cache lookup via `cacheMap`, with fallback to `cache` for tests that
-construct `GlyphAtlasCache` with only `cache` populated. -/
+/-- O(1) glyph/icon cache lookup via `cacheMap`, with sound fallback to `cache` if `cache` was
+populated externally without going through `insertRasterized`. -/
 @[inline] def lookupGlyph (ac : GlyphAtlasCache) (key : GlyphKey) : Option AtlasGlyphEntry :=
-  if !ac.cacheMap.isEmpty then ac.cacheMap.get? key
-  else ac.cache.lookup hashGlyphKey key
+  match ac.cacheMap.get? key with
+  | some entry => some entry
+  | none =>
+    if ac.cache.entries.isEmpty || ac.cacheMapSynced then none
+    else ac.cache.lookup hashGlyphKey key
 
 def beginUploads (ac : GlyphAtlasCache) : GlyphAtlasCache :=
   { ac with pendingUploads := some (ac.pendingUploads.getD #[]) }
@@ -408,6 +415,7 @@ def resetAll (ac : GlyphAtlasCache) : GlyphAtlasCache :=
     pages := pages'
     cache := {}
     cacheMap := {}
+    cacheMapSynced := true
     resolved := #[]
     resolvedMap := {}
     pendingUploads := none
@@ -418,13 +426,14 @@ def resetAll (ac : GlyphAtlasCache) : GlyphAtlasCache :=
 and blit the rasterized bitmap into the chosen page. -/
 def insertRasterized (ac : GlyphAtlasCache) (key : GlyphKey) (rg : RasterizedGlyph) :
     GlyphAtlasCache × AtlasGlyphEntry := Id.run do
+  let synced := ac.cacheMapSynced || ac.cache.entries.isEmpty
   if rg.width == 0 || rg.height == 0 then
     let entry : AtlasGlyphEntry :=
       { page := 0, uv := { x := 0, y := 0, w := 0, h := 0 },
         bearingX := rg.bearingX, bearingY := rg.bearingY, isColor := rg.isColor }
     let cache' := ac.cache.insert hashGlyphKey key entry
     let cacheMap' := ac.cacheMap.insert key entry
-    return ({ ac with cache := cache', cacheMap := cacheMap', misses := ac.misses + 1 }, entry)
+    return ({ ac with cache := cache', cacheMap := cacheMap', cacheMapSynced := synced, misses := ac.misses + 1 }, entry)
   -- Try existing pages with `Atlas.allocPadded` first
   for idx in [0:ac.pages.size] do
     let p := ac.pages[idx]!
@@ -439,7 +448,7 @@ def insertRasterized (ac : GlyphAtlasCache) (key : GlyphKey) (rg : RasterizedGly
       let cache' := ac.cache.insert hashGlyphKey key entry
       let cacheMap' := ac.cacheMap.insert key entry
       let gpuDirty' := if ac.pendingUploads.isSome then ac.gpuDirtyRects else ac.gpuDirtyRects.push (idx, rect)
-      return ({ ac with pages := pages', cache := cache', cacheMap := cacheMap', misses := ac.misses + 1,
+      return ({ ac with pages := pages', cache := cache', cacheMap := cacheMap', cacheMapSynced := synced, misses := ac.misses + 1,
                         pendingUploads := ac.pendingUploads.map (·.push (idx, rect, rg)),
                         gpuDirtyRects := gpuDirty' }, entry)
   -- Otherwise allocate a new page via `Atlas.allocPages` / `Atlas.allocPadded`
@@ -457,7 +466,7 @@ def insertRasterized (ac : GlyphAtlasCache) (key : GlyphKey) (rg : RasterizedGly
     let cache' := ac.cache.insert hashGlyphKey key entry
     let cacheMap' := ac.cacheMap.insert key entry
     let gpuDirty' := if ac.pendingUploads.isSome then ac.gpuDirtyRects else ac.gpuDirtyRects.push (pageIdx, rect)
-    return ({ ac with pages := pages', cache := cache', cacheMap := cacheMap', misses := ac.misses + 1,
+    return ({ ac with pages := pages', cache := cache', cacheMap := cacheMap', cacheMapSynced := synced, misses := ac.misses + 1,
                       pendingUploads := ac.pendingUploads.map (·.push (pageIdx, rect, rg)),
                       gpuDirtyRects := gpuDirty' }, entry)
   | none =>

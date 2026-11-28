@@ -8,7 +8,7 @@ on:
       - fix/leanui-parity-u3-final
       - master
     paths:
-      - 'lean/LeanUI/**'
+      - 'lean/Orb/**'
       - 'lean/OrbDesktop/**'
       - 'linux_shell/gtk_leanui_palette*'
       - 'linux_shell/gtk_wayland_subsurface*'
@@ -18,6 +18,7 @@ on:
       - 'scripts/orb_desktop_dev.sh'
       - 'scripts/leanui_parity.py'
       - 'scripts/test_leanui_*.py'
+      - 'scripts/bench_desktop.sh'
       - 'scripts/gen_leanui_shaders.py'
       - 'shaders/**'
       - 'docs/ui/**'
@@ -27,7 +28,7 @@ on:
   pull_request:
     branches: [master, main]
     paths:
-      - 'lean/LeanUI/**'
+      - 'lean/Orb/**'
       - 'lean/OrbDesktop/**'
       - 'linux_shell/gtk_leanui_palette*'
       - 'linux_shell/gtk_wayland_subsurface*'
