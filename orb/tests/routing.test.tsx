@@ -522,7 +522,8 @@ describe("Routing settings", () => {
   });
   it("matches normalized CLIProxyAPI model IDs in Resolve without false no-eligible-account warnings", async () => {
     chains[0].entries = [
-      { provider_id: "antigravity", model_id: "gemini-4-neon" },
+      { provider_id: "antigravity", model_id: "gemini-4-neon-eap" },
+      { provider_id: "antigravity", model_id: "antigravity/agy-demo-medium" },
       { provider_id: "kimi", model_id: "kimi-for-coding" },
     ];
     const orig = vi.mocked(fetch).getMockImplementation()!;
@@ -532,6 +533,7 @@ describe("Routing settings", () => {
         return new Response(
           JSON.stringify([
             { provider_id: "antigravity", model_id: "orb-ag-1/gemini-4-neon-high", account_id: "account-one", has_credentials: true, auth_kind: "oauth", has_base_url: true },
+            { provider_id: "antigravity", model_id: "gemini-4-argon-medium", account_id: "account-one", has_credentials: true, auth_kind: "oauth", has_base_url: true },
             { provider_id: "kimi", model_id: "kimi-k3", account_id: "account-two", has_credentials: true, auth_kind: "oauth", has_base_url: true },
           ]),
           { status: 200 },
@@ -542,7 +544,7 @@ describe("Routing settings", () => {
     await mount();
     fireEvent.click(screen.getByRole("button", { name: /Test chain/ }));
     fireEvent.click(screen.getByRole("button", { name: "Resolve" }));
-    await screen.findByText("2 eligible accounts");
+    await screen.findByText("3 eligible accounts");
     expect(screen.queryByText(/No eligible account\. The server did not provide/)).toBeNull();
   });
 });

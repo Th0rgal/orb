@@ -873,6 +873,10 @@ private def buildLiveInventory (st : DesktopState) (hover : Option WidgetId) (wi
       [mkTab inferenceTabAccountsId "Accounts" (st.inferenceTab != "chains"),
        mkTab inferenceTabChainsId s!"Chains ({st.routingChains.length})" (st.inferenceTab == "chains")]]
   if providers && st.inferenceTab == "chains" then
+    if st.providerReadFailed then
+      let failed := WidgetNode.box (BoxStyle.col 0 |>.withAlign .center |>.withJustify .center |>.withFixedSize width listH)
+        [screenTextLine theme colW (pxToSub 20) (pxToSub 13) (pxToSub 20) pal.textSecondary "Could not load accounts. Open Inference to retry."]
+      return WidgetNode.box (BoxStyle.col 0 |>.withAlign .center |>.withFixedSize width height) (tabBar ++ [failed])
     let chains := st.routingChains
     let count := chains.length
     if count == 0 then
@@ -891,9 +895,11 @@ private def buildLiveInventory (st : DesktopState) (hover : Option WidgetId) (wi
       let mainRowW := colW - actionW
       let actionNode := if ch.isDefault then
           screenTextLine theme actionW (pxToSub 20) (pxToSub 12) (pxToSub 20) pal.textMuted "Default"
-        else
+        else if st.providerCanAdmin then
           inventoryTarget theme hover (routingChainDefaultId idx) actionW rowH
             (screenTextLine theme actionW (pxToSub 20) (pxToSub 12) (pxToSub 20) pal.textPrimary "Set default" 500)
+        else
+          WidgetNode.box (BoxStyle.row 0 |>.withFixedSize actionW rowH) []
       WidgetNode.box (BoxStyle.row 0 |>.withFixedSize colW rowH)
         [buildMachineRow theme mainRowW rowH title detail "" true false, actionNode]
     let content := WidgetNode.box (BoxStyle.col 0 |>.withAlign .center)
@@ -926,7 +932,7 @@ private def buildLiveInventory (st : DesktopState) (hover : Option WidgetId) (wi
       let detail := if account.category.isEmpty || account.category == account.name then availability
         else account.category ++ " · " ++ availability
       let preference := if account.userEnabled then "Using" else "Skipped"
-      let canClear := account.cooldownSecs > 0 || account.healthState == "disabled_by_provider"
+      let canClear := st.providerCanAdmin && (account.cooldownSecs > 0 || account.healthState == "disabled_by_provider")
       let canUp := peerCount >= 2 && peerIdx > 0
       let canDown := peerCount >= 2 && peerIdx + 1 < peerCount
       let moveW := pxToSub 28

@@ -290,6 +290,7 @@ private def v2InferenceState : DesktopState :=
       { id := "xai-b", name := "xAI B", category := "xAI", userEnabled := true, globallyEnabled := true, providerType := "xai", healthState := "disabled_by_provider", healthDetail := "TOS_VIOLATION" },
       { id := "ant-1", name := "Claude", category := "Anthropic", userEnabled := true, globallyEnabled := true, providerType := "anthropic" }
     ]
+    providerCanAdmin := true
     routingChains := [
       { id := "builtin/smart", name := "Smart", isDefault := true, entriesSummary := "xai/grok-4 → anthropic/claude-opus-5-5" },
       { id := "custom/fast", name := "Fast", isDefault := false, entriesSummary := "xai/grok-4" }
@@ -299,10 +300,13 @@ private def v2InferenceState : DesktopState :=
 #guard (stepDesktopEvent 120 vp v2InferenceState (.activate (providerMoveUpId 0))).1.writeRequest.isNone
 #guard (stepDesktopEvent 120 vp v2InferenceState (.activate (providerClearHealthId 0))).1.writeRequest == some (.providerClearHealth "xai-a")
 #guard (stepDesktopEvent 120 vp v2InferenceState (.activate (providerClearHealthId 1))).1.writeRequest == some (.providerClearHealth "xai-b")
+#guard (stepDesktopEvent 120 vp { v2InferenceState with providerCanAdmin := false } (.activate (providerClearHealthId 0))).1.writeRequest.isNone
+#guard (stepDesktopEvent 120 vp { v2InferenceState with providerCanAdmin := false } (.activate (providerMoveDownId 0))).1.writeRequest == some (.providerReorder ["xai-b", "xai-a"])
 private def v2ChainsTab := (stepDesktopEvent 120 vp v2InferenceState (.activate inferenceTabChainsId)).1
 #guard v2ChainsTab.inferenceTab == "chains"
 #guard (stepDesktopEvent 120 vp v2ChainsTab (.activate (routingChainDefaultId 1))).1.writeRequest == some (.chainSetDefault "custom/fast")
 #guard (stepDesktopEvent 120 vp v2ChainsTab (.activate (routingChainDefaultId 0))).1.writeRequest.isNone
+#guard (stepDesktopEvent 120 vp { v2ChainsTab with providerCanAdmin := false } (.activate (routingChainDefaultId 1))).1.writeRequest.isNone
 
 private def v2ResourcesState : DesktopState :=
   { inferencePage with
@@ -1652,3 +1656,9 @@ private def routeButtonsText (opts : List AccountRouteOption) : String :=
   let rendered := routeButtonsText [
     ⟨"refresh", "", "Alternative routers", "Update Core to configure alternative router access."⟩]
   rendered.contains "Retry" && !rendered.contains "Refresh"
+
+#guard
+  let failedChains := { v2ChainsTab with providerReadFailed := true }
+  let (box, _) := renderWidgetTree 120 (pxToSub 900) (pxToSub 600) failedChains.initialFocusState failedChains.theme
+    (buildDesktopScreen failedChains (pxToSub 900) (pxToSub 600))
+  (renderedBoxRoot box).contains "Could not load accounts"

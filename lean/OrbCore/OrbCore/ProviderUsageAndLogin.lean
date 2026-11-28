@@ -505,7 +505,7 @@ def loadHydratedProviders (store : CoreStore) (workingDir : String)
   let uniquePrefix := fun (file : CliAuthFileInfo) =>
     if !file.prefixId.isEmpty && !file.prefixId.contains '/' &&
         (authFiles.filter (fun f => f.prefixId == file.prefixId)).size == 1 then file.prefixId else ""
-  let maxSavedOrderForType (pType : String) : Option Nat := Id.run do
+  let maxOrderJvForType (pType : String) : Option Nat := Id.run do
     let mut best : Option Nat := none
     let bump (cand : Option Nat) (cur : Option Nat) : Option Nat :=
       match cand, cur with
@@ -524,16 +524,28 @@ def loadHydratedProviders (store : CoreStore) (workingDir : String)
         best := bump (orderJv.fieldNat? (fileAccountId afType af.fileName)) best
         if !af.prefixId.isEmpty then best := bump (orderJv.fieldNat? af.prefixId) best
     return best
+  let maxDbSortOrderForType (pType : String) : Option Nat := Id.run do
+    let mut best : Option Nat := none
+    for (_, pt, so) in dbSortOrders do
+      if pt == pType then
+        best := match best with | some b => some (max b so) | none => some so
+    return best
   let savedOrderFor (id pType : String) (fallback : Nat) : Nat :=
     match orderJv.fieldNat? id with
     | some p => p
     | none =>
-      match maxSavedOrderForType pType with
-      | some m => m + 1 + fallback
+      let hasPositiveDb := dbSortOrders.any (fun (_, pt, so) => pt == pType && so > 0)
+      match dbSortOrders.find? (fun (rid, _, _) => rid == id) with
+      | some (_, _, dbSo) =>
+        match maxOrderJvForType pType with
+        | some mJv => mJv + 1 + dbSo
+        | none => if hasPositiveDb then dbSo else fallback
       | none =>
-        if dbSortOrders.any (fun (_, pt, so) => pt == pType && so > 0) then
-          (dbSortOrders.find? (fun (rid, _, _) => rid == id)).map (·.2.2) |>.getD fallback
-        else fallback
+        match maxOrderJvForType pType, (if hasPositiveDb then maxDbSortOrderForType pType else none) with
+        | some mJv, some mDb => mJv + 1 + mDb + 1 + fallback
+        | some mJv, none => mJv + 1 + fallback
+        | none, some mDb => mDb + 1 + fallback
+        | none, none => fallback
 
   let nowIso := formatEpochIso8601Utc (← nowEpoch)
   -- Accounts added by a member never inherit the operator's credentials: no instance env-key

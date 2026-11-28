@@ -48,6 +48,25 @@ const time = (value: string | null) =>
 export type RoutingTab = "chains" | "health" | "keys";
 
 /** `tab` comes from the settings page (Models → Fallback Chains, Providers, API Keys). */
+function canonicalAntigravityModelId(raw: string): string {
+  const m0 = raw.trim();
+  const m = m0.startsWith("antigravity/") ? m0.slice(12) : m0;
+  if (m === "agy-model" || m === "agy-model-high" || m === "gemini-4-carbon" || m === "gemini-4-carbon-eap" || m === "gemini-4-carbon-high") {
+    return "gemini-4-carbon-high";
+  }
+  if (m === "agy-model-medium" || m === "gemini-4-carbon-medium") return "gemini-4-carbon-medium";
+  if (m === "agy-model-low" || m === "gemini-4-carbon-low") return "gemini-4-carbon-low";
+  if (m === "agy-demo" || m === "agy-demo-high" || m === "gemini-4-argon" || m === "gemini-4-argon-eap" || m === "gemini-4-argon-high") {
+    return "gemini-4-argon-high";
+  }
+  if (m === "agy-demo-medium" || m === "gemini-4-argon-medium") return "gemini-4-argon-medium";
+  if (m === "agy-demo-low" || m === "gemini-4-argon-low") return "gemini-4-argon-low";
+  if (m === "gemini-4-neon" || m === "gemini-4-neon-eap" || m === "gemini-4-neon-high") return "gemini-4-neon-high";
+  if (m === "gemini-4-neon-medium") return "gemini-4-neon-medium";
+  if (m === "gemini-4-neon-low") return "gemini-4-neon-low";
+  return m0;
+}
+
 export function RoutingSettings(p: { onOpenClient: () => void; tab?: RoutingTab }) {
   const [tab, setTab] = createSignal<RoutingTab>(p.tab ?? "chains");
   const [catalogLoading, setCatalogLoading] = createSignal(false);
@@ -413,7 +432,7 @@ export function RoutingSettings(p: { onOpenClient: () => void; tab?: RoutingTab 
                               if (r.model_id === entry.model_id) return true;
                               const bare = r.model_id.includes("/") ? r.model_id.slice(r.model_id.indexOf("/") + 1) : r.model_id;
                               if (bare === entry.model_id) return true;
-                              if (entry.provider_id === "antigravity" && bare === `${entry.model_id}-high`) return true;
+                              if (entry.provider_id === "antigravity" && (bare === `${entry.model_id}-high` || bare === canonicalAntigravityModelId(entry.model_id))) return true;
                               if (entry.provider_id === "xai" && entry.model_id.endsWith("-latest") && bare === entry.model_id.slice(0, -7)) return true;
                               if (entry.provider_id === "kimi" && (bare === `kimi-${entry.model_id}` || (entry.model_id === "kimi-for-coding" && bare === "kimi-k3") || (entry.model_id === "kimi-for-coding-highspeed" && bare === "kimi-k2.7-code-highspeed"))) return true;
                               return false;

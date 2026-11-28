@@ -913,8 +913,8 @@ def parseChainTargetsJson
           let useCliProxy := !cliProxyKey.isEmpty && !cliProxyUrl.isEmpty && (isAg || (!hp.hasApiKey && hp.hasOAuth))
           let target : ProviderTarget :=
             if useCliProxy then
-              let credential? : Option SidecarCredential := if pinned then
-                some ⟨hp.providerType, accountRoutingFile hydratedProvs hp, hp.modelPrefix⟩ else none
+              let cred : SidecarCredential := ⟨hp.providerType, accountRoutingFile hydratedProvs hp, hp.modelPrefix⟩
+              let credential? : Option SidecarCredential := if pinned then some cred else none
               let rawModel := if isAg then mdl else OrbCore.ProxyModelRouting.cliProxyModelId effProvType mdl
               let routedModel := match credential? with
                 | some c => if c.modelPrefix.isEmpty || rawModel.isEmpty || rawModel.startsWith (c.modelPrefix ++ "/")
@@ -938,6 +938,7 @@ def parseChainTargetsJson
                 modelMaxConcurrency?   := inlineMdlConc?.orElse (fun _ => matchedModel?.bind (·.maxConcurrency?))
                 contextLimit           := inlineContextLimit
                 sourceAccountIds       := #[hp.id]
+                sourceCredentials      := #[(hp.id, cred)]
               }
             else
               let url :=
@@ -983,7 +984,8 @@ def parseChainTargetsJson
           | some idx =>
             let prev := entryTargets[idx]!
             let mergedIds := target.sourceAccountIds.foldl (fun acc sid => if acc.contains sid then acc else acc.push sid) prev.sourceAccountIds
-            entryTargets := entryTargets.set! idx { prev with sourceAccountIds := mergedIds }
+            let mergedCreds := target.sourceCredentials.foldl (fun acc pair => if acc.any (·.1 == pair.1) then acc else acc.push pair) prev.sourceCredentials
+            entryTargets := entryTargets.set! idx { prev with sourceAccountIds := mergedIds, sourceCredentials := mergedCreds }
         out := out ++ entryTargets
       else if inlineKey?.isNone && inlineUrl?.isNone && matchedHydratedList.isEmpty && !matchedRows.isEmpty then
         let mut entryTargets : Array ProviderTarget := #[]
@@ -1034,7 +1036,8 @@ def parseChainTargetsJson
           | some idx =>
             let prev := entryTargets[idx]!
             let mergedIds := target.sourceAccountIds.foldl (fun acc sid => if acc.contains sid then acc else acc.push sid) prev.sourceAccountIds
-            entryTargets := entryTargets.set! idx { prev with sourceAccountIds := mergedIds }
+            let mergedCreds := target.sourceCredentials.foldl (fun acc pair => if acc.any (·.1 == pair.1) then acc else acc.push pair) prev.sourceCredentials
+            entryTargets := entryTargets.set! idx { prev with sourceAccountIds := mergedIds, sourceCredentials := mergedCreds }
         out := out ++ entryTargets
       else
       let effProvType :=
@@ -1880,13 +1883,15 @@ private def isMissionOwnedChain
   let some mRec ← getMission? st.store mid | return false
   let rawMissionModel := mRec.modelOverride.trimAscii.toString
   let bLow := mRec.backend.trimAscii.toString.toLower
+  let defaultChainId? := (chains.find? (·.isDefault)).map (·.id)
   let effMissionModel :=
     if !rawMissionModel.isEmpty then rawMissionModel
-    else if bLow == "opencode" then "builtin/smart"
+    else if bLow == "opencode" then defaultChainId?.getD "builtin/smart"
     else if bLow == "codex" then defaultCodexModel
     else ""
   if effMissionModel.isEmpty then
-    return chainId == "default" || chainId == "builtin/smart" || chainId == "smart"
+    return chainId == "default" || chainId == "builtin/smart" || chainId == "smart" ||
+      defaultChainId? == some chainId
   match findMatchingRoutingChain? chains effMissionModel with
   | some mc => return mc.id == chainId
   | none =>
@@ -3826,6 +3831,61 @@ private def parseGoalApprovalAction? (answers : JVal) : Option String :=
   | some "accept" | some "approve" | some "allow" | some "yes" => some "accept"
   | some "reject" | some "deny" | some "decline" | some "cancel" | some "no" | some "revise" => some "revise"
   | _ => none
+
+/-- Collect live per-provider health/cooldown/quota hints from Core's routing state for
+    `GET /api/resources/overview` so inference pools and Sankey links reflect live Core truth. -/
+private def collectResourcesPoolHealthHints
+    (st : CoreAppState) (nowEpochSec : UInt64) : IO (Array InferencePoolHealthHint) := do
+  let mut hints : Array InferencePoolHealthHint := #[]
+  let dbProvs ← listAIProviders st.store
+  let trackedCooldowns ← match st.healthTracker? with
+    | some ht => snapshotActiveHealthCooldowns ht nowEpochSec
+    | none => pure #[]
+  let disabledIds ← match st.healthTracker? with
+    | some ht => snapshotDisabledHealthAccountIds ht
+    | none => pure #[]
+  let rawCooldowns := (← st.proxyCooldownsRef.get) ++ trackedCooldowns
+  let usageCached ← match st.providerHub? with
+    | some hub => hub.mu.atomically (do return (← get).usageEntries)
+    | none => pure #[]
+  let providerSlugFor (acctId : String) : String :=
+    match dbProvs.find? (fun p => p.id == acctId) with
+    | some p => p.providerType
+    | none =>
+      if acctId.startsWith "cliproxyapi:" then
+        let rest := (acctId.drop 12).toString
+        (rest.splitOn ":").headD rest
+      else (acctId.splitOn ":").headD acctId
+  for did in disabledIds do
+    hints := hints.push { provider := providerSlugFor did, health := "disabled_by_provider" }
+  for cd in rawCooldowns do
+    if cd.remainingSecs nowEpochSec > 0 then
+      hints := hints.push {
+        provider := providerSlugFor cd.accountId
+        health := "cooldown"
+        resetAt? := some (formatEpochIso8601Utc cd.untilEpoch)
+      }
+  if let some ht := st.healthTracker? then
+    for p in dbProvs do
+      let rec ← lookupAccountHealthRecord ht p.id
+      if rec.disabledByProvider then
+        hints := hints.push { provider := p.providerType, health := "disabled_by_provider" }
+      else if rec.parkedQuota || rec.poisonedSub || rec.transientStreak > 0 || rec.consecutiveTrips > 0 then
+        hints := hints.push { provider := p.providerType, health := "degraded" }
+  for u in usageCached do
+    let opt := u.payload.fieldOrNull "optimize"
+    let wins := (opt.fieldArr? "windows").getD #[]
+    let pKey? := opt.fieldStr? "primary_window"
+    let chosen? := (pKey?.bind fun pk => wins.find? (fun w => w.fieldStr? "key" == some pk)).orElse (fun _ => wins[0]?)
+    if let some pct := chosen?.bind (fun w => w.field? "pct_remaining") then
+      let reset? := chosen?.bind (fun w => w.fieldStr? "reset_at")
+      hints := hints.push {
+        provider := providerSlugFor u.providerId
+        health := "ok"
+        quotaPctRemaining? := some pct
+        resetAt? := reset?
+      }
+  return hints
 
 set_option maxHeartbeats 1600000 in
 private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowEpochSec : UInt64) : IO (Except ByteArray CoreHttpResponse) := do
@@ -6793,12 +6853,14 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
         (caller.isLegacyUnscoped || caller.role == "admin") caller.isLegacyUnscoped then
       return .ok { status := cCode, contentType := cCtype, corsOrigin? := reqOrigin?, body := cBody }
     let sHub ← match st.systemHub? with | some h => pure h | none => newSystemRuntimeHub
+    let resPoolHints ← if req.method == "GET" && cleanPath == "/api/resources/overview" then
+        collectResourcesPoolHealthHints st nowEpochSec else pure #[]
     if let some (sCode, sCtype, sBody) ← dispatchResourcesAndSystemRoute
         sHub st.store st.cfg.workingDir st.cfg.libraryRemote st.cfg.githubClientId
         st.bunkerStateRef? st.managedStore? st.relayHub? st.broadcastHub?
         req.method cleanPath rawTarget req.headers req.bodySlice.toByteArray
         caller.userId caller.username st.bootstrapAdminId
-        (caller.isLegacyUnscoped || caller.role == "admin") caller.isLegacyUnscoped then
+        (caller.isLegacyUnscoped || caller.role == "admin") caller.isLegacyUnscoped resPoolHints then
       return .ok (hardenedDownloadResponse req.method cleanPath rawTarget req.bodySlice.toByteArray sCode sCtype sBody reqOrigin?)
 
   -- Mission Detail & Delete (`GET|DELETE /api/control/missions/:id`, `SM-01`, `SM-07`)
@@ -7262,9 +7324,9 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
         | return .ok (mkJson 400 "{\"error\":\"invalid_json\"}")
       let defCid ← nextUniqueId st "chain" nowEpochSec
       let cid := chainId?.orElse (fun _ => (jv.fieldStr? "id").map (·.trimAscii.toString) |>.filter (!·.isEmpty)) |>.getD defCid
-      if req.method == "POST" && cid.startsWith "builtin/" then
-        return .ok (mkJson 400 "{\"error\":\"builtin_chain_id_reserved\"}")
       let existing? := (← loadChainRows).find? (fun c => c.fieldStr? "id" == some cid)
+      if cid.startsWith "builtin/" && (req.method == "POST" || existing?.isNone) then
+        return .ok (mkJson 400 "{\"error\":\"builtin_chain_id_reserved\"}")
       let .ok storedRows ← execParamQuery st.store.missionsDb "SELECT models_json FROM model_routing_chains WHERE id=?1;" #[cid]
         | return .ok (mkJson 500 "{\"error\":\"routing_chain_store_unavailable\"}")
       -- Entries are stored under one spelling per provider, whatever the editor sent.
@@ -8995,11 +9057,13 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
     return .ok { status := cCode, contentType := cCtype, corsOrigin? := reqOrigin?, body := cBody }
 
   let sHubFallback ← match st.systemHub? with | some h => pure h | none => newSystemRuntimeHub
+  let resPoolHintsFb ← if req.method == "GET" && cleanPath == "/api/resources/overview" then
+      collectResourcesPoolHealthHints st nowEpochSec else pure #[]
   if let some (sysCode, sysCtype, sysBody) ← dispatchResourcesAndSystemRoute
       sHubFallback st.store st.cfg.workingDir st.cfg.libraryRemote st.cfg.githubClientId
       st.bunkerStateRef? st.managedStore? st.relayHub? st.broadcastHub?
       req.method cleanPath rawTarget req.headers req.bodySlice.toByteArray
-      caller.userId caller.username st.bootstrapAdminId isAdmCaller caller.isLegacyUnscoped then
+      caller.userId caller.username st.bootstrapAdminId isAdmCaller caller.isLegacyUnscoped resPoolHintsFb then
     return .ok (hardenedDownloadResponse req.method cleanPath rawTarget req.bodySlice.toByteArray sysCode sysCtype sysBody reqOrigin?)
 
   return .ok (mkJson 404 s!"\{\"error\":\"not_found\",\"path\":{jsonEscape cleanPath}}")

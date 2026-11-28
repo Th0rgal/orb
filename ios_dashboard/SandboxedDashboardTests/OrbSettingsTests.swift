@@ -640,6 +640,9 @@ final class OrbSettingsTests: XCTestCase {
 
         XCTAssertFalse(OrbRoutingSettings.canDeleteChain("builtin/smart"))
         XCTAssertTrue(OrbRoutingSettings.canDeleteChain("custom/fast"))
+        XCTAssertFalse(OrbRoutingSettings.canCreateChainID("builtin/spoof"))
+        XCTAssertFalse(OrbRoutingSettings.canCreateChainID("   "))
+        XCTAssertTrue(OrbRoutingSettings.canCreateChainID("fast-fallback"))
     }
 
 }

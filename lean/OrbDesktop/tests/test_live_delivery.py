@@ -2072,18 +2072,30 @@ class Delivery(unittest.TestCase):
         with patch.object(live, 'Connection') as conn, contextlib.redirect_stdout(io.StringIO()) as output:
             c = conn.return_value
             c.binding = 'thomas'
-            c.get.side_effect = [accounts, health, chains]
+            c.get.side_effect = [accounts, {'user': {'role': 'admin'}}, health, chains]
             live.provider_inventory('thomas')
         lines = output.getvalue().splitlines()
         self.assertEqual(lines[0], 'accounts')
+        self.assertEqual(lines[1], 'P\tadmin\t1')
         # Ordered by priority within provider_type: xai-b (prio 0) precedes xai-a (prio 1)
-        self.assertEqual(lines[1], 'A\txai-b\txAI B\txai\t1\t1\txai')
-        self.assertEqual(lines[2], 'A\txai-a\txAI A\txai\t1\t1\txai')
-        self.assertEqual(lines[3], 'A\tag-1\tAntigravity\tantigravity\t1\t1\tantigravity')
+        self.assertEqual(lines[2], 'A\txai-b\txAI B\txai\t1\t1\txai')
+        self.assertEqual(lines[3], 'A\txai-a\txAI A\txai\t1\t1\txai')
+        self.assertEqual(lines[4], 'A\tag-1\tAntigravity\tantigravity\t1\t1\tantigravity')
         self.assertIn('H\txai-b\tcooldown\t120\tusage_limit', lines)
         self.assertIn('H\tag-1\tdisabled_by_provider\t0\tTOS_VIOLATION', lines)
+        self.assertIn('CS\t1', lines)
         self.assertIn('C\tbuiltin/smart\tSmart\t1\txai/grok-4', lines)
         self.assertIn('C\tcustom/fast\tFast\t0\tantigravity/gemini-4-neon', lines)
+
+        # Member role projects P\tadmin\t0 and transient /chains error omits CS\t1 so prior chains survive
+        with patch.object(live, 'Connection') as conn, contextlib.redirect_stdout(io.StringIO()) as output:
+            c = conn.return_value
+            c.binding = 'member'
+            c.get.side_effect = [accounts, {'user': {'role': 'member'}}, health, OSError('transient')]
+            live.provider_inventory('member')
+        mem_lines = output.getvalue().splitlines()
+        self.assertIn('P\tadmin\t0', mem_lines)
+        self.assertNotIn('CS\t1', mem_lines)
 
         # Mutations: reorder, clear cooldown (percent-encoding colons), set default chain
         with patch.object(live, 'Connection') as conn:

@@ -2241,11 +2241,16 @@ private def v2RoutingEndToEndContract
       failures := failures.push "v2: clearing targeted accounts must preserve unrelated cooldowns in both stores"
 
     -- 6) Default chain selection (`is_default`) governs requests omitting `model`,
-    --    and `POST /api/model-routing/chains` rejects reserved `builtin/` IDs.
+    --    `POST`/`PUT` reject new reserved `builtin/` IDs, and custom `is_default` chains
+    --    still qualify for `isMissionOwnedChain` `remote_quota` turn-stop on model-less missions.
     let (builtinPostSt, _) ← postJson v2App jwt "/api/model-routing/chains"
       "{\"id\":\"builtin/spoof\",\"name\":\"Spoof\",\"entries\":[{\"provider_id\":\"xai\",\"model_id\":\"grok-4\"}]}" now
     if builtinPostSt != 400 then
       failures := failures.push s!"v2: POST builtin/ chain expected 400, got {builtinPostSt}"
+    let (builtinPutSt, _) ← putJson v2App jwt "/api/model-routing/chains/builtin%2Fspoof"
+      "{\"name\":\"Spoof\",\"entries\":[{\"provider_id\":\"xai\",\"model_id\":\"grok-4\"}]}" now
+    if builtinPutSt != 400 then
+      failures := failures.push s!"v2: PUT new builtin/ chain expected 400, got {builtinPutSt}"
     let (setDefSt, setDefDoc) ← putJson v2App jwt s!"/api/model-routing/chains/{customChainId}" "{\"is_default\":true}" now
     if setDefSt != 200 || setDefDoc.fieldBool? "is_default" != some true then
       failures := failures.push s!"v2: set custom chain default expected 200 is_default=true, got {setDefSt} {renderCompact setDefDoc}"
@@ -2256,31 +2261,77 @@ private def v2RoutingEndToEndContract
     let .ok noModelResp ← dispatchCoreRequest v2App noModelReq now | throw (IO.userError "v2 no-model unexpected upgrade")
     if noModelResp.status != 200 || (← tried.get) != #[acctB] then
       failures := failures.push s!"v2: request omitting model must route to custom default chain ({acctB}), got status={noModelResp.status} tried={← tried.get}"
+    -- Verify `isMissionOwnedChain` stops a model-less running mission routed to custom `is_default` chain.
+    let defMid := "m-v2-custom-default-stop"
+    let defOwnerUid := match ← execParamQuery store.missionsDb "SELECT id FROM users WHERE role='admin' LIMIT 1;" #[] with
+      | .ok rs => (rs[1]?.bind (·[0]?)).getD app.bootstrapAdminId
+      | .error _ => app.bootstrapAdminId
+    let nowIsoDef := formatEpochIso8601Utc now
+    discard <| execParamQuery store.missionsDb
+      ("INSERT INTO missions(id,title,status,backend,model_override,workspace_id,owner_user_id,created_at,updated_at) " ++
+       "VALUES(?1,'V2 Default Stop','active','claudecode','','ws-v2',?2,?3,?3);")
+      #[defMid, defOwnerUid, nowIsoDef]
+    discard <| execParamQuery store.missionsDb
+      "INSERT INTO mission_runs(id,mission_id,generation,execution_state,owner_actor_id,terminal_reason,updated_at) VALUES(?1,?2,1,'running','v2-test','',?3);"
+      #[s!"run-{defMid}", defMid, nowIsoDef]
+    let .ok defTok ← mintMissionProxyToken store defMid defOwnerUid (now + 3600)
+      | throw (IO.userError "v2 custom-default mintMissionProxyToken failed")
+    cooldownsRef.set #[
+      { accountId := acctB, untilEpoch := now + 600, reason := .usageLimit },
+      { accountId := acctA, untilEpoch := now + 600, reason := .usageLimit }
+    ]
+    let defProxyRaw := s!"POST /v1/chat/completions HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {defTok}\r\nContent-Length: {noModelBody.utf8ByteSize}\r\n\r\n{noModelBody}"
+    let .ok defProxyReq := parseRequest defProxyRaw.toUTF8 none | throw (IO.userError "v2 custom-default stop parse failed")
+    let .ok defProxyResp ← dispatchCoreRequest v2App defProxyReq now | throw (IO.userError "v2 custom-default stop unexpected upgrade")
+    let defMissionStatus := match ← execParamQuery store.missionsDb "SELECT status FROM missions WHERE id=?1;" #[defMid] with
+      | .ok rs => (rs[1]?.bind (·[0]?)).getD ""
+      | .error _ => ""
+    let defTermReason := match ← execParamQuery store.missionsDb "SELECT terminal_reason FROM mission_runs WHERE mission_id=?1;" #[defMid] with
+      | .ok rs => (rs[1]?.bind (·[0]?)).getD ""
+      | .error _ => ""
+    cooldownsRef.set #[]
+    if defProxyResp.status != 429 || defMissionStatus != "interrupted" || defTermReason != "remote_quota" then
+      failures := failures.push s!"v2: custom is_default chain must stop model-less mission with remote_quota, got http={defProxyResp.status} status={defMissionStatus} reason={defTermReason}"
 
-    -- 7) New account added AFTER reorder must append after existing reordered accounts (never jump to rank 0).
-    let acctC := "v2-xai-0-late"
-    match ← upsertAIProvider store {
-      id := acctC, providerType := "xai", name := "xAI Latecomer", enabled := true,
-      apiKey := "sk-v2-c", updatedAt := "1700001001"
-    } with
-    | .error e => throw (IO.userError s!"v2 seed latecomer {acctC} failed: {e}")
-    | .ok () => pure ()
+    -- 7) Multiple accounts added AFTER reorder must preserve insertion `sort_order` after reordered
+    --    peers even when their IDs sort in reverse ASCII order, and unranked sidecar files must not
+    --    jump ahead of ranked DB rows.
+    let acctLateZ := "v2-xai-late-z"
+    let acctLateA := "v2-xai-late-a"
+    for (aid, aname) in #[(acctLateZ, "xAI Late Z"), (acctLateA, "xAI Late A")] do
+      match ← upsertAIProvider store {
+        id := aid, providerType := "xai", name := aname, enabled := true,
+        apiKey := "sk-v2-late", updatedAt := "1700001001"
+      } with
+      | .error e => throw (IO.userError s!"v2 seed latecomer {aid} failed: {e}")
+      | .ok () => pure ()
     let resLate := (← getJson v2App jwt s!"/api/model-routing/chains/{customChainId}/resolve" now).asArr?.getD #[]
     let idsLate := resLate.filterMap (·.fieldStr? "account_id")
-    if idsLate != #[acctB, acctA, acctC] then
-      failures := failures.push s!"v2: account added after reorder must follow reordered peers [{acctB}, {acctA}, {acctC}], got {idsLate}"
-    discard <| deleteAIProvider store acctC
+    if idsLate != #[acctB, acctA, acctLateZ, acctLateA] then
+      failures := failures.push s!"v2: latecomers after reorder must preserve chronological sort_order [{acctB}, {acctA}, {acctLateZ}, {acctLateA}], got {idsLate}"
+    discard <| deleteAIProvider store acctLateZ
+    discard <| deleteAIProvider store acctLateA
 
-    -- 8) Per-user `user_provider_prefs` must also filter pooled `cliproxyapi:*` OAuth targets:
-    --    when a member disables all OAuth accounts backing a pooled target, it is excluded;
-    --    when one of two OAuth accounts remains enabled, the pooled target stays eligible.
+    -- 8) Per-user `user_provider_prefs` must narrow pooled `cliproxyapi:*` OAuth targets strictly
+    --    to enabled accounts via `modelPrefix` (never leaking a disabled OAuth account), drop
+    --    partially-disabled unprefixed pools, and never conflate a legacy `id == "xai"` account
+    --    with a sibling `"prov-xai-2"` account sharing `provider == "xai"`.
+    let oaCred1 : SidecarCredential := ⟨"openai", "oa1.json", "orb-oa-1"⟩
+    let oaCred2 : SidecarCredential := ⟨"openai", "oa2.json", "orb-oa-2"⟩
     let oaTarget1 : ProviderTarget := {
       accountId := "cliproxyapi:openai", provider := "openai", baseUrl := "http://127.0.0.1:8317/v1",
-      apiKey := "cli-key", modelId := "gpt-6.1-sol", sourceAccountIds := #["oa-1"]
+      apiKey := "cli-key", modelId := "gpt-6.1-sol", sourceAccountIds := #["oa-1"],
+      sourceCredentials := #[("oa-1", oaCred1)]
     }
     let oaTarget2 : ProviderTarget := {
       accountId := "cliproxyapi:openai", provider := "openai", baseUrl := "http://127.0.0.1:8317/v1",
-      apiKey := "cli-key", modelId := "gpt-6.1-sol", sourceAccountIds := #["oa-1", "oa-2"]
+      apiKey := "cli-key", modelId := "gpt-6.1-sol", sourceAccountIds := #["oa-1", "oa-2"],
+      sourceCredentials := #[("oa-1", oaCred1), ("oa-2", oaCred2)]
+    }
+    let oaTargetUnprefixed : ProviderTarget := {
+      accountId := "cliproxyapi:openai", provider := "openai", baseUrl := "http://127.0.0.1:8317/v1",
+      apiKey := "cli-key", modelId := "gpt-6.1-sol", sourceAccountIds := #["oa-1", "oa-2"],
+      sourceCredentials := #[("oa-1", ⟨"openai", "oa1.json", ""⟩), ("oa-2", ⟨"openai", "oa2.json", ""⟩)]
     }
     let filteredSingle := filterChainTargetsForUserPrefs
       { id := "oa-single", name := "OA Single", targets := #[oaTarget1] } #[("oa-1", false)]
@@ -2288,8 +2339,25 @@ private def v2RoutingEndToEndContract
       { id := "oa-pair", name := "OA Pair", targets := #[oaTarget2] } #[("oa-1", false)]
     let filteredBothOfTwo := filterChainTargetsForUserPrefs
       { id := "oa-pair", name := "OA Pair", targets := #[oaTarget2] } #[("oa-1", false), ("oa-2", false)]
-    if !filteredSingle.targets.isEmpty || filteredOneOfTwo.targets.size != 1 || !filteredBothOfTwo.targets.isEmpty then
-      failures := failures.push s!"v2: pooled OAuth user_provider_prefs filtering failed: single={filteredSingle.targets.size} oneOfTwo={filteredOneOfTwo.targets.size} both={filteredBothOfTwo.targets.size}"
+    let filteredUnprefixed := filterChainTargetsForUserPrefs
+      { id := "oa-unpref", name := "OA Unpref", targets := #[oaTargetUnprefixed] } #[("oa-1", false)]
+    let narrowedOk := match filteredOneOfTwo.targets[0]? with
+      | some t => t.accountId == "oa-2" && t.modelId == "orb-oa-2/gpt-6.1-sol" &&
+          t.sidecarCredential? == some oaCred2 && t.sourceAccountIds == #["oa-2"]
+      | none => false
+    if !filteredSingle.targets.isEmpty || filteredOneOfTwo.targets.size != 1 || !narrowedOk ||
+       !filteredBothOfTwo.targets.isEmpty || !filteredUnprefixed.targets.isEmpty then
+      failures := failures.push s!"v2: pooled OAuth user_provider_prefs narrowing failed: single={filteredSingle.targets.size} oneOfTwo={filteredOneOfTwo.targets.size} narrowedOk={narrowedOk} both={filteredBothOfTwo.targets.size} unpref={filteredUnprefixed.targets.size}"
+    let directSlugChain : RoutingChain := {
+      id := "xai-direct-pair", name := "xAI Direct Pair",
+      targets := #[
+        { accountId := "xai", provider := "xai", baseUrl := "https://api.x.ai/v1", apiKey := "k1", modelId := "grok-4", sourceAccountIds := #["xai"] },
+        { accountId := "prov-xai-2", provider := "xai", baseUrl := "https://api.x.ai/v1", apiKey := "k2", modelId := "grok-4", sourceAccountIds := #["prov-xai-2"] }
+      ]
+    }
+    let filteredDirectSlug := filterChainTargetsForUserPrefs directSlugChain #[("xai", false)]
+    if filteredDirectSlug.targets.map (·.accountId) != #["prov-xai-2"] then
+      failures := failures.push s!"v2: skipping legacy account id 'xai' must not disable sibling 'prov-xai-2', got {filteredDirectSlug.targets.map (·.accountId)}"
 
     -- 9) `planChainState` must never resurrect a `disabledByProvider` account when `proxyCooldownsRef`
     --    has another active cooldown, and stale `.rateLimit` in `proxyCooldownsRef` must not shadow
@@ -2325,6 +2393,41 @@ private def v2RoutingEndToEndContract
     guardApp.chainsRef.set savedChains
     if gResp.status != 429 || !(← tried.get).isEmpty || ((String.fromUTF8! gResp.body).splitOn "usage limit").length <= 1 then
       failures := failures.push s!"v2: disabledByProvider + shadowed usageLimit must short-circuit with usage-limit 429 without resurrecting banned account, got status={gResp.status} tried={← tried.get} body={String.fromUTF8! gResp.body}"
+
+    -- 10) `GET /api/resources/overview` must reflect real Core `proxy_outcomes` 429/503 counts,
+    --     per-pool cooldown/disabled health, and degraded inference Sankey links (while still
+    --     redacting instance-wide inference telemetry for member callers).
+    let resNowIso := formatEpochIso8601Utc (← nowEpoch)
+    discard <| execParamQuery store.missionsDb
+      ("INSERT INTO proxy_usage(timestamp,model,input_tokens,output_tokens,cost_cents,provider,account_id,mission_id) " ++
+       "VALUES(?1,'grok-4',5000,1000,12,'xai',?2,?3);")
+      #[resNowIso, acctB, defMid]
+    discard <| execParamQuery store.missionsDb
+      ("INSERT INTO proxy_outcomes(timestamp,chain_id,provider,account_id,model,status,http_status,total_ms) " ++
+       "VALUES(?1,?2,'xai',?3,'grok-4','rate_limited_or_quota',429,25);")
+      #[resNowIso, customChainId, acctB]
+    discard <| execParamQuery store.missionsDb
+      ("INSERT INTO proxy_outcomes(timestamp,chain_id,provider,account_id,model,status,http_status,total_ms) " ++
+       "VALUES(?1,?2,'xai',?3,'grok-4','model_cooldown',503,30);")
+      #[resNowIso, customChainId, acctA]
+    cooldownsRef.set #[{ accountId := acctB, untilEpoch := now + 600, reason := .usageLimit }]
+    let ovAdmin ← getJson v2App jwt "/api/resources/overview?range=6h" now
+    let ovInf := ovAdmin.fieldOrNull "inference"
+    let ov429 := (ovInf.fieldNat? "throttled_429_count").getD 0
+    let xaiPool? := ((ovInf.fieldArr? "pools").getD #[]).find? (·.fieldStr? "id" == some "xai")
+    let xaiPoolHealth := (xaiPool?.bind (·.fieldStr? "health")).getD ""
+    let xaiPoolReset := (xaiPool?.bind (·.fieldStr? "reset_at")).getD ""
+    let xaiLink? := ((ovAdmin.fieldArr? "links").getD #[]).find? (fun l =>
+      l.fieldStr? "kind" == some "inference" && l.fieldStr? "source_id" == some "xai")
+    let xaiLinkDeg := (xaiLink?.bind (·.fieldBool? "degraded")).getD false
+    if ov429 < 2 || xaiPoolHealth != "cooldown" || xaiPoolReset.isEmpty || !xaiLinkDeg then
+      failures := failures.push s!"v2: /api/resources/overview must reflect real 429s, cooldown pool health, and degraded link: 429={ov429} health={xaiPoolHealth} reset={xaiPoolReset} deg={xaiLinkDeg}"
+    let ovMember ← getJson v2App memberJwt "/api/resources/overview?range=6h" now
+    let ovMemInf := ovMember.fieldOrNull "inference"
+    if (ovMemInf.fieldNat? "throttled_429_count").getD 99 != 0 ||
+       !((ovMemInf.fieldArr? "pools").getD #[]).isEmpty ||
+       !((ovMember.fieldArr? "links").getD #[]).isEmpty then
+      failures := failures.push s!"v2: member /api/resources/overview must stay redacted: {renderCompact ovMember}"
   finally
     cooldownsRef.set #[]
     discard <| execParamQuery store.missionsDb "DELETE FROM model_routing_chains WHERE id=?1;" #[customChainId]

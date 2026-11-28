@@ -76,7 +76,11 @@ struct OrbRoutingSettings: View {
                         .font(.caption).foregroundStyle(OrbStyle.textSecondary)
                 }
                 .contextMenu { chainMenu(chain) }
-                .swipeActions { Button("Delete", role: .destructive) { deleting = chain } }
+                .swipeActions {
+                    if Self.canDeleteChain(chain.selfID) {
+                        Button("Delete", role: .destructive) { deleting = chain }
+                    }
+                }
             }
         } header: { Text("Fallback chains") } footer: { Text("Requests to a chain ID try each provider/model in order, skipping accounts in cooldown. Long-press a chain for actions.") }
     }
@@ -131,6 +135,11 @@ struct OrbRoutingSettings: View {
 
     static func canDeleteChain(_ id: String) -> Bool {
         !id.hasPrefix("builtin/")
+    }
+
+    static func canCreateChainID(_ id: String) -> Bool {
+        let trimmed = id.trimmingCharacters(in: .whitespaces)
+        return !trimmed.isEmpty && !trimmed.hasPrefix("builtin/")
     }
 
     static func cooldownSecs(_ h: OrbJSON) -> Double {
@@ -377,15 +386,25 @@ private struct OrbChainEditor: View {
     @Environment(\.dismiss) private var dismiss
 
     private var valid: Bool {
-        !draft.chainID.trimmingCharacters(in: .whitespaces).isEmpty && !draft.entries.isEmpty
+        let idOK = draft.existing ? !draft.chainID.trimmingCharacters(in: .whitespaces).isEmpty : OrbRoutingSettings.canCreateChainID(draft.chainID)
+        return idOK && !draft.entries.isEmpty
             && draft.entries.allSatisfy { !$0.provider.isEmpty && !$0.model.trimmingCharacters(in: .whitespaces).isEmpty }
+    }
+
+    private var reservedBuiltinID: Bool {
+        !draft.existing && draft.chainID.trimmingCharacters(in: .whitespaces).hasPrefix("builtin/")
     }
 
     var body: some View {
         NavigationStack {
             Form {
                 Section {
-                    TextField("Chain ID (e.g. builtin/smart)", text: $draft.chainID).textInputAutocapitalization(.never).autocorrectionDisabled().disabled(draft.existing)
+                    TextField("Chain ID (e.g. fast-fallback)", text: $draft.chainID).textInputAutocapitalization(.never).autocorrectionDisabled().disabled(draft.existing)
+                    if reservedBuiltinID {
+                        Text("Chain IDs starting with \"builtin/\" are reserved.")
+                            .font(.caption)
+                            .foregroundStyle(OrbStyle.error)
+                    }
                     TextField("Name", text: $draft.name).textInputAutocapitalization(.never).autocorrectionDisabled()
                     Toggle("Strip <think> blocks", isOn: $draft.stripThinking)
                 }

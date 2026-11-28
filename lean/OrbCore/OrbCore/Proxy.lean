@@ -49,6 +49,9 @@ structure ProviderTarget where
   /-- Underlying Core provider row IDs that map to this target (including pooled `cliproxyapi:*` targets)
       so per-user `user_provider_prefs` apply to OAuth/sidecar accounts as well as direct API-key accounts. -/
   sourceAccountIds        : Array String := #[]
+  /-- Per-source-account sidecar credentials (`(accountId, SidecarCredential)`) so partial per-user
+      opt-outs on a pooled `cliproxyapi:*` target can narrow routing strictly to the user-enabled accounts. -/
+  sourceCredentials       : Array (String × SidecarCredential) := #[]
   deriving Repr, DecidableEq, Inhabited
 
 /-- In-memory sliding-window RPM, active in-flight concurrency & learned upstream header state. -/
@@ -3222,18 +3225,53 @@ def forwardProxyChain
   }
 
 /-- Filter `chain.targets` according to a user's `user_provider_prefs` (`(providerId, enabled)` pairs;
-    providers omitted from `prefs` default to `true`). Checks `tgt.accountId`, `tgt.provider`
-    (plus stripped `custom:<id>`), and any underlying `sourceAccountIds` backing a pooled target. -/
+    providers omitted from `prefs` default to `true`). Matches strictly by account identity
+    (`tgt.accountId`, `tgt.sourceAccountIds`, and `custom:<id>`), never bare provider-type slugs shared
+    across distinct accounts. When a pooled `cliproxyapi:*` target has a subset of its backing OAuth
+    accounts disabled by `userPrefs`, narrows it into prefix-pinned targets for only the enabled accounts
+    (or drops it if no enabled account has a routing prefix) so disabled OAuth accounts are never used. -/
 def filterChainTargetsForUserPrefs (chain : RoutingChain) (userPrefs : Array (String × Bool)) : RoutingChain :=
   if userPrefs.isEmpty then chain
   else
-    let allowed (tgt : ProviderTarget) : Bool :=
-      let stripped := if tgt.provider.startsWith "custom:" then (tgt.provider.drop 7).toString else tgt.provider
-      isUserProviderEnabled userPrefs tgt.accountId &&
-      isUserProviderEnabled userPrefs tgt.provider &&
-      isUserProviderEnabled userPrefs stripped &&
-      (tgt.sourceAccountIds.isEmpty || tgt.sourceAccountIds.any (isUserProviderEnabled userPrefs))
-    { chain with targets := chain.targets.filter allowed }
+    let narrowed : Array ProviderTarget := Id.run do
+      let mut out : Array ProviderTarget := #[]
+      for tgt in chain.targets do
+        let customAllowed :=
+          if tgt.provider.startsWith "custom:" then
+            let stripped := (tgt.provider.drop 7).toString
+            isUserProviderEnabled userPrefs tgt.provider && isUserProviderEnabled userPrefs stripped
+          else if tgt.accountId.isEmpty && tgt.sourceAccountIds.isEmpty then
+            isUserProviderEnabled userPrefs tgt.provider
+          else
+            true
+        if !customAllowed || !isUserProviderEnabled userPrefs tgt.accountId then
+          continue
+        if tgt.sourceAccountIds.isEmpty then
+          out := out.push tgt
+        else
+          let enabledIds := tgt.sourceAccountIds.filter (isUserProviderEnabled userPrefs)
+          if enabledIds.isEmpty then
+            continue
+          else if enabledIds.size == tgt.sourceAccountIds.size then
+            out := out.push tgt
+          else
+            -- Partial opt-out on a pooled target: steer strictly to enabled accounts via their modelPrefix.
+            for eid in enabledIds do
+              if let some (_, cred) := tgt.sourceCredentials.find? (fun (aid, _) => aid == eid) then
+                if !cred.modelPrefix.isEmpty then
+                  let routedModel :=
+                    if tgt.modelId.isEmpty || tgt.modelId.startsWith (cred.modelPrefix ++ "/") then tgt.modelId
+                    else cred.modelPrefix ++ "/" ++ tgt.modelId
+                  out := out.push {
+                    tgt with
+                    accountId := eid
+                    modelId := routedModel
+                    sidecarCredential? := some cred
+                    sourceAccountIds := #[eid]
+                    sourceCredentials := #[(eid, cred)]
+                  }
+      return out
+    { chain with targets := narrowed }
 
 /-- Estimate inference cost in USD cents from a `2xx` upstream JSON response body or explicit
     `X-Orb-Cost-Cents` header (`minimum 1 cent` whenever positive token usage is reported). -/

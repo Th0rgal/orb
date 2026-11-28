@@ -35,5 +35,8 @@ class OrbRoutingProviderTest {
 
         assertEquals(false, routingChainCanDelete("builtin/smart"))
         assertEquals(true, routingChainCanDelete("custom/fast"))
+        assertEquals(false, routingChainCanCreate("builtin/spoof"))
+        assertEquals(false, routingChainCanCreate("   "))
+        assertEquals(true, routingChainCanCreate("fast-fallback"))
     }
 }

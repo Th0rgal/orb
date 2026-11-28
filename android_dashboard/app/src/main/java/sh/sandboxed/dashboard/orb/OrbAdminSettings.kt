@@ -351,6 +351,9 @@ internal fun routingHealthNeedsAttention(h: OrbRow): Boolean {
 
 internal fun routingChainCanDelete(chainId: String): Boolean = !chainId.startsWith("builtin/")
 
+internal fun routingChainCanCreate(chainId: String): Boolean =
+    chainId.trim().let { it.isNotEmpty() && !it.startsWith("builtin/") }
+
 internal fun routingHealthSummaryLine(h: OrbRow): String {
     val parts = mutableListOf<String>()
     val totalReq = h.int("total_requests")
@@ -866,7 +869,7 @@ fun OrbRoutingSettingsPage(core: OrbCore, onBack: () -> Unit) {
                         },
                         enabled = existing == null && !busy,
                         singleLine = true,
-                        label = { Text("Chain ID (e.g. builtin/smart)") },
+                        label = { Text("Chain ID (e.g. fast-fallback)") },
                         modifier = Modifier.fillMaxWidth()
                     )
                     OutlinedTextField(
@@ -912,14 +915,17 @@ fun OrbRoutingSettingsPage(core: OrbCore, onBack: () -> Unit) {
                         Text("Strip <think> blocks", color = Color.White, fontSize = 13.sp, modifier = Modifier.weight(1f))
                         Switch(checked = stripThinking, onCheckedChange = { stripThinking = it }, enabled = !busy)
                     }
+                    val reservedBuiltin = existing == null && chainId.trim().startsWith("builtin/")
                     val validationError = editorError
+                        ?: (if (reservedBuiltin) "Chain IDs starting with \"builtin/\" are reserved." else null)
                         ?: invalidLines.firstOrNull()?.let { "Each non-empty line must be provider/model (invalid: $it)." }
                     validationError?.let { Text(it, color = OrbStyle.error, fontSize = 12.sp) }
                 }
             },
             confirmButton = {
                 TextButton(
-                    enabled = chainId.isNotBlank() && nonBlankLines.isNotEmpty() && invalidLines.isEmpty() && !busy,
+                    enabled = (if (existing != null) chainId.isNotBlank() else routingChainCanCreate(chainId)) &&
+                        nonBlankLines.isNotEmpty() && invalidLines.isEmpty() && !busy,
                     onClick = {
                         val trimmedId = chainId.trim()
                         if (existing == null && chains.any { it.id.equals(trimmedId, ignoreCase = true) }) {

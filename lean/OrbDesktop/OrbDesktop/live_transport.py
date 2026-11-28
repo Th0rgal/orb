@@ -856,6 +856,20 @@ def provider_inventory(binding):
         category = account.get('provider_type_name') or account.get('provider_type')
         rows.append(('A', ident, name, category, str(int(account.get('user_enabled', True))),
                      str(int(account.get('globally_enabled', account['enabled']))), account.get('provider_type', '')))
+    can_admin = None
+    try:
+        me = c.get('/api/auth/me')
+        if isinstance(me, dict):
+            user = me.get('user') if isinstance(me.get('user'), dict) else {}
+            role = user.get('role') or me.get('role')
+            if isinstance(me.get('is_admin'), bool):
+                can_admin = me['is_admin']
+            elif isinstance(role, str) and role:
+                can_admin = (role == 'admin')
+            elif me.get('auth_required') is False:
+                can_admin = True
+    except (urllib.error.HTTPError, urllib.error.URLError, OSError, ValueError):
+        pass
     health_rows = []
     try:
         health = c.get('/api/model-routing/health')
@@ -868,9 +882,11 @@ def provider_inventory(binding):
     except (urllib.error.HTTPError, urllib.error.URLError, OSError, ValueError):
         pass
     chain_rows = []
+    chains_ok = False
     try:
         chains = c.get('/api/model-routing/chains')
         if isinstance(chains, list):
+            chains_ok = True
             for chain in chains:
                 if not isinstance(chain, dict):
                     continue
@@ -889,12 +905,16 @@ def provider_inventory(binding):
         pass
     c.check()
     print('accounts')
+    if can_admin is not None:
+        print(f"P\tadmin\t{int(can_admin)}")
     for row in rows:
         print('\t'.join(map(label, row)))
     for row in health_rows:
         print('\t'.join(map(label, row)))
-    for row in chain_rows:
-        print('\t'.join(map(label, row)))
+    if chains_ok:
+        print('CS\t1')
+        for row in chain_rows:
+            print('\t'.join(map(label, row)))
 
 
 INBOX_PATH = '/api/control/inbox-state'

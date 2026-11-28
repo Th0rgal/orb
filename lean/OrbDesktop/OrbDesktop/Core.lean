@@ -260,6 +260,11 @@ def withLiveSources {α : Type} (isDark : Bool) (notify : IO Unit)
         return some { st with launchMachines := some nodes }
       if source.kind == .providers then
         if lines.head? != some "accounts" then return some { st with providerReadFailed := true }
+        let canAdmin := match lines.findSome? fun line => match splitTab line with
+          | ["P", "admin", flag] => some (flag == "1")
+          | _ => none with
+          | some v => v
+          | none => st.providerCanAdmin
         let healthMap : List (String × String × Nat × String) := lines.filterMap fun line =>
           match splitTab line with
           | ["H", aid, state, cd, detail] => some (aid, state, cd.toNat?.getD 0, detail)
@@ -280,12 +285,15 @@ def withLiveSources {α : Type} (isDark : Bool) (notify : IO Unit)
               healthDetail := hDetail
             } : ProviderAccount)
           | _ => none
-        let chains := lines.filterMap fun line =>
-          match splitTab line with
-          | ["C", cid, cname, isDef, summary] =>
-            some ({ id := cid, name := cname, isDefault := isDef == "1", entriesSummary := summary } : RoutingChainSummary)
-          | _ => none
-        return some { st with providers := some rows, routingChains := chains }
+        let chainsLoaded := lines.any (· == "CS\t1")
+        let chains := if chainsLoaded then
+            lines.filterMap fun line =>
+              match splitTab line with
+              | ["C", cid, cname, isDef, summary] =>
+                some ({ id := cid, name := cname, isDefault := isDef == "1", entriesSummary := summary } : RoutingChainSummary)
+              | _ => none
+          else st.routingChains
+        return some { st with providers := some rows, providerReadFailed := false, providerCanAdmin := canAdmin, routingChains := chains }
       let models := lines.filterMap fun line =>
         match splitTab line with
         | ["H", backend, harnessName, model, modelName] =>

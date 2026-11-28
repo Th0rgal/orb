@@ -661,6 +661,7 @@ structure DesktopState where
   catalogRevision : Nat := 0
   providers : Option (List ProviderAccount) := none
   providerReadFailed : Bool := false
+  providerCanAdmin : Bool := false
   routingChains : List RoutingChainSummary := []
   inferenceTab : String := "accounts"
   accountRoutePage : Option AccountRoutePage := none
@@ -2039,12 +2040,14 @@ def stepDesktopEvent (scale120 : Nat) (viewport : Rect) (st : DesktopState) (ev 
         if navId == inferenceTabChainsId then
           return ({ st with inferenceTab := "chains", fleetTopSub := 0, writeError := "" }, some viewport)
         if navId >= routingChainDefaultId 0 then
-          if let some chain := st.routingChains[navId - routingChainDefaultId 0]? then
-            if !chain.isDefault then
-              return ({ st with writeRequest := some (.chainSetDefault chain.id) }, none)
+          if st.providerCanAdmin then
+            if let some chain := st.routingChains[navId - routingChainDefaultId 0]? then
+              if !chain.isDefault then
+                return ({ st with writeRequest := some (.chainSetDefault chain.id) }, none)
         if navId >= providerClearHealthId 0 && navId < providerRouteId 0 then
-          if let some account := (st.providers.getD [])[navId - providerClearHealthId 0]? then
-            return ({ st with writeRequest := some (.providerClearHealth account.id) }, none)
+          if st.providerCanAdmin then
+            if let some account := (st.providers.getD [])[navId - providerClearHealthId 0]? then
+              return ({ st with writeRequest := some (.providerClearHealth account.id) }, none)
         if navId >= providerSettingsId 0 && navId < providerClearHealthId 0 then
           if let some account := (st.providers.getD [])[navId - providerSettingsId 0]? then
             return ({ st with accountRoutePage := some { account, previousTop := st.fleetTopSub }, fleetTopSub := 0, writeError := "" }, some viewport)
