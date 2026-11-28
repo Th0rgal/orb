@@ -9609,6 +9609,14 @@ def main (args : List String) : IO UInt32 := do
     return ← OrbCore.SelfTest.runSoftwareVersionProbeTest
   if args.contains "--prod-parity-only" then
     return ← OrbCore.SelfTest.runCyberSkillGroup false false false true
+  if args.contains "--r17-only" then
+    let nonce ← IO.monoNanosNow
+    let tmpRoot := s!"/tmp/orb-core-r17-only-{nonce}"
+    IO.FS.createDirAll tmpRoot
+    OrbCore.R17Tests.run tmpRoot
+    return 0
+  if args.contains "--suite-only" then
+    return ← OrbCore.SelfTest.runSuite (OrbCore.SelfTest.findFlag? args "--emit-evidence-log")
   OrbCore.SettingsDocumentTests.run
   OrbCore.LegacyMigrationTests.run
   OrbCore.SettingsTransferTests.run

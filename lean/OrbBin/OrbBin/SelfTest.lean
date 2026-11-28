@@ -1351,6 +1351,23 @@ def runAllTests : IO UInt32 := do
   let insecurePreflight ← insecureClient.preflight
   assertTrue "preflight-cache fails closed when mode != 0600" (isErr insecurePreflight)
 
+  -- 7c. MCP-17 desktop_mcp fractional wait_seconds & strict desktop_get_text validation
+  assertEq "MCP-17 parseWaitMillis 0.5" (OrbBin.DesktopMcp.parseWaitMillis (.num "0.5")) (some 500)
+  assertEq "MCP-17 parseWaitMillis 1.25" (OrbBin.DesktopMcp.parseWaitMillis (.num "1.25")) (some 1250)
+  assertEq "MCP-17 parseWaitMillis 2" (OrbBin.DesktopMcp.parseWaitMillis (.num "2")) (some 2000)
+  assertEq "MCP-17 parseWaitMillis rejects negative" (OrbBin.DesktopMcp.parseWaitMillis (.num "-1")) none
+  assertEq "MCP-17 parseWaitMillis rejects non-number" (OrbBin.DesktopMcp.parseWaitMillis (.str "0.5")) none
+  assertTrue "MCP-17 desktop_get_text accepts omitted method"
+    (OrbBin.DesktopMcp.validateGetTextArgs (.obj #[("display", .str ":99")]) |>.isOk)
+  assertTrue "MCP-17 desktop_get_text accepts method=ocr"
+    (OrbBin.DesktopMcp.validateGetTextArgs (.obj #[("display", .str ":99"), ("method", .str "ocr")]) |>.isOk)
+  assertTrue "MCP-17 desktop_get_text rejects method=accessibility"
+    (!(OrbBin.DesktopMcp.validateGetTextArgs (.obj #[("display", .str ":99"), ("method", .str "accessibility")]) |>.isOk))
+  assertTrue "MCP-17 desktop_get_text rejects non-string method"
+    (!(OrbBin.DesktopMcp.validateGetTextArgs (.obj #[("display", .str ":99"), ("method", .nat 1)]) |>.isOk))
+  assertTrue "MCP-17 desktop_get_text rejects unsupported max_depth"
+    (!(OrbBin.DesktopMcp.validateGetTextArgs (.obj #[("display", .str ":99"), ("method", .str "ocr"), ("max_depth", .nat 4)]) |>.isOk))
+
   let srvDummy := JVal.obj #[("name", .str "sandboxed"), ("command", .str "/bin/sandboxed-mcp"), ("args", .arr #[]), ("env", .arr #[])]
   let acpNew := "{\"id\":2,\"method\":\"session/new\",\"params\":{\"cwd\":\"/work\",\"mcpServers\":[{\"name\":\"other\"},{\"name\":\"sandboxed\",\"command\":\"stale\"}]}}".toUTF8
   match transformGrokAcpFrame acpNew srvDummy with

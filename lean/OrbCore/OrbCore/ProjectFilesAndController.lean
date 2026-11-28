@@ -279,19 +279,38 @@ def updateProjectColor
     return .error e
   return .ok (.obj #[("slug", .str clientSlug), ("color", optStrJVal color)])
 
+def validateProjectGrantPatch (jv : JVal) : Except String Unit := do
+  if let some v := jv.field? "autonomy_level" then
+    if v != .null then
+      match v.asStr? with
+      | none => throw "autonomy_level must be a string"
+      | some lvl =>
+        if !lvl.isEmpty && !(["observe", "propose", "act_reversible", "act_full"].contains lvl) then
+          throw s!"unknown autonomy_level `{lvl}`"
+  if let some v := jv.field? "parallel_missions" then
+    if v != .null then
+      if v.asNat?.isNone then
+        throw "parallel_missions must be a non-negative integer or null"
+  for f in #["merge_authority", "budget_per_tick", "pause_reason", "resume_condition", "material_bar"] do
+    if let some v := jv.field? f then
+      if v != .null && v.asStr?.isNone then
+        throw s!"{f} must be a string or null"
+
 def getProjectGrantJVal (store : CoreStore) (scopedSlug clientSlug : String) : IO JVal := do
   match ← execParamQuery store.projectsDb
-      "SELECT COALESCE(merge_authority,''), COALESCE(budget_per_tick,''), COALESCE(parallel_missions,0), COALESCE(pause_reason,''), COALESCE(resume_condition,''), COALESCE(material_bar,''), COALESCE(autonomy_level,''), COALESCE(updated_at,'') FROM project_grant WHERE slug=?1;"
+      "SELECT COALESCE(merge_authority,''), COALESCE(budget_per_tick,''), CASE WHEN parallel_missions IS NULL THEN '' ELSE CAST(parallel_missions AS TEXT) END, COALESCE(pause_reason,''), COALESCE(resume_condition,''), COALESCE(material_bar,''), COALESCE(autonomy_level,''), COALESCE(updated_at,'') FROM project_grant WHERE slug=?1;"
       #[scopedSlug] with
   | .ok rows =>
     if rows.size > 1 then
       let r := rows[1]!
-      let par := cellU64 r 2
+      let parVal : JVal := match (cell r 2).trimAscii.toString.toNat? with
+        | some n => JVal.nat n
+        | none => .null
       return .obj #[
         ("slug", .str clientSlug),
         ("merge_authority", optStrJVal (cell r 0)),
         ("budget_per_tick", optStrJVal (cell r 1)),
-        ("parallel_missions", if par == 0 then .null else JVal.uint64 par),
+        ("parallel_missions", parVal),
         ("pause_reason", optStrJVal (cell r 3)),
         ("resume_condition", optStrJVal (cell r 4)),
         ("material_bar", optStrJVal (cell r 5)),
@@ -314,6 +333,8 @@ def getProjectGrantJVal (store : CoreStore) (scopedSlug clientSlug : String) : I
     return .obj #[("slug", .str clientSlug)]
 
 def upsertProjectGrantJVal (store : CoreStore) (scopedSlug clientSlug : String) (jv : JVal) (nowIso : String) : IO (Except String JVal) := do
+  if let .error e := validateProjectGrantPatch jv then
+    return .error e
   let mergeAuth := (jv.fieldStr? "merge_authority").getD ""
   let budget := (jv.fieldStr? "budget_per_tick").getD ""
   let parStr := match jv.fieldNat? "parallel_missions" with | some n => s!"{n}" | none => ""
@@ -911,6 +932,13 @@ def dispatchProjectAndControllerRoutes?
     -- `POST /api/projects/:slug/status`
     if method == "POST" && tail == ["status"] then
       let jv := (OrbBin.Json.parseBytes bodyBytes).toOption.getD (.obj #[])
+      if let some v := jv.field? "consumed_steer_ids" then
+        if v != .null then
+          return some (jsonResp 501 (.obj #[
+            ("ok", .bool false),
+            ("error", .str "unsupported"),
+            ("message", .str "Project steers were retired; consumed_steer_ids is not accepted or acknowledged.")
+          ]))
       let stVal := (jv.fieldStr? "status").getD "active"
       discard <| upsertProjectRecord store scopedSlug clientSlug "" "" stVal "" nowIso
         (if isLegacyUnscoped then none else some callerUserId)
@@ -921,11 +949,21 @@ def dispatchProjectAndControllerRoutes?
 
     -- `GET|POST /api/projects/:slug/grant`
     if tail == ["grant"] then
+      let .ok projRows ← execParamQuery store.projectsDb
+          "SELECT p.slug FROM projects p LEFT JOIN project_owners o ON o.slug=p.slug WHERE (p.slug=?1 OR p.slug=?2) AND (?3='1' OR o.owner_user_id=?4) ORDER BY (p.slug=?1) DESC LIMIT 1;"
+          #[scopedSlug, clientSlug, if isAdmin then "1" else "0", callerUserId]
+        | return some (jsonErr 500 "db_error")
       if method == "GET" then
-        return some (jsonResp 200 (← getProjectGrantJVal store scopedSlug clientSlug))
+        let resolvedSlug := if projRows.size > 1 then cell projRows[1]! 0 else scopedSlug
+        return some (jsonResp 200 (← getProjectGrantJVal store resolvedSlug clientSlug))
       else if method == "POST" || method == "PUT" then
-        let jv := (OrbBin.Json.parseBytes bodyBytes).toOption.getD (.obj #[])
-        match ← upsertProjectGrantJVal store scopedSlug clientSlug jv nowIso with
+        let .ok jv := OrbBin.Json.parseBytes bodyBytes
+          | return some (jsonErr 400 "invalid_json")
+        if let .error e := validateProjectGrantPatch jv then
+          return some (jsonErr 400 e)
+        if projRows.size ≤ 1 then return some (jsonErr 404 "not_found")
+        let resolvedSlug := cell projRows[1]! 0
+        match ← upsertProjectGrantJVal store resolvedSlug clientSlug jv nowIso with
         | .ok gv => return some (jsonResp 200 gv)
         | .error e => return some (jsonErr 500 e)
 

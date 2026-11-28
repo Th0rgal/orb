@@ -985,6 +985,7 @@ def renderHydratedProviderJv (hp : HydratedProvider) (userEnabled? : Option Bool
     ("use_for_backends", .arr ((if hp.nativeOnly then #["antigravity"] else hp.useForBackends).map JVal.str)),
     ("custom_models", .arr hp.customModels),
     ("priority", JVal.nat hp.priority),
+    ("auto_reset_on_limit", .bool false),
     ("status", statusObj),
     ("created_at", .str hp.createdAt),
     ("updated_at", .str hp.updatedAt)

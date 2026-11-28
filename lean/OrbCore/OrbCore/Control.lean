@@ -4213,7 +4213,7 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
     return .ok (mkJson 200 s!"\{\"allow_exec\":true,\"allowed\":true,\"grant_id\":{jsonEscape lease.grantId},\"scope\":{jsonEscape lease.scope},\"allowed_units\":{unitsRaw},\"require_force_cmd\":{rfStr},\"bunker_state\":{bunkerState.toNat},\"expires_at\":{lease.expiresAtEpoch},\"lease_epoch\":{liveLeaseEp}}")
 
   -- 5b0. Retired dynamic MCP management surface: explicit unsupported, never fabricated.
-  if cleanPath == "/api/mcp" || cleanPath == "/api/tools" then
+  if cleanPath == "/api/mcp" || cleanPath == "/api/tools" || cleanPath.startsWith "/api/tools/" then
     return .ok (mkJson 501 "{\"ok\":false,\"error\":\"unsupported\",\"message\":\"Dynamic MCP server management and configured HTTP transport are not implemented; stdio servers from SANDBOXED_MCP_STDIO_SERVERS remain available.\"}")
 
   -- 5b. Unified Control-Plane MCP Gateway (`/api/mcp/session`, `/api/mcp/external-sessions`, `/api/mcp/renew`, `/api/mcp/capabilities`, `/api/mcp/call`)
@@ -6917,6 +6917,9 @@ private def dispatchCoreRequestRaw (st : CoreAppState) (req : HttpRequest) (nowE
         let rawBody := String.fromUTF8? req.bodySlice.toByteArray |>.getD ""
         let .ok jv := OrbBin.Json.parse rawBody
           | return .ok (mkJson 400 "{\"error\":\"invalid_json\"}")
+        if let some arVal := jv.field? "auto_reset_on_limit" then
+          if arVal != .null && arVal != .bool false then
+            return .ok (mkJson 501 "{\"ok\":false,\"error\":\"unsupported\",\"field\":\"auto_reset_on_limit\",\"message\":\"Automatic vendor usage reset redemption is not implemented; auto_reset_on_limit cannot be enabled.\"}")
         let existing? ← getAIProvider? st.store pid
         if existing?.isNone then
           if !isAdm || !pid.startsWith "cliproxyapi:" then

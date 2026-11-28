@@ -467,6 +467,36 @@ def setPersistedNodeCordoned (dataRoot nodeName : String) (cordoned : Bool) : IO
   discard <| (IO.FS.writeFile path ((renderCompact outObj) ++ "\n")).toBaseIO
   return true
 
+/-- Authoritative remote harness & typed-launch capability contract (`FLT-14`),
+    shared between `GET /api/remote-nodes` capability discovery and `RemoteDispatch` preflight. -/
+def remoteSupportedHarnesses : Array String :=
+  #["claudecode", "opencode", "grok", "codex", "antigravity"]
+
+def remoteRequiresProxyHarnesses : Array String :=
+  #["claudecode", "opencode", "codex"]
+
+def remoteLaunchErrorPrefixes : Array String := #[
+  "REMOTE_HARNESS_UNSUPPORTED",
+  "REMOTE_PROMPT_REQUIRED",
+  "REMOTE_GOAL_UNSUPPORTED",
+  "REMOTE_AUTH_REQUIRED"
+]
+
+def normalizeRemoteHarness (backend : String) : String :=
+  let bLow := backend.trimAscii.toString.toLower
+  if bLow == "claude" then "claudecode" else bLow
+
+/-- Pure typed preflight validator matching `buildRemoteLaunchCapabilitiesJVal` (`FLT-14`). -/
+def validateRemoteLaunchPlan (backend prompt proxyBase : String) : Except String String := do
+  let harness := normalizeRemoteHarness backend
+  if !remoteSupportedHarnesses.contains harness then
+    throw s!"REMOTE_HARNESS_UNSUPPORTED: unsupported remote harness `{backend}`"
+  if prompt.trimAscii.toString.isEmpty then
+    throw "REMOTE_PROMPT_REQUIRED: remote mission turn requires a non-empty prompt"
+  if remoteRequiresProxyHarnesses.contains harness && proxyBase.trimAscii.toString.isEmpty then
+    throw s!"REMOTE_AUTH_REQUIRED: SANDBOXED_PUBLIC_URL (or SANDBOXED_PROXY_PUBLIC_URL) must be configured for remote {harness} turns"
+  return harness
+
 /-- Build server-advertised typed remote launch capabilities (`RemoteLaunchCapabilities`). -/
 def buildRemoteLaunchCapabilitiesJVal : IO JVal := do
   let p1 := ((← IO.getEnv "SANDBOXED_PROXY_PUBLIC_URL").getD "").trimAscii.toString
@@ -474,18 +504,12 @@ def buildRemoteLaunchCapabilitiesJVal : IO JVal := do
   let proxyConfigured := !p1.isEmpty || !p2.isEmpty
   return .obj #[
     ("typed", .bool true),
-    ("harnesses", .arr #[.str "claudecode", .str "opencode", .str "grok", .str "codex", .str "antigravity"]),
+    ("harnesses", .arr (remoteSupportedHarnesses.map JVal.str)),
     ("goal_harnesses", .arr (RemoteGoal.harnesses.map JVal.str)),
-    ("requires_proxy_harnesses", .arr #[.str "claudecode", .str "opencode", .str "codex"]),
+    ("requires_proxy_harnesses", .arr (remoteRequiresProxyHarnesses.map JVal.str)),
     ("raw_command", .bool true),
     ("proxy_url_configured", .bool proxyConfigured),
-    ("error_prefixes", .arr #[
-      .str "REMOTE_HARNESS_UNSUPPORTED",
-      .str "REMOTE_PROMPT_REQUIRED",
-      .str "REMOTE_MODEL_REQUIRED",
-      .str "REMOTE_GOAL_UNSUPPORTED",
-      .str "REMOTE_AUTH_REQUIRED"
-    ])
+    ("error_prefixes", .arr (remoteLaunchErrorPrefixes.map JVal.str))
   ]
 
 private def optNatJVal (v? : Option Nat) : JVal :=
@@ -2066,6 +2090,15 @@ def dispatchRemoteFleetAndRelayRoutes?
           ("ok", .bool true), ("job_id", .str jid), ("state", .str "cancelled"),
           ("cancel_requested", .bool true), ("confirmed", .bool true)
         ]))
+      -- Record durable cancellation intent BEFORE calling the node (`FLT-04`): if the
+      -- node is partitioned or returns a failure status, pollers/reattach keep retrying
+      -- `/cancel` instead of dropping intent or falsely claiming confirmation.
+      discard <| execParamQuery store.missionsDb
+        "UPDATE remote_node_jobs SET state='cancel_requested', updated_at=?2 WHERE job_id=?1 AND state NOT IN ('terminal','completed','succeeded','failed','aborted','cancelled','lost');"
+        #[jid, nowIso]
+      discard <| execParamQuery store.projectsDb
+        "UPDATE remote_jobs SET state='cancel_requested', heartbeat_at=?2, updated_at=?2 WHERE job_id=?1 AND state NOT IN ('terminal','completed','succeeded','failed','aborted','cancelled','lost');"
+        #[jid, nowIso]
       let hdrs := #[
         ("x-sandboxed-cancel-actor", "core"),
         ("x-sandboxed-cancel-reason", "Durable job cancelled via API")
@@ -2074,21 +2107,24 @@ def dispatchRemoteFleetAndRelayRoutes?
       | .error e =>
         return some (jsonResp 502 (.obj #[
           ("ok", .bool false), ("error", .str "cancel_not_confirmed"),
+          ("cancel_requested", .bool true), ("confirmed", .bool false),
           ("message", .str e), ("job_id", .str jid)
         ]))
       | .ok (st, txt, jv?, _, _) =>
-        if !(200 ≤ st && st < 300) then
+        let missingOnNode := st == 404 && txt.trimAscii.toString == "job not found"
+        if !(200 ≤ st && st < 300) && !missingOnNode then
           return some (jsonResp 502 (.obj #[
             ("ok", .bool false), ("error", .str "cancel_not_confirmed"),
+            ("cancel_requested", .bool true), ("confirmed", .bool false),
             ("message", .str s!"node HTTP {st}: {txt}"), ("job_id", .str jid)
           ]))
-        let confirmed := match jv? with
+        let confirmed := missingOnNode || match jv? with
           | some j => (j.fieldBool? "cancel_requested").getD false
           | none => false
         if !confirmed then
           return some (jsonResp 202 (.obj #[
             ("ok", .bool false), ("error", .str "cancel_not_confirmed"),
-            ("cancel_requested", .bool false), ("confirmed", .bool false), ("job_id", .str jid)
+            ("cancel_requested", .bool true), ("confirmed", .bool false), ("job_id", .str jid)
           ]))
         discard <| execParamQuery store.missionsDb
           "UPDATE remote_node_jobs SET state='cancelled',updated_at=?2 WHERE job_id=?1;" #[jid, nowIso]

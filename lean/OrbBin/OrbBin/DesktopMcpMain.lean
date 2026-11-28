@@ -299,7 +299,7 @@ private def toolStopSession (args : JVal) : IO (Except String String) := do
   let killedJson := renderCompact (.arr (killed.map JVal.int))
   return .ok s!"\{\"success\": true, \"display\": {escapeJsonString displayId}, \"killed_pids\": {killedJson}}"
 
-private def parseWaitMillis (v : JVal) : Option Nat :=
+def parseWaitMillis (v : JVal) : Option Nat :=
   match v with
   | .num raw =>
     let s := raw.trimAscii.toString
@@ -443,11 +443,23 @@ private def toolI3Command (args : JVal) : IO (Except String String) := do
       return .ok trimmed
     return .ok s!"\{\"success\": true, \"output\": {escapeJsonString trimmed}}"
 
+def validateGetTextArgs (args : JVal) : Except String Unit := do
+  match args.field? "method" with
+  | none | some .null => pure ()
+  | some (.str raw) =>
+    let method := raw.trimAscii.toString.toLower
+    if method != "ocr" then
+      throw s!"unsupported desktop_get_text method: {method}; only 'ocr' is implemented"
+  | some _ =>
+    throw "unsupported desktop_get_text method: expected 'ocr'; only 'ocr' is implemented"
+  if let some md := args.field? "max_depth" then
+    if md != .null then
+      throw "unsupported desktop_get_text argument: max_depth requires accessibility mode, which is not implemented"
+
 private def toolGetText (args : JVal) : IO (Except String String) := do
   let some displayId := args.fieldStr? "display" | return .error "Missing 'display' argument"
-  let method := ((args.fieldStr? "method").getD "ocr").trimAscii.toString.toLower
-  if method != "ocr" then
-    return .error s!"unsupported desktop_get_text method: {method}; only 'ocr' is implemented"
+  if let .error e := validateGetTextArgs args then
+    return .error e
   let wd ← getWorkingDir
   let screenshotsDir := wd / "screenshots"
   try IO.FS.createDirAll screenshotsDir catch e => return .error s!"Failed to create screenshots dir: {e}"

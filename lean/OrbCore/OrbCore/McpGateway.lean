@@ -961,8 +961,8 @@ def dispatchMcpToolCall
     ])
 
   | "cancel_action" =>
-    let aid := (args.fieldStr? "action_id").orElse (fun _ => args.fieldStr? "id") |>.getD ""
-    if aid.trimAscii.toString.isEmpty then
+    let aid := ((args.fieldStr? "action_id").orElse (fun _ => args.fieldStr? "id") |>.getD "").trimAscii.toString
+    if aid.isEmpty then
       return mcpErr "invalid_arguments" "missing action_id"
     if ← ManagedSpawnActions.isSpawnAction store aid then
       match ← ManagedSpawnActions.cancel store aid { userId := callerUserId, missionId := callerMid } operatorIsAdmin with
@@ -970,18 +970,25 @@ def dispatchMcpToolCall
       | .error _ => return mcpErr "not_found" "Action not found"
     if let some rec ← lookupCallerAction? aid then
       let curSt := (rec.fieldStr? "state").getD "succeeded"
-      let cancelled := curSt == "queued" || curSt == "pending"
-      if cancelled then
-        let .ok _ ← execParamQuery store.projectsDb
-          "UPDATE mcp_actions_v1 SET state='cancelled', updated_at=?2 WHERE id=?1;" #[aid, nowIso]
-          | return mcpErr "cancel_failed" "action receipt update failed" false
+      let canCancel := curSt == "queued" || curSt == "pending"
+      let mut didCancel := false
+      if canCancel then
+        match ← execParamQuery store.projectsDb
+            "UPDATE mcp_actions_v1 SET state='cancelled', updated_at=?2 WHERE id=?1 AND state IN ('queued','pending') RETURNING id;"
+            #[aid, nowIso] with
+        | .ok rows => didCancel := rows.size > 1
+        | .error _ => return mcpErr "cancel_failed" "action receipt update failed" false
+      let finalSt ← if didCancel then pure "cancelled" else do
+        match ← lookupCallerAction? aid with
+        | some refreshed => pure ((refreshed.fieldStr? "state").getD curSt)
+        | none => pure curSt
       return mcpOk (.obj #[
         ("action_id", .str aid),
-        ("cancelled", .bool cancelled),
-        ("state", .str (if cancelled then "cancelled" else curSt)),
-        ("accepted", .str "yes")
+        ("cancelled", .bool didCancel),
+        ("state", .str finalSt),
+        ("accepted", .str (if didCancel then "yes" else "no"))
       ])
-    return mcpOk (.obj #[("action_id", .str aid), ("cancelled", .bool false), ("state", .str "not_found")])
+    return mcpErr "not_found" "Action not found"
 
   | "get_fleet_sweep" =>
     let scopeTree := !callerMid.isEmpty && !claims.isExternal && !directOperator
@@ -1859,6 +1866,11 @@ def dispatchMcpToolCall
   | "update_mission_settings" => withReservedMcpOutcome store claims callerUserId toolName idemKeyTop nowIso do
     let mid := (args.fieldStr? "mission_id").getD callerMid
     if mid.isEmpty then return ← failReservedOrErr store claims callerUserId toolName idemKeyTop "invalid_arguments" "missing mission_id" nowIso
+    if let .obj kvs := args then
+      for (k, v) in kvs do
+        if v != .null && #["agent", "config_profile", "fast_mode"].contains k then
+          return ← failReservedOrErr store claims callerUserId toolName idemKeyTop "unsupported"
+            s!"Field `{k}` is not supported by update_mission_settings; no settings were changed." nowIso false mid
     let some existing ← getMission? store mid
       | return ← failReservedOrErr store claims callerUserId toolName idemKeyTop "not_found" "mission_not_found" nowIso false mid
     let allowed ← (show IO Bool from do
@@ -2409,9 +2421,8 @@ def dispatchMcpToolCall
     if slug.isEmpty then return ← failReservedOrErr store claims callerUserId toolName idemKeyTop "invalid_arguments" "missing project slug" nowIso
     if idemKeyTop.isEmpty then
       return mcpErr "invalid_arguments" "missing idempotency_key"
-    if let some lvl := args.fieldStr? "autonomy_level" then
-      if !(["observe", "propose", "act_reversible", "act_full"].contains lvl) then
-        return ← failReservedOrErr store claims callerUserId toolName idemKeyTop "invalid_arguments" s!"unknown autonomy_level `{lvl}`" nowIso
+    if let .error e := validateProjectGrantPatch args then
+      return ← failReservedOrErr store claims callerUserId toolName idemKeyTop "invalid_arguments" e nowIso
     match ← execParamQuery store.projectsDb "SELECT slug FROM projects WHERE slug=?1 LIMIT 1;" #[slug] with
     | .ok rows => unless rows.size > 1 do return ← failReservedOrErr store claims callerUserId toolName idemKeyTop "not_found" s!"Project `{slug}` not found" nowIso
     | .error e => return ← failReservedOrErr store claims callerUserId toolName idemKeyTop "internal_error" e nowIso true
@@ -2492,7 +2503,10 @@ def dispatchMcpToolCall
           finalRes := finalRes.setField "auto_resume" (.bool true)
     return mcpOk finalRes
 
-  | "secret_request" | "secret_put" | "secret_delete" | "secret_move" =>
+  | "secret_put" | "secret_delete" | "secret_move" =>
+    return mcpErr "unsupported" s!"`{toolName}` is not implemented; Bitwarden secret mutations (write/delete/move) are unsupported and no request was queued."
+
+  | "secret_request" =>
     let bwProj := (args.fieldStr? "bitwarden_project").orElse (fun _ => args.fieldStr? "project") |>.getD "unassigned"
     let secName := (args.fieldStr? "name").orElse (fun _ => args.fieldStr? "secret_name") |>.getD ""
     let val := (args.fieldStr? "value").getD ""

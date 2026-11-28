@@ -1037,14 +1037,19 @@ def prepareRemoteHarnessCommand
   let tags := parseTagsArray spec.tagsJson
   let wsPrefix := buildWorkspacePrefix coreWorkDir spec.workingDirectory tags
   let (apiBase, proxyBase) ← resolveRemoteCallbackUrls sup effNodeId
-  let mcpEnvs ← mintMissionScopedMcpEnv store sup spec.missionId spec.ownerUserId spec.project apiBase spec.sideQuestion nowSec
   if let some rawCmd := spec.rawCommandOverride?.filter (fun s => !s.trimAscii.toString.isEmpty) then
+    let mcpEnvs ← mintMissionScopedMcpEnv store sup spec.missionId spec.ownerUserId spec.project apiBase spec.sideQuestion nowSec
     return .ok {
       command     := wsPrefix ++ rawCmd
       envPairs    := mcpEnvs.push ("NO_COLOR", "1")
       managedAuth := #[]
       proxyToken  := ""
     }
+  -- Shared typed launch-plan validation (`FLT-14`) before minting tokens or side effects.
+  let harness ← match validateRemoteLaunchPlan spec.backend spec.prompt proxyBase with
+    | .ok h => pure h
+    | .error e => return .error e
+  let mcpEnvs ← mintMissionScopedMcpEnv store sup spec.missionId spec.ownerUserId spec.project apiBase spec.sideQuestion nowSec
   let trimmedPrompt := spec.prompt.trimAscii.toString
   let isPlanPrompt :=
     trimmedPrompt == "/plan" || trimmedPrompt.startsWith "/plan " || trimmedPrompt.startsWith "/plan\n"
@@ -1072,12 +1077,10 @@ def prepareRemoteHarnessCommand
       some s!"{apiBase}/api/mcp/rpc"
     else
       none
-  let bLow := spec.backend.trimAscii.toString.toLower
-  let harness := if bLow == "claude" then "claudecode" else bLow
 
   if harness == "opencode" then
     if proxyBase.isEmpty then
-      return .error "SANDBOXED_PUBLIC_URL (or SANDBOXED_PROXY_PUBLIC_URL) must be configured for remote opencode turns"
+      return .error "REMOTE_AUTH_REQUIRED: SANDBOXED_PUBLIC_URL (or SANDBOXED_PROXY_PUBLIC_URL) must be configured for remote opencode turns"
     let pTok ← match ← mintMissionProxyToken store spec.missionId spec.ownerUserId (nowSec + 86400) with
       | .ok t => pure t
       | .error e => return .error s!"failed to mint mission proxy token: {e}"
@@ -1289,7 +1292,7 @@ def prepareRemoteHarnessCommand
     }
 
   else
-    return .error s!"unsupported remote harness `{spec.backend}`"
+    return .error s!"REMOTE_HARNESS_UNSUPPORTED: unsupported remote harness `{spec.backend}`"
 
 /-! ## NDJSON Line Ingestion (`claudecode` + `opencode` + `codex` + `grok` + `antigravity`) -/
 
