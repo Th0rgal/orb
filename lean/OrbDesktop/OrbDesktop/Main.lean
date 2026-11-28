@@ -448,9 +448,9 @@ private def shapeOpenTailLinesCached (cache : TranscriptRenderCache) (ac : Text.
 /-- Compute the transcript pane logical width in `SubPx`, matching `Screens.buildDesktopScreen`. -/
 @[inline] private def transcriptPaneWidth (st : DesktopState) (availW : SubPx) : SubPx :=
   let mainW : SubPx := availW - st.sidebarWidth
-  if st.screen == .missionSplitDiff then pxToSub 688
+  if st.screen == .missionSplitDiff then pxToSub 688 - st.theme.borderWidth
   else if st.screen == .missionTranscript && st.sidePanelOpen then
-    mainW - min (pxToSub 480) (mainW / 2)
+    mainW - min (pxToSub 480) (mainW / 2) - st.theme.borderWidth
   else mainW
 
 /-- Build a virtualized offscreen spacer that preserves exact vertical height AND attaches
@@ -791,11 +791,7 @@ def renderDesktopView (rt : Runtime.RuntimeState DesktopState) :
     if liveWindow then #[.clipPushRounded winClipRect winRadii] ++ prims ++ #[.clipPop] else prims
   let scenePrims : Scene :=
     if st.screen == .missionTranscript || st.screen == .missionSplitDiff then
-      let mainW := availW - st.sidebarWidth
-      let paneW :=
-        if st.screen == .missionSplitDiff then pxToSub 688 - theme.borderWidth
-        else if st.sidePanelOpen then mainW - min (pxToSub 480) (mainW / 2) - theme.borderWidth
-        else mainW
+      let paneW := transcriptPaneWidth st availW
       let fadeRect : Rect := {
         x := Int.ofNat (scaleSubPx sc st.sidebarWidth),
         y := Int.ofNat (scaleSubPx sc chromeHeaderHeightSub),

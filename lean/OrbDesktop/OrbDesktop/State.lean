@@ -1337,13 +1337,22 @@ private def stepSharedControls (st : DesktopState) (id : WidgetId) : Option Desk
     let nextRef := if st.diffRef == "Working tree vs HEAD" then "HEAD~1 vs HEAD" else "Working tree vs HEAD"
     some { st with diffRef := nextRef }
   else if id == diffUnifiedId then some { st with diffMode := "unified" }
-  else if id == diffSplitId || id == splitHeaderSplitId then some { st with diffMode := "split" }
+  else if id == diffSplitId then some { st with diffMode := "split" }
+  else if id == splitHeaderSplitId then
+    if !st.liveData && st.screen == .missionSplitDiff then
+      some { st with screen := .missionTranscript, sidePanelOpen := true, sidePanelTab := "diff" }
+    else
+      some { st with diffMode := if st.diffMode == "split" then "unified" else "split" }
   else if id == splitHeaderExpandId then
     some { st with diffMode := if st.diffMode == "unified" then "split" else "unified" }
   else if id == splitHeaderSidebarId then some { st with sidebarHidden := !st.sidebarHidden }
   else if id == splitHeaderSearchId then some (openSearchModal st)
-  else if id == splitHeaderFilesTabId then some (toggleSidePanel st "files")
-  else if id == splitHeaderChangesTabId then some (toggleSidePanel st "diff")
+  else if id == splitHeaderFilesTabId then
+    let nextScreen := if !st.liveData && st.screen == .missionSplitDiff then .missionTranscript else st.screen
+    some { st with sidePanelOpen := true, sidePanelTab := "files", screen := nextScreen }
+  else if id == splitHeaderChangesTabId then
+    let nextScreen := if !st.liveData && st.screen == .missionTranscript then .missionSplitDiff else st.screen
+    some { st with sidePanelOpen := true, sidePanelTab := "diff", screen := nextScreen }
   else if id == diffRefreshId || id == splitHeaderRefreshId then some { st with diffRefreshCount := st.diffRefreshCount + 1 }
   else if id == splitHeaderCloseId then
     let nextScreen := if !st.liveData && st.screen == .missionSplitDiff then .missionTranscript else st.screen

@@ -803,7 +803,33 @@ private def verifyWaylandImeSerialGuard : IO Unit := do
   let c0 := DesktopState.forScreen .controlEmpty
   for (lbl, wid, chkP) in [("draftProject", draftProjectPickerId, false), ("draftMachine", 720, false), ("draftFolder", draftDirectoryPickerId, false), ("attach", 3, false), ("draftModel", 722, false)] do
     assertVisualChange s!"01_{lbl}" c0 wid chkP
-  assertVisualChange "04_diffFileChip" (DesktopState.forScreen .missionSplitDiff) diffFileChipId true
+  let s04 := DesktopState.forScreen .missionSplitDiff
+  assertVisualChange "04_diffFileChip" s04 diffFileChipId true
+  for (lbl, wid, chkP) in [
+    ("splitExpand", splitHeaderExpandId, false),
+    ("splitToggle", splitHeaderSplitId, false),
+    ("splitSidebar", splitHeaderSidebarId, false),
+    ("splitFilesTab", splitHeaderFilesTabId, false),
+    ("splitRefresh", splitHeaderRefreshId, false),
+    ("splitClose", splitHeaderCloseId, false)
+  ] do
+    assertVisualChange s!"04_{lbl}" s04 wid chkP
+  -- Search icon (413) opens the Search modal overlay (rendered by Main.lean over buildDesktopScreen).
+  let (s04Search, s04SearchDmg) := stepDesktopEvent 120 vpDev s04 (.activate splitHeaderSearchId)
+  unless s04SearchDmg.isSome && (s04Search.modal matches .searchPalette _) do
+    throw <| IO.userError "04_splitSearch (413) did not open Search modal with damage"
+  -- Clicking the already-selected Changes tab (415) keeps the diff pane open rather than closing it,
+  -- and clicking it after switching to Files restores the full-height split diff view.
+  let (s04ChangesSame, _) := stepDesktopEvent 120 vpDev s04 (.activate splitHeaderChangesTabId)
+  unless s04ChangesSame.sidePanelOpen && s04ChangesSame.sidePanelTab == "diff" && s04ChangesSame.screen == .missionSplitDiff do
+    throw <| IO.userError "04_splitChangesTab (415) unexpectedly closed or altered the Changes tab"
+  let (s04Files, _) := stepDesktopEvent 120 vpDev s04 (.activate splitHeaderFilesTabId)
+  unless s04Files.sidePanelOpen && s04Files.sidePanelTab == "files" && s04Files.screen == .missionTranscript do
+    throw <| IO.userError "04_splitFilesTab (414) did not switch to the Files side panel"
+  assertVisualChange "04_splitChangesTabFromFiles" s04Files splitHeaderChangesTabId false
+  let (s04Restored, _) := stepDesktopEvent 120 vpDev s04Files (.activate splitHeaderChangesTabId)
+  unless s04Restored.sidePanelOpen && s04Restored.sidePanelTab == "diff" && s04Restored.screen == .missionSplitDiff do
+    throw <| IO.userError "04_splitChangesTab (415) from Files did not restore missionSplitDiff"
   assertVisualChange "05_agentSoftware" (DesktopState.forScreen .machinesFleet) fleetSoftwareId true
   let s06 := DesktopState.forScreen .settingsGeneral
   for (lbl, wid) in [("models", 111), ("agents", 112), ("security", 113), ("notifs", 114), ("disconnect", settingsDisconnectId), ("connectGh", settingsConnectGhId), ("refreshCloud", settingsRefreshCloudId)] do

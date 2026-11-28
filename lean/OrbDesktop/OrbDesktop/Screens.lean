@@ -556,7 +556,7 @@ def buildSplitDiffRightPane (theme : Theme) (paneW paneH : SubPx)
                 (BoxStyle.row 0 |>.withAlign .center |>.withJustify .center |>.withFixedSize (pxToSub 16) (pxToSub 16))
                 badgeBg (CornerRadii.uniform (pxToSub 3)) BorderStyle.none
                 [screenTextLine theme (pxToSub 10) (pxToSub 13) (pxToSub 10) (pxToSub 13) pal.textSecondary "M" 600]
-            , screenTextLine theme (pxToSub 232) (pxToSub 16) (pxToSub 12) (pxToSub 16) pal.textPrimary
+            , screenTextLine theme (pxToSub 226) (pxToSub 16) (pxToSub 12) (pxToSub 16) pal.textPrimary
                 "lean/OrbDesktop/OrbDesktop/Main.lean" 400 false
             , screenTextLine theme (pxToSub 14) (pxToSub 16) (pxToSub 11) (pxToSub 16) addTxtCol "+1" 500
             , screenTextLine theme (pxToSub 13) (pxToSub 16) (pxToSub 11) (pxToSub 16) delTxtCol "-1" 500
@@ -1644,16 +1644,19 @@ def buildDesktopScreen (st : DesktopState) (availW availH : SubPx)
       if st.sidePanelOpen then
         let rightW : SubPx := min (pxToSub 480) (mainW / 2)
         let leftW : SubPx := mainW - rightW
+        let innerLeftW : SubPx := leftW - theme.borderWidth
         let leftBodyH := splitH - composerH
-        let leftTranscript := buildMissionTranscriptBody st leftW leftBodyH runs hoverRow
+        let leftTranscript := buildMissionTranscriptBody st innerLeftW leftBodyH runs hoverRow
         let retrySend := st.unconfirmedSend.any (·.2 == st.composer.text)
-        let leftComposer := buildComposerWidget theme leftW composerH
+        let leftComposer := buildComposerWidget theme innerLeftW composerH
           { st.composer with isRunning := st.composer.isRunning && !retrySend } []
-          (if st.liveData then some (liveComposerControls st (min (pxToSub 748) (leftW - pxToSub 68))) else none)
+          (if st.liveData then some (liveComposerControls st (min (pxToSub 748) (innerLeftW - pxToSub 68))) else none)
           none none (attachActive := st.attachCount > 0) (underLabels := fixtureUnderLabels)
         let leftPane : WidgetNode :=
           WidgetNode.rrect
-            (BoxStyle.col 0 |>.withFixedSize leftW splitH)
+            (BoxStyle.col 0
+              |>.withPadding (Edges.trbl 0 theme.borderWidth 0 0)
+              |>.withFixedSize leftW splitH)
             st.theme.palette.canvas
             CornerRadii.zero
             { widths := Edges.trbl 0 theme.borderWidth 0 0, color := pal.borderSubtle }
@@ -1694,10 +1697,11 @@ def buildDesktopScreen (st : DesktopState) (availW availH : SubPx)
     | .missionSplitDiff =>
       let splitH := availH - headerH
       let leftW : SubPx := pxToSub 688
+      let innerLeftW : SubPx := leftW - theme.borderWidth
       let rightW : SubPx := mainW - leftW
       let leftBodyH := splitH - composerH
-      let leftHeader := buildHeaderChrome st leftW runs.headerTitleRuns
-      let leftTranscript := buildMissionTranscriptBody st leftW leftBodyH runs hoverRow
+      let leftHeader := buildHeaderChrome st innerLeftW runs.headerTitleRuns
+      let leftTranscript := buildMissionTranscriptBody st innerLeftW leftBodyH runs hoverRow
       let ds := st.draftSettings
       let fixtureUnderLabels : Option (String × String × String × String × String) :=
         some (
@@ -1707,11 +1711,13 @@ def buildDesktopScreen (st : DesktopState) (availW availH : SubPx)
           if ds.effort.isEmpty then "Default" else ds.effort,
           if ds.permission == "supervised" || ds.permission.isEmpty then "Supervised" else ds.permission
         )
-      let leftComposer := buildComposerWidget theme leftW composerH st.composer [] none none none
+      let leftComposer := buildComposerWidget theme innerLeftW composerH st.composer [] none none none
         (attachActive := st.attachCount > 0) (underLabels := fixtureUnderLabels)
       let leftPane : WidgetNode :=
         WidgetNode.rrect
-          (BoxStyle.col 0 |>.withFixedSize leftW availH)
+          (BoxStyle.col 0
+            |>.withPadding (Edges.trbl 0 theme.borderWidth 0 0)
+            |>.withFixedSize leftW availH)
           st.theme.palette.canvas
           CornerRadii.zero
           { widths := Edges.trbl 0 theme.borderWidth 0 0, color := pal.borderSubtle }
