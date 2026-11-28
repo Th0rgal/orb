@@ -711,7 +711,9 @@ def buildClaudeHttpMcpPrelude (rpcUrl : String) : String :=
   let urlJson := jsonEscape rpcUrl
   s!"orb_claude_mcp=\"$(umask 077 && mktemp)\" || exit 1; " ++
   "trap 'rm -f \"$orb_claude_mcp\"' EXIT; " ++
-  s!"printf '\{\"mcpServers\":\{\"sandboxed\":\{\"type\":\"http\",\"url\":%s,\"headers\":\{\"Authorization\":\"Bearer %s\"}}}}\\n' {shellSingleQuote urlJson} \"$SANDBOXED_MCP_TOKEN\" > \"$orb_claude_mcp\" || exit 1; "
+  "if [ -x /usr/local/bin/sandboxed-mcp ] && [ -n \"${SANDBOXED_MCP_API_URL:-}\" ]; then " ++
+  "printf '{\"mcpServers\":{\"sandboxed\":{\"command\":\"/usr/local/bin/sandboxed-mcp\",\"args\":[],\"env\":{\"SANDBOXED_MCP_API_URL\":\"%s\",\"SANDBOXED_MCP_TOKEN\":\"%s\",\"SANDBOXED_SH_MISSION_ID\":\"%s\"}}}}\\n' \"$SANDBOXED_MCP_API_URL\" \"$SANDBOXED_MCP_TOKEN\" \"${SANDBOXED_SH_MISSION_ID:-}\" > \"$orb_claude_mcp\" || exit 1; " ++
+  s!"else printf '\{\"mcpServers\":\{\"sandboxed\":\{\"type\":\"http\",\"url\":%s,\"headers\":\{\"Authorization\":\"Bearer %s\"}}}}\\n' {shellSingleQuote urlJson} \"$SANDBOXED_MCP_TOKEN\" > \"$orb_claude_mcp\" || exit 1; fi; "
 
 /-- Codex `-c` overrides for direct Streamable HTTP MCP using `bearer_token_env_var` (no token in argv). -/
 def buildCodexHttpMcpArgs (rpcUrl : String) : String :=
@@ -728,7 +730,10 @@ def buildCodexHttpMcpArgs (rpcUrl : String) : String :=
 def buildAntigravityHttpMcpPrelude (rpcUrl : String) : String :=
   let urlJson := jsonEscape rpcUrl
   s!"(umask 077; mkdir -p \"$HOME/.gemini/config\"; tmp=\"$HOME/.gemini/config/.mcp_config.json.$$\"; " ++
-  s!"printf '\{\"mcpServers\":\{\"sandboxed\":\{\"serverUrl\":%s,\"headers\":\{\"Authorization\":\"Bearer %s\"},\"disabled\":false}}}\\n' {shellSingleQuote urlJson} \"$SANDBOXED_MCP_TOKEN\" > \"$tmp\" && mv -f \"$tmp\" \"$HOME/.gemini/config/mcp_config.json\") || exit 1; "
+  "if [ -x /usr/local/bin/sandboxed-mcp ] && [ -n \"${SANDBOXED_MCP_API_URL:-}\" ]; then " ++
+  "printf '{\"mcpServers\":{\"sandboxed\":{\"command\":\"/usr/local/bin/sandboxed-mcp\",\"args\":[],\"env\":{\"SANDBOXED_MCP_API_URL\":\"%s\",\"SANDBOXED_MCP_TOKEN\":\"%s\",\"SANDBOXED_SH_MISSION_ID\":\"%s\"},\"disabled\":false}}}\\n' \"$SANDBOXED_MCP_API_URL\" \"$SANDBOXED_MCP_TOKEN\" \"${SANDBOXED_SH_MISSION_ID:-}\" > \"$tmp\"; " ++
+  s!"else printf '\{\"mcpServers\":\{\"sandboxed\":\{\"serverUrl\":%s,\"headers\":\{\"Authorization\":\"Bearer %s\"},\"disabled\":false}}}\\n' {shellSingleQuote urlJson} \"$SANDBOXED_MCP_TOKEN\" > \"$tmp\"; fi && " ++
+  "mv -f \"$tmp\" \"$HOME/.gemini/config/mcp_config.json\") || exit 1; "
 
 private def claudeMcpParts (mcpRpcUrl? : Option String) : String × String × Bool :=
   match mcpRpcUrl? with
