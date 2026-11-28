@@ -729,51 +729,6 @@ fun OrbSetupView(
                     modifier = Modifier.fillMaxWidth()
                 )
             }
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                val onLocal = urlInput.trim().trimEnd('/') == localSideSystemUrl
-                Box(
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(8.dp))
-                        .background(if (onLocal) OrbStyle.success.copy(alpha = 0.18f) else OrbStyle.surface)
-                        .border(
-                            1.dp,
-                            if (onLocal) OrbStyle.success else OrbStyle.border,
-                            RoundedCornerShape(8.dp)
-                        )
-                        .orbPressClickable {
-                            urlInput = localSideSystemUrl
-                            passwordInput = ""
-                        }
-                        .padding(horizontal = 10.dp, vertical = 6.dp)
-                ) {
-                    Text(
-                        text = if (localSideSystemReachable) "Local SideSystem (Ready)" else "Local SideSystem",
-                        color = Color.White,
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.Medium
-                    )
-                }
-                Box(
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(8.dp))
-                        .background(if (!onLocal) OrbStyle.surface else OrbStyle.surface)
-                        .border(1.dp, if (!onLocal) Color.White else OrbStyle.border, RoundedCornerShape(8.dp))
-                        .orbPressClickable {
-                            urlInput = "https://orbcore.thomas.md"
-                        }
-                        .padding(horizontal = 10.dp, vertical = 6.dp)
-                ) {
-                    Text(
-                        text = "Cloud Backend",
-                        color = if (!onLocal) Color.White else OrbStyle.textMuted,
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.Medium
-                    )
-                }
-            }
         }
 
         if (authMode == "multi_user") {
@@ -871,37 +826,6 @@ fun OrbSetupView(
                     fontWeight = FontWeight.SemiBold
                 )
             }
-        }
-
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .clip(RoundedCornerShape(14.dp))
-                .background(OrbStyle.surface)
-                .border(1.dp, OrbStyle.border, RoundedCornerShape(14.dp))
-                .orbPressClickable(enabled = !isConnecting && gitHubState !is OrbGitHubSignInButton.State.Pending) {
-                    errorMessage = null
-                    gitHubState = gitHubButton.start(urlInput)
-                }
-                .padding(vertical = 14.dp)
-                .semantics { contentDescription = "Sign in with GitHub" },
-            contentAlignment = Alignment.Center
-        ) {
-            Text(
-                text = if (gitHubState is OrbGitHubSignInButton.State.Pending) "Waiting for GitHub…" else "Sign in with GitHub",
-                color = Color.White,
-                fontSize = 15.sp,
-                fontWeight = FontWeight.SemiBold
-            )
-        }
-        when (val state = gitHubState) {
-            is OrbGitHubSignInButton.State.Pending -> Text(
-                "Finish signing in in the browser. Orb accepts the sign-in for this server for 10 minutes.",
-                color = OrbStyle.textMuted,
-                fontSize = 13.sp
-            )
-            is OrbGitHubSignInButton.State.Failed -> OrbNotice(title = state.message, log = null)
-            OrbGitHubSignInButton.State.Idle -> Unit
         }
 
         if (isConnectedSession) {

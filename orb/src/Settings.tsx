@@ -939,16 +939,9 @@ export function BackendTab(p: { standalone?: boolean } = {}) {
           <Show
             when={isConnected()}
             fallback={
-              <>
-                <Show when={health()?.github_enabled}>
-                  <button type="button" class="s-btn" disabled={busy() || githubBusy()} onClick={() => void signInGitHub()}>
-                    {githubBusy() ? "Signing in…" : "Sign in with GitHub"}
-                  </button>
-                </Show>
-                <button class="s-btn primary" disabled={!canConnect()} onClick={() => void connect()}>
-                  {busy() ? "Connecting…" : "Connect"}
-                </button>
-              </>
+              <button class="s-btn primary" disabled={!canConnect()} onClick={() => void connect()}>
+                {busy() ? "Connecting…" : "Connect"}
+              </button>
             }
           >
             <button class="s-btn" disabled={busy()} onClick={() => void disconnect()}>

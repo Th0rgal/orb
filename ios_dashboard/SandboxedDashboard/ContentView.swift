@@ -335,27 +335,6 @@ struct SetupSheet: View {
                             .accessibilityIdentifier("server-password")
                     }.padding(14)
                         .background(OrbStyle.surface, in: RoundedRectangle(cornerRadius: 14))
-
-                    Button {
-                        Task { await startGitHubSignIn() }
-                    } label: {
-                        HStack(spacing: 8) {
-                            Image(systemName: "person.badge.key.fill")
-                            Text(gitHubPending ? "Waiting for GitHub…" : "Sign in with GitHub")
-                                .fontWeight(.semibold)
-                        }
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 6)
-                    }
-                    .buttonStyle(.bordered)
-                    .disabled(isTestingConnection || serverURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                    .accessibilityIdentifier("account.github-sign-in")
-
-                    if gitHubPending {
-                        Text("Finish signing in in Safari. Orb accepts the callback for this server for 10 minutes.")
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
-                    }
                 }
                 if isConnectedSession && api.authRequired && (api.authMode == .singleTenant || api.authMode == .multiUser) {
                     VStack(alignment: .leading, spacing: 10) {
@@ -645,19 +624,6 @@ struct LoginView: View {
                             }
                             .buttonStyle(.borderedProminent)
                             .disabled(isLoading || password.isEmpty || (api.authMode == .multiUser && username.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty))
-
-                            Button {
-                                startGitHubLogin()
-                            } label: {
-                                HStack(spacing: 8) {
-                                    Image(systemName: "person.badge.key.fill")
-                                    Text("Sign in with GitHub").fontWeight(.semibold)
-                                }
-                                .frame(maxWidth: .infinity)
-                                .padding(.vertical, 6)
-                            }
-                            .buttonStyle(.bordered)
-                            .disabled(isLoading || serverURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                         }
                     }
                     .padding(.horizontal, 24)
