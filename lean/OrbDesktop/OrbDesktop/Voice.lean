@@ -75,7 +75,9 @@ def pollVoice (slot : IO.Ref (Option VoiceSession)) (capability : IO.Ref VoiceCa
             return { st with voicePhase := .idle, voiceLanguage := language }
           return { st with voicePhase := .idle, writeError := "Could not select dictation language." }
         return { st with
-          voicePhase := .idle, composer := st.composer.insertText (result.getD ""),
+          voicePhase := .idle,
+          imeResetGen := if st.composer.imePreeditText.isEmpty then st.imeResetGen else st.imeResetGen + 1,
+          composer := st.composer.insertText (result.getD ""),
           writeError := if result.isNone then "Dictation failed. Try again." else st.writeError }
       if st.voicePhase == .finishing && !s.finishing then
         try s.finish catch _ => pure ()

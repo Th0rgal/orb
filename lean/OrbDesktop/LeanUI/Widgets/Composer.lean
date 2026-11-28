@@ -106,7 +106,8 @@ def deleteAroundCursor (buf : ComposerBuffer) (delBefore delAfter : Nat) : Compo
 /-- Set or clear the active IME preedit composition string at `cursorOffset`. -/
 def setPreedit (buf : ComposerBuffer) (preedit : String) : ComposerBuffer :=
   let cur := clampCursor buf.text buf.cursorOffset
-  if buf.imePreeditText == preedit && buf.imePreeditOffset == cur then buf else
+  if preedit.isEmpty && buf.imePreeditText.isEmpty then buf
+  else if buf.imePreeditText == preedit && buf.imePreeditOffset == cur then buf else
   { buf with
     wheelTop := none
     preferredX := none
@@ -324,7 +325,8 @@ def buildAttachmentChipWidget (theme : Theme) (att : ComposerAttachment) : Widge
 editor centred in a column of at most `748 px`, as `.dock > .col > .composer` in the SolidJS
 desktop. The pill holds the round attach button, the text and the send button. -/
 def buildComposerWidget (theme : Theme) (availW composerH : SubPx)
-    (buf : ComposerBuffer) (overrideRuns : List InlineRun := []) (controls : Option WidgetNode := none) (newAgentHeader : Option WidgetNode := none) (voice : Option WidgetNode := none) : WidgetNode :=
+    (buf : ComposerBuffer) (overrideRuns : List InlineRun := []) (controls : Option WidgetNode := none) (newAgentHeader : Option WidgetNode := none) (voice : Option WidgetNode := none)
+    (attachActive : Bool := false) (underLabels : Option (String × String × String × String × String) := none) : WidgetNode :=
   let pal := theme.palette
   let tall := newAgentHeader.isSome
   let colW : SubPx := if tall then min (pxToSub 608) (availW - pxToSub 32) else min (pxToSub 748) (availW - pxToSub 68)
@@ -340,6 +342,7 @@ def buildComposerWidget (theme : Theme) (availW composerH : SubPx)
     match id with
     | some wid => WidgetNode.focusable wid node
     | none => node
+  let attachIconCol := if attachActive then pal.accent else pal.textMuted
   let attachBtn : WidgetNode :=
     withId buf.attachButtonId <|
       WidgetNode.box
@@ -348,9 +351,9 @@ def buildComposerWidget (theme : Theme) (availW composerH : SubPx)
           |>.withRadius (pxToSub 12))
         [WidgetNode.box
           (BoxStyle.col 0 |>.withAlign .center |>.withFixedSize (pxToSub 10) (pxToSub 10))
-          [ WidgetNode.rrect (BoxStyle.row 0 |>.withFixedSize (pxToSub 2) (pxToSub 4)) pal.textMuted CornerRadii.zero
-          , WidgetNode.rrect (BoxStyle.row 0 |>.withFixedSize (pxToSub 10) (pxToSub 2)) pal.textMuted CornerRadii.zero
-          , WidgetNode.rrect (BoxStyle.row 0 |>.withFixedSize (pxToSub 2) (pxToSub 4)) pal.textMuted CornerRadii.zero ]]
+          [ WidgetNode.rrect (BoxStyle.row 0 |>.withFixedSize (pxToSub 2) (pxToSub 4)) attachIconCol CornerRadii.zero
+          , WidgetNode.rrect (BoxStyle.row 0 |>.withFixedSize (pxToSub 10) (pxToSub 2)) attachIconCol CornerRadii.zero
+          , WidgetNode.rrect (BoxStyle.row 0 |>.withFixedSize (pxToSub 2) (pxToSub 4)) attachIconCol CornerRadii.zero ]]
         buf.attachButtonId
   let hasText := !buf.text.isEmpty || !buf.imePreeditText.isEmpty
   -- Two 24px buttons, two 8px gaps and the pill padding (which already holds the 1px border).
@@ -420,15 +423,19 @@ def buildComposerWidget (theme : Theme) (availW composerH : SubPx)
         [attachBtn, textNode, sendBtn]
   let metaStyle : TextStyle :=
     { (Theme.mutedText theme) with sizeSub := pxToSub 12, lineHeightSub := pxToSub 18, color := pal.textMuted }
-  let metaText (text : String) (width : SubPx) : WidgetNode :=
-    WidgetNode.text (BoxStyle.row 0 |>.withFixedSize width (pxToSub 18))
-      (pxToSub 18) [composerSynthRun metaStyle text]
-  let selector (text : String) (width : Nat) : WidgetNode :=
-    WidgetNode.box (BoxStyle.row (pxToSub 4) |>.withAlign .center
-      |>.withFixedSize (pxToSub (width + 14)) (pxToSub 18))
-      [metaText text (pxToSub width), .mk none false false (BoxStyle.row 0 |>.withFixedSize (pxToSub 10) (pxToSub 10))
-        (.vectorIcon WidgetNode.downChevronPaths pal.textMuted) []]
+  let metaText (text : String) (width : SubPx) (clip : Bool := false) : WidgetNode :=
+    let base := BoxStyle.row 0 |>.withFixedSize width (pxToSub 18)
+    let st := if clip then { base with maxWidth := width, clip := true } else base
+    WidgetNode.text st (pxToSub 18) [composerSynthRun metaStyle text]
+  let selector (id : WidgetId) (text : String) (width : Nat) (clip : Bool := false) : WidgetNode :=
+    WidgetNode.focusable id <|
+      WidgetNode.box (BoxStyle.row (pxToSub 4) |>.withAlign .center
+        |>.withFixedSize (pxToSub (width + 14)) (pxToSub 18))
+        [metaText text (pxToSub width) clip, .mk none false false (BoxStyle.row 0 |>.withFixedSize (pxToSub 10) (pxToSub 10))
+          (.vectorIcon WidgetNode.downChevronPaths pal.textMuted) []]
   let sep := metaText "·" (pxToSub 3)
+  let (lblMachine, lblBackend, lblModel, lblEffort, lblPerm) :=
+    underLabels.getD ("selected machine", "claudecode", "Default", "Default", "Supervised")
   let underRow : WidgetNode :=
     WidgetNode.box
       (BoxStyle.row (pxToSub 6)
@@ -436,9 +443,11 @@ def buildComposerWidget (theme : Theme) (availW composerH : SubPx)
         |>.withPadding (Edges.trbl 0 (pxToSub 12) (pxToSub 2) (pxToSub 12))
         |>.withFixedSize colW (pxToSub 36))
       [ WidgetNode.box (BoxStyle.row 0 |>.withFixedSize (pxToSub 11) (pxToSub 13)) []
-      , selector "selected machine" 99, sep
-      , selector "claudecode" 66, sep, metaText "Default" (pxToSub 40), sep
-      , selector "Default" 40, sep, selector "Supervised" 65 ]
+      , selector 720 lblMachine 99 (lblMachine != "selected machine"), sep
+      , selector 721 lblBackend 66 (lblBackend != "claudecode"), sep
+      , WidgetNode.focusable 722 (metaText lblModel (pxToSub 40) (lblModel != "Default")), sep
+      , selector 723 lblEffort 40 (lblEffort != "Default"), sep
+      , selector 724 lblPerm 65 (lblPerm != "Supervised") ]
   let chipBar : List WidgetNode :=
     if hasChips then
       [WidgetNode.box

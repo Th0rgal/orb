@@ -22,7 +22,9 @@ private def step (s : DesktopState) (e : Event) : DesktopState :=
 #guard (step (step base (.text "hello")) (.activate 2)).composer.text == ""
 #guard (step { base with composer := { base.composer with isRunning := true } } (.activate 2)).missionStopped
 #guard (step base (.activate 106)).missionArchived
-#guard (step base (.activate 111)).sidePanelOpen
+#guard (step base (.activate 102)).screen == .inbox
+#guard (step base (.activate 111)).screen == .cloud
+#guard (step base (.activate sidePanelDiffId)).sidePanelOpen
 #guard !(step base (.activate 805)).missionCreated
 #guard (step { base with modal := defaultNewMissionModal } (.activate 805)).missionCreated
 #guard (step { base with screen := .controlEmpty } (.activate 103)).screen == .settingsGeneral
