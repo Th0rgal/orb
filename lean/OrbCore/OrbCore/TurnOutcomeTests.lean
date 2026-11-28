@@ -1513,7 +1513,9 @@ def run : IO Unit := do
            "only the current Goal job can settle completion"
          setenvVar "SANDBOXED_REMOTE_NODES" s!"mockgoalchecks=http://127.0.0.1:{checksPort}|TURN_OUTCOME_MOCK_TOK"
          -- A normal turn after a completed Goal must not arm its old objective.
-         -- The live poller retires the run before settleRemoteGoal.
+         -- The live poller retires both the remote job and the run before settleRemoteGoal.
+         discard <| execParamQuery db
+           "UPDATE remote_node_jobs SET state='succeeded' WHERE mission_id='m-goal-dispatch';" #[]
          discard <| execParamQuery db
            "UPDATE mission_runs SET execution_state='terminal' WHERE mission_id='m-goal-dispatch';" #[]
          let followSup ← newRemoteJobSupervisor "goal-follow-up-fixture"
