@@ -134,6 +134,10 @@ private def gatewayTests (root : String) : IO Unit := do
     check (← nodeApiHangCause? store "babylon").isNone "R19: single transient timeout does not cordon node"
     let blipFlags ← sql "SELECT mission_id FROM mission_events WHERE json_extract(payload,'$.reason')='hung_node'"
     check (blipFlags.size == 1) "R19: single transient timeout emits no mission error event"
+    -- An unreachable host (`ping = false`) clears an unconfirmed single strike so a later blip does not accumulate.
+    observeNodeApi store "babylon" "offline" "t0-unreach" (pure false)
+    observeNodeApi store "babylon" "offline" "t0-blip2" (pure true)
+    check (← nodeApiHangCause? store "babylon").isNone "R19: unpingable observation resets unconfirmed 1-strike blip"
     observeNodeApi store "babylon" "online" "t0-recover" (pure false)
     -- Fresh active `/jobs/:id` HTTP activity suppresses false hang conviction even across two missed heartbeats.
     discard <| sql "UPDATE remote_node_jobs SET updated_at='2026-11-25T23:14:28Z' WHERE job_id='j1'"
@@ -141,21 +145,98 @@ private def gatewayTests (root : String) : IO Unit := do
     observeNodeApi store "babylon" "offline" "2026-11-25T23:14:30Z" (pure true)
     check (← nodeApiHangCause? store "babylon").isNone "R19: fresh active job HTTP poll proves API is responsive"
     discard <| sql "UPDATE remote_node_jobs SET updated_at='' WHERE job_id='j1'"
-    -- Two consecutive pingable API misses without fresh job activity confirm the hang and flag once.
-    for t in #["t1", "t2"] do observeNodeApi store "babylon" "offline" t (pure true)
+    -- Add a second active job on `Babylon` (mixed case) for the same mission `free` and a job on `legacy`
+    -- (`remote-node:auto`) to prove single flagging and concrete job-node resolution on resume.
+    discard <| sql "INSERT INTO remote_node_jobs(job_id,mission_id,node_id,state) VALUES('j1-extra','free','Babylon','queued');"
+    discard <| sql "INSERT INTO remote_node_jobs(job_id,mission_id,node_id,state) VALUES('j-leg','legacy','babylon','running');"
+    -- Consecutive pingable API misses without fresh job activity confirm the hang and flag each affected mission once.
+    for t in #["t1", "t2", "t2b"] do observeNodeApi store "babylon" "offline" t (pure true)
     let (_, nodes) ← loadStaticRemoteNodes
     let cs ← candidates store nodes
     check (choose (cs.filter (·.id == "babylon")) #[] == none) "R19: pingable hung node excluded"
     for n in #["ashur", "ur"] do
       check (choose (cs.filter (·.id == n)) #[] == some n) "R19: healthy idle and active stay eligible"
-    let flags ← sql "SELECT mission_id FROM mission_events WHERE json_extract(payload,'$.reason')='hung_node'"
-    check (flags.size == 2 && cell flags[1]! 0 == "free") "R19: only affected mission flagged, exactly once"
+    -- `resolveConcreteRemoteTargetNode` with `"auto"` skips hung/cordoned nodes and picks healthy `ur`.
+    let autoRes ← OrbCore.RemoteDispatch.resolveConcreteRemoteTargetNode none "auto" (some (store, "worker"))
+    check (autoRes.toOption == some "ur") s!"R19: auto target resolution skips excluded ashur, cordoned nippur, and hung babylon: {reprStr autoRes}"
+    -- Confirmed hang survives a brief unpingable observation (e.g. reboot) until a healthy `online` heartbeat arrives.
+    observeNodeApi store "babylon" "offline" "t2-reboot" (pure false)
+    check (← nodeApiHangCause? store "babylon").isSome "R19: confirmed hang stays cordoned across unpingable reboot until online"
+    let flags ← sql "SELECT mission_id FROM mission_events WHERE json_extract(payload,'$.reason')='hung_node' ORDER BY mission_id"
+    check (flags.size == 3 && cell flags[1]! 0 == "free" && cell flags[2]! 0 == "legacy")
+      s!"R19: each affected mission flagged exactly once despite 2 jobs and 3 strikes: {reprStr flags}"
+    -- Legacy `remote-node:auto` mission with a job on `babylon` resolves to `babylon` and names it on resume.
+    check ((← OrbCore.RemoteDispatch.resolveMissionRemoteNode? store none "legacy") == some "babylon")
+      "R19: legacy auto mission with job on hung node resolves concrete job node"
     let claims : McpSessionClaims := { sessionId := "r19", missionId := "free", role := "coordinator", expiresAt := 2000 }
     let resume ← OrbCore.McpGateway.dispatchMcpToolCall store none none none fleet root claims "resume_mission"
       (.obj #[("mission_id", .str "free"), ("idempotency_key", .str "r19-resume")]) now
     check (resume.contains "babylon" && resume.contains "API is unresponsive") s!"R19: resume names the cause: {resume}"
+    let legacyClaims : McpSessionClaims := { claims with missionId := "legacy" }
+    let resumeLegacy ← OrbCore.McpGateway.dispatchMcpToolCall store none none none fleet root legacyClaims "resume_mission"
+      (.obj #[("mission_id", .str "legacy"), ("idempotency_key", .str "r19-resume-legacy")]) now
+    check (resumeLegacy.contains "babylon" && resumeLegacy.contains "API is unresponsive")
+      s!"R19: legacy auto resume names the hung node: {resumeLegacy}"
+    -- Finding 2: `native_owner_enrollments` nodes are excluded from `AutoPlacement.candidates`.
+    discard <| sql "INSERT INTO native_owner_enrollments(node_id,owner_id,account_id,revision) VALUES('ur','alice','acct-1',1);"
+    let csEnrolled ← candidates store nodes
+    check (choose (csEnrolled.filter (·.id == "ur")) #[] == none) "R19: native-owner-enrolled node excluded from auto placement"
+    discard <| sql "DELETE FROM native_owner_enrollments WHERE node_id='ur';"
+    -- Finding 4: legacy `remote-node:auto` with concrete node only in `mission_runs.scope_unit` resolves to `babylon`.
+    discard <| sql "INSERT INTO missions(id,owner_user_id,project,status,tags) VALUES('legacy-run','alice','p','interrupted','[\"remote-node:auto\"]');"
+    discard <| sql "INSERT INTO mission_runs(id,mission_id,generation,execution_state,scope_unit) VALUES('run-leg-1','legacy-run',1,'terminal','remote-node:babylon');"
+    check ((← OrbCore.RemoteDispatch.resolveMissionRemoteNode? store none "legacy-run") == some "babylon")
+      "R19: legacy auto mission resolves concrete node from mission_runs.scope_unit"
+    let legRunClaims : McpSessionClaims := { claims with missionId := "legacy-run" }
+    let resumeLegRun ← OrbCore.McpGateway.dispatchMcpToolCall store none none none fleet root legRunClaims "resume_mission"
+      (.obj #[("mission_id", .str "legacy-run"), ("idempotency_key", .str "r19-resume-legrun")]) now
+    check (resumeLegRun.contains "babylon" && resumeLegRun.contains "API is unresponsive")
+      s!"R19: legacy auto scope_unit resume names hung node: {resumeLegRun}"
+    -- Finding 5: `interrupted` mission with an `'unreachable'` job row refuses `send_message_to_mission`
+    -- (with or without `remoteSup?`), appends 0 phantom events, and does not mutate `missions.title`.
+    discard <| sql "INSERT INTO missions(id,title,owner_user_id,project,status,tags) VALUES('idle-bab','Original Title','alice','p','interrupted','[\"remote-node:babylon\"]');"
+    discard <| sql "INSERT INTO remote_node_jobs(job_id,mission_id,node_id,state) VALUES('j-idle-unreach','idle-bab','babylon','unreachable');"
+    let dummySup ← OrbCore.RemoteDispatch.newRemoteJobSupervisor
+    let idleClaims : McpSessionClaims := { claims with missionId := "idle-bab" }
+    let sendMsg ← OrbCore.McpGateway.dispatchMcpToolCall store none none none fleet root idleClaims "send_message_to_mission"
+      (.obj #[("mission_id", .str "idle-bab"), ("title", .str "Mutated Title"), ("content", .str "hello"), ("idempotency_key", .str "r19-send-hung")]) now (remoteSup? := some dummySup)
+    let sendMsgNoSup ← OrbCore.McpGateway.dispatchMcpToolCall store none none none fleet root idleClaims "send_message_to_mission"
+      (.obj #[("mission_id", .str "idle-bab"), ("title", .str "Mutated Title 2"), ("content", .str "hello"), ("idempotency_key", .str "r19-send-hung-nosup")]) now
+    let idleEvs ← sql "SELECT event_type FROM mission_events WHERE mission_id='idle-bab'"
+    let idleTitle ← sql "SELECT title FROM missions WHERE id='idle-bab'"
+    check (sendMsg.contains "hung_node" && sendMsg.contains "babylon" &&
+           sendMsgNoSup.contains "hung_node" && sendMsgNoSup.contains "babylon" &&
+           idleEvs.size == 1 && (idleTitle[1]?.bind (·[0]?)).getD "" == "Original Title")
+      s!"R19: send_message_to_mission refuses hung node cleanly with zero phantom events or title mutation: {sendMsg} / {sendMsgNoSup} evs={reprStr idleEvs} title={reprStr idleTitle}"
+    -- Finding 3: `tickRemoteFollowupPump` skips missions on a hung node without claiming or flooding error events.
+    discard <| sql "DELETE FROM remote_node_jobs WHERE job_id='j-idle-unreach';"
+    discard <| OrbCore.QueueCont.enqueueStructuredFollowup store "core" "r19-q-msg-1" "idle-bab" "follow up while hung" "control" "2026-11-28T00:00:00Z"
+    let pumpedWhileHung ← OrbCore.RemoteDispatch.tickRemoteFollowupPump store none none none dummySup root now
+    let idleEvsAfterPump ← sql "SELECT event_type FROM mission_events WHERE mission_id='idle-bab'"
+    check (pumpedWhileHung == 0 && idleEvsAfterPump.size == 1)
+      s!"R19: tickRemoteFollowupPump must not claim or emit errors while node is hung: pumped={pumpedWhileHung} evs={reprStr idleEvsAfterPump}"
+    -- R2 F2 & F3: `remote-node:auto` on an unstarted fork/child does NOT inherit its parent's hung node,
+    -- respects its own `exclude-node:` tags, and `resolveConcreteRemoteTargetNode` handles mixed-case
+    -- `Auto` / `LOCAL` / `AUTO-MANAGED` case-insensitively.
+    discard <| sql "INSERT INTO missions(id,owner_user_id,project,status,parent_mission_id,tags) VALUES('fork-auto','alice','p','awaiting_user','free','[\"forked-from:free\",\"remote-node:Auto\",\"exclude-node:ashur\"]');"
+    check ((← OrbCore.RemoteDispatch.resolveMissionRemoteNode? store none "fork-auto") == some "Auto")
+      "R19: unstarted remote-node:auto fork keeps auto instead of inheriting parent's hung node"
+    let autoMixedRes ← OrbCore.RemoteDispatch.resolveConcreteRemoteTargetNode none "Auto" (some (store, "fork-auto"))
+    check (autoMixedRes.toOption == some "ur")
+      s!"R19: mixed-case Auto resolves to healthy static node ur: {reprStr autoMixedRes}"
+    let localMixedRes ← OrbCore.RemoteDispatch.resolveConcreteRemoteTargetNode none "LOCAL" (some (store, "fork-auto"))
+    check (match localMixedRes with | .error "not_a_remote_target" => true | _ => false)
+      s!"R19: mixed-case LOCAL rejected as not_a_remote_target: {reprStr localMixedRes}"
+    let managedMixedRes ← OrbCore.RemoteDispatch.resolveConcreteRemoteTargetNode none "AUTO-MANAGED" none
+    check (match managedMixedRes with | .error "no_managed_machines_available" => true | _ => false)
+      s!"R19: mixed-case AUTO-MANAGED handled case-insensitively: {reprStr managedMixedRes}"
+    -- Recovery/uncordoning clears the hang incident, restores placement eligibility, and preserves operator cordons.
     observeNodeApi store "babylon" "online" "t3" (pure false)
     check (← nodeApiHangCause? store "babylon").isNone "R19: healthy heartbeat clears the incident"
+    let csRecovered ← candidates store nodes
+    check (choose (csRecovered.filter (·.id == "babylon")) #[] == some "babylon") "R19: recovered node eligible again"
+    check (choose (csRecovered.filter (·.id == "nippur")) #[] == none) "R19: independent operator cordon preserved on recovery"
+    discard <| sql "DELETE FROM remote_node_jobs WHERE job_id IN ('j1-extra','j-leg');"
   finally
     OrbBin.PosixExt.unsetenvVar "SANDBOXED_REMOTE_NODES_ENABLED"
     OrbBin.PosixExt.unsetenvVar "SANDBOXED_REMOTE_NODES"

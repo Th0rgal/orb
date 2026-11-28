@@ -7094,6 +7094,154 @@ private def runProdParityAndMissionMoveTests (_baseCfg : CoreConfig) : IO UInt32
       s!"(c) gRefusedOk={gRefusedOk} (elapsedRefusedMs={elapsedRefusedMs}, res={httpRefusedRes.map (·.status)}); " ++
       s!"(d) gNoFdLeakOk={gNoFdLeakOk} (fdBefore={probeFdBefore.raw}, fdAfter={probeFdAfter.raw})"))
 
+  -- R19 HTTP end-to-end integration test:
+  -- hung static node (`lagash`) is cordoned in `GET /api/remote-nodes` and skipped by `POST /api/control/missions`
+  -- (`remote_node_id: "auto"`), explicit placement and `POST /api/control/missions/:id/resume` (both `active` and
+  -- `interrupted`) return 503 naming `lagash` without appending phantom `user_message` events, affected missions
+  -- are flagged exactly once, `remote-node:local` tag does not fail remote dispatch, and recovery (`online`)
+  -- uncordons cleanly and dispatches a live `POST /jobs` resume on `lagash`.
+  let .ok (r19OkFd, r19OkPort) ← tcpListen "127.0.0.1" 0 8
+    | return (← fail "tcpListen r19OkFd failed")
+  let .ok (r19LagashFd, r19LagashPort) ← tcpListen "127.0.0.1" 0 8
+    | do discard <| closeFd r19OkFd; return (← fail "tcpListen r19LagashFd failed")
+  let r19LagashOnline ← IO.mkRef false
+  let r19Stop ← IO.mkRef false
+  let r19SawJobSubmit ← IO.mkRef false
+  let r19HbTask ← IO.asTask (prio := .dedicated) do
+    while !(← r19Stop.get) do
+      if let .ok cfd ← tcpAcceptPoll r19OkFd 200 then
+        discard <| readCoreHttpRequestFromFd cfd 1000
+        let hbJson := "{\"version\":\"1.3.0-lean4\",\"protocol_version\":2,\"capacity_total\":4,\"capacity_available\":4,\"active_jobs\":0,\"queued_jobs\":0,\"cordoned\":false}"
+        discard <| writeAll cfd (encodeCoreHttpResponse (jsonResponse 200 hbJson)) false
+        discard <| closeFd cfd
+    discard <| closeFd r19OkFd
+  let r19LagashTask ← IO.asTask (prio := .dedicated) do
+    while !(← r19Stop.get) do
+      if let .ok cfd ← tcpAcceptPoll r19LagashFd 200 then
+        let reqOpt ← readCoreHttpRequestFromFd cfd 1000
+        if ← r19LagashOnline.get then
+          let path := match reqOpt with | .ok req => req.path | .error _ => ""
+          let respJson ←
+            if path == "/jobs" then
+              r19SawJobSubmit.set true
+              pure "{\"job_id\":\"j-r19-rec\",\"state\":\"running\"}"
+            else if path.startsWith "/jobs/" && path.contains "/log" then
+              pure "{\"offset\":0,\"next_offset\":0,\"log_len\":0,\"data\":\"\"}"
+            else if path.startsWith "/jobs/" then
+              pure "{\"job_id\":\"j-r19-rec\",\"state\":\"succeeded\",\"exit_code\":0}"
+            else
+              pure "{\"version\":\"1.3.0-lean4\",\"protocol_version\":2,\"capacity_total\":4,\"capacity_available\":4,\"active_jobs\":0,\"queued_jobs\":0,\"cordoned\":false}"
+          discard <| writeAll cfd (encodeCoreHttpResponse (jsonResponse 200 respJson)) false
+        discard <| closeFd cfd
+    discard <| closeFd r19LagashFd
+  let r19Sup ← newRemoteJobSupervisor jwtSec false
+  r19Sup.boundPortRef.set 13000
+  let r19AppSt : CoreAppState := { appSt with remoteSup? := some r19Sup }
+  let sendR19Json (method path tok body : String) : IO (Nat × String) := do
+    let bBytes := body.toUTF8
+    let authLine := if tok.isEmpty then "" else s!"Authorization: Bearer {tok}\r\n"
+    let rawWire :=
+      (s!"{method} {path} HTTP/1.1\r\nHost: 127.0.0.1\r\n{authLine}" ++
+       s!"Content-Type: application/json\r\nContent-Length: {bBytes.size}\r\n\r\n").toUTF8 ++ bBytes
+    match parseRequest rawWire none with
+    | .error _ => return (599, "parse_err")
+    | .ok req =>
+      match ← dispatchCoreRequest r19AppSt req nowSec with
+      | .error _ => return (101, "")
+      | .ok r => return (r.status, (String.fromUTF8? r.body).getD "")
+  OrbBin.PosixExt.setenvVar "SANDBOXED_REMOTE_NODES_ENABLED" "true"
+  OrbBin.PosixExt.setenvVar "SANDBOXED_REMOTE_NODES"
+    s!"lagash=http://localhost:{r19LagashPort}|ORB_TEST_LAGASH_TOK,uruk=http://localhost:{r19OkPort}|ORB_TEST_URUK_TOK"
+  OrbBin.PosixExt.setenvVar "ORB_TEST_LAGASH_TOK" "tok-lagash-r19"
+  OrbBin.PosixExt.setenvVar "ORB_TEST_URUK_TOK" "tok-uruk-r19"
+  discard <| execParamQuery store.missionsDb
+    "INSERT INTO missions(id,title,status,backend,working_directory,tags,updated_at,owner_user_id) VALUES('m-r19-active','R19 Active','active','opencode','/tmp','[\"remote-node:lagash\"]','2026-11-28T00:00:00Z',?1);"
+    #[hsAdminId]
+  discard <| execParamQuery store.missionsDb
+    "INSERT INTO missions(id,title,status,backend,working_directory,tags,updated_at,owner_user_id) VALUES('m-r19-int','R19 Interrupted','interrupted','opencode','/tmp','[\"remote-node:lagash\"]','2026-11-28T00:00:00Z',?1);"
+    #[hsAdminId]
+  OrbCore.RemoteFleetAndRelay.ensureDurableJobsTable store
+  discard <| execParamQuery store.missionsDb
+    "INSERT INTO remote_node_jobs(job_id,mission_id,node_id,state,created_at,updated_at) VALUES('j-r19-act','m-r19-active','Lagash','running','2026-11-28T00:00:00Z','');" #[]
+  discard <| execParamQuery store.missionsDb
+    "INSERT INTO remote_node_jobs(job_id,mission_id,node_id,state,created_at,updated_at) VALUES('j-r19-int','m-r19-int','lagash','unreachable','2026-11-28T00:00:00Z','');" #[]
+  for ts in #["2026-11-28T00:01:00Z", "2026-11-28T00:01:30Z", "2026-11-28T00:02:00Z"] do
+    OrbCore.RemoteFleetAndRelay.observeNodeApi store "Lagash" "offline" ts (pure true)
+  let (r19FleetSt, r19FleetBody) ← sendR19Json "GET" "/api/remote-nodes" hsJwt ""
+  let r19LagashCordoned :=
+    match OrbBin.Json.parse r19FleetBody with
+    | .ok jv =>
+      let ns := (jv.fieldArr? "nodes").getD #[]
+      (ns.find? (·.fieldStr? "id" == some "lagash")).bind (·.fieldBool? "cordoned") == some true &&
+      (ns.find? (·.fieldStr? "id" == some "uruk")).bind (·.fieldBool? "cordoned") == some false
+    | .error _ => false
+  let (r19AutoSt, r19AutoBody) ← sendR19Json "POST" "/api/control/missions" hsJwt
+    "{\"title\":\"R19 Auto Placement\",\"backend\":\"opencode\",\"remote_node_id\":\"auto\"}"
+  let (r19ExplicitSt, r19ExplicitBody) ← sendR19Json "POST" "/api/control/missions" hsJwt
+    "{\"title\":\"R19 Explicit Hung\",\"backend\":\"opencode\",\"remote_node_id\":\"lagash\"}"
+  -- Finding 1 & R2 F5: tag-only placement, conflicting remote_node_id + tags, and non-remote `local` tag.
+  let (r19TagHungSt, r19TagHungBody) ← sendR19Json "POST" "/api/control/missions" hsJwt
+    "{\"title\":\"R19 Tag Hung\",\"backend\":\"opencode\",\"tags\":[\"remote-node:lagash\"]}"
+  let (r19TagAutoSt, r19TagAutoBody) ← sendR19Json "POST" "/api/control/missions" hsJwt
+    "{\"title\":\"R19 Tag Auto\",\"backend\":\"opencode\",\"tags\":[\"remote-node:auto\"]}"
+  let (r19ConflictSt, r19ConflictBody) ← sendR19Json "POST" "/api/control/missions" hsJwt
+    "{\"title\":\"R19 Conflict\",\"backend\":\"opencode\",\"remote_node_id\":\"uruk\",\"tags\":[\"remote-node:lagash\"]}"
+  let (r19LocalTagSt, r19LocalTagBody) ← sendR19Json "POST" "/api/control/missions" hsJwt
+    "{\"title\":\"R19 Local Tag\",\"backend\":\"opencode\",\"tags\":[\"remote-node:local\"],\"prompt\":\"hello local\",\"spawn_harness\":false}"
+  let (r19LocalConflictSt, r19LocalConflictBody) ← sendR19Json "POST" "/api/control/missions" hsJwt
+    "{\"title\":\"R19 Local Conflict\",\"backend\":\"opencode\",\"remote_node_id\":\"uruk\",\"tags\":[\"remote-node:local\"]}"
+  let (r19ResActSt, r19ResActBody) ← sendR19Json "POST" "/api/control/missions/m-r19-active/resume" hsJwt "{}"
+  let (r19ResIntSt, r19ResIntBody) ← sendR19Json "POST" "/api/control/missions/m-r19-int/resume" hsJwt "{}"
+  let r19FlagRows := (← execParamQuery store.missionsDb
+    "SELECT mission_id FROM mission_events WHERE mission_id IN ('m-r19-active','m-r19-int') AND event_type='error' AND json_extract(payload,'$.reason')='hung_node' ORDER BY mission_id;" #[]).toOption.getD #[]
+  let r19UserMsgs := (← execParamQuery store.missionsDb
+    "SELECT COUNT(*) FROM mission_events WHERE mission_id IN ('m-r19-active','m-r19-int') AND event_type='user_message';" #[]).toOption.getD #[]
+  -- Finding 6: mixed-case persisted cordon is cleanly removed by case-insensitive `/api/nodes/lagash/uncordon`.
+  discard <| OrbCore.RemoteFleetAndRelay.setPersistedNodeCordoned dataRoot "Lagash" true
+  let (r19UncordSt, r19UncordBody) ← sendR19Json "POST" "/api/nodes/lagash/uncordon" hsJwt "{}"
+  let r19AfterMixedUncord ← OrbCore.RemoteFleetAndRelay.loadPersistedNodeCordons dataRoot
+  -- Now recover `lagash` (`online`) with live responder and confirm uncordoning + live `POST /jobs` resume.
+  r19LagashOnline.set true
+  OrbCore.RemoteFleetAndRelay.observeNodeApi store "lagash" "online" "2026-11-28T00:03:00Z" (pure false)
+  let (r19FleetRecSt, r19FleetRecBody) ← sendR19Json "GET" "/api/remote-nodes" hsJwt ""
+  let r19LagashUncordoned :=
+    match OrbBin.Json.parse r19FleetRecBody with
+    | .ok jv =>
+      let ns := (jv.fieldArr? "nodes").getD #[]
+      (ns.find? (·.fieldStr? "id" == some "lagash")).bind (·.fieldBool? "cordoned") == some false
+    | .error _ => false
+  let (r19ResRecSt, r19ResRecBody) ← sendR19Json "POST" "/api/control/missions/m-r19-int/resume" hsJwt "{}"
+  -- Wait for the spawned poller to observe `succeeded` and exit cleanly before joining mock listeners.
+  for _ in [0:40] do
+    let activePollers ← r19Sup.mu.atomically get
+    if activePollers.isEmpty then break
+    IO.sleep 100
+  r19Stop.set true
+  let r19JobSubmitted ← r19SawJobSubmit.get
+  OrbBin.PosixExt.unsetenvVar "SANDBOXED_REMOTE_NODES_ENABLED"
+  OrbBin.PosixExt.unsetenvVar "SANDBOXED_REMOTE_NODES"
+  OrbBin.PosixExt.unsetenvVar "ORB_TEST_LAGASH_TOK"
+  OrbBin.PosixExt.unsetenvVar "ORB_TEST_URUK_TOK"
+  discard <| execParamQuery store.missionsDb "DELETE FROM remote_node_jobs WHERE mission_id IN ('m-r19-active','m-r19-int');" #[]
+  discard <| IO.wait r19HbTask
+  discard <| IO.wait r19LagashTask
+  if r19FleetSt != 200 || !r19LagashCordoned ||
+     r19AutoSt != 201 || (r19AutoBody.splitOn "\"remote_node_id\":\"uruk\"").length < 2 ||
+     r19ExplicitSt != 503 || !r19ExplicitBody.contains "lagash" || !r19ExplicitBody.contains "hung_node" ||
+     r19TagHungSt != 503 || !r19TagHungBody.contains "lagash" || !r19TagHungBody.contains "hung_node" ||
+     r19TagAutoSt != 201 || (r19TagAutoBody.splitOn "\"remote_node_id\":\"uruk\"").length < 2 ||
+     r19ConflictSt != 400 || !r19ConflictBody.contains "conflicting_remote_node_placement" ||
+     r19LocalTagSt != 201 ||
+     r19LocalConflictSt != 400 || !r19LocalConflictBody.contains "conflicting_remote_node_placement" ||
+     r19ResActSt != 503 || !r19ResActBody.contains "lagash" || !r19ResActBody.contains "API is unresponsive" ||
+     r19ResIntSt != 503 || !r19ResIntBody.contains "lagash" || !r19ResIntBody.contains "API is unresponsive" ||
+     r19FlagRows.size != 3 || (r19UserMsgs[1]?.bind (·[0]?)).getD "" != "0" ||
+     r19UncordSt != 200 || (r19UncordBody.splitOn "\"changed\":true").length < 2 ||
+     r19AfterMixedUncord.any (fun c => c.toLower == "lagash") ||
+     r19FleetRecSt != 200 || !r19LagashUncordoned ||
+     r19ResRecSt != 200 || !r19JobSubmitted then
+    return (← fail s!"R19 HTTP integration test failed: fleet={r19FleetSt}/{r19LagashCordoned} auto={r19AutoSt}:{r19AutoBody} explicit={r19ExplicitSt}:{r19ExplicitBody} tagHung={r19TagHungSt}:{r19TagHungBody} tagAuto={r19TagAutoSt}:{r19TagAutoBody} conflict={r19ConflictSt}:{r19ConflictBody} localTag={r19LocalTagSt}:{r19LocalTagBody} localConflict={r19LocalConflictSt}:{r19LocalConflictBody} resAct={r19ResActSt}:{r19ResActBody} resInt={r19ResIntSt}:{r19ResIntBody} flags={reprStr r19FlagRows} userMsgs={reprStr r19UserMsgs} uncord={r19UncordSt}:{r19UncordBody} afterMixed={r19AfterMixedUncord} recFleet={r19FleetRecSt}/{r19LagashUncordoned} recRes={r19ResRecSt}:{r19ResRecBody} jobSub={r19JobSubmitted}")
+
   -- 6. Privilege Access & Unified Approval Queue Cross-Client Parity (`shared/orb-spec/fixtures/{privilege-access,approvals}.json`)
   let d1 := computeApprovalDigest "privilege" "a1b2c3d4-0000-4000-8000-000000000010"
     (.obj #[("kind", .str "mission"), ("mission_id", .str "7c1d2e3f-0000-4000-8000-000000000001")])

@@ -80,6 +80,10 @@ def lineageExclusions (store : CoreStore) (missionId : String) : IO (Array Strin
 def candidates (store : CoreStore) (nodes : Array StaticRemoteNode) : IO (Array Candidate) := do
   let .ok hung ← execParamQuery store.missionsDb "SELECT node_id FROM node_api_hangs WHERE strikes>=2" #[] | return #[]
   let cordons := ((← loadPersistedNodeCordons store.rootDir) ++ (hung.extract 1 hung.size).map (fun r => cell r 0)).map normalize
+  let canary ← NativeCanary.load
+  let enrolled : Array String ← match ← execParamQuery store.missionsDb "SELECT node_id FROM native_owner_enrollments;" #[] with
+    | .ok rows => pure ((rows.extract 1 rows.size).map (fun r => normalize (cell r 0)))
+    | .error _ => pure #[]
   let mut load : Array (String × Nat) := #[]
   if let .ok rows ← execParamQuery store.missionsDb
       ("SELECT node_id, COUNT(*) FROM remote_node_jobs WHERE state NOT IN " ++
@@ -87,7 +91,7 @@ def candidates (store : CoreStore) (nodes : Array StaticRemoteNode) : IO (Array 
     load := (rows.extract 1 rows.size).map fun row => (normalize (cell row 0), ((cell row 1).toNat?).getD 0)
   return nodes.map fun node => {
     id := node.id
-    reserved := node.dedicatedOwner?.isSome || reserved node
+    reserved := node.dedicatedOwner?.isSome || canary.reserves node.id || enrolled.contains (normalize node.id) || reserved node
     cordoned := cordons.contains (normalize node.id)
     activeJobs := ((load.find? (·.1 == normalize node.id)).map (·.2)).getD 0
   }
